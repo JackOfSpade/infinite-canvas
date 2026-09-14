@@ -618,8 +618,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           && !findJobSearchBoardPausedContinuationOwner(data.hubId, jobRunId, getNodes(), getEdges())
         )
         || isJobSourceResolveBusyHubState(hubData.hubState)) {
+        // `prev` is genuinely nullable — a card that has received no progress
+        // beat yet (fresh mount, or a run reset that cleared it) holds null.
+        // The sibling access is optional-chained but `prev.status` is not, so
+        // without this test the guarded early return would throw INSIDE a React
+        // state updater and take down the Solve handler that is trying to
+        // restore the card.
         setProgress(prev => (
-          (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
+          prev && (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
             ? prevForRestore
             : prev
         ));
@@ -864,16 +870,31 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         }
       } else {
         const rawRestoreWarning = result?.warning || prevForRestore?.warning || null;
+        // The status-copy override below must describe the warning that is
+        // actually about to be RENDERED, never the mode captured when the
+        // button was clicked. jobs.js now treats an inconclusive native
+        // verification poll ('closed'/'timeout' — the AppleScript tab read
+        // simply never observed clearance) as a fall-through and runs the
+        // authoritative resume scrape, so a Solve that started in
+        // 'native-challenge' can come back carrying a completely different
+        // warning: e.g. "Indeed accepted the session but blocked its search
+        // endpoint". Stamping the click-time mode onto that outcome printed
+        // 'Verification not confirmed' directly above evidence saying the
+        // session WAS accepted — a verdict no observer ever made, contradicting
+        // the panel beside it. Only when the backend returned no warning at all
+        // does the click-time state still describe what the card is showing.
+        const renderedOutcome = result?.warning || { resumeState };
         const restoreWarning = rawRestoreWarning ? {
           ...rawRestoreWarning,
-          // Native verification failures are common for this path; keep the
-          // existing action-label copy so the card explains exactly why the
-          // solve was not confirmed.
-          ...((resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel)
+          // Native verification failures are common for this path. Change only
+          // the STATUS copy: the action button deliberately keeps its
+          // 'Continue' fallback so it agrees with the suggestion rendered
+          // directly above it ("…then click Continue again") and with its own
+          // hover title ("Continue opens real Chrome…"). Relabelling the button
+          // 'Retry verification' left the card telling the user to press two
+          // different things for one action.
+          ...((renderedOutcome.resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel)
             ? { shortLabel: 'Verification not confirmed' }
-            : {}),
-          ...((resumeState?.mode === 'native-challenge' && !rawRestoreWarning.actionLabel)
-            ? { actionLabel: 'Retry verification' }
             : {}),
           resumeState: rawRestoreWarning.resumeState || resumeState || prevForRestore?.warning?.resumeState,
         } : null;
@@ -970,8 +991,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           solveIpcResult = null;
         }
       }
+      // Same nullable-`prev` hazard as the early-return restore above: a Solve
+      // that fails before any progress beat lands leaves `prev` null, and an
+      // unguarded `prev.status` would throw inside the state updater on exactly
+      // the failure path whose job is to put the actionable warning back.
       setProgress(prev => (
-        (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
+        prev && (prev?.jobRunId || null) === (jobRunId || null) && !isTerminalSourceStatus(prev.status)
           ? (solveIpcResult
             ? { ...prevForRestore, warning: warningForSolveIpcFailure(prevForRestore?.warning, solveIpcResult) }
             : prevForRestore)

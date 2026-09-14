@@ -1747,10 +1747,11 @@ export function mergeExpandedJobDetail(job, {
   const existingSalaryUsable = parseSalaryToNumeric(job?.salary) > 0;
   const existingCompanyUsable = !!String(job?.company || '').trim();
   const usableJsonLdCompany = String(jsonLdCompany || '').trim();
-  return {
+  const hasDescriptionText = !!String(text || '').trim();
+  const mergedJob = {
     ...job,
-    ...(text ? { snippet: text } : {}),
-    ...(text && descriptionCapture ? { descriptionCapture } : {}),
+    ...(hasDescriptionText ? { snippet: text } : {}),
+    ...(hasDescriptionText && descriptionCapture ? { descriptionCapture } : {}),
     ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
     ...(salaryChanged ? { salary: reconciledSalary } : {}),
     // Structured detail pay includes schema.org unitText. Let it repair a
@@ -1765,6 +1766,12 @@ export function mergeExpandedJobDetail(job, {
     // extractor found nothing; never clobber a company it already resolved.
     ...(usableJsonLdCompany && !existingCompanyUsable ? { company: usableJsonLdCompany } : {}),
   };
+  // A navigation detail page can recover a row that was explicitly deferred by
+  // an earlier source-wide block. Keep the marker for a blank detail page, but
+  // do not let it make a later verified description permanently ineligible for
+  // the shared scoring-evidence gate.
+  if (hasDescriptionText) delete mergedJob.descriptionDeferredReason;
+  return mergedJob;
 }
 
 // ── Challenge detection ───────────────────────────────────────────────────────
@@ -4656,7 +4663,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         gotDescription = !!merged.descriptionSource;
         if (gotDescription) expandedCount++;
       } else if (panelText) {
+        // This row may have entered the recovery pool with an explicit
+        // deferral marker from an earlier rate-limit/card miss. A verified
+        // detail panel is the evidence that resolves that condition. Leaving
+        // the old marker on the otherwise-full row makes downstream admission
+        // (correctly) reject it forever, so every later Solve reopens the same
+        // card and falsely reports fresh progress.
         enhanced[i] = { ...enhanced[i], snippet: panelText };
+        delete enhanced[i].descriptionDeferredReason;
         prevPanelText = panelText;
         gotDescription = true;
         expandedCount++;

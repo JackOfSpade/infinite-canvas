@@ -1,4 +1,8 @@
 import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobRunProfileFingerprint, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+// The bug-report builders under test. test-dependencies.js already re-exports
+// all three; they are imported on their own line so the shared bundle import
+// above stays untouched while other sessions edit it.
+import { buildJobCompletionAssessment, buildJobRecoverySnapshot, buildJobsPipelineSnapshot } from '../test-dependencies.js';
 import { registerJobsHandlers } from '../../electron/ipc/jobs.js';
 
 export default [
@@ -1615,6 +1619,312 @@ export default [
       assert(reportForBoth === null && reportForOne?.search?.runId === 'run-b',
         `a multi-hub report must be indeterminate while a narrowed owner remains readable, got ${JSON.stringify({ reportForBoth, reportForOne })}`);
       return { multiHub: 'indeterminate', singleHub: reportForOne.search.runId };
+    },
+  },
+  {
+    // The fail-closed rule above is correct, but every reader of its null used
+    // to render an ABSENCE. On a canvas with two Job Search hubs that printed
+    // "(no search recorded this session)", "(no scoring recorded this session)"
+    // and "(no taxonomy recorded this session)" over a process that had just
+    // run three searches, three scorings and a taxonomy pass — while the three
+    // Continue clicks the report existed to explain rendered nowhere at all.
+    name: 'job telemetry report: two owning hubs state the ambiguity and keep their per-hub records',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 606 };
+      const now = Date.now();
+      const inHub = (nodeId, callback) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel: 'search-jobs' }, callback,
+      );
+      inHub('hub-ok', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-ok';
+        telemetry.windowId = sender.id;
+        telemetry.search = { runId: 'run-healthy', kept: 4 };
+        telemetry.indeedSession = {
+          ts: now - 140_000, landedUrl: 'https://www.indeed.com/jobs?q=engineer',
+          preflightStatus: 'authenticated', hasPPID: true, cookieNames: ['PPID'],
+          executablePath: '/healthy/Chrome', userDataDir: '/healthy/profile',
+        };
+      });
+      inHub('hub-blk', () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-blk';
+        telemetry.windowId = sender.id;
+        telemetry.search = { runId: 'run-blocked', kept: 0 };
+        telemetry.indeedSession = {
+          ts: now - 5_000, landedUrl: 'https://www.indeed.com/challenge',
+          preflightStatus: 'challenge', hasPPID: false, cookieNames: [],
+          executablePath: '/blocked/Chrome', userDataDir: '/blocked/profile',
+        };
+        telemetry.resumeAttempts = {
+          indeed: [
+            { t: now - 9_000, mode: 'native-challenge', outcome: 'closed', detail: 'native window closed' },
+            { t: now - 6_000, mode: 'native-challenge', outcome: 'closed', detail: 'native window closed' },
+            { t: now - 3_000, mode: 'native-challenge', outcome: 'closed', detail: 'native window closed' },
+          ],
+        };
+      });
+      const snapshot = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => buildJobsPipelineSnapshot(
+          new Set(['hub-ok', 'hub-blk']), sender.id, null, [], false,
+          new Set(['hub-ok', 'hub-blk']),
+        ),
+      );
+      const ambiguity = '2 current Job Search hubs each hold their own live telemetry in this process, so no single hub owns this section';
+      assert(snapshot.includes(`### Search\n- (funnel not attributed: ${ambiguity}`)
+        && snapshot.includes(`### Scoring\n- (not attributed: ${ambiguity}`)
+        && snapshot.includes(`role)\n- (not attributed: ${ambiguity}`),
+      `each conflated section must state the observed hub count instead of an absence, got ${snapshot.slice(0, 2500)}`);
+      assert(!snapshot.includes('no search recorded this session')
+        && !snapshot.includes('no scoring recorded this session')
+        && !snapshot.includes('no taxonomy recorded this session'),
+      'an ambiguous report must never assert that nothing was recorded');
+      // The block at the centre of the incident: three Continue clicks on the
+      // BLOCKED hub, printed under that hub rather than merged into a funnel.
+      assert(snapshot.includes('### Per-hub records (no single hub owns the funnel above)')
+        && snapshot.includes('- Hub `hub-blk`')
+        && snapshot.includes('- Hub `hub-ok`')
+        && snapshot.includes('    - `indeed` (3 attempts):')
+        && (snapshot.match(/`native-challenge`\u2192closed/g) || []).length === 3,
+      `the per-hub block must render each hub's own Continue trail under its hub id, got ${snapshot.slice(0, 5000)}`);
+      // Naming only whichever hub wrote telemetry last is what sent the original
+      // investigation at the healthy run's preflight. Both must be attributable.
+      assert(snapshot.includes('/blocked/profile') && snapshot.includes('/healthy/profile')
+        && snapshot.includes('    - Preflight status: challenge')
+        && snapshot.includes('    - Preflight status: authenticated'),
+      `both hubs' preflights must be shown with their owner, got ${snapshot.slice(0, 5000)}`);
+      return { ambiguousHubs: 2, perHubRecords: 2 };
+    },
+  },
+  {
+    // The other half of the same rule: when nothing was genuinely recorded the
+    // honest absence statement must survive untouched, so "ambiguous" never
+    // becomes a blanket replacement that hides a real empty process.
+    name: 'job telemetry report: a single owner keeps the honest absence wording',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 707 };
+      __runWithIpcRequestContextForTests({ sender, nodeId: 'hub-live', channel: 'search-jobs' }, () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-live';
+        telemetry.windowId = sender.id;
+        telemetry.indeedSession = {
+          ts: Date.now(), landedUrl: 'https://www.indeed.com/jobs',
+          preflightStatus: 'authenticated', hasPPID: true, cookieNames: ['PPID'],
+        };
+      });
+      const soleOwner = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => buildJobsPipelineSnapshot(new Set(['hub-live']), sender.id, null, [], false, new Set(['hub-live'])),
+      );
+      assert(soleOwner.includes('### Search\n- (no search recorded this session')
+        && soleOwner.includes('### Scoring\n- (no scoring recorded this session)')
+        && soleOwner.includes('- (no taxonomy recorded this session)')
+        && !soleOwner.includes('not attributed:')
+        && !soleOwner.includes('### Per-hub records'),
+      `one owner that recorded no funnel is a real absence, got ${soleOwner.slice(0, 2500)}`);
+      // Zero owners keeps the pre-existing whole-section suppression: an empty
+      // string asserts nothing, which is the correct answer for a hub set that
+      // holds no telemetry at all.
+      const noOwner = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => buildJobsPipelineSnapshot(new Set(['hub-absent']), sender.id, null, [], false, new Set(['hub-absent'])),
+      );
+      assert(!noOwner.includes('### Per-hub records') && !noOwner.includes('not attributed:'),
+        `a hub set with no telemetry must not claim ambiguity, got ${noOwner.slice(0, 800)}`);
+      return { soleOwner: 'absence', noOwner: noOwner.length };
+    },
+  },
+  {
+    // "previous-process receipt" was an inference, not an observation: all the
+    // report ever saw was that no live pipeline phase could be attributed. Two
+    // live hubs made it plainly false — runs that had finished seconds earlier
+    // in THIS process were labelled as belonging to a previous one.
+    name: 'job recovery/completion report: an unattributable live run is reported as observed, not as a previous process',
+    run: async () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 808 };
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-multihub-report-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await fs.promises.writeFile(canvasPath, JSON.stringify({ nodes: [] }), 'utf8');
+        await writeLastRunReceipt(canvasPath, {
+          runId: 'run-receipt', nodeId: 'hub-a',
+          startedAt: 1_700_000_000_000, completedAt: 1_700_000_060_000,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 4 },
+          cleanup: { attempted: true, cleared: true },
+        });
+        for (const nodeId of ['hub-a', 'hub-b']) {
+          __runWithIpcRequestContextForTests({ sender, nodeId, channel: 'search-jobs' }, () => {
+            const telemetry = getJobsTelemetry();
+            telemetry.nodeId = nodeId;
+            telemetry.windowId = sender.id;
+            telemetry.search = { runId: `run-${nodeId}` };
+          });
+        }
+        const report = (hubs) => __runWithIpcRequestContextForTests(
+          { sender, nodeId: null, channel: 'bug-report' },
+          () => ({
+            recovery: buildJobRecoverySnapshot(canvasPath, new Set(hubs), new Set(hubs), sender.id),
+            assessment: buildJobCompletionAssessment(canvasPath, new Set(hubs), [], null, new Set(hubs), sender.id),
+          }),
+        );
+        const ambiguity = '2 current Job Search hubs each hold their own live telemetry in this process, so no single hub owns this section';
+        const both = report(['hub-a', 'hub-b']);
+        assert(!both.recovery.includes('previous-process receipt') && !both.assessment.includes('previous-process receipt'),
+          `the report may not assert a previous process it never observed, got ${both.recovery.slice(0, 1500)}`);
+        assert(both.recovery.includes(`receipt not correlated to a live run \u2014 ${ambiguity}`)
+          && both.recovery.includes(`no pipeline phase is attributable here: ${ambiguity}`),
+        `recovery must name the observed hub count for both the receipt and the sidecars, got ${both.recovery.slice(0, 2500)}`);
+        assert(both.assessment.includes(`- Search + recovery: not attributable \u2014 ${ambiguity}`)
+          && both.assessment.includes(`- Scoring: not attributable \u2014 ${ambiguity}.`)
+          && both.assessment.includes(`- Taxonomy: not attributable \u2014 ${ambiguity}.`)
+          && both.assessment.includes(`- Seen-history write: not attributable \u2014 ${ambiguity}.`)
+          && both.assessment.includes(`- Live search stage: not attributable \u2014 ${ambiguity}`)
+          && !both.assessment.includes('not retained in this process'),
+        `every completion line must distinguish ambiguity from absence, got ${both.assessment.slice(0, 3000)}`);
+        // Narrowing to the single hub that owns telemetry removes the ambiguity
+        // and must restore the plain absence wording verbatim.
+        const sole = report(['hub-a']);
+        assert(sole.recovery.includes('receipt not correlated to a live run \u2014 no live pipeline telemetry was attributable in this process')
+          && sole.recovery.includes('no pipeline phase recorded in this process')
+          && sole.assessment.includes('- Scoring: not retained in this process.')
+          && sole.assessment.includes('- Taxonomy: not retained in this process.')
+          && !sole.assessment.includes('not attributable'),
+        `a single owner must keep the honest absence wording, got ${sole.assessment.slice(0, 3000)}`);
+        return { ambiguous: 2, sole: 1 };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // `detail` is free-form producer prose and a native-login failure reason
+    // carries the landing URL verbatim, so the trail was exporting auth and
+    // continuation query tokens under a heading whose contract is that query
+    // strings are never reported. The same line's 120-character render cap then
+    // amputated the TAIL of the 'unverified' detail — "no indeed.com tab was
+    // ever visible to the observer" — which is the clause that separates "we
+    // watched and it never cleared" from "we never saw the window at all".
+    name: 'job resume trail: free-form detail is URL-redacted and kept to the producer\'s own 200-character bound',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 909 };
+      const now = Date.now();
+      // Both strings are the shapes electron/ipc/jobs.js actually writes.
+      const loginDetail = 'login window could not run: landed on https://secure.indeed.com/auth?token=secret&continue=https%3A%2F%2Fwww.indeed.com%2Fjobs';
+      const unverifiedDetail = 'native challenge ended timeout; no clearance observed either way; probing with the resume scrape; 12 tab poll(s); no indeed.com tab was ever visible to the observer';
+      __runWithIpcRequestContextForTests({ sender, nodeId: 'hub-trail', channel: 'search-jobs' }, () => {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub-trail';
+        telemetry.windowId = sender.id;
+        telemetry.resumeAttempts = {
+          indeed: [
+            { t: now - 8_000, mode: 'native-login', outcome: 'login-failed', detail: loginDetail },
+            { t: now - 2_000, mode: 'native-challenge', outcome: 'unverified', detail: unverifiedDetail },
+          ],
+          // recordResumeAttemptTelemetry keeps only the newest 12 per source, so
+          // a full list is a FLOOR on the number of clicks the user made, never
+          // a total — the count must say so rather than read as "12 attempts".
+          dice: Array.from({ length: 12 }, (_, index) => ({
+            t: now - (12 - index) * 1_000, mode: 'retry-descriptions',
+            outcome: 'blocked', detail: 'no descriptions to retry',
+          })),
+        };
+      });
+      const snapshot = __runWithIpcRequestContextForTests(
+        { sender, nodeId: null, channel: 'bug-report' },
+        () => buildJobsPipelineSnapshot(new Set(['hub-trail']), sender.id, null, [], false, new Set(['hub-trail'])),
+      );
+      assert(snapshot.includes('https://secure.indeed.com/auth')
+        && !snapshot.includes('token=')
+        && !snapshot.includes('continue=')
+        && !snapshot.includes('secret'),
+      `the resume trail must keep the landed host/path and export no query data, got ${snapshot.slice(0, 4000)}`);
+      assert(snapshot.includes(unverifiedDetail)
+        && snapshot.includes('12 tab poll(s); no indeed.com tab was ever visible to the observer')
+        && !snapshot.includes('probing with the resume scrape; 12 tab poll(s); no in…'),
+      `the observer evidence at the end of an 'unverified' detail must survive rendering, got ${snapshot.slice(0, 4000)}`);
+      assert(snapshot.includes('- `dice` (12 retained at the producer\'s newest-12 cap — any earlier click is not retained)')
+        && !snapshot.includes('`dice` (12 attempts)'),
+      `a saturated per-source trail must be marked rather than counted as a total, got ${snapshot.slice(0, 4000)}`);
+      return { redactedUrls: 1, detailChars: unverifiedDetail.length, saturatedSources: 1 };
+    },
+  },
+  {
+    // Two defects that both over-claim: the multi-hub Search line pointed at a
+    // "Per-hub records" heading that renders only when some hub holds an
+    // attributable record (two hubs that searched with no Indeed session and no
+    // Continue click hold none), and the Solve-pass line said "all retained"
+    // over a list an outcome allowlist had just shortened.
+    name: 'job telemetry report: the per-hub pointer and the Solve-pass trail claim only what was rendered',
+    run: async () => {
+      __resetJobsTelemetryForTests();
+      const sender = { id: 910 };
+      const now = Date.now();
+      const seed = (nodeId, runId, resolvePasses) => __runWithIpcRequestContextForTests(
+        { sender, nodeId, channel: 'search-jobs' },
+        () => {
+          const telemetry = getJobsTelemetry();
+          telemetry.nodeId = nodeId;
+          telemetry.windowId = sender.id;
+          telemetry.search = { runId };
+          telemetry.sourceRunHistory = {
+            google: [{
+              runId, announcedAt: 1_000, dispatchedAt: 2_000, terminalAt: 5_000,
+              announcedStatus: 'searching', terminalStatus: 'done',
+              resolvePassCount: resolvePasses.length, resolvePasses,
+            }],
+          };
+        },
+      );
+      seed('hub-x', 'run-x', [
+        { at: now - 4_000, outcome: 'completed', attempted: 2, recovered: 2, checkpoint: 'saved' },
+        // An outcome this renderer's allowlist does not contain — a future or
+        // malformed producer row. It is dropped, so the summary above it may not
+        // describe the list as complete.
+        { at: now - 3_000, outcome: 'deferred-to-next-run', attempted: 1 },
+        { at: now - 2_000, outcome: 'blocked', attempted: 1, recommendation: 'retry' },
+      ]);
+      seed('hub-y', 'run-y', []);
+      const hubs = () => new Set(['hub-x', 'hub-y']);
+      // The completion assessment renders nothing at all without a durable
+      // receipt or saved snapshot to reconcile, so give it the receipt its
+      // "Search + recovery" line is written for.
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-pointer-report-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await fs.promises.writeFile(canvasPath, JSON.stringify({ nodes: [] }), 'utf8');
+        await writeLastRunReceipt(canvasPath, {
+          runId: 'run-receipt', nodeId: 'hub-x',
+          startedAt: 1_700_000_000_000, completedAt: 1_700_000_060_000,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 4 },
+          cleanup: { attempted: true, cleared: true },
+        });
+        const rendered = __runWithIpcRequestContextForTests(
+          { sender, nodeId: null, channel: 'bug-report' },
+          () => ({
+            snapshot: buildJobsPipelineSnapshot(hubs(), sender.id, null, [], false, hubs()),
+            assessment: buildJobCompletionAssessment(canvasPath, hubs(), [], null, hubs(), sender.id),
+          }),
+        );
+        assert(rendered.snapshot.includes('No hub held an independently attributable record either, so no "Per-hub records" section follows')
+          && !rendered.snapshot.includes('### Per-hub records')
+          && !rendered.snapshot.includes('are under "Per-hub records" below'),
+        `the Search line may not point at a heading this report never wrote, got ${rendered.snapshot.slice(0, 4000)}`);
+        assert(rendered.assessment.includes('- Search + recovery: not attributable — 2 current Job Search hubs each hold their own live telemetry in this process, so no single hub owns this section; no hub held an independently attributable record either, so no per-hub records are listed.')
+          && !rendered.assessment.includes('listed in Job Search Pipeline'),
+        `the completion assessment must apply the same conditional, got ${rendered.assessment.slice(0, 3000)}`);
+        assert(rendered.snapshot.includes('Solve passes (run `run-x`): 3 recorded · 2 rendered · ⚠️ 1 carried an outcome this report does not recognise and is not rendered.')
+          && !rendered.snapshot.includes('all retained')
+          && !rendered.snapshot.includes('deferred-to-next-run'),
+        `an allowlist-shortened Solve trail must state both counts and mark the drop, got ${rendered.snapshot.slice(0, 4000)}`);
+        return { danglingPointers: 0, unrecognisedPasses: 1 };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {

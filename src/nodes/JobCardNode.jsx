@@ -225,8 +225,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // React Flow only knows the active canvas level. A card can unmount because
   // its parent level is no longer active while still existing in the global
   // navigation stack, so async lifecycle checks must prefer that complete
-  // graph over a current-level getNode lookup.
-  const getLiveJobCard = useCallback((nodeId) => {
+  // graph over a current-level getNode lookup. The same applies to the owning
+  // hub/board this card points at (data.hubId, data.originHubId): nested-canvas
+  // absorption can move a module to another level, and a level-scoped miss
+  // there reads as "the module was deleted" when it is merely one level away.
+  const getLiveNode = useCallback((nodeId) => {
     const globalNode = nav?.enumerateAllNodes?.().find((node) => node.id === nodeId);
     return globalNode || getNode(nodeId);
   }, [nav, getNode]);
@@ -286,11 +289,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     });
     if (!shouldReflow) return;
     const frame = requestAnimationFrame(() => {
-      const hubData = getNode(data.hubId)?.data || {};
+      const hubData = getLiveNode(data.hubId)?.data || {};
       setNodes((nodes) => computeJobTreeView(nodes, data.hubId, hubCardFilter(hubData), undefined, true));
     });
     return () => cancelAnimationFrame(frame);
-  }, [id, measuredHeight, data.hubId, getNode, setNodes]);
+  }, [id, measuredHeight, data.hubId, getNode, getLiveNode, setNodes]);
 
   // Local disclosure state is intentionally non-persistent, but report it while
   // mounted so a bug report can explain a measured-height/layout discrepancy.
@@ -399,19 +402,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // checked at click time against BOTH this card and the owning board — a
   // render-time read would go stale on already-mounted cards.
   const dismissCard = useCallback(async () => {
-    if (data.locked || getNode(data.hubId)?.data?.locked) return;
+    if (data.locked || getLiveNode(data.hubId)?.data?.locked) return;
     // A hidden/collapsed card may unmount while it remains a canvas node, so
     // unmount is not cancellation. Explicit dismissal is: remove only this
     // card's waiting lease; an already-running IPC operation is left intact.
     cancelQueuedRunsForNode(id, 'Job card dismissed before generation started');
     await deleteElements({ nodes: [{ id }] });
-    const hubData = getNode(data.hubId)?.data || {};
+    // Read the board's own config the same way the lock check above does, and
+    // the same way `updateGlobal` below writes it back — cross-level. A
+    // level-scoped miss here would silently degrade to `{}`, which changes
+    // which cards the filter keeps and what the stats are derived from.
+    const hubData = getLiveNode(data.hubId)?.data || {};
     const filter = hubCardFilter(hubData);
     setNodes((nodes) => computeJobTreeView(nodes, data.hubId, filter));
+    // getNodes() stays level-scoped here on purpose: these stats count the
+    // cards present on THIS board's level, and absorption's closure keeps a
+    // board and its cards together, so widening this to the whole graph would
+    // change what the statistic means rather than fix a bug.
     const stats = deriveBoardCardStats(getNodes().filter((node) => node.id !== id), data.hubId, hubData);
     updateGlobal(data.hubId, stats);
     EventLogger.log(`[JobCard] dismissed id=${id} board=${data.hubId} remaining=${stats.resultCount}`);
-  }, [id, data.locked, data.hubId, deleteElements, getNode, getNodes, setNodes, updateGlobal, cancelQueuedRunsForNode]);
+  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, getNodes, setNodes, updateGlobal, cancelQueuedRunsForNode]);
 
   // A completed Local AI job is converted into the exact same capability-bound
   // workspace that the API flow creates, then saved through saveApplication.
@@ -494,7 +505,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // card merely unmounts it and its node remains live; an explicit delete
       // must instead discard the exact sender-owned workspace before it can
       // be promoted into the durable application-bundle destination.
-      if (!canSaveImportedLocalApplication(getLiveJobCard(idRef.current), jobId)) {
+      if (!canSaveImportedLocalApplication(getLiveNode(idRef.current), jobId)) {
         await window.electronAPI.discardApplication?.({ workDir: local.workDir });
         EventLogger.log(`[LocalAI] discarded imported workspace job=${jobId}: card was removed before save`);
         return;
@@ -555,7 +566,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
-  }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveJobCard, isMountedRef]);
+  }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveNode, isMountedRef]);
 
   // The local coding agent writes result.json manually/asynchronously. Polling only reads
   // that app-owned job; after a short stable-result window, the import happens
@@ -639,12 +650,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
-    if (getNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
+    if (getLiveNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
     const originHubId = data.originHubId || data.hubId;
     // Fast, non-queued validation prevents a known-invalid card from taking a
     // queue turn. This is intentionally re-read after the lease as well: the
     // preflight is only user feedback, never the data used for generation.
-    const preflightOriginHub = getNode(originHubId);
+    const preflightOriginHub = getLiveNode(originHubId);
     if (!preflightOriginHub?.data?.careerData) {
       addToast({
         title: 'No Career Data',
@@ -688,7 +699,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         onStart: () => {
           // Hidden card views can unmount while their node remains valid. Only
           // cancellation/deletion of the actual canvas node skips the work.
-          if (!getLiveJobCard(idRef.current)) {
+          if (!getLiveNode(idRef.current)) {
             cancelledBeforeStart = true;
             throw new Error('Job card was removed before application generation started');
           }
@@ -714,7 +725,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
 
-      const originHub = getNode(originHubId);
+      const originHub = getLiveNode(originHubId);
       const careerData = originHub?.data?.careerData;
       if (!careerData) {
         addToast({
@@ -737,7 +748,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // accept it only if the live card still owns the same terminal id/status.
       // That permits regeneration without allowing a late response to clobber
       // a genuinely newer in-flight handoff.
-      const expectedPriorLocalApplication = getLiveJobCard(idRef.current)?.data?.localApplication || null;
+      const expectedPriorLocalApplication = getLiveNode(idRef.current)?.data?.localApplication || null;
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
         canvasFilePath,
@@ -774,7 +785,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // exact app-owned handoff rather than leaving private career context
       // behind until retention pruning.
       const settlement = queuedLocalApplicationSettlement(
-        getLiveJobCard(idRef.current),
+        getLiveNode(idRef.current),
         queued.localJob,
         expectedPriorLocalApplication,
       );
@@ -800,7 +811,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       let replacementPersisted = false;
       for (let attempt = 0; attempt < 3 && !replacementPersisted; attempt += 1) {
         await new Promise(resolve => setTimeout(resolve, 0));
-        replacementPersisted = getLiveJobCard(idRef.current)?.data?.localApplication?.id === queued.localJob.id;
+        replacementPersisted = getLiveNode(idRef.current)?.data?.localApplication?.id === queued.localJob.id;
       }
       const replacedLocalApplication = replacedLocalApplicationForCleanup(
         expectedPriorLocalApplication,
@@ -842,7 +853,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getNode, getLiveJobCard, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
 
   return (
     <div

@@ -44,7 +44,10 @@ export function useCanvasDragAndDrop({
   const handleDragLeave = useCallback(() => {
     cancelPendingDragOverScan();
     if (hoveredGroupIdRef.current) {
-      updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+      // dragHover is also cleared here (not just isDropTarget) so a stale reject
+      // label left by a node-absorption drag (useDragCorrections.js) can't
+      // survive into this sidebar/Finder file-drop path.
+      updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false, dragHover: null });
       hoveredGroupIdRef.current = null;
     }
   }, [updateNodeData, cancelPendingDragOverScan]);
@@ -67,7 +70,8 @@ export function useCanvasDragAndDrop({
       const newTargetId = targetGroup ? targetGroup.id : null;
 
       if (newTargetId !== hoveredGroupIdRef.current) {
-        if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+        // Clear dragHover alongside isDropTarget — see handleDragLeave above.
+        if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false, dragHover: null });
         if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
         hoveredGroupIdRef.current = newTargetId;
       }

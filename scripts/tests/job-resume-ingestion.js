@@ -2,10 +2,10 @@ import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCh
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __extractCareerFileSectionsForTests, __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests } from '../../electron/ipc/jobs.js';
+import { __extractCareerFileSectionsForTests, __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport } from '../../electron/ipc/jobs.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
-import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __recordResumeAttemptForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
+import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
 
 export default [
   {
@@ -1527,8 +1527,12 @@ export default [
           && !generic.includes('const telemetryWritable') && !resume.includes('const telemetryWritable')
           && generic.includes('const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);')
           && resume.includes('const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);')
-          && resume.includes('const recordResumeAttempt = (attemptSourceId, mode, outcome, detail) =>')
+          // Widened with an `observed` argument that carries ONLY enumerated
+          // values for the durable receipt; `detail` stays the free-form field
+          // the live trail slices. Both recorders bind this handler's own tuple.
+          && resume.includes('const recordResumeAttempt = (attemptSourceId, mode, outcome, detail, observed = null) =>')
           && resume.includes('recordResumeAttemptTelemetry(attemptSourceId, mode, outcome, detail, { nodeId, jobRunId });')
+          && resume.includes('recordJobSourceResumeAttempt(attemptSourceId, {')
           && jobsSource.slice(mergeStart, mergeStart + 700).includes('{ nodeId, jobRunId }')
           && renderer.includes('nodeId: id,') && renderer.includes('jobRunId: e.detail?.jobRunId || jobRunIdRef.current || null'),
         'generic Solve and Indeed Continue use durable run ownership before browser work, while merge acknowledgements keep the in-memory telemetry ownership tuple');
@@ -1617,7 +1621,7 @@ export default [
       'taxonomy audit retains both universal salary-range provenance and the existing anomaly signal');
       assert(generic.includes('const descriptionEvidence = filterJobsByDescriptionEvidence(items);')
         && generic.includes('buildResolvedDescriptionWarning(')
-        && generic.includes('removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean)')
+        && generic.includes('removedItemKeys: retiredListingKeys(descriptionEvidence.dropped)')
         && generic.includes('reconcileResolvedDescriptionRecovery(')
         && generic.includes('preloadResolvedJobList(page, sourceId, inlineExtractorJS, signal)')
         && generic.includes('partitionResolvedDescriptionRecoveryCandidates(')
@@ -1643,7 +1647,7 @@ export default [
         && resume.includes('recordJobSourceProgress(resumeProgress, { updatePipeline: false, expectedNodeId: nodeId })')
         && resume.includes('const retryProgress = {\n        nodeId,\n        sourceId,\n        jobRunId,')
         && resume.includes('const resumeProgress = {\n      nodeId,\n      sourceId,\n      jobRunId,')
-        && resume.includes('removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean)'),
+        && resume.includes('removedItemKeys: retiredListingKeys(descriptionEvidence.dropped)'),
       'native Indeed resume records the complete funnel, history samples, evidence drops, and run-correlated terminal source events without reactivating the gather pipeline');
       const postSearchStart = jobSearchNode.indexOf('const handlePostSearchResult');
       const postSearchEnd = jobSearchNode.indexOf('if (foundJobs.length === 0)', postSearchStart);
@@ -1676,8 +1680,10 @@ export default [
       'the recovery snapshot is loaded for every source whose Solve enriches descriptions, not Google alone');
       assert(jobsSource.includes("const recoveryBlocksResolve = sourceId === 'google';")
         && jobsSource.includes('return recoveryBlocksResolve\n')
-        && jobsSource.includes('if (blocked) return blocked;'),
-      'only Google is hard-blocked by a missing/stale/row-less snapshot — every other source falls through to the ordinary resolve path rather than wedging on Solve');
+        && jobsSource.includes('if (blocked) {')
+        && jobsSource.includes("outcome: 'rejected'")
+        && jobsSource.includes('return blocked;'),
+      'only Google is hard-blocked by a missing/stale/row-less snapshot — every other source falls through to the ordinary resolve path rather than wedging on Solve, while rejected passes are recorded for diagnostics');
       assert(jobsSource.includes('if (sourceRecoveryJobs.length > 0) {\n            // The recovery snapshot is already the current run')
         && !jobsSource.includes("if (sourceId === 'google' && sourceRecoveryJobs.length > 0) {"),
       'candidate selection targets the snapshot identities for any source that has them, instead of re-running age + history over the reopened page');
@@ -1687,6 +1693,268 @@ export default [
         && jobsSource.includes('export function resolveSourceLabel(sourceId)'),
       'recovery messages name the actual source now that non-Google sources reach them');
       return { blockedSources: ['google'] };
+    },
+  },
+  {
+    // The incident: a user clicked Continue three times, completed the real
+    // Chrome verification each time, and closed the window. The AppleScript tab
+    // poll never made an affirmative clean-tab observation, so the window
+    // settled result:'closed' and the handler hard-blocked on
+    // `result !== 'cleared'` — telling the user "no automated retry was
+    // attempted" while their clearance sat unused in the shared profile.
+    // 'closed'/'timeout'/unrecognised are the ABSENCE of a positive
+    // observation, not a negative one, and the resume scrape is the only
+    // authority that can settle it.
+    name: 'an inconclusive native-challenge terminal probes with the resume scrape while an observed negative still hard-blocks',
+    run: () => {
+      // The classifier the handler itself calls, exercised over the whole
+      // terminal enum. A source-shape pin could not tell a real revert apart
+      // from a reformat; this asserts the shipped decision.
+      const expected = [
+        ['hard-block', 'blocked'],
+        ['aborted', 'blocked'],
+        ['app-window-destroyed', 'blocked'],
+        ['cleared', 'cleared'],
+        ['closed', 'unverified'],
+        ['timeout', 'unverified'],
+        ['', 'unverified'],
+        [undefined, 'unverified'],
+        ['wat', 'unverified'],
+      ];
+      const wrong = expected.filter(([outcome, want]) => nativeChallengeTerminalDisposition(outcome) !== want);
+      assert(wrong.length === 0,
+        `only a read block page, an already-fired abort, and a destroyed renderer are direct negative observations of a native verification; every other terminal — including a missing or unrecognised one — is the ABSENCE of a positive observation and must probe (misclassified: ${wrong.map(([outcome]) => JSON.stringify(outcome)).join(', ') || 'none'})`);
+
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const resumeStart = jobsSource.indexOf("handleSafe('resume-job-source'");
+      const mergeStart = jobsSource.indexOf("ipcMain.handle('record-resolve-merge'", resumeStart);
+      const resume = jobsSource.slice(resumeStart, mergeStart);
+
+      // The table above only binds the handler while the handler actually
+      // consumes it, so prove the branch routes through the classifier rather
+      // than re-deriving the split inline.
+      const dispositionStart = resume.indexOf('nativeChallengeTerminalDisposition(nativeOutcome)');
+      const negativeStart = resume.indexOf("=== 'blocked'", dispositionStart);
+      const inconclusiveStart = resume.indexOf("!== 'cleared'", negativeStart);
+      const retryLaterStart = resume.indexOf("if (effectiveResumeState.mode === 'retry-later') {", inconclusiveStart);
+      assert(dispositionStart > 0 && negativeStart > dispositionStart && inconclusiveStart > negativeStart && retryLaterStart > inconclusiveStart,
+        'the native-challenge branch classifies its terminal with the exported classifier, then splits the observed negatives from the inconclusive terminals before falling through');
+      const negativeBranch = resume.slice(negativeStart, inconclusiveStart);
+      const inconclusiveBranch = resume.slice(inconclusiveStart, retryLaterStart);
+      assert(negativeBranch.includes("recordResumeAttempt(sourceId, attemptMode, 'blocked'")
+        && negativeBranch.includes('return {')
+        && negativeBranch.includes("code: 'scrape-failed', severity: 'block'"),
+      'an observed negative still returns a blocking warning instead of spending a scrape on a wall the observer actually read');
+      // Comment prose in this branch legitimately says the scrape "returns its
+      // own warning", so look for an actual statement, not the word.
+      const inconclusiveReturns = inconclusiveBranch.split('\n')
+        .filter(line => !line.trim().startsWith('//') && /(?:^|[^\w.])return\b/.test(line));
+      assert(inconclusiveReturns.length === 0
+        && inconclusiveBranch.includes("recordResumeAttempt(sourceId, attemptMode, 'unverified'")
+        && inconclusiveBranch.includes("recordResumeAttempt(sourceId, attemptMode, 'cleared'")
+        && inconclusiveBranch.includes('mode: null'),
+      'closed/timeout/unrecognised records an explicit unverified attempt and clears the handoff mode instead of returning, so the resume scrape — the only authority that can settle whether the user\u2019s verification landed — actually runs');
+
+      // The evidence sentence must report what the observer saw. "No automated
+      // retry was attempted" is now false on every inconclusive path and would
+      // also be an assertion about a decision rather than an observation.
+      const liveClaims = jobsSource.split('\n')
+        .filter(line => line.includes('no automated retry was attempted') && !line.trim().startsWith('//'));
+      assert(liveClaims.length === 0
+        && resume.includes('Native Indeed verification ended ${nativeOutcome}.${pollSummary ? ` Observer: ${pollSummary}.` : \'\'}'),
+      'the user-facing evidence carries the window observer\u2019s own poll summary and no longer claims a retry was withheld');
+      return { hardBlocking: expected.filter(([, want]) => want === 'blocked').map(([outcome]) => outcome) };
+    },
+  },
+  {
+    // Two ways the same handoff lied about state it no longer owned. A native
+    // window can sit open for the full five-minute ceiling: long enough for the
+    // user to give up, close it, and start a fresh search on the same hub, which
+    // retires this run. And the recent-login dedupe stamp outlived the cookies
+    // it stood for, so a "Log in" click after Settings -> Reset Indeed session
+    // opened no window while recording 'logged-in'.
+    name: 'a resume that waited on a native window re-checks run ownership, and every deliberate Indeed session invalidation drops the login dedupe stamp',
+    run: () => {
+      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const resumeStart = jobsSource.indexOf("handleSafe('resume-job-source'");
+      const mergeStart = jobsSource.indexOf("ipcMain.handle('record-resolve-merge'", resumeStart);
+      const resume = jobsSource.slice(resumeStart, mergeStart);
+      const settledWrites = resume.split('\n').filter(line => /^\s*nativeWindowSettled = true;\s*$/.test(line));
+      const recheck = resume.indexOf('if (nativeWindowSettled && !(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId)))');
+      const destructure = resume.indexOf('const { remainingQueries, startPage = 0 } = effectiveResumeState;');
+      assert(settledWrites.length === 2
+        && recheck > 0 && destructure > recheck
+        && resume.slice(recheck, destructure).includes('staleRun: true'),
+      'both the native-login and native-challenge branches mark the window settled, and the handler re-reads the durable manifest before the scrape — a run retired while the window was open must not queue a complete Indeed pass ahead of the fresh search that replaced it');
+
+      const invalidate = jobsSource.slice(
+        jobsSource.indexOf('async function invalidateIndeedSessionIfNeedsLogin'),
+        jobsSource.indexOf('async function syncIndeedSessionStatusFromScrape'),
+      );
+      const resetHandler = jobsSource.slice(
+        jobsSource.indexOf("handleSafe('reset-platform-session'"),
+        jobsSource.indexOf("handleSafe('clear-browser-session'"),
+      );
+      const clearHandler = jobsSource.slice(jobsSource.indexOf("handleSafe('clear-browser-session'"));
+      assert(invalidate.includes('forgetIndeedLoginConfirmation(')
+        && resetHandler.includes('forgetIndeedLoginConfirmation(')
+        && clearHandler.includes('forgetIndeedLoginConfirmation('),
+      'the needs-login invalidation, the targeted Indeed reset, and the all-profile clear each drop the recent-login stamp, so the next "Log in" click opens a real window instead of deduping against cookies that were just wiped');
+      return { settledWrites: settledWrites.length };
+    },
+  },
+  {
+    // jobsTelemetry.resumeAttempts answers "what did each Continue click do",
+    // but it is wiped by this hub's next search and the whole live-telemetry
+    // surface is dropped from a report whose canvas has more than one Job
+    // Search hub. So the three clicks at the heart of this incident had no
+    // durable record anywhere. The per-source/run receipt already used for
+    // Solve passes is the one place that survives both.
+    name: 'a resume attempt lands in the durable per-source/run receipt with enum-only, bounded fields',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        sourceRunHistory: telemetry.sourceRunHistory,
+        pipeline: telemetry.pipeline,
+      };
+      const secret = 'never-export-resume-prose-or-urls-9d31';
+      const owner = { nodeId: 'resume-receipt-owner', jobRunId: 'resume-receipt-run' };
+      try {
+        Object.assign(telemetry, {
+          nodeId: owner.nodeId,
+          windowId: null,
+          sourceRunHistory: {},
+          pipeline: { phase: 'completed', active: false, runId: owner.jobRunId },
+        });
+        for (let click = 1; click <= 14; click += 1) {
+          const normalized = __recordJobSourceResumeAttemptForTests('indeed', {
+            at: click,
+            mode: 'native-challenge',
+            outcome: 'unverified',
+            nativeResult: 'closed',
+            // Everything below is the free-form material the live trail may
+            // carry and the receipt must refuse: a poll summary can embed a
+            // 200-character osascript error, and a challenge URL is a URL.
+            detail: secret,
+            challengeUrl: `https://indeed.invalid/${secret}`,
+            pollEvidenceSummary: secret,
+          }, owner);
+          assert(normalized?.mode === 'native-challenge'
+            && normalized?.outcome === 'unverified'
+            && normalized?.nativeResult === 'closed'
+            && Object.keys(normalized).sort().join(',') === 'at,mode,nativeResult,outcome',
+          'a resume attempt is normalized to its timestamp and three enumerated fields before it reaches the receipt');
+        }
+        const receipt = telemetry.sourceRunHistory.indeed[0];
+        assert(receipt.resumeAttemptCount === 14
+          && receipt.resumeAttempts.length === 12
+          && receipt.resumeAttempts[0].at === 3
+          && receipt.resumeAttempts.at(-1).at === 14
+          && !JSON.stringify(receipt.resumeAttempts).includes(secret),
+        'the receipt retains the total click count plus only the newest twelve attempts, with no prose, URL, or job text');
+
+        const unrecognised = __recordJobSourceResumeAttemptForTests('indeed', {
+          at: 15, mode: 'a-card-mode-this-build-predates', outcome: 'surprise', nativeResult: 'who-knows',
+        }, owner);
+        assert(unrecognised?.mode === 'unrecognized'
+          && unrecognised?.outcome === 'unrecognized'
+          && unrecognised?.nativeResult === 'unknown'
+          && receipt.resumeAttemptCount === 15,
+        'an unknown mode/outcome/terminal is marked as unrecognised rather than folded into a real value the user never produced');
+
+        const stale = __recordJobSourceResumeAttemptForTests('indeed', {
+          at: 16, mode: 'native-challenge', outcome: 'blocked',
+        }, { nodeId: 'superseded-resume-owner', jobRunId: owner.jobRunId });
+        const unknownSource = __recordJobSourceResumeAttemptForTests('not-a-source', {
+          at: 17, mode: 'native-challenge', outcome: 'blocked',
+        }, owner);
+        assert(stale === null && unknownSource === null
+          && receipt.resumeAttemptCount === 15
+          && !telemetry.sourceRunHistory['not-a-source'],
+        'a superseded hub cannot append to the current receipt, and an unknown provider id cannot open a new one');
+
+        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        assert(jobsSource.includes('const recordResumeAttempt = (attemptSourceId, mode, outcome, detail, observed = null) => {')
+          && jobsSource.includes('recordJobSourceResumeAttempt(attemptSourceId, {\n        mode,\n        outcome,\n        nativeResult: observed?.nativeResult,\n      }, { nodeId, jobRunId });')
+          && jobsSource.includes("recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error), { nativeResult: 'launch-error' });"),
+        'the receipt is written inside the handler-local recorder, so every present and future resume call site is covered by construction');
+        return { clicks: 15, retained: 12 };
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
+  {
+    // A canvas with three Job Search hubs made getJobsTelemetryForReport fail
+    // closed (correctly — no hub owns the combined funnel), and every reader of
+    // that null then printed "no search recorded this session" for a process
+    // that had just run three searches, and dropped the Resume attempts block
+    // entirely. Absence was asserted, never observed.
+    name: 'a multi-hub report can count telemetry owners and attribute resume evidence per hub without merging the funnel',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      try {
+        const senderA = { id: 821 };
+        const senderB = { id: 822 };
+        const inContext = (sender, nodeId, callback) => __runWithIpcRequestContextForTests(
+          { sender, nodeId, channel: nodeId ? 'search-jobs' : 'bug-report' },
+          callback,
+        );
+        const seed = (sender, nodeId, fields) => inContext(sender, nodeId, () => {
+          Object.assign(getJobsTelemetry(), { nodeId, windowId: sender.id, ...fields });
+        });
+        const attempt = (t, outcome) => ({ t, mode: 'native-challenge', outcome, detail: `pass ${t}` });
+        seed(senderA, 'hub-a2', {
+          indeedSession: { ts: 5, preflightStatus: 'challenge', hasPPID: true },
+          // Fifteen clicks written straight into the live map: the report
+          // boundary must re-apply the producer's newest-12 bound rather than
+          // trusting whatever the in-memory list happens to hold.
+          resumeAttempts: {
+            indeed: Array.from({ length: 15 }, (_, index) => attempt(index + 1, 'blocked')),
+            'not-a-source': [attempt(1, 'blocked')],
+          },
+        });
+        seed(senderA, 'hub-a1', {
+          indeedSession: null,
+          resumeAttempts: { glassdoor: [attempt(3, 'resolved')] },
+        });
+        // Present, owns telemetry, but has neither observation to report.
+        seed(senderA, 'hub-a3', { indeedSession: null, resumeAttempts: {} });
+        seed(senderB, 'hub-b1', {
+          indeedSession: { ts: 9, preflightStatus: 'authenticated' },
+          resumeAttempts: { indeed: [attempt(4, 'resolved')] },
+        });
+
+        const hubIds = new Set(['hub-a1', 'hub-a2', 'hub-a3']);
+        const funnel = inContext(senderA, null, () => __getJobsTelemetryForReportForTests(hubIds, senderA.id));
+        const hubCount = inContext(senderA, null, () => getJobsTelemetryHubCountForReport(hubIds, senderA.id));
+        const attribution = inContext(senderA, null, () => getJobsResumeAttributionForReport(hubIds, senderA.id));
+        assert(funnel === null && hubCount === 3,
+          'the funnel still fails closed on a multi-hub canvas, and the count is the observation a renderer can state instead of asserting nothing was recorded');
+        assert(attribution.length === 2
+          && attribution.map(row => row.nodeId).join(',') === 'hub-a1,hub-a2'
+          && attribution[0].resumeAttempts.length === 1
+          && attribution[0].resumeAttempts[0].sourceId === 'glassdoor'
+          && attribution[0].indeedSession === null
+          && attribution[1].indeedSession?.preflightStatus === 'challenge'
+          && attribution[1].resumeAttempts.map(row => row.sourceId).join(',') === 'indeed'
+          && attribution[1].resumeAttempts[0].attempts.length === 12
+          && attribution[1].resumeAttempts[0].attempts[0].t === 4,
+        'each hub\u2019s own nodeId-scoped session and resume clicks are reported under that hub, unknown source keys are refused, the producer cap is re-applied, and a hub with neither observation is omitted rather than reported as empty');
+
+        const foreignWindow = inContext(senderA, null, () => ([
+          getJobsTelemetryHubCountForReport(hubIds, senderB.id),
+          getJobsResumeAttributionForReport(hubIds, senderB.id).length,
+        ]));
+        const foreignHub = inContext(senderA, null, () => getJobsResumeAttributionForReport(new Set(['hub-b1']), senderA.id));
+        assert(foreignWindow.join(',') === '0,0' && foreignHub.length === 0,
+          'both accessors keep the sibling\u2019s window and current-hub fences: another window\u2019s report, or a hub id this canvas does not hold, yields nothing rather than borrowed state');
+        return { hubsHoldingTelemetry: 3, attributableHubs: 2 };
+      } finally {
+        __resetJobsTelemetryForTests();
+      }
     },
   },
 ];

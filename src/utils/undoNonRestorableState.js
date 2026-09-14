@@ -1,3 +1,5 @@
+import { TRANSIENT_PROCESSING_HUB_STATES } from './persistenceTransientState.js';
+
 // External-lifecycle data must not participate in undo. It is stripped from
 // fingerprints and merged from the live nodes on restore so Undo cannot revive
 // a retired provider request, queue lease, Board transaction, rollback fence,
@@ -79,6 +81,27 @@ function hasExternallyOwnedJobSearchState(data) {
     || data.pendingJobPreferencesInterpretation;
 }
 
+// A SellHub mid photo-analysis/comp-research is externally owned the same way
+// a Job Search run is: `hubState` is one of the shared transient-processing
+// states while a worker is between phases, and `queuedModuleRun`/
+// `platformFitPending` mark a request already handed to (or awaiting) a
+// backend call. Without this, ordinary navigation could unmount a SellHub
+// mid-run and silently discard its result — a standing bug independent of
+// absorption, not only a nested-canvas concern.
+//
+// `platformFitPending` is load-bearing rather than redundant: the second,
+// post-pricing fit assessment runs while hubState is already the TERMINAL
+// 'priced', so it is the only marker covering that window. Its failure mode is
+// bounded — every success/failure/reset path clears it, and it is a
+// SELLHUB_TRANSIENT_KEY, so a reload strips it even if a pathological unmount
+// left it set. It can therefore never durably wedge navigation or Undo.
+function hasExternallyOwnedSellHubState(data) {
+  if (!data || typeof data !== 'object') return false;
+  return TRANSIENT_PROCESSING_HUB_STATES.includes(data.hubState)
+    || !!data.queuedModuleRun
+    || !!data.platformFitPending;
+}
+
 export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
   if (!Array.isArray(nodes)) return false;
   return nodes.some((node) => {
@@ -91,6 +114,11 @@ export function hasActiveExternalRunState(nodes, { recursive = true } = {}) {
       || data.queuedModuleRun
     )) return true;
     if (node?.type === 'jobhub' && hasExternallyOwnedJobSearchState(data)) return true;
+    if (node?.type === 'sellhub' && hasExternallyOwnedSellHubState(data)) return true;
+    // marketplacestatus is deliberately NOT guarded here: it has no unmount
+    // cleanup and keeps its in-flight scan in a module-level store (not node
+    // data), precisely so an unmount/remount (navigation, or absorption) is
+    // safe without a run guard.
     return recursive && hasActiveExternalRunState(data.canvasData?.nodes, { recursive: true });
   });
 }

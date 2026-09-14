@@ -3,7 +3,7 @@ const { app } = electronPkg;
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { getCurrentRequestJobAnalysisPaths, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
+import { getCurrentRequestJobAnalysisPaths, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
 import { getNonApiAiHandoffLifecycle } from '../nonApiAi.js';
 import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
@@ -745,7 +745,47 @@ function revealOutcomeLabel(outcome) {
   return `q${outcome?.queryIndex || '?'}/${outcome?.queryTotal || '?'} ${outcome?.count ?? '?'} card(s) after ${outcome?.iterations ?? '?'} reveal pass(es) — ${meaning}`;
 }
 
-function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label = 'Last terminal run receipt') {
+/**
+ * How many current Job Search hubs hold their own live telemetry right now.
+ *
+ * getJobsTelemetryForReport returns null at two or more matches on purpose —
+ * no single hub owns a combined funnel, and summing two hubs' search/scoring
+ * counts would print one hub's numbers under the other's name. But every
+ * reader of that null then rendered an ABSENCE ("no search recorded this
+ * session", "not retained in this process") for a process that had just run
+ * three searches, three scorings and a taxonomy pass. That is a claim the
+ * report never observed. This is the fact it can state instead, and the only
+ * thing derived from it is the hub COUNT: nothing is merged or re-summed.
+ */
+function attributableTelemetryHubCount(currentNodeIds, reportWindowId) {
+  try { return getJobsTelemetryHubCountForReport(currentNodeIds, reportWindowId) || 0; } catch { return 0; }
+}
+
+/**
+ * The ambiguity clause for a section whose owner could not be selected, or
+ * null when a single hub (or no hub at all) holds telemetry — in which case
+ * the caller's existing honest absence wording is still the right answer.
+ * States the observation only; it deliberately says nothing about WHY several
+ * hubs are live or which of them the reader wants.
+ */
+function multiHubAttributionNote(hubCount) {
+  return hubCount >= 2
+    ? `${hubCount} current Job Search hubs each hold their own live telemetry in this process, so no single hub owns this section`
+    : null;
+}
+
+/**
+ * The per-hub records that stay independently attributable when the combined
+ * funnel does not (see getJobsResumeAttributionForReport). Outside the Job
+ * Search Pipeline section only the LENGTH is used: a line may point a reader at
+ * the "Per-hub records" heading only when that heading will actually be
+ * rendered, and the heading renders only when this list is non-empty.
+ */
+function attributableHubRecords(currentNodeIds, reportWindowId) {
+  try { return getJobsResumeAttributionForReport(currentNodeIds, reportWindowId) || []; } catch { return []; }
+}
+
+function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label = 'Last terminal run receipt', attributionNote = null) {
   if (!receiptState?.exists) {
     return `- ${label}: absent — completion of any prior-process run is **unknown**; this build has no durable terminal evidence for it.`;
   }
@@ -775,8 +815,15 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       : 'result count unknown';
   const livePhase = livePipeline?.phase || null;
   const liveRunId = receiptIdentifier(livePipeline?.runId, '');
+  // What is actually observed when `livePhase` is missing is that no live
+  // pipeline phase could be ATTRIBUTED here — never that the receipt belongs to
+  // an earlier process. The old "previous-process receipt" label asserted the
+  // latter, and a canvas with two live Job Search hubs made it plainly false:
+  // getJobsTelemetryForReport fails closed, so runs that had just finished in
+  // THIS process were labelled previous-process. Report the observation and let
+  // the reader draw the conclusion.
   const provenance = !livePhase
-    ? 'previous-process receipt — live pipeline telemetry is unavailable in this process'
+    ? `receipt not correlated to a live run — ${attributionNote || 'no live pipeline telemetry was attributable in this process'}`
     : liveRunId && liveRunId === receipt.runId
       ? `this-process receipt — live search-stage phase \`${String(livePhase).replace(/`/g, "'")}\` belongs to this run`
       : `prior/other-run receipt — this process retains an uncorrelated pipeline phase \`${String(livePhase).replace(/`/g, "'")}\`${liveRunId ? ` for run \`${liveRunId}\`` : ''}`;
@@ -897,11 +944,11 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
   return lines.join('\n');
 }
 
-function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline) {
+function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, attributionNote = null) {
   const receiptArtifacts = artifacts.filter(artifact => artifact.receipt);
-  if (receiptArtifacts.length === 0) return [formatLastRunReceipt({ exists: false }, currentNodeIds, livePipeline)];
+  if (receiptArtifacts.length === 0) return [formatLastRunReceipt({ exists: false }, currentNodeIds, livePipeline, undefined, attributionNote)];
   if (receiptArtifacts.length === 1) {
-    return [formatLastRunReceipt(readArtifactReceiptSnapshot(receiptArtifacts[0]), currentNodeIds, livePipeline)];
+    return [formatLastRunReceipt(readArtifactReceiptSnapshot(receiptArtifacts[0]), currentNodeIds, livePipeline, undefined, attributionNote)];
   }
   const lines = [`- Terminal run receipts: ${receiptArtifacts.length} retained across independently recoverable Job Search hubs.`];
   for (const [index, artifact] of receiptArtifacts.entries()) {
@@ -910,6 +957,7 @@ function formatArtifactReceipts(artifacts, currentNodeIds, livePipeline) {
       currentNodeIds,
       livePipeline,
       `Terminal run receipt ${index + 1}/${receiptArtifacts.length}`,
+      attributionNote,
     ));
   }
   return lines;
@@ -1917,6 +1965,18 @@ export function buildJobCompletionAssessment(
   const hubIds = currentJobHubIds instanceof Set ? currentJobHubIds : new Set(currentJobHubIds || []);
   let telemetry = null;
   try { telemetry = getJobsTelemetryForReport(hubIds, reportWindowId) || null; } catch { /* report absence below */ }
+  // Every `!telemetry` branch below used to render an absence. Two live hubs
+  // make `telemetry` null without anything being absent, so resolve the null
+  // into the observation first and let each line choose its wording from it.
+  const telemetryAmbiguity = multiHubAttributionNote(attributableTelemetryHubCount(hubIds, reportWindowId));
+  // Only queried in the ambiguous case, and only so the search line below can
+  // decide whether it may point at Job Search Pipeline's "Per-hub records"
+  // heading — that heading is absent when no hub holds an attributable record,
+  // and a pointer to an absent heading reads as a filtered or truncated
+  // section rather than as one that was never written.
+  const attributableHubRecordCount = telemetryAmbiguity
+    ? attributableHubRecords(hubIds, reportWindowId).length
+    : 0;
   // The telemetry singleton is process-global. Do not attribute a different
   // canvas's run to this report simply because its saved snapshot is readable.
   if (telemetry?.nodeId && !ids.has(telemetry.nodeId)) telemetry = null;
@@ -2537,7 +2597,9 @@ export function buildJobCompletionAssessment(
   // Same rule as gather coverage: an unretained last stage is not a proven one.
   const historyQualifier = historyWrite || completedWithoutScoring
     ? ''
-    : ' The board-displayed seen-history write was not retained in this process, so this verdict does not prove those listings were recorded as seen.';
+    : telemetryAmbiguity
+      ? ` The board-displayed seen-history write is not attributable — ${telemetryAmbiguity} — so this verdict does not prove those listings were recorded as seen.`
+      : ' The board-displayed seen-history write was not retained in this process, so this verdict does not prove those listings were recorded as seen.';
   const hasExhaustedReachable = applicableCoverageSources.some(source => source.isExhausted
     && (source.total == null || source.gathered < source.total));
   const configuredCapQualifier = configuredCapSources.length > 0
@@ -2592,7 +2654,7 @@ export function buildJobCompletionAssessment(
       ? `✅ **COMPLETED WITH COLLECTION QUALIFICATIONS** — every reconciled stage agrees.${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${coverageQualifier}${historyQualifier}${boardClearQualifier}`
       : `✅ **VERIFIED COMPLETE** — every reconciled stage agrees.${coverageQualifier}${historyQualifier}${boardClearQualifier}`
     : durableOutputOnly
-      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${snapshot?.metadataOnly ? ' The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.' : ''}${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${durableCollectionShortfallQualifier}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
+      ? `✅ **DURABLE OUTPUT COMPLETE** — a cleanup-cleared terminal receipt and the same-run, same-canvas, current-hub saved score-ready snapshot agree.${snapshot?.metadataOnly ? ' The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.' : ''}${receiptScoring ? ' The receipt also retains matching final scoring counters.' : ''}${durableCollectionShortfallQualifier}${acceptedLimitationQualifier}${regionUnverifiedQualifier}${countrySkippedQualifier}${boardConsumptionQualifier}${boardClearQualifier} Live search/scoring telemetry ${foreignLiveRun ? 'for this run was replaced in-process when a later run started on another hub' : telemetryAmbiguity ? `is not attributable — ${telemetryAmbiguity}` : 'was not retained after restart'}; taxonomy and Job Board consumption are assessed separately below, and this does not verify gather coverage.`
     : `⚠️ **INDETERMINATE** — ${gaps.length ? gaps.join('; ') : 'one or more completion facts were not retained'}.`;
 
   const searchLine = searchKept == null
@@ -2602,7 +2664,11 @@ export function buildJobCompletionAssessment(
         ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''} = ${snapshot.candidatePoolJobs} candidate pool − ${receiptPreferenceFiltered} preference-filtered = ${receiptScoreInput} terminal scoring input.`
       : receiptRecovery != null
         ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept ?? '?'} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''}${receiptScoreInput != null ? ` · terminal scoring input ${receiptScoreInput}` : ''}.`
-        : '- Search + recovery: not retained in this process.'
+        : telemetryAmbiguity
+          ? `- Search + recovery: not attributable — ${telemetryAmbiguity}${attributableHubRecordCount > 0
+            ? '; the per-hub records that remain attributable are listed in Job Search Pipeline'
+            : '; no hub held an independently attributable record either, so no per-hub records are listed'}.`
+          : '- Search + recovery: not retained in this process.'
     : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''}${preferenceFiltered ? ` − ${preferenceFiltered} removed by Job Preferences` : ''} = ${expectedAfterPreferences} expected scoring input.`;
   const scoringLine = completedZeroResult
     ? '- Scoring: not required — zero score-ready jobs.'
@@ -2611,14 +2677,18 @@ export function buildJobCompletionAssessment(
     : !scoring
     ? receiptScoring
       ? `- Scoring: durable terminal receipt — input ${receiptScoreInput ?? '?'} → scored ${receiptScored ?? '?'} · placeholders ${receiptPlaceholders ?? '?'} · unscored ${receiptUnscored ?? '?'} · failed batches ${receiptFailedBatches ?? '?'}.`
-      : '- Scoring: not retained in this process.'
+      : telemetryAmbiguity
+        ? `- Scoring: not attributable — ${telemetryAmbiguity}.`
+        : '- Scoring: not retained in this process.'
     : `- Scoring: input ${scoreInput ?? '?'} → scored ${scored ?? '?'} · placeholders ${placeholders ?? '?'} · unscored ${unscored ?? '?'} · failed batches ${failedBatches ?? '?'}.`;
   const taxonomyLine = completedZeroResult
     ? '- Taxonomy: not required — zero scored jobs.'
     : completedPreferenceFiltered
       ? '- Taxonomy: intentionally skipped — no preference-accepted jobs reached the board.'
     : !taxonomy
-    ? '- Taxonomy: not retained in this process.'
+    ? telemetryAmbiguity
+      ? `- Taxonomy: not attributable — ${telemetryAmbiguity}.`
+      : '- Taxonomy: not retained in this process.'
     : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), so it exceeds this hub's ${scored ?? '?'} scored job(s) by design` : ''}.`;
   const receiptLine = !receiptState.exists
     ? '- Terminal receipt: absent — prior-process completion cannot be proven.'
@@ -2656,7 +2726,9 @@ export function buildJobCompletionAssessment(
   // Rendered whether or not it is a gap: "not retained" is a real answer here,
   // because a run that never reached this stage is not the same as one that did.
   const historyLine = !historyWrite
-    ? '- Seen-history write: not retained in this process.'
+    ? telemetryAmbiguity
+      ? `- Seen-history write: not attributable — ${telemetryAmbiguity}.`
+      : '- Seen-history write: not retained in this process.'
     : historyWrite.error
       ? `- Seen-history write: ❌ failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) — these listings will be offered again on the next search.`
       : historyWrite.skipped
@@ -2739,7 +2811,7 @@ export function buildJobCompletionAssessment(
 > Compact reconciliation of the search/recovery funnel, scoring, taxonomy, terminal receipt, and the owned saved score-ready snapshot. Detailed live per-job evidence appears in Job Search Pipeline only when retained in this process.
 
 - ${verdict}
-- Live search stage: ${foreignLiveRun ? `not retained for this run — the in-process phase belongs to a later run on hub \`${sourceHubLabel(liveTelemetryNodeId)}\`` : pipelinePhase || 'not retained'} _(this phase is stamped when the GATHER ends; scoring and taxonomy run after it — the terminal receipt is durable proof of the scoring output, while taxonomy and Job Board consumption are reconciled separately below)._
+- Live search stage: ${foreignLiveRun ? `not retained for this run — the in-process phase belongs to a later run on hub \`${sourceHubLabel(liveTelemetryNodeId)}\`` : pipelinePhase || (telemetryAmbiguity ? `not attributable — ${telemetryAmbiguity}` : 'not retained')} _(this phase is stamped when the GATHER ends; scoring and taxonomy run after it — the terminal receipt is durable proof of the scoring output, while taxonomy and Job Board consumption are reconciled separately below)._
 ${foreignRunLine ? `${foreignRunLine}\n` : ''}${receiptLine}
 ${searchLine}
 ${scoringLine}
@@ -3549,6 +3621,10 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
       livePipeline = telemetry.pipeline || null;
     }
   } catch { /* telemetry may not be ready */ }
+  // A null telemetry here has two very different causes and the sidecar note
+  // below used to state only one of them. Distinguish "nothing recorded" from
+  // "several hubs recorded, none of them ownable" before wording it.
+  const telemetryAmbiguity = multiHubAttributionNote(attributableTelemetryHubCount(currentJobHubIds, reportWindowId));
   const lastRunPhase = livePipeline?.phase || null;
   const durableSnapshot = currentSavedSnapshotFact(canvasFilePath, currentJobHubIds);
   const durableCleanFinish = hasDurableCompletedOutput(lastReceipt?.receipt, durableSnapshot);
@@ -3559,13 +3635,15 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
       ? ' — expected: a clean finish deletes both sidecars (there is no `done` stage), and this process\'s last pipeline phase is `completed`'
     : lastRunPhase
       ? ` — ⚠️ last pipeline phase in this process is \`${String(lastRunPhase).replace(/`/g, "'")}\`, not \`completed\`, so this is either a pre-restart run or staging did not write`
-      : ' — no pipeline phase recorded in this process, so this cannot be attributed to a clean finish rather than staging never running';
+      : telemetryAmbiguity
+        ? ` — ⚠️ no pipeline phase is attributable here: ${telemetryAmbiguity}, so this cannot be attributed to a clean finish rather than staging never running`
+        : ' — no pipeline phase recorded in this process, so this cannot be attributed to a clean finish rather than staging never running';
   const lines = [];
   // The manifest/staging pair is intentionally removed after a clean finish.
   // The receipt is the sole durable answer for a prior-process run; render it
   // before the transient recovery artifacts so a reader does not mistake their
   // absence for either success or failure.
-  lines.push(...formatArtifactReceipts(artifacts, currentNodeIds, livePipeline));
+  lines.push(...formatArtifactReceipts(artifacts, currentNodeIds, livePipeline, telemetryAmbiguity));
   lines.push(...formatRecoverySidecars(sidecarArtifacts, currentNodeIds, {
     absentNote,
     durableCleanFinish,
@@ -3924,6 +4002,82 @@ function historyReportValue(value, fallback, max = 240) {
   return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
 }
 
+// Mirrors SOURCE_RUN_RESOLVE_PASS_TRAIL_CAP in jobs.js. This is a rendering
+// guard as well as a display convention: malformed in-memory telemetry cannot
+// make a focused report expand beyond the producer's bounded design.
+const SOURCE_RUN_RESOLVE_PASS_TRAIL_REPORT_CAP = 12;
+const SOURCE_RUN_RESOLVE_OUTCOMES = new Set(['completed', 'blocked', 'rejected', 'failed']);
+const SOURCE_RUN_RESOLVE_RECOMMENDATIONS = new Set(['retry', 'skip', 'none']);
+const SOURCE_RUN_RESOLVE_CHECKPOINTS = new Set(['saved', 'unchanged', 'not-ready', 'failed', 'not-applicable']);
+const SOURCE_RUN_RESOLVE_SEVERITIES = new Set(['block', 'throttle', 'warn', 'info']);
+const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
+  'description-appcast-temporary-restriction',
+  'description-card-unavailable',
+  'description-detail-error',
+  'description-detail-challenge',
+  'description-detail-hard-block',
+  'description-detail-miss',
+  'description-detail-navigation',
+  'description-detail-session-reset',
+  'description-listing-unavailable',
+  'description-panel-http-error',
+  'description-rate-limited',
+  'description-recovery-not-ready',
+  'description-recovery-persist-failed',
+  'description-recovery-snapshot-stale',
+  'description-recovery-snapshot-unavailable',
+  'description-unsupported-url',
+  'resolve-description-incomplete',
+  'resolve-detail-enrichment-failed',
+  'cloudflare-hard-block',
+]);
+const SOURCE_RUN_RESOLVE_COUNT_FIELDS = [
+  ['providerRowsLoaded', 'provider rows'],
+  ['targeted', 'targeted'],
+  ['attempted', 'attempted'],
+  ['recovered', 'recovered'],
+  ['completeTotal', 'score-ready'],
+  ['empty', 'still deferred'],
+  ['unavailable', 'unavailable'],
+  ['consecutiveNoMatchPasses', 'unchanged checks'],
+  ['consecutiveNoProgressPasses', 'no-progress checks'],
+];
+
+function sourceRunResolvePassCountForReport(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0
+    ? Math.min(1_000_000, Math.floor(numeric))
+    : null;
+}
+
+// This intentionally does not fall back to historyReportValue for the code:
+// only a compact identifier is allowed here, never free-form warning evidence
+// that could contain a listing title, URL, search query, or location.
+function formatSourceRunResolvePass(pass) {
+  if (!pass || !SOURCE_RUN_RESOLVE_OUTCOMES.has(pass.outcome)) return null;
+  const at = Number(pass.at);
+  const bits = [Number.isFinite(at) && at > 0 ? ago(at) : 'time unavailable', pass.outcome];
+  for (const [field, label] of SOURCE_RUN_RESOLVE_COUNT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(pass, field)) continue;
+    const count = sourceRunResolvePassCountForReport(pass[field]);
+    if (count != null) bits.push(`${label} ${count}`);
+  }
+  if (SOURCE_RUN_RESOLVE_RECOMMENDATIONS.has(pass.recommendation)) {
+    bits.push(pass.recommendation === 'skip' ? 'Skip recommended' : `recommendation: ${pass.recommendation}`);
+  }
+  if (SOURCE_RUN_RESOLVE_CHECKPOINTS.has(pass.checkpoint)) bits.push(`checkpoint ${pass.checkpoint}`);
+  const warning = pass.warning;
+  if (
+    warning
+    && typeof warning.code === 'string'
+    && SOURCE_RUN_RESOLVE_WARNING_CODES.has(warning.code)
+    && SOURCE_RUN_RESOLVE_SEVERITIES.has(warning.severity)
+  ) {
+    bits.push(`warning: ${warning.code}/${warning.severity}`);
+  }
+  return bits.join(' · ');
+}
+
 // Job detail/search URLs commonly carry opaque provider IDs, tracking values,
 // or short-lived challenge tokens in their query string. The report only needs
 // the host/path that was reached; keeping the raw query risks exporting data
@@ -3995,6 +4149,77 @@ function historyDropEvidenceLines(samples, totalDropped, indent = '') {
 // and the deferred-listing samples — into a one-line marker each. It never touches the funnel numbers,
 // stop reasons, warnings, or per-source outcomes that surround them: those are
 // exactly what a reader debugging a filtered job report still needs.
+// One Indeed browser-session preflight, rendered as observations only (contract:
+// jobsTelemetry.indeedSession, electron/ipc/jobs.js). Shared by the single-owner
+// section and the per-hub block below so the two can never drift: the same facts
+// must be readable whether one hub or several hold telemetry, and the only
+// difference between the callers is the indent and the owning-hub label.
+function indeedSessionPreflightLines(isess, indent = '') {
+  const ppidLabel = isess.hasPPID === true ? 'yes' : isess.hasPPID === false ? 'no' : 'not recorded';
+  const cookieList = Array.isArray(isess.cookieNames) && isess.cookieNames.length
+    ? isess.cookieNames.map(n => `\`${n}\``).join(', ')
+    : '(none observed)';
+  const out = [
+    `${indent}- Landed URL: \`${reportUrl(isess.landedUrl, '(unrecorded)')}\``,
+    `${indent}- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${reportText(isess.preflightReason, '(unrecorded)')}\`` : ''}`,
+    `${indent}- PPID session cookie present: ${ppidLabel}`,
+    `${indent}- Cookie names observed: ${cookieList}`,
+    `${indent}- Chrome executable: \`${String(isess.executablePath || '(unrecorded)').replace(/`/g, "'")}\``,
+    `${indent}- Profile dir: \`${String(isess.userDataDir || '(unrecorded)').replace(/`/g, "'")}\``,
+  ];
+  if (isess.host) out.push(`${indent}- Host: \`${String(isess.host).replace(/`/g, "'")}\``);
+  return out;
+}
+
+// Mirrors MAX_RESUME_ATTEMPTS_PER_SOURCE in jobs.js — the cap the producer
+// applies to the in-memory per-source trail, re-applied here for the same
+// reason SOURCE_RUN_RESOLVE_PASS_TRAIL_REPORT_CAP is: malformed in-memory
+// telemetry must not be able to grow a focused report past the producer's
+// bounded design, and a saturated trail must be MARKED rather than presented
+// as a complete count of the user's clicks.
+const RESUME_ATTEMPT_TRAIL_REPORT_CAP = 12;
+
+// Free-form producer prose written by recordResumeAttemptTelemetry. Rendered
+// through reportText (never bare historyReportValue) because a native-login
+// failure reason carries the landing URL verbatim — e.g.
+// `https://secure.indeed.com/auth?hl=…&continue=…&_ga=…` — and this section
+// sits under a contract that URL query strings are never exported. The cap is
+// the producer's own 200-character slice: rendering shorter silently amputated
+// the observer evidence at the END of an 'unverified' detail ("no indeed.com
+// tab was ever visible to the observer"), which is the exact clause that
+// distinguishes "we watched and it never cleared" from "we never saw the
+// window at all" — the evidence that path exists to surface.
+function resumeAttemptDetailForReport(detail) {
+  return reportText(detail, '', 200);
+}
+
+// One source's Continue / Log in / Solve trail, newest first, or null when the
+// source recorded none. Shared for the same reason as the preflight formatter.
+function resumeAttemptTrailLine(sourceId, attempts, indent = '  ') {
+  const list = Array.isArray(attempts) ? attempts : [];
+  if (!list.length) return null;
+  const shown = list.slice(-RESUME_ATTEMPT_TRAIL_REPORT_CAP);
+  const rendered = shown.slice().reverse().map(a => {
+    // mode/outcome are producer enums, but they reach this renderer as raw
+    // in-memory strings: pass them through the same scrubber so a stray
+    // backtick or newline cannot break the surrounding markdown.
+    const mode = historyReportValue(a?.mode, '(no mode recorded)', 40);
+    const outcome = historyReportValue(a?.outcome, '(no outcome recorded)', 40);
+    const detail = a?.detail ? ` — ${resumeAttemptDetailForReport(a.detail)}` : '';
+    return `\`${mode}\`→${outcome}${detail}${ago(a?.t)}`;
+  }).join('; ');
+  // The producer keeps only the newest 12 per source, so a full trail is a
+  // FLOOR on the number of clicks, not a total. Saying "12 attempts" over a
+  // saturated list would assert a completeness this report never observed.
+  const trimmedHere = list.length - shown.length;
+  const countLabel = trimmedHere > 0
+    ? `${list.length} recorded, newest ${shown.length} rendered`
+    : shown.length >= RESUME_ATTEMPT_TRAIL_REPORT_CAP
+      ? `${shown.length} retained at the producer's newest-${RESUME_ATTEMPT_TRAIL_REPORT_CAP} cap — any earlier click is not retained`
+      : `${shown.length} attempt${shown.length === 1 ? '' : 's'}`;
+  return `${indent}- \`${sourceId}\` (${countLabel}): ${rendered}`;
+}
+
 export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath, localApplications = [], omitJobAudit = false, currentJobHubIds = currentNodeIds) {
   let t;
   // Older direct callers/tests do not have the renderer's typed hub index.
@@ -4004,6 +4229,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { t = getJobsTelemetryForReport(telemetryOwners, reportWindowId); } catch { return ''; }
   let sourceRunHistoryOwners = [];
   try { sourceRunHistoryOwners = getJobsSourceRunHistoryForReport(telemetryOwners, reportWindowId); } catch { /* optional bounded diagnostics */ }
+  // `t` is null both when nothing ran and when several hubs each ran their own
+  // search — the second case is the one that rendered "(no search recorded this
+  // session)" over three completed searches. Keep the two apart from here down.
+  const telemetryHubCount = attributableTelemetryHubCount(telemetryOwners, reportWindowId);
+  const telemetryAmbiguity = multiHubAttributionNote(telemetryHubCount);
+  // The per-hub records that survive the fail-closed funnel gate. Each is
+  // stamped through the nodeId-scoped telemetry proxy, so a row belongs to the
+  // hub it is labelled with and nothing here is merged or re-summed across
+  // hubs. Only rendered in the ambiguous case: with a single owner the normal
+  // sections below already print exactly these observations.
+  let multiHubAttribution = [];
+  if (telemetryAmbiguity) {
+    try { multiHubAttribution = getJobsResumeAttributionForReport(telemetryOwners, reportWindowId); } catch { /* optional bounded diagnostics */ }
+  }
   // Local AI card state is renderer-owned and can be diagnostically useful
   // even before the job-search telemetry store has recorded a pipeline run.
   if (!t) t = {};
@@ -4075,19 +4314,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // every report, FULL included.
   const hasResumeAttempts = !!(t.resumeAttempts && Object.keys(t.resumeAttempts).length > 0);
   const hasSourceRunHistory = sourceRunHistoryOwners.length > 0;
+  // Same reasoning as hasResumeAttempts above, for the multi-owner case: with
+  // two live hubs `t` is {} so every has* flag below is false, and the section
+  // returned '' — taking the per-hub preflight/Continue evidence with it.
+  const hasMultiHubAttribution = multiHubAttribution.length > 0;
   // t.compensation (Competitive salary check, rendered below) is its own
   // telemetry object stamped independently of scoring/bucketing — a run can in
   // principle reach compensation research with those absent (e.g. replayed from
   // a batch-reconcile path). Omitting it here would risk the same silent
   // whole-section drop the resumeAttempts comment above already documents.
-  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && visibleLocalApplications.length === 0) return '';
+  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
     deletedNoun: 'hub',
   });
   if (scope.foreign) {
-    if (!scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory) return `\n## Job Search Pipeline\n${scope.note}`;
+    if (!scopedApplication && !applicationSync && visibleLocalApplications.length === 0 && !hasSourceRunHistory && !hasMultiHubAttribution) return `\n## Job Search Pipeline\n${scope.note}`;
     // A local application generation/Sync must remain reportable even when a
     // different window owns the process-global last jobs run. Drop only that
     // foreign funnel rather than returning before the local sections render.
@@ -4252,6 +4495,31 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           return `run \`${shortId(record?.runId || 'unknown')}\`: ${announced}${terminal}${warningText}${timing.length ? ` (${timing.join('; ')})` : ''}`;
         }).join(' | ');
         lines.push(`  - hub \`${shortId(owner.nodeId)}\` / \`${sourceId}\`: ${trail}`);
+        // The full funnel intentionally has no merged owner when two current
+        // hubs are present. These compact entries remain independently
+        // attributable to this source/run receipt, so show them here rather
+        // than silently omitting the retry/Skip evidence from FULL/JOBRESOLVE.
+        for (const record of bounded) {
+          const boundedPasses = Array.isArray(record?.resolvePasses)
+            ? record.resolvePasses.slice(-SOURCE_RUN_RESOLVE_PASS_TRAIL_REPORT_CAP)
+            : [];
+          // formatSourceRunResolvePass returns null for any pass whose
+          // `outcome` is not in the allowlist, so the rendered list can be
+          // SHORTER than the slice it came from. Counting only the survivors
+          // and then printing "all retained" asserted a completeness over rows
+          // the report had just dropped — the same unmarked truncation this
+          // section was reworked to eliminate. Count the pre-filter slice
+          // separately, state both numbers, and mark the drop; nothing is
+          // inferred about why an outcome is unrecognised.
+          const retained = boundedPasses.map(formatSourceRunResolvePass).filter(Boolean);
+          if (retained.length === 0) continue;
+          const recordedTotal = sourceRunResolvePassCountForReport(record?.resolvePassCount);
+          const total = Math.max(boundedPasses.length, recordedTotal ?? boundedPasses.length);
+          const olderTrimmed = total - boundedPasses.length;
+          const unrecognised = boundedPasses.length - retained.length;
+          lines.push(`    - Solve passes (run \`${shortId(record?.runId || 'unknown')}\`): ${total} recorded · ${retained.length} rendered${olderTrimmed > 0 ? ` · oldest ${olderTrimmed} not retained` : ''}${unrecognised > 0 ? ` · ⚠️ ${unrecognised} carried an outcome this report does not recognise and ${unrecognised === 1 ? 'is' : 'are'} not rendered` : ''}${olderTrimmed === 0 && unrecognised === 0 ? ' (all retained)' : ''}.`);
+          for (const pass of retained) lines.push(`      - ${pass}`);
+        }
       }
     }
   }
@@ -5483,7 +5751,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - ${intentSources.length} selected source(s)${intentSources.length ? `: ${intentSources.map(id => `\`${id}\``).join(', ')}` : ''}`);
       lines.push(`  - Max posting age ${nonnegativeCount(intent.maxAgeDays) ?? '?'}d · location \`${historyReportValue(intent.location, 'none', 80)}\``);
     } else {
-      lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+      // The pointer is conditional on the section it points at. "Per-hub
+      // records" renders only when at least one hub holds an independently
+      // attributable record; two hubs that each searched with no Indeed session
+      // and no Continue click produce none, and an unconditional pointer then
+      // sent the reader to a heading that is not in the report — unreadable as
+      // either a filtered, truncated or never-written section.
+      lines.push(telemetryAmbiguity
+        ? `### Search\n- (funnel not attributed: ${telemetryAmbiguity}.${hasMultiHubAttribution ? ' The per-hub records that remain attributable are under "Per-hub records" below;' : ' No hub held an independently attributable record either, so no "Per-hub records" section follows;'} the combined funnel is deliberately not re-derived across hubs.)`
+        : '### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
     }
   }
   // Indeed browser-session preflight (contract: jobsTelemetry.indeedSession,
@@ -5496,20 +5772,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // only: which URL the scrape landed on, whether the session cookie was
   // present, and which binary/profile ran it — never an asserted cause.
   if (t.indeedSession) {
-    const isess = t.indeedSession;
-    const ppidLabel = isess.hasPPID === true ? 'yes' : isess.hasPPID === false ? 'no' : 'not recorded';
-    const cookieList = Array.isArray(isess.cookieNames) && isess.cookieNames.length
-      ? isess.cookieNames.map(n => `\`${n}\``).join(', ')
-      : '(none observed)';
-    lines.push(`\n### Browser session preflight — Indeed${ago(isess.ts)}`);
+    lines.push(`\n### Browser session preflight — Indeed${ago(t.indeedSession.ts)}`);
     lines.push('> Was the browser that ran the scrape actually logged in, and which profile/binary did it use? Observations only — never an asserted cause.');
-    lines.push(`- Landed URL: \`${reportUrl(isess.landedUrl, '(unrecorded)')}\``);
-    lines.push(`- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${reportText(isess.preflightReason, '(unrecorded)')}\`` : ''}`);
-    lines.push(`- PPID session cookie present: ${ppidLabel}`);
-    lines.push(`- Cookie names observed: ${cookieList}`);
-    lines.push(`- Chrome executable: \`${String(isess.executablePath || '(unrecorded)').replace(/`/g, "'")}\``);
-    lines.push(`- Profile dir: \`${String(isess.userDataDir || '(unrecorded)').replace(/`/g, "'")}\``);
-    if (isess.host) lines.push(`- Host: \`${String(isess.host).replace(/`/g, "'")}\``);
+    lines.push(...indeedSessionPreflightLines(t.indeedSession));
   }
   // Resume ("Continue" / "Log in") attempts per source (contract: jobsTelemetry.
   // resumeAttempts, electron/ipc/jobs.js — newest-12-capped per source). This is
@@ -5521,15 +5786,38 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push('> What each Continue / Log in / Solve click on a source card actually did. A card only ever shows its CURRENT state, so a click that changed nothing is otherwise indistinguishable from one that was never made.');
     lines.push('- Per source, newest first:');
     for (const [sid, attempts] of Object.entries(t.resumeAttempts)) {
-      const list = Array.isArray(attempts) ? attempts : [];
-      if (!list.length) continue;
-      const rendered = list.slice().reverse().map(a => {
-        const mode = a?.mode || '(no mode recorded)';
-        const outcome = a?.outcome || '(no outcome recorded)';
-        const detail = a?.detail ? ` — ${historyReportValue(a.detail, '', 120)}` : '';
-        return `\`${mode}\`→${outcome}${detail}${ago(a?.t)}`;
-      }).join('; ');
-      lines.push(`  - \`${sid}\` (${list.length} attempt${list.length === 1 ? '' : 's'}): ${rendered}`);
+      const trail = resumeAttemptTrailLine(sid, attempts);
+      if (trail) lines.push(trail);
+    }
+  }
+
+  // Per-hub records — the evidence that survives the fail-closed funnel gate.
+  // With two live hubs `t` is {} so both sections above render nothing, which is
+  // exactly how a user's three Continue clicks on a blocked Indeed source became
+  // invisible in the report that was supposed to explain them. These two records
+  // are stamped through the nodeId-scoped telemetry proxy, so every row below
+  // belongs to the hub it is printed under. Nothing is merged, summed, or
+  // re-derived across hubs, and no cause is asserted for why several are live.
+  if (hasMultiHubAttribution) {
+    lines.push('\n### Per-hub records (no single hub owns the funnel above)');
+    lines.push(`> ${telemetryAmbiguity}. Only records that are independently attributable to one hub are shown, each under the hub that recorded it; ${multiHubAttribution.length} of ${telemetryHubCount} hub(s) recorded one.`);
+    for (const hub of multiHubAttribution) {
+      lines.push(`- Hub \`${shortId(hub.nodeId)}\``);
+      if (hub.indeedSession) {
+        lines.push(`  - Browser session preflight — Indeed${ago(hub.indeedSession.ts)}:`);
+        lines.push(...indeedSessionPreflightLines(hub.indeedSession, '    '));
+      } else {
+        lines.push('  - Browser session preflight — Indeed: (none recorded for this hub)');
+      }
+      if (hub.resumeAttempts.length > 0) {
+        lines.push('  - Resume attempts (per source, newest first):');
+        for (const { sourceId, attempts } of hub.resumeAttempts) {
+          const trail = resumeAttemptTrailLine(sourceId, attempts, '    ');
+          if (trail) lines.push(trail);
+        }
+      } else {
+        lines.push('  - Resume attempts: (none recorded for this hub)');
+      }
     }
   }
 
@@ -6626,7 +6914,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     }
   } else {
-    lines.push('\n### Scoring\n- (no scoring recorded this session)');
+    lines.push(telemetryAmbiguity
+      ? `\n### Scoring\n- (not attributed: ${telemetryAmbiguity}. Scoring counters are not summed across hubs.)`
+      : '\n### Scoring\n- (no scoring recorded this session)');
   }
 
   // Competitive salary check (contract: jobsTelemetry.compensation, stamped by
@@ -6936,7 +7226,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     }
   } else {
-    lines.push('\n### Taxonomy (hiring fit → salary → role)\n- (no taxonomy recorded this session)');
+    lines.push(telemetryAmbiguity
+      ? `\n### Taxonomy (hiring fit → salary → role)\n- (not attributed: ${telemetryAmbiguity}. Taxonomy counters are not summed across hubs.)`
+      : '\n### Taxonomy (hiring fit → salary → role)\n- (no taxonomy recorded this session)');
   }
 
   // ── Application generation (last) ──────────────────────────────────────────

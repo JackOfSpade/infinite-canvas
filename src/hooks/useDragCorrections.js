@@ -7,6 +7,8 @@ import { findNonOverlappingPlacement } from '../utils/layoutUtils';
 import { getHubDropRejectLabel, getHubFileDropMode } from '../utils/hubDropEligibility';
 import { buildHubHoverState, filePayloadFromDraggedNodes, fileSupportedByHub } from '../utils/hubNodeDrop';
 import { appendPhotoFiles } from '../utils/photoPathList';
+import { collectAbsorptionClosure, partitionEdgesForMove, buildGroupHoverState } from '../utils/nestedCanvasAbsorption';
+import { markJobWorkflowRelocationPending, settleJobWorkflowRelocation } from '../utils/nodeDeletionLifecycle';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -25,12 +27,41 @@ function findHubDropTarget(dragSet, getIntersectingNodes) {
   return null;
 }
 
+// Unlike findHubDropTarget, this does not filter out a locked group — a
+// locked sub-canvas must still be found so getAbsorptionRejection (via
+// buildGroupHoverState) can report "Sub-canvas is locked" instead of the drag
+// silently showing no cue at all, same honesty goal as the rest of this file.
+function findGroupDropTarget(dragSet, getIntersectingNodes) {
+  for (const dragged of dragSet) {
+    const intersections = getIntersectingNodes(dragged);
+    const targetGroup = intersections.find(n => n.type === 'group' && n.id !== dragged.id);
+    if (targetGroup) return targetGroup;
+  }
+  return null;
+}
+
 export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
   const targetHubIdRef         = useRef(null);
   const dragStartPositionsRef  = useRef(new Map());
+  // React Flow fixes the drag set at drag-start (getDragItems), so it is
+  // captured once here instead of re-derived via getNodes()+filter on every
+  // onNodeDrag pointer-move frame. dragCanvasRef freezes the node/edge
+  // membership alongside it for the same reason: collectAbsorptionClosure and
+  // findSeveredRelations (run inside buildGroupHoverState) are each
+  // O(nodes x closure), and neither the drag set nor canvas membership
+  // changes mid-drag from user input, so there is nothing to gain by pulling
+  // getNodes()/getEdges() again every frame — only onNodeDragStop re-resolves
+  // from live state, right before it actually mutates anything.
+  const dragSetRef             = useRef([]);
+  const dragCanvasRef          = useRef({ nodes: [], edges: [] });
+  // Per-drag memo of group hover state, keyed by target group id, so a frame
+  // that keeps hovering the same sub-canvas does no new closure/severed-refs
+  // work — only switching to a different target pays for a fresh
+  // buildGroupHoverState call.
+  const groupHoverCacheRef     = useRef(new Map());
 
   const clearHubHover = useCallback(() => {
     if (!targetHubIdRef.current) return;
@@ -58,9 +89,17 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     dragStartPositionsRef.current.clear();
     const currentNodes = getNodes ? getNodes() : [node];
     const draggedAtStart = currentNodes.filter(n => n.id === node.id || n.selected);
-    for (const n of draggedAtStart.length > 0 ? draggedAtStart : [node]) {
+    const dragSet = draggedAtStart.length > 0 ? draggedAtStart : [node];
+    for (const n of dragSet) {
       dragStartPositionsRef.current.set(n.id, { ...n.position });
     }
+
+    // Freeze the drag set and the node/edge snapshot used for absorption
+    // hover math (see the comment on these refs above) — computed once here
+    // rather than per pointer-move frame in onNodeDrag.
+    dragSetRef.current = dragSet;
+    dragCanvasRef.current = { nodes: currentNodes, edges: getEdges ? getEdges() : [] };
+    groupHoverCacheRef.current = new Map();
 
     // Tag this RF drag as resize-initiated if a resize is currently active.
     if (ResizeActive.has(node.id)) {
@@ -70,53 +109,81 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (TitleZoneActive.has(node.id)) {
       titleZoneDragActiveRef.current.add(node.id);
     }
-  }, [getNodes, isAnimatingRef, takeSnapshot, isInteractionRef]);
+  }, [getNodes, getEdges, isAnimatingRef, takeSnapshot, isInteractionRef]);
 
   const onNodeDrag = useCallback((e, node) => {
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
+    if (!getIntersectingNodes) return;
 
-    // Every movable non-hub node participates in hub-hover validation, including
-    // a Job Board. Boards are not valid career files, but excluding them here
-    // meant the user got no red cue explaining that the board is not a career
-    // file before it silently snapped back on release. Group absorption remains
-    // limited to the ordinary node types handled by the drop-stop path below.
-    if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
-      const intersections = getIntersectingNodes(node);
-      const targetGroup = node.type === 'jobboard'
-        ? null
-        : intersections.find(n => n.type === 'group' && !n.data?.locked);
-      const newTargetId = targetGroup ? targetGroup.id : null;
+    // React Flow fixes the drag set at drag-start (see onNodeDragStart), so
+    // every check below reads dragSetRef instead of re-deriving it. This also
+    // removes the old reason a drag whose primary node was itself a
+    // group/jobhub/jobboard/sellhub skipped hover work entirely: those types
+    // now participate too, and it is getAbsorptionRejection (via
+    // buildGroupHoverState, e.g. ABSORB_EXCLUDED_TYPES or the run guard) that
+    // decides — with a visible reject cue — whether a given combination is
+    // actually legal, rather than a silent type-based carve-out here.
+    const dragSet = dragSetRef.current.length > 0 ? dragSetRef.current : [node];
 
-      if (targetGroupIdRef.current !== newTargetId) {
-        if (targetGroupIdRef.current) updateNodeData(targetGroupIdRef.current, { isDropTarget: false });
-        if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
-        targetGroupIdRef.current = newTargetId;
+    // --- sub-canvas (group) absorption hover ---
+    const targetGroup = findGroupDropTarget(dragSet, getIntersectingNodes);
+    const newGroupId = targetGroup ? targetGroup.id : null;
+    if (targetGroupIdRef.current !== newGroupId) {
+      if (targetGroupIdRef.current) {
+        updateNodeData(targetGroupIdRef.current, { isDropTarget: false, dragHover: null });
       }
-
-      // Only the hub-drop path needs the selected-node set; compute it here so a
-      // drag of a group/hub (which returns above) doesn't pay getNodes()+filter
-      // over the whole canvas on every pointer-move frame.
-      const dragSet = (() => {
-        const currentNodes = getNodes ? getNodes() : [node];
-        const selected = currentNodes.filter(n => n.id === node.id || n.selected);
-        return selected.length > 0 ? selected : [node];
-      })();
-
-      const targetHub = findHubDropTarget(dragSet, getIntersectingNodes);
-      const newHubId = targetHub?.id || null;
-      const hoverState = targetHub ? buildHubHoverState(targetHub, dragSet) : null;
-      if (newHubId !== targetHubIdRef.current) {
-        clearHubHover();
-        if (newHubId && hoverState) {
-          updateNodeData(newHubId, { dragHover: hoverState });
-          targetHubIdRef.current = newHubId;
-        }
-      } else if (newHubId && hoverState) {
-        updateNodeData(newHubId, { dragHover: hoverState });
-      }
+      targetGroupIdRef.current = newGroupId;
     }
-  }, [getIntersectingNodes, updateNodeData, isAnimatingRef, getNodes, clearHubHover]);
+    if (newGroupId) {
+      // collectAbsorptionClosure/findSeveredRelations inside
+      // buildGroupHoverState are each O(nodes x closure) — paying that on
+      // every pointer-move frame would stutter the drag on a large canvas.
+      // The drag set and canvas membership are frozen for the whole drag
+      // (dragCanvasRef), so the hover state for a given target group cannot
+      // change frame-to-frame either; memoize by target id so re-hovering the
+      // same group across many frames does no new work.
+      let groupHoverState = groupHoverCacheRef.current.get(newGroupId);
+      if (!groupHoverState) {
+        groupHoverState = buildGroupHoverState(
+          dragSet,
+          targetGroup,
+          dragCanvasRef.current.nodes,
+          dragCanvasRef.current.edges,
+        );
+        groupHoverCacheRef.current.set(newGroupId, groupHoverState);
+      }
+      // isDropTarget only goes true on an accept, so the existing blue ring
+      // keeps meaning "this will work" — a reject renders from dragHover alone.
+      updateNodeData(newGroupId, {
+        dragHover: groupHoverState,
+        isDropTarget: groupHoverState.kind === 'accept',
+      });
+    }
+
+    // --- hub (jobhub/sellhub) drop hover — no closure math involved ---
+    // Gated on the same type test onNodeDragStop uses to resolve its own
+    // targetHub. Without it, dragging a Job Search over another Job Search
+    // would light the target up with "Unsupported component" even though the
+    // drop path never evaluates a hub target for a dragged hub — a cue for an
+    // interaction that does not exist. A dragged Job Board is deliberately NOT
+    // excluded: its drop DOES resolve a hub target, and its "Drop a career file
+    // instead" cue is the one commit 4f3f448 added on purpose.
+    const targetHub = HUB_DROP_TARGET_TYPES.has(node.type)
+      ? null
+      : findHubDropTarget(dragSet, getIntersectingNodes);
+    const newHubId = targetHub?.id || null;
+    const hubHoverState = targetHub ? buildHubHoverState(targetHub, dragSet) : null;
+    if (newHubId !== targetHubIdRef.current) {
+      clearHubHover();
+      if (newHubId && hubHoverState) {
+        updateNodeData(newHubId, { dragHover: hubHoverState });
+        targetHubIdRef.current = newHubId;
+      }
+    } else if (newHubId && hubHoverState) {
+      updateNodeData(newHubId, { dragHover: hubHoverState });
+    }
+  }, [getIntersectingNodes, updateNodeData, isAnimatingRef, clearHubHover]);
 
   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
     if (isAnimatingRef?.current) return;
@@ -126,10 +193,15 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
 
     // Clear the drop target visual indicator if active
     if (targetGroupIdRef.current) {
-      updateNodeData(targetGroupIdRef.current, { isDropTarget: false });
+      updateNodeData(targetGroupIdRef.current, { isDropTarget: false, dragHover: null });
       targetGroupIdRef.current = null;
     }
     clearHubHover();
+    // The drag is over — drop the frozen drag-set/canvas snapshot and hover
+    // memo so a stale reference from this gesture cannot leak into the next.
+    dragSetRef.current = [];
+    dragCanvasRef.current = { nodes: [], edges: [] };
+    groupHoverCacheRef.current = new Map();
 
     const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
     const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
@@ -182,28 +254,36 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (droppedOnBreadcrumbDepth !== null) {
       if (extractToLevel) {
         const nodesToExtract = (draggedNodes && draggedNodes.length > 0) ? draggedNodes.map(n => n.id) : [node.id];
-        extractToLevel(nodesToExtract, droppedOnBreadcrumbDepth);
-        EventLogger.log(`Extracted nodes [${nodesToExtract.join(',')}] to breadcrumb level ${droppedOnBreadcrumbDepth}`);
+        // Log what extractToLevel actually moved, not what was requested: it
+        // resolves the same ownership closure the absorption path uses, so
+        // dragging a Board out by itself also carries its cards. It returns
+        // undefined when it refused (locked child, active run, bad level).
+        const extractedIds = extractToLevel(nodesToExtract, droppedOnBreadcrumbDepth);
+        if (extractedIds && extractedIds.length > 0) {
+          EventLogger.log(`Extracted nodes [${extractedIds.join(',')}] to breadcrumb level ${droppedOnBreadcrumbDepth} (requested [${nodesToExtract.join(',')}])`);
+        } else {
+          EventLogger.log(`Extraction of [${nodesToExtract.join(',')}] to breadcrumb level ${droppedOnBreadcrumbDepth} was refused`);
+        }
       }
       return; 
     }
 
     // Existing document nodes can be dropped onto workflow hubs as shortcuts to
-    // their underlying files. Keep the document node on the canvas and let the
-    // hub run the same pipeline it would run for a Finder file drop.
-    if (!wasResizeDrag && !wasTitleZoneDrag && getIntersectingNodes && !HUB_DROP_TARGET_TYPES.has(node.type)) {
+    // their underlying files, and any node type (including jobhub/jobboard/
+    // sellhub themselves) can now be absorbed into a sub-canvas group. A drop
+    // can geometrically overlap both a hub and a group at once, so precedence
+    // matters: the hub branch only has something to do with a drag set that
+    // is actually carrying files, so it wins ONLY in that case — otherwise a
+    // node that merely overlaps a hub while also being dropped on a group
+    // must still absorb into the group rather than being swallowed by the
+    // hub's unrelated "not a file" rejection.
+    if (!wasResizeDrag && !wasTitleZoneDrag && getIntersectingNodes && getNode) {
       const dragSet = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];
-      const targetHub = findHubDropTarget(dragSet, getIntersectingNodes);
+      const targetHub = HUB_DROP_TARGET_TYPES.has(node.type) ? null : findHubDropTarget(dragSet, getIntersectingNodes);
       const filePayload = filePayloadFromDraggedNodes(dragSet);
-      if (targetHub) {
-        const draggedIds = dragSet.map(n => n.id);
-        if (filePayload.length === 0) {
-          restoreDragStartPositions(draggedIds);
-          const draggedSummary = dragSet.map(n => `${n.id}:${n.type || 'unknown'}`).join(',');
-          EventLogger.log(`Rejected non-file node drop [${draggedSummary}] onto ${targetHub.type} ${targetHub.id}; restored drag position`);
-          return;
-        }
 
+      if (targetHub && filePayload.length > 0) {
+        const draggedIds = dragSet.map(n => n.id);
         const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
         const dropMode = getHubFileDropMode(targetHub);
         if (acceptedFiles.length === 0 || !dropMode) {
@@ -243,30 +323,60 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id} mode=${dropMode}`);
         return;
       }
-    }
 
-    // Check if the node was dropped inside a group (nested canvas)
-    // Only standard nodes (no groups) are absorbed, to prevent deep recursion complexities.
-    if (!wasResizeDrag && !wasTitleZoneDrag && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'jobboard' && node.type !== 'sellhub') {
-      if (getIntersectingNodes && getNode) {
-        const intersections = getIntersectingNodes(node);
-        const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
-        if (targetGroup) {
-          const draggedNode = getNode(node.id);
-          if (!draggedNode) return;
-          
+      // --- sub-canvas (group) absorption ---
+      const targetGroup = findGroupDropTarget(dragSet, getIntersectingNodes);
+      if (targetGroup) {
+        const currentNodes = getNodes ? getNodes() : [node];
+        const currentEdges = getEdges ? getEdges() : [];
+        // Re-resolve everything from live canvas state right before mutating
+        // anything — the closure/hover cache built up during onNodeDrag is
+        // for hover feedback only, and the canvas can in principle change
+        // during a long drag (see dragCanvasRef's comment above).
+        const closure = collectAbsorptionClosure(dragSet, currentNodes);
+        const hoverResult = buildGroupHoverState(dragSet, targetGroup, currentNodes, currentEdges);
+
+        if (hoverResult.kind === 'reject') {
+          // Deliberately NOT a snap-back. Before this feature a drop onto a
+          // group that could not absorb (a group onto a group, a locked
+          // group) simply fell through to an ordinary move and the nodes
+          // stayed where they were released — snapping them back now would
+          // be a new surprise, and would make a sub-canvas impossible to
+          // position over another one. The red drag-hover cue already told
+          // the user it would not go in, and a non-absorbed node visibly
+          // sits on top of the circle rather than inside it. Fall through to
+          // the ordinary-move snapshot at the end of this callback.
+          EventLogger.log(`Absorption into group ${targetGroup.id} refused (${hoverResult.label}); left as an ordinary move`);
+        } else {
           if (takeSnapshot) takeSnapshot();
-          
-          const nodesToAbsorb = (draggedNodes && draggedNodes.length > 0) ? 
-                                draggedNodes.filter(n => n.id !== targetGroup.id && !n.data?.locked) : 
-                                [draggedNode].filter(n => !n.data?.locked);
-          
-          if (nodesToAbsorb.length === 0) return;
+
+          // Move the whole closure, not just the dragged nodes — a hub must
+          // never move without the children it owns (see
+          // collectAbsorptionClosure's doc comment), or leaving them behind
+          // re-triggers exactly the unmount cascade this feature exists to avoid.
+          const closureNodes = closure.nodes;
+          const movedIds = new Set(closureNodes.map(n => n.id));
+
+          // Mark the relocation fence synchronously and BEFORE the setNodes
+          // below unmounts these components. Each module's unmount handler
+          // (isJobWorkflowRelocationPending) checks this fence to tell "the
+          // user moved me into a sub-canvas" apart from "the user deleted me" —
+          // see the relocation-fence comment in nodeDeletionLifecycle.js.
+          const relocatedIds = markJobWorkflowRelocationPending(closureNodes);
+
+          const { internal: edgesToTransfer, crossing } = partitionEdgesForMove(currentEdges, movedIds);
+          if (crossing.length > 0) {
+            // React Flow cannot hold a cross-level edge (serializationUtils.js:
+            // ~376) — these are genuinely destroyed by this move. Say so
+            // explicitly; silently dropping them is one of the bugs this
+            // feature fixes.
+            EventLogger.log(`Absorption into group ${targetGroup.id} cuts ${crossing.length} cross-level edge(s)`);
+          }
 
           const childNodes = targetGroup.data?.canvasData?.nodes || [];
-          const { anchorX, anchorY, dropMinX, dropMinY } = findNonOverlappingPlacement(nodesToAbsorb, childNodes);
+          const { anchorX, anchorY, dropMinX, dropMinY } = findNonOverlappingPlacement(closureNodes, childNodes);
 
-          const newNodesPayload = nodesToAbsorb.map(n => {
+          const newNodesPayload = closureNodes.map(n => {
             const offsetX = n.position.x - dropMinX;
             const offsetY = n.position.y - dropMinY;
             return {
@@ -276,32 +386,53 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
             };
           });
 
-          const absorbedIds = new Set(nodesToAbsorb.map(n => n.id));
-          
-          let edgesToTransfer = [];
-          if (getEdges) {
-            const currentEdges = getEdges();
-            edgesToTransfer = currentEdges.filter(e => absorbedIds.has(e.source) && absorbedIds.has(e.target));
+          setNodes(nds => nds.filter(n => !movedIds.has(n.id)));
+          if (setEdges) {
+            setEdges(eds => eds.filter(e => !movedIds.has(e.source) && !movedIds.has(e.target)));
           }
 
-          setNodes(nds => nds.filter(n => !absorbedIds.has(n.id)));
-          if (setEdges) {
-            setEdges(eds => eds.filter(e => !absorbedIds.has(e.source) && !absorbedIds.has(e.target)));
-          }
-          
           if (addElementsGlobally) {
             addElementsGlobally(targetGroup.id, newNodesPayload, edgesToTransfer);
           }
-          EventLogger.log(`Absorbed ${absorbedIds.size} node(s) and ${edgesToTransfer.length} edge(s) into group ${targetGroup.id}`);
+          EventLogger.log(`Absorbed ${movedIds.size} node(s) and ${edgesToTransfer.length} edge(s) into group ${targetGroup.id}`);
+
+          // Settle on a macrotask, not a microtask: useUnmountEffect defers its
+          // own cleanup by one microtask (Promise.resolve().then(...), see
+          // useUnmountEffect.js) so a React StrictMode remount can invalidate a
+          // stale cleanup before it runs its check. Settling the fence here
+          // with a microtask could resolve before that deferred callback reads
+          // isJobWorkflowRelocationPending, re-opening the exact race the fence
+          // exists to close. setTimeout(...,0) is a macrotask, guaranteed to run
+          // strictly after every microtask already queued by the unmount,
+          // including that deferred one.
+          setTimeout(() => settleJobWorkflowRelocation(relocatedIds), 0);
           return;
         }
+      }
+
+      if (!targetGroup && targetHub) {
+        // Only when the drop never touched a sub-canvas at all. Once a group
+        // was found, that branch above owns the outcome — including its
+        // deliberate "refused, left as an ordinary move" case. Falling into
+        // the hub snap-back there would undo that decision and blame the hub
+        // in the log for a rejection the group actually made.
+        //
+        // No file payload and no group to fall through to: keep today's exact
+        // snap-back + rejection log so a document-less drop onto a hub still
+        // reads as rejected instead of silently doing nothing.
+        const draggedIds = dragSet.map(n => n.id);
+        restoreDragStartPositions(draggedIds);
+        const draggedSummary = dragSet.map(n => `${n.id}:${n.type || 'unknown'}`).join(',');
+        EventLogger.log(`Rejected non-file node drop [${draggedSummary}] onto ${targetHub.type} ${targetHub.id}; restored drag position`);
+        return;
       }
     }
 
     // Snapshot the final resting canvas state for ordinary drags only. Hub-input
-    // drops return earlier because they intentionally snap back to the start.
+    // and group-absorption drops return earlier (they either snap back or have
+    // already taken their own snapshot before mutating).
     if (takeSnapshot) takeSnapshot();
-  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef, restoreDragStartPositions, clearHubHover]);
+  }, [setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef, restoreDragStartPositions, clearHubHover]);
 
   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
 }

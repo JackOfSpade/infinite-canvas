@@ -6,6 +6,8 @@ import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddEleme
 import { EventLogger } from '../utils/EventLogger';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { hasActiveExternalRunState } from '../utils/undoNonRestorableState';
+import { collectAbsorptionClosure, partitionEdgesForMove } from '../utils/nestedCanvasAbsorption';
+import { markJobWorkflowRelocationPending, settleJobWorkflowRelocation } from '../utils/nodeDeletionLifecycle';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -307,22 +309,54 @@ export function useCanvasNavigation({
     if (targetIndex >= stackRef.current.length || targetIndex < 0) return;
 
     const ids = Array.isArray(nodeIdOrIds) ? nodeIdOrIds : [nodeIdOrIds];
-    
+
     // Filter out locked nodes - they cannot be extracted
-    const nodesToExtract = nodesRef.current.filter(n => ids.includes(n.id) && !n.data?.locked);
-    if (nodesToExtract.length === 0) return;
+    const requestedNodes = nodesRef.current.filter(n => ids.includes(n.id) && !n.data?.locked);
+    if (requestedNodes.length === 0) return;
 
+    // Mirror of the absorption path's closure (nestedCanvasAbsorption.js): a
+    // hub dragged out of a sub-canvas without its owned children
+    // (jobsourcecard/jobcard/jobgroup) recreates the orphan case from the
+    // other direction — leave a child behind here and, once the hub remounts
+    // a level up, its unmount handler's cascade-delete treats that child as
+    // abandoned. Resolve over the current level's nodes, since extraction
+    // never crosses more than the one level being left.
+    const closure = collectAbsorptionClosure(requestedNodes, nodesRef.current);
+    if (closure.lockedBlockerId) {
+      // An owned child that cannot travel blocks the whole extraction —
+      // moving the hub without it would orphan (and, once its unmount
+      // handler runs, cascade-delete) that child. Refuse outright rather
+      // than silently leaving it behind.
+      EventLogger.log(`canvas extract blocked reason=locked-child id=${closure.lockedBlockerId}`);
+      return;
+    }
+    const nodesToExtract = closure.nodes;
     const finalIds = nodesToExtract.map(n => n.id);
+    const movedIds = new Set(finalIds);
 
-    // Preserve edges that are entirely between the extracted nodes
-    const edgesToExtract = edgesRef.current.filter(e => finalIds.includes(e.source) && finalIds.includes(e.target));
+    // Both-endpoints filter, done honestly: an edge with exactly one endpoint
+    // extracted ("crossing") cannot follow either side — React Flow cannot
+    // hold a cross-level edge (serializationUtils.js:376) — so it must be
+    // dropped, not silently discarded the way the hand-rolled filter used to.
+    const { internal: edgesToExtract, crossing } = partitionEdgesForMove(edgesRef.current, movedIds);
+    if (crossing.length > 0) {
+      EventLogger.log(`canvas extract dropped ${crossing.length} crossing edge${crossing.length === 1 ? '' : 's'}`);
+    }
 
-    // Remove from current canvas
-    setNodes(nds => nds.filter(n => !finalIds.includes(n.id)));
+    // Mark synchronously and BEFORE the setNodes below unmounts these
+    // components, so Job Search/Job Board/SellHub's unmount handlers can
+    // tell this apart from a real delete (see nodeDeletionLifecycle.js's
+    // relocation-fence comment).
+    const relocationIds = markJobWorkflowRelocationPending(nodesToExtract);
+
+    // Remove from current canvas. Membership is tested against `movedIds`
+    // rather than the `finalIds` array: the closure can pull a whole Board
+    // cascade in, and an array scan per node/edge would be quadratic over it.
+    setNodes(nds => nds.filter(n => !movedIds.has(n.id)));
     // Delete any edges connected to the extracted nodes in the current canvas
-    setEdges(eds => eds.filter(e => !finalIds.includes(e.source) && !finalIds.includes(e.target)));
+    setEdges(eds => eds.filter(e => !movedIds.has(e.source) && !movedIds.has(e.target)));
 
-    // Clear history to prevent a duplication bug where undoing the extraction 
+    // Clear history to prevent a duplication bug where undoing the extraction
     // restores the node locally, but it remains injected in the parent stack.
     clearHistory?.();
 
@@ -369,6 +403,20 @@ export function useCanvasNavigation({
       newStack[targetIndex] = { ...targetParent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
+
+    // useUnmountEffect (the hook these modules' cleanups use) defers its
+    // callback by one Promise microtask, to let a React StrictMode
+    // setup→cleanup→setup replay invalidate it first. A microtask settle
+    // here would therefore resolve BEFORE that deferred callback runs and
+    // lift the fence too early — this must be a macrotask, so every pending
+    // microtask (including the unmount handler's own check) drains first.
+    setTimeout(() => settleJobWorkflowRelocation(relocationIds), 0);
+
+    // Report what actually moved, not what was asked for: the closure can pull
+    // a hub's owned children along, so the caller cannot derive this from the
+    // ids it passed in. Every early return above yields undefined, which the
+    // caller reads as "nothing was extracted".
+    return finalIds;
   }, [setNodes, setEdges, clearHistory, canMutateCanvas, setStackGuarded]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**

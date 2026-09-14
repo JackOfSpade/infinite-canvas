@@ -35,6 +35,7 @@ import { safeClone } from '../utils/navigationUtils';
 import {
   getJobWorkflowDeletionLifecycleRevision,
   isJobWorkflowDeletionPending,
+  isJobWorkflowRelocationPending,
   subscribeJobWorkflowDeletionLifecycle,
 } from '../utils/nodeDeletionLifecycle';
 
@@ -2097,6 +2098,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const cleanupBoard = useCallback(() => {
     if (isJobWorkflowDeletionPending(id)) {
       EventLogger.log(`[JobBoard] Unmount cleanup deferred to pending deletion transaction id=${id}`);
+      return;
+    }
+    if (isJobWorkflowRelocationPending(id)) {
+      EventLogger.log(`[JobBoard] Unmount cleanup deferred to pending relocation transaction id=${id}`);
       return;
     }
     const planAtUnmount = getNode(id)?.data?.boardScanResume || data.boardScanResume || null;

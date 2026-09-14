@@ -1,5 +1,5 @@
 import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
-import { __canWriteJobResolveTelemetryForTests } from '../test-dependencies.js';
+import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
 import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '../test-dependencies.js';
@@ -11,6 +11,12 @@ import { descriptionPanelFailureAttribution } from '../../electron/ipc/browser/m
 // must not touch): clipboardCap.js has zero electron/module dependencies, so
 // this is safe and mirrors the EventLogger.js direct-import pattern above.
 import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } from '../../electron/ipc/bugReport/clipboardCap.js';
+// Same direct-import rationale as above: these auth-history renderers are new
+// exports of bugReport.js and test-dependencies.js is outside this task's file
+// scope. generateMarkdown (re-exported through test-dependencies) covers the
+// end-to-end path; these pure builders are what let a test seed a fixture ring,
+// which the live auth-window ring offers no seam for.
+import { buildAuthLifecycleTableMarkdown, buildNativeChallengeSessionMarkdown, formatAuthHistoryTruncationNote, selectAuthHistoryForReport } from '../../electron/ipc/bugReport.js';
 import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
@@ -2396,7 +2402,12 @@ export default [
 
         const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
         assert(recovery.includes('Last terminal run receipt: ✅ completed')
-          && recovery.includes('previous-process receipt — live pipeline telemetry is unavailable in this process')
+          // States the OBSERVATION (no live phase could be correlated), not the
+          // inference that the receipt came from an earlier process — which was
+          // provably false whenever several live hubs made the funnel accessor
+          // fail closed on runs that had just finished in THIS process.
+          && recovery.includes('receipt not correlated to a live run — no live pipeline telemetry was attributable in this process')
+          && !recovery.includes('previous-process receipt')
           && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 4 kept')
           && recovery.includes('`google`: 13 candidate identities traversed → 11 usable row(s) retained')
           && recovery.includes('warning rate-limit (block)')
@@ -2991,6 +3002,297 @@ export default [
         && !evidence.includes('private=token'),
       'native challenge reports retain decisive lifecycle facts but strip URL query tokens');
       return { evidence: 'redacted' };
+    },
+  },
+  {
+    // BR-2 follow-up: the always-on handoff section promised poll evidence the
+    // record could not carry. A handoff whose observer never had a tab to read
+    // (Chrome's Apple-event permission denied, or no indeed.com tab ever in the
+    // inventory) ended `closed` and printed `polls=40; last=unknown;
+    // terminal=child-exit` — byte-identical to an observer that watched a real
+    // challenge page forty times and never saw it clear. That distinction is the
+    // entire reason the section exists, so both facts authWindows persists must
+    // reach the render.
+    name: 'native challenge evidence separates "never had a tab to watch" from "watched a wall that never cleared"',
+    run: () => {
+      const blind = buildNativeChallengeHistoryEvidence({
+        nativeChallenge: {
+          initialChallengeObserved: false, pollCount: 40, pollErrorCount: 40,
+          sawFirstPartyTab: false,
+          firstPollError: 'osascript: execution error: Not authorized to send Apple events to Google Chrome. (-1743) see https://support.example.test/mac?tok=leak-me',
+          lastClassification: null, terminalSource: 'child-exit', exitCode: 0,
+        },
+      });
+      const watched = buildNativeChallengeHistoryEvidence({
+        nativeChallenge: {
+          initialChallengeObserved: true, pollCount: 40, pollErrorCount: 0,
+          sawFirstPartyTab: true, firstPollError: null,
+          lastClassification: 'pending', terminalSource: 'child-exit', exitCode: 0,
+        },
+      });
+      assert(blind.includes('first-party tab seen=no')
+        && blind.includes('poll errors=40')
+        && blind.includes('first poll error=osascript: execution error: Not authorized to send Apple events')
+        && watched.includes('first-party tab seen=yes')
+        && !watched.includes('first poll error=')
+        && blind !== watched,
+      `a blind observer and a watched-and-never-cleared observer must not render identically → blind="${blind}" watched="${watched}"`);
+      assert(!blind.includes('leak-me') && !blind.includes('`') && !blind.includes('|'),
+        'the first poll error is redacted and stripped of markup the way its neighbouring bits are');
+
+      // 200 is the producer's cap on the stored field, and the renderer prints at
+      // the same width — so a message that filled the record cannot pick up a
+      // second, unmarked cut here. (Anything longer was already cut upstream.)
+      const atCap = buildNativeChallengeHistoryEvidence({
+        nativeChallenge: { pollCount: 3, pollErrorCount: 3, sawFirstPartyTab: false, firstPollError: 'E'.repeat(200) },
+      });
+      assert(atCap.includes(`first poll error=${'E'.repeat(200)}`),
+        'a first poll error already at the record cap renders whole rather than being truncated twice');
+
+      // Absent on records written before the fields existed. "Not recorded" is
+      // not an observation of absence, so neither bit may be invented there.
+      const legacy = buildNativeChallengeHistoryEvidence({
+        nativeChallenge: { pollCount: 5, lastClassification: 'pending', terminalSource: 'child-exit' },
+      });
+      assert(!legacy.includes('first-party tab seen') && !legacy.includes('first poll error')
+        && legacy.includes('polls=5'),
+      `a record carrying neither field states neither, instead of rendering a 'no' it never observed → "${legacy}"`);
+
+      // The section prose must name what a record actually retains rather than
+      // promising evidence the record structurally may not carry.
+      const sectionSrc = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(!sectionSrc.includes('> \\`closed\\` always carries its poll / child-exit /')
+        && sectionSrc.includes('What a record retains varies, and each bit below is'),
+      'the handoff section blockquote describes the evidence each record retains instead of claiming it always carries poll evidence');
+
+      const rendered = buildNativeChallengeSessionMarkdown([{
+        platformId: 'indeed-native-challenge', mode: 'native-chrome', result: 'closed',
+        finishedAt: new Date().toISOString(), openMs: 61_000,
+        nativeChallenge: {
+          pollCount: 40, pollErrorCount: 40, sawFirstPartyTab: false,
+          firstPollError: 'osascript: execution error: Not authorized to send Apple events to Google Chrome. (-1743)',
+          terminalSource: 'child-exit', exitCode: 0,
+        },
+      }]);
+      assert(rendered.includes('first-party tab seen=no')
+        && rendered.includes('Not authorized to send Apple events'),
+      'the always-on handoff section renders the two bits, not just the evidence helper');
+      return { blindBits: blind.split('; ').length };
+    },
+  },
+  {
+    // The incident fixture, reproduced exactly: the session ring held 15 of its
+    // 16 slots — so authWindows.js had evicted nothing — and the three
+    // `indeed-native-challenge` handoffs were the OLDEST records. The renderer's
+    // own newest-12 slice then dropped all three behind 12 routine `captcha:`
+    // rows, emptying the only place buildNativeChallengeHistoryEvidence renders.
+    name: 'auth history selection renders every retained record, so native challenge evidence cannot be evicted by routine captcha windows',
+    run: () => {
+      const now = Date.now();
+      const at = (secondsAgo) => new Date(now - secondsAgo * 1000).toISOString();
+      const nativeRecord = (i) => ({
+        platformId: 'indeed-native-challenge', mode: 'native-chrome', result: 'closed',
+        finishedAt: at(900 - i), openMs: 41_000 + i, cookieStoreCommitted: true,
+        cookieFlushMs: 900, cookieFlushPhase: 'post-close-observe',
+        nativeChallenge: {
+          initialChallengeObserved: true, pollCount: 12 + i, lastClassification: 'pending',
+          terminalSource: 'child-exit', exitCode: 0,
+          lastTabUrl: 'https://secure.indeed.com/auth?__cf_chl_rt_tk=ring-secret',
+        },
+      });
+      const captchaRecord = (i) => ({
+        platformId: `captcha:board${i}`, mode: 'puppeteer-visible', result: 'closed',
+        finishedAt: at(100 - i), openMs: 5_000, cookieFlushMs: 1_200, cookieFlushPhase: 'pre-close-fixed',
+      });
+      const history = [
+        ...[0, 1, 2].map(nativeRecord),
+        ...Array.from({ length: 12 }, (_, i) => captchaRecord(i)),
+      ];
+      assert(history.length === 15
+        && !history.slice(-12).some(h => h.platformId === 'indeed-native-challenge'),
+      'fixture guard: this ring reproduces the incident — nothing was evicted upstream, yet a newest-12 slice keeps no native challenge record');
+
+      const selection = selectAuthHistoryForReport(history);
+      const finishedOrder = selection.rows.map(h => new Date(h.finishedAt).getTime());
+      assert(selection.shown === 15 && selection.retained === 15 && selection.dropped === 0
+        && selection.rows.filter(h => h.platformId === 'indeed-native-challenge').length === 3
+        && finishedOrder.every((ms, i) => i === 0 || ms <= finishedOrder[i - 1]),
+      `the whole retained ring is selected, strictly newest-first, with all three native records kept → shown=${selection.shown}, dropped=${selection.dropped}`);
+
+      const lifecycle = buildAuthLifecycleTableMarkdown(history);
+      const nativeRows = (lifecycle.match(/\| `indeed-native-challenge` \|/g) || []).length;
+      assert(nativeRows === 3 && lifecycle.includes('| `captcha:board11` |'),
+        `the close-lifecycle table renders every retained native challenge row → ${nativeRows} of 3`);
+      return { retained: selection.retained, nativeRowsRendered: nativeRows };
+    },
+  },
+  {
+    name: 'auth history truncation marker states observed counts and appears only when rows were actually dropped',
+    run: () => {
+      const history = Array.from({ length: 15 }, (_, i) => ({
+        platformId: `captcha:board${i}`, mode: 'puppeteer-visible', result: 'closed',
+        finishedAt: new Date(Date.now() - (100 - i) * 1000).toISOString(),
+      }));
+      const complete = selectAuthHistoryForReport(history);
+      assert(formatAuthHistoryTruncationNote(complete, 'completed auth-window record(s)') === '',
+        'a list that shows everything it retains prints no truncation marker — a marker there would read as evidence of a loss that never happened');
+      assert(!buildAuthLifecycleTableMarkdown(history).includes('Truncated:'),
+        'the close-lifecycle table renders the whole retained ring, so it emits no truncation marker');
+
+      const cut = selectAuthHistoryForReport(history, 4);
+      const note = formatAuthHistoryTruncationNote(cut, 'completed auth-window record(s)');
+      assert(cut.shown === 4 && cut.retained === 15 && cut.dropped === 11
+        && note.includes('showing the 4 newest of 15 completed auth-window record(s)')
+        && note.includes('11 older retained record(s) are not shown')
+        && note.includes('at most 16 completed auth windows'),
+      `a genuinely cut list marks the truncation with the counts it measured → ${note.trim()}`);
+
+      // BR-5: the section prose used to open "Every completed login/captcha
+      // window." while the renderer silently cut the list — a completeness claim
+      // the report could not honour.
+      const reportSrc = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(!reportSrc.includes('> Every completed login/captcha window.')
+        && reportSrc.includes('> The completed login/captcha windows this process still retains, newest first.'),
+      'the attempt-list prose describes what is retained instead of claiming every completed window is shown');
+
+      // The marker names the ring bound, so it must not drift from the ring.
+      // AUTH_HISTORY_CAP is private to authWindows.js; pin the mirror at source.
+      const authSrc = fs.readFileSync(path.resolve('electron/ipc/browser/authWindows.js'), 'utf8');
+      const ringCap = /const AUTH_HISTORY_CAP = (\d+);/.exec(authSrc)?.[1];
+      const mirroredCap = /const AUTH_HISTORY_RING_CAP = (\d+);/.exec(reportSrc)?.[1];
+      assert(ringCap && mirroredCap && ringCap === mirroredCap,
+        `the reported ring cap must mirror authWindows.js AUTH_HISTORY_CAP → ring=${ringCap}, reported=${mirroredCap}`);
+      return { dropped: cut.dropped, ringCap };
+    },
+  },
+  {
+    // BR-2: buildNativeChallengeHistoryEvidence had exactly one render site,
+    // inside a capped list inside a conditionally-gated block, so its output was
+    // all-or-nothing. This section always renders — including when the ring holds
+    // nothing — and its empty state may only describe the ring, never assert that
+    // no handoff happened.
+    name: 'native challenge handoff section always renders, with an empty state that claims only what the ring holds',
+    run: () => {
+      const empty = buildNativeChallengeSessionMarkdown([]);
+      assert(empty.includes('### Native Chrome challenge handoffs')
+        && empty.includes("No native challenge handoff record is retained in this process's auth-window ring")
+        && empty.includes('it is not an observation that no native challenge handoff occurred'),
+      'the empty state names what the ring holds and explicitly refuses the stronger claim that no handoff occurred');
+
+      const populated = buildNativeChallengeSessionMarkdown([
+        { platformId: 'captcha:indeed', mode: 'puppeteer-visible', result: 'closed', finishedAt: new Date().toISOString() },
+        {
+          platformId: 'indeed-native-challenge', mode: 'native-chrome', result: 'closed',
+          finishedAt: new Date(Date.now() - 30_000).toISOString(), openMs: 47_500,
+          cookieStoreCommitted: true, closeDisposition: null,
+          nativeChallenge: {
+            initialChallengeObserved: true, pollCount: 9, lastClassification: 'pending',
+            terminalSource: 'child-exit', exitCode: 0,
+            lastTabUrl: 'https://secure.indeed.com/auth?__cf_chl_rt_tk=must-not-leak',
+          },
+        },
+      ]);
+      assert(populated.includes('`indeed-native-challenge`')
+        && !populated.includes('captcha:indeed')
+        && populated.includes('(30s ago)')
+        && populated.includes('result **closed**')
+        && populated.includes('open 47.5s')
+        && populated.includes('cookie store checkpointed yes')
+        && populated.includes('polls=9')
+        && populated.includes('https://secure.indeed.com/auth')
+        && !populated.includes('must-not-leak'),
+      'each retained handoff prints its finish age, observed result, open duration, checkpoint state and bounded evidence, with URL query tokens stripped');
+      assert(populated.includes('none stamped on this record; the child process exit WAS observed (exit code 0, terminal source child-exit)'),
+        'an absent close disposition is reported alongside the child-exit observation instead of as a bare dash');
+
+      // End-to-end: the section is inside the session-persistence builder, not
+      // the conditionally-gated auth-window block, so a FULL report always has it.
+      const base = {
+        description: 'Native challenge section fixture.', nodes: [], edges: [], drawings: [],
+        frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      };
+      for (const filterCode of ['FULL', 'PERSIST']) {
+        const report = generateMarkdown({ ...base, filterCode }).markdown;
+        assert(report.includes('### Native Chrome challenge handoffs')
+          && report.includes("No native challenge handoff record is retained in this process's auth-window ring"),
+        `${filterCode} reports always carry the native challenge handoff section, empty state included`);
+      }
+      return { emptyStateRendered: true };
+    },
+  },
+  {
+    // BR-6: the column used to be headed "Pre-close wait ms", but on the
+    // child-exit path cookieFlushMs is measured AFTER Chrome is gone. Without the
+    // producer's phase beside it, a post-close observation read as a wait the app
+    // chose to take before closing.
+    name: 'close-lifecycle table reports the cookie flush phase beside the wait, and never guesses one for an unstamped record',
+    run: () => {
+      const row = (phase) => ({
+        platformId: phase ? `indeed-${phase}` : 'indeed-unstamped', mode: 'native-chrome',
+        result: 'closed', finishedAt: new Date().toISOString(),
+        cookieFlushMs: 1_800, cookieFlushPhase: phase,
+      });
+      const table = buildAuthLifecycleTableMarkdown([
+        row('pre-close-fixed'), row('pre-close-checkpoint'), row('post-close-observe'), row(null),
+        { platformId: 'indeed-no-wait', mode: 'native-chrome', result: 'closed', finishedAt: new Date().toISOString() },
+      ]);
+      assert(!table.includes('Pre-close wait ms')
+        && table.includes('| Cookie flush wait ms (phase) |'),
+      'the mislabelled pre-close column is replaced by a phase-neutral heading');
+      for (const phase of ['pre-close-fixed', 'pre-close-checkpoint', 'post-close-observe']) {
+        assert(table.includes(`| 1800 (phase ${phase}) |`),
+          `the stamped phase '${phase}' renders beside the measured wait`);
+      }
+      assert(table.includes('| 1800 (phase not recorded) |'),
+        'a record carrying a wait but no stamped phase says so rather than being attributed to a phase');
+      assert(table.includes('| — (phase not recorded) |'),
+        'a record with neither a wait nor a phase reports both as unrecorded');
+      return { phasesRendered: 3 };
+    },
+  },
+  {
+    // The table's rows are FILTERED to `puppeteer-visible` / `native-chrome`, but
+    // its empty state read "no completed auth window this process" — an assertion
+    // of absence the report never observed, printed on the exact table a reader
+    // consults to decide whether a window ever opened. A session whose only
+    // visible windows were `captcha-resolve` windows retains those records and
+    // still empties this table.
+    name: 'close-lifecycle empty state describes the mode filter it applied, not an absence of auth windows',
+    run: () => {
+      const captchaOnly = [0, 1, 2].map(i => ({
+        platformId: `captcha:board${i}`, mode: 'captcha-resolve', result: 'closed',
+        finishedAt: new Date(Date.now() - (30 - i) * 1000).toISOString(),
+      }));
+      const filtered = buildAuthLifecycleTableMarkdown(captchaOnly);
+      assert(!filtered.includes('no completed auth window this process'),
+        'the table may not claim no auth window completed while the ring still retains completed records it filtered out');
+      assert(filtered.includes('no retained record has mode `puppeteer-visible` or `native-chrome`')
+        && filtered.includes('the 3 other retained record(s) it holds (mode: captcha-resolve)')
+        && filtered.includes('Recent login and captcha attempts (this session)'),
+      `the empty state counts what the filter excluded, names the modes it saw, and points at the section that lists them → ${filtered.split('\n').pop()}`);
+
+      // The blockquote makes the same scope claim as the empty cell, so it has to
+      // name the filter too.
+      assert(filtered.includes('whose mode is')
+        && filtered.includes('Other retained') && filtered.includes('`captcha-resolve`'),
+      'the section prose states which modes become rows instead of claiming every retained auth window is listed');
+
+      // A genuinely empty ring is a different observation and gets different words.
+      const none = buildAuthLifecycleTableMarkdown([]);
+      assert(none.includes("this process's auth-window ring retains no completed auth window at all")
+        && !none.includes('other retained record(s) it holds'),
+      'an empty ring says the ring is empty, without inventing excluded records');
+
+      // And when even one row qualifies, no empty state renders at all.
+      const mixed = buildAuthLifecycleTableMarkdown([
+        ...captchaOnly,
+        { platformId: 'indeed-native-challenge', mode: 'native-chrome', result: 'closed', finishedAt: new Date().toISOString() },
+      ]);
+      assert(mixed.includes('| `indeed-native-challenge` | native-chrome |')
+        && !mixed.includes('no retained record has mode')
+        && !mixed.includes('| `captcha:board0` |'),
+      'a qualifying record renders as a row, the excluded modes stay excluded, and the empty state disappears');
+      return { excludedCounted: 3 };
     },
   },
   {
@@ -6939,11 +7241,31 @@ export default [
       const restoresNativeVerificationOutcome = sourceCard.includes('const rawRestoreWarning = result?.warning || prevForRestore?.warning || null')
         && sourceCard.includes("resumeState?.mode === 'native-challenge' && !rawRestoreWarning.shortLabel")
         && sourceCard.includes("? { shortLabel: 'Verification not confirmed' }")
-        && sourceCard.includes("resumeState?.mode === 'native-challenge' && !rawRestoreWarning.actionLabel")
-        && sourceCard.includes("? { actionLabel: 'Retry verification' }")
+        // The STATUS copy changes on a failed native verification; the ACTION
         && sourceCard.includes('if (rawRestoreWarning) {')
         && sourceCard.includes("status: 'error'")
         && sourceCard.includes('warning: restoreWarning');
+      // The STATUS copy changes on a failed native verification; the ACTION button
+      // must not. It keeps its 'Continue' fallback so it agrees with the
+      // suggestion rendered directly above it ("…then click Continue again") and
+      // with its own hover title — a second label for one action read as two
+      // different instructions.
+      //
+      // Pin the PROPERTY, not one formatting of one phrase: the earlier pin
+      // matched the literal "{ actionLabel: 'Retry verification' }", so
+      // reintroducing the override as a standalone property, with different
+      // spacing, or under any other label would have sailed past it. It also sat
+      // in a seven-clause conjunction whose failure message named its siblings
+      // instead of itself, so it gets its own assert.
+      const overrideStart = sourceCard.indexOf('const restoreWarning = rawRestoreWarning ? {');
+      const overrideEnd = sourceCard.indexOf('} : null;', overrideStart);
+      assert(overrideStart !== -1 && overrideEnd > overrideStart,
+        'fixture guard: the restore-warning override block must be locatable before asserting what it may not set');
+      const restoreWarningOverride = sourceCard.slice(overrideStart, overrideEnd);
+      assert(/shortLabel\s*:/.test(restoreWarningOverride),
+        'the failed-native-verification override restyles the STATUS copy, so it must still set shortLabel');
+      assert(!/actionLabel/.test(restoreWarningOverride),
+        `the failed-native-verification override must set NO action label at all — the button keeps the 'Continue' fallback its own suggestion text and hover title name → ${restoreWarningOverride.replace(/\s+/g, ' ').slice(0, 220)}`);
       assert(sourceCard.includes("status: isJobSourceWarningGating(nextWarning) ? 'error' : 'done'")
         && sourceCard.includes('const resolveInFlightRef = useRef(false)')
         && sourceCard.includes('resolveInFlightRef.current = true')
@@ -11377,6 +11699,102 @@ export default [
     },
   },
   {
+    name: 'generic Solve diagnostics keep a bounded, owner-guarded and redacted pass trail per source run',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        sourceEvents: telemetry.sourceEvents,
+        sourceEventsT0: telemetry.sourceEventsT0,
+        sourceRunHistory: telemetry.sourceRunHistory,
+        pipeline: telemetry.pipeline,
+      };
+      const secret = 'never-export-job-text-or-url-4bf2';
+      try {
+        Object.assign(telemetry, {
+          nodeId: 'solve-trail-owner',
+          windowId: null,
+          sourceEvents: {},
+          sourceEventsT0: Date.now(),
+          sourceRunHistory: {},
+          pipeline: { phase: 'gathering-sources', active: true, runId: 'solve-trail-run' },
+        });
+        recordJobSourceProgress({
+          sourceId: 'google', jobRunId: 'solve-trail-run', status: 'searching',
+        });
+        for (let pass = 1; pass <= 15; pass += 1) {
+          const normalized = __recordJobSourceResolvePassForTests('google', {
+            at: pass,
+            outcome: 'blocked',
+            warning: { code: 'description-listing-unavailable', severity: 'block' },
+            providerRowsLoaded: 9,
+            targeted: 2,
+            attempted: 2,
+            recovered: 0,
+            completeTotal: 3,
+            empty: 2,
+            unavailable: 2,
+            consecutiveNoMatchPasses: pass,
+            consecutiveNoProgressPasses: pass,
+            recommendation: pass >= 2 ? 'skip' : 'retry',
+            checkpoint: 'saved',
+            url: `https://example.invalid/${secret}`,
+            title: secret,
+            detail: secret,
+            unavailableSamples: [secret],
+          }, { nodeId: 'solve-trail-owner', jobRunId: 'solve-trail-run' });
+          assert(normalized?.outcome === 'blocked'
+            && normalized?.consecutiveNoMatchPasses === pass,
+          'a current generic Solve pass is normalized before being added to its source receipt');
+        }
+        const receipt = telemetry.sourceRunHistory.google[0];
+        assert(receipt.resolvePassCount === 15
+          && receipt.resolvePasses.length === 12
+          && receipt.resolvePasses[0].at === 4
+          && receipt.resolvePasses.at(-1).recommendation === 'skip'
+          && receipt.resolvePasses.every(pass => pass.warning?.code === 'description-listing-unavailable'
+            && pass.checkpoint === 'saved')
+          && !JSON.stringify(receipt.resolvePasses).includes(secret),
+        'the receipt retains a total plus only the latest twelve safe Solve observations, with no job text, samples, or URLs');
+        const stale = __recordJobSourceResolvePassForTests('google', {
+          at: 16, outcome: 'completed', providerRowsLoaded: 1, recommendation: 'retry', checkpoint: 'saved',
+        }, { nodeId: 'superseded-solve-owner', jobRunId: 'solve-trail-run' });
+        assert(stale === null && receipt.resolvePassCount === 15,
+          'a late Resolve from a superseded hub cannot create or mutate the current source-run pass trail');
+        const persistenceFailure = __recordJobSourceResolvePassForTests('glassdoor', {
+          outcome: 'failed',
+          warning: { code: 'description-recovery-persist-failed', severity: 'block' },
+          checkpoint: 'failed',
+        }, { nodeId: 'solve-trail-owner', jobRunId: 'solve-trail-run' });
+        assert(persistenceFailure?.outcome === 'failed'
+          && persistenceFailure?.checkpoint === 'failed'
+          && persistenceFailure?.warning?.code === 'description-recovery-persist-failed'
+          && fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8').includes("recordGenericResolvePass('failed', warning, 'failed');"),
+        'checkpoint persistence failure is a retained fixed-state Solve outcome, including after queue-consumption persistence fails');
+        const visibleWindowFailure = __recordJobSourceResolvePassForTests('ziprecruiter', {
+          outcome: 'failed',
+          warning: { code: 'description-detail-error', severity: 'block' },
+          checkpoint: 'unchanged',
+          error: secret,
+          url: `https://example.invalid/${secret}`,
+        }, { nodeId: 'solve-trail-owner', jobRunId: 'solve-trail-run' });
+        const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        assert(visibleWindowFailure?.outcome === 'failed'
+          && visibleWindowFailure?.warning?.code === 'description-detail-error'
+          && visibleWindowFailure?.checkpoint === 'unchanged'
+          && !JSON.stringify(visibleWindowFailure).includes(secret)
+          && jobsSource.includes('let result;\n    try {\n      result = await withSharedProfileLock(() => openCaptchaResolveWindow(')
+          && jobsSource.includes("warning: { code: 'description-detail-error', severity: 'block' }")
+          && jobsSource.includes('if (!signal?.aborted) {\n        recordJobSourceResolvePass(sourceId,'),
+        'a thrown visible Solve window retains only a fixed failed-state code before its original IPC error is rethrown');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { retainedPasses: 12, totalPasses: 15, staleWrites: 0 };
+    },
+  },
+  {
     name: 'multi-hub source scheduling history remains window-local without weakening single-owner funnel attribution',
     run: () => {
       __resetJobsTelemetryForTests();
@@ -11387,7 +11805,7 @@ export default [
           { sender, nodeId, channel: nodeId ? 'search-jobs' : 'bug-report' },
           callback,
         );
-        const setHistory = (sender, nodeId, sourceId, runId, warning = null) => inContext(sender, nodeId, () => {
+        const setHistory = (sender, nodeId, sourceId, runId, warning = null, resolvePasses = []) => inContext(sender, nodeId, () => {
           const telemetry = getJobsTelemetry();
           Object.assign(telemetry, {
             nodeId,
@@ -11403,11 +11821,38 @@ export default [
                 announcedStatus: 'searching',
                 terminalStatus: warning ? 'error' : 'done',
                 warning,
+                resolvePassCount: resolvePasses.length,
+                resolvePasses,
               }],
             },
           });
         });
-        setHistory(senderA, 'hub-a1', 'google', 'a1-run', { code: 'http-429', severity: 'throttle' });
+        setHistory(senderA, 'hub-a1', 'google', 'a1-run', { code: 'http-429', severity: 'throttle' }, [{
+          at: 3_500,
+          outcome: 'blocked',
+          warning: { code: 'description-listing-unavailable', severity: 'block' },
+          providerRowsLoaded: 8,
+          targeted: 0,
+          attempted: 0,
+          recovered: 0,
+          completeTotal: 3,
+          empty: 2,
+          unavailable: 2,
+          consecutiveNoMatchPasses: 2,
+          consecutiveNoProgressPasses: 0,
+          recommendation: 'skip',
+          checkpoint: 'saved',
+          url: 'https://example.invalid/must-not-render',
+        }, {
+          at: 3_750,
+          outcome: 'blocked',
+          warning: { code: 'description-detail-hard-block', severity: 'block' },
+          attempted: 2,
+          recovered: 0,
+          empty: 2,
+          recommendation: 'retry',
+          checkpoint: 'unchanged',
+        }]);
         setHistory(senderA, 'hub-a2', 'glassdoor', 'a2-run', { code: 'description-panel-http-error', severity: 'warn' });
         setHistory(senderB, 'hub-b1', 'dice', 'b1-run');
 
@@ -11421,6 +11866,11 @@ export default [
           && reportA.includes('hub `hub-a2` / `glassdoor`: run `a2-run`')
           && reportA.includes('http-429/throttle')
           && reportA.includes('description-panel-http-error/warn')
+          && reportA.includes('Solve passes (run `a1-run`)')
+          && reportA.includes('Skip recommended')
+          && reportA.includes('checkpoint saved')
+          && reportA.includes('warning: description-detail-hard-block/block')
+          && !reportA.includes('https://example.invalid/must-not-render')
           && !reportA.includes('hub `hub-b1`')
           && !wrongWindow.includes('Source Scheduling & Throttle History'),
         'a multi-hub FULL/JOBS/STALL snapshot merges only current-window hub-local history, including non-blocking terminal warnings, while a mismatched report window receives none');
@@ -11466,6 +11916,26 @@ export default [
         });
         seed(senderA, hubA1, 'google', 'assembled-a1', {
           detail: secret, query: secret, location: secret,
+          resolvePassCount: 2,
+          resolvePasses: [{
+            at: 2_500,
+            outcome: 'blocked',
+            warning: { code: 'description-listing-unavailable', severity: 'block' },
+            providerRowsLoaded: 4,
+            targeted: 0,
+            attempted: 0,
+            recovered: 0,
+            completeTotal: 1,
+            empty: 1,
+            unavailable: 1,
+            consecutiveNoMatchPasses: 2,
+            consecutiveNoProgressPasses: 0,
+            recommendation: 'skip',
+            checkpoint: 'saved',
+            title: secret,
+            url: `https://example.invalid/${secret}`,
+            unavailableSamples: [secret],
+          }],
         });
         seed(senderA, hubA2, 'glassdoor', 'assembled-a2');
         // Corrupt/unexpected keys must never become report-visible receipts.
@@ -11494,26 +11964,34 @@ export default [
         const stall = inContext(senderA, null, () => generateMarkdown(
           payloadFor('STALL', [hubA1, hubA2]), senderA.id,
         ).markdown);
+        const resolve = inContext(senderA, null, () => generateMarkdown(
+          payloadFor('JOBRESOLVE', [hubA1, hubA2]), senderA.id,
+        ).markdown);
         const nonCurrent = inContext(senderA, null, () => generateMarkdown(
           payloadFor('FULL', [hubA1]), senderA.id,
         ).markdown);
         const wrongWindow = inContext(senderA, null, () => generateMarkdown(
           payloadFor('FULL', [hubA1, hubA2]), senderB.id,
         ).markdown);
-        const everyExpectedReport = [full, jobs, stall].every(report => report.includes('### Source Scheduling & Throttle History')
+        const everyExpectedReport = [full, jobs, stall, resolve].every(report => report.includes('### Source Scheduling & Throttle History')
           && report.includes('hub `…d-hub-a1` / `google`')
           && report.includes('hub `…d-hub-a2` / `glassdoor`'));
         assert(everyExpectedReport
+          && full.includes('Solve passes (run `…mbled-a1`)')
+          && resolve.includes('Solve passes (run `…mbled-a1`)')
+          && resolve.includes('Skip recommended')
+          && resolve.includes('checkpoint saved')
           && !full.includes('assembled-hub-b')
           && !full.includes('untrusted-source-key')
           && !full.includes(secret)
+          && !resolve.includes(secret)
           && !nonCurrent.includes('assembled-hub-a2')
           && !wrongWindow.includes('Source Scheduling & Throttle History'),
-        'real FULL/JOBS/STALL report assembly retains each current sender-local Job Search hub, excludes foreign/non-current/corrupt receipts, and renders no arbitrary query/location/detail fields');
+        'real FULL/JOBS/STALL/JOBRESOLVE assembly retains each current sender-local Job Search hub, exposes the compact Solve retry trail in FULL and JOBRESOLVE, and renders no arbitrary query/location/detail fields');
       } finally {
         __resetJobsTelemetryForTests();
       }
-      return { assembledFilters: 3, leakedFields: 0 };
+      return { assembledFilters: 4, leakedFields: 0 };
     },
   },
 {

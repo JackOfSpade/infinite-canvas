@@ -500,12 +500,14 @@ export function sanitizeNodesForSave(nodes) {
         || innerDrawings !== rawCanvasData.drawings;
       const {
         isDropTarget: _idt,
+        dragHover: _dh,
         _hmr: _h,
         _boardRollbackProgressRestore: _rollbackProgressRestore,
         ...cleanData
       } = n.data || {};
       const hasTransientData = n.data && (
         'isDropTarget' in n.data
+        || 'dragHover' in n.data
         || '_hmr' in n.data
         || '_boardRollbackProgressRestore' in n.data
       );
@@ -536,12 +538,15 @@ export function sanitizeNodesForSave(nodes) {
 
     // For all node types: strip transient display state in a single pass.
     // - isDropTarget: drag-hover highlight set by DnD handlers, never saved.
+    // - dragHover: { kind, label } drag-hover feedback set by the node-absorption
+    //   and hub-drop paths, never saved (see CanvasNode.jsx / HubContainer.jsx).
     // - _hmr: HMR invalidation token set by the dev-only HMR hook, never saved.
     // - _boardRollbackProgressRestore: in-memory receipt used to restore a
     //   source card's local progress generation after Board cancellation.
     // - style.opacity (jobcard only): set transiently by toggleSourceFilter.
     const hasTransientData = n.data && (
       'isDropTarget' in n.data
+      || 'dragHover' in n.data
       || '_hmr' in n.data
       || '_boardRollbackProgressRestore' in n.data
     );
@@ -603,6 +608,7 @@ export function sanitizeNodesForSave(nodes) {
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient || hasJobBoardTransient) {
       const {
         isDropTarget: _idt,
+        dragHover: _dh,
         _hmr: _h,
         _boardRollbackProgressRestore: _rollbackProgressRestore,
         ...cleanData

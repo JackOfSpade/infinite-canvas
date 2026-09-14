@@ -593,15 +593,39 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             position: 'absolute', inset: 0, borderRadius: '50%', pointerEvents: 'none',
             background: 'radial-gradient(circle, transparent 55%, rgba(0,0,0,0.35) 100%)',
           }} />
-          {data.isDropTarget && (
+          {/* dragHover (set by the node-absorption drag path, see useDragCorrections.js) carries a
+              kind ('accept' | 'reject') and a short label. Plain isDropTarget with no dragHover is
+              the sidebar/Finder file-drop path — it keeps today's bouncing blue arrow, unlabeled. */}
+          {data.dragHover?.kind === 'reject' ? (
             <div className="absolute inset-0 rounded-full pointer-events-none z-50 flex items-center justify-center overflow-hidden transition-all duration-300 backdrop-blur-[6px]"
-                 style={{ 
-                   border: '3px solid rgba(59,130,246,0.9)', 
+                 style={{
+                   border: '3px solid rgba(248,113,113,0.9)',
+                   boxShadow: '0 0 30px rgba(248,113,113,0.3), inset 0 0 30px rgba(248,113,113,0.4)',
+                   background: 'radial-gradient(circle, rgba(127,29,29,0.3) 0%, rgba(15,23,42,0.6) 100%)',
+                 }}>
+               <div className="flex flex-col items-center justify-center gap-1 text-red-400 px-3">
+                  <X size={30} strokeWidth={2.5} className="drop-shadow-[0_0_8px_rgba(248,113,113,0.8)]" />
+                  <span className="text-[9px] font-semibold text-center leading-tight text-red-100">
+                    {data.dragHover.label}
+                  </span>
+               </div>
+            </div>
+          ) : (data.isDropTarget || data.dragHover) && (
+            <div className="absolute inset-0 rounded-full pointer-events-none z-50 flex items-center justify-center overflow-hidden transition-all duration-300 backdrop-blur-[6px]"
+                 style={{
+                   border: '3px solid rgba(59,130,246,0.9)',
                    boxShadow: '0 0 30px rgba(59,130,246,0.3), inset 0 0 30px rgba(59,130,246,0.4)',
                    background: 'radial-gradient(circle, rgba(30,58,138,0.3) 0%, rgba(15,23,42,0.6) 100%)',
                  }}>
-               <div className="flex flex-col items-center justify-center animate-bounce text-blue-400">
-                  <ArrowDown size={36} strokeWidth={2.5} className="drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
+               {/* Only the arrow bounces. A bouncing label is hard to read at 9px, and the
+                   label is the part the user actually needs to parse before releasing. */}
+               <div className="flex flex-col items-center justify-center gap-1 text-blue-400 px-3">
+                  <ArrowDown size={36} strokeWidth={2.5} className="animate-bounce drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
+                  {data.dragHover?.label && (
+                    <span className="text-[9px] font-semibold text-center leading-tight text-blue-100">
+                      {data.dragHover.label}
+                    </span>
+                  )}
                </div>
             </div>
           )}

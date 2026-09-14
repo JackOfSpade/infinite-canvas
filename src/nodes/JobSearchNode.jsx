@@ -62,6 +62,7 @@ import { safeClone } from '../utils/navigationUtils';
 import {
   getJobWorkflowDeletionLifecycleRevision,
   isJobWorkflowDeletionPending,
+  isJobWorkflowRelocationPending,
   subscribeJobWorkflowDeletionLifecycle,
 } from '../utils/nodeDeletionLifecycle';
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
@@ -416,6 +417,19 @@ function boardCancellationCleanupError(error, fallback) {
 function isSavedScrapeManualAiResume(resume) {
   return resume?.task === 'job-scoring'
     || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode);
+}
+
+/**
+ * Identity for two warning entries that belong to the SAME source, used by the
+ * restore paths that re-add a warning which may already sit in the hub's list.
+ * Warnings carry no id, so the code+severity pair is the only stable identity
+ * available. When the pair differs the two entries are kept side by side on
+ * purpose: an extra visible warning stays recoverable (Skip / Score current
+ * results), while a wrongly-dropped gate silently un-pauses a blocked run.
+ */
+function isSameJobSourceWarningEntry(a, b) {
+  return (a?.code || null) === (b?.code || null)
+    && (a?.severity || null) === (b?.severity || null);
 }
 
 // The Board's `awaitingSourceResolution` receipt is the authority for a
@@ -2689,10 +2703,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       EventLogger.log(`[JobSearch][${id}] Unmount child cleanup deferred to pending deletion transaction`);
       return;
     }
+    if (isJobWorkflowRelocationPending(id)) {
+      EventLogger.log(`[JobSearch][${id}] Unmount child cleanup deferred to pending relocation transaction`);
+      return;
+    }
     cleanupAllJobChildren();
   });
   useUnmountEffect(() => {
     if (isJobWorkflowDeletionPending(id)) return;
+    if (isJobWorkflowRelocationPending(id)) return;
     moduleRunQueue.cancelQueuedRunsForNode(id);
   });
 
@@ -5962,8 +5981,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const warning = e.detail?.warning || null;
       if (!sourceId || !warning) return;
 
-      const remaining = (scrapeWarningsRef.current || []).filter(item => item.sourceId !== sourceId);
-      remaining.push({ sourceId, ...warning });
+      const current = scrapeWarningsRef.current || [];
+      const restored = { sourceId, ...warning };
+      const remaining = current.filter(item => item.sourceId !== sourceId);
+      // `job-source-retry-start` deliberately KEEPS this source's gating
+      // warnings and trims only its non-gating siblings — one source can end a
+      // run holding several entries (reconcileJobSourceWarnings keeps a
+      // per-source override alongside the run's own entry, and jobs.js appends
+      // LinkedIn's enrichment warnings after the per-source list). Collapsing
+      // every entry for the source into the single restored warning threw that
+      // preserved gate away moments after the click kept it, which un-paused
+      // the hub and let a later Skip auto-resume a run that was still blocked —
+      // the exact hazard the partition exists to prevent. Re-add the source's
+      // other gates, minus the one the restored warning already is.
+      remaining.push(
+        ...current.filter(item => item?.sourceId === sourceId
+          && isJobSourceWarningGating(item)
+          && !isSameJobSourceWarningEntry(item, restored)),
+        restored,
+      );
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
       EventLogger.log(`[JobSearch][${id}] Solve for ${sourceId} did not complete; restored its actionable warning`);
@@ -6043,9 +6079,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // instead of clearing on every attempt regardless of outcome. Captcha /
       // resume resolves carry no warning, so they clear cleanly as before.
       const resolveWarning = e.detail?.warning || null;
-      const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
+      const currentWarnings = scrapeWarningsRef.current || [];
+      const remaining = currentWarnings.filter(w => w.sourceId !== resolvedSourceId);
       if (resolveWarning) {
-        remaining.push({ sourceId: resolvedSourceId, ...resolveWarning });
+        const restored = { sourceId: resolvedSourceId, ...resolveWarning };
+        // Same partition as `job-source-retry-start`, which kept this source's
+        // OTHER gating warnings while the Solve ran: re-adding only the
+        // returned warning would discard a gate the click deliberately
+        // preserved and let a later Skip auto-resume a still-blocked run. A
+        // resolve that comes back with NO warning is untouched by this — it
+        // still clears the source outright, which is the clean success this
+        // whole flow exists to reach.
+        remaining.push(
+          ...currentWarnings.filter(w => w?.sourceId === resolvedSourceId
+            && isJobSourceWarningGating(w)
+            && !isSameJobSourceWarningEntry(w, restored)),
+          restored,
+        );
       }
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, {
@@ -6126,9 +6176,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const sid = e.detail?.sourceId;
       if (!sid) return;
       const current = scrapeWarningsRef.current || [];
-      const w = current.find(x => x.sourceId === sid);
-      if (!w || isJobSourceWarningGating(w)) return;
-      const remaining = current.filter(x => x.sourceId !== sid);
+      // One source can end a run holding MORE THAN ONE final warning:
+      // reconcileJobSourceWarnings keeps a per-source override alongside the
+      // run's own entry, and jobs.js appends LinkedIn's enrichment warnings
+      // after the per-source list. The guard used to inspect only the FIRST
+      // match while the removal deleted every entry for the source, so a gate
+      // sitting second was trimmed silently — that un-paused the hub and let a
+      // later Skip auto-resume a run that was still blocked. Guard and removal
+      // now agree on the same set: if ANY entry gates, only the non-gating
+      // siblings are stale enough to trim; with no gate at all they all go.
+      const entries = current.filter(x => x?.sourceId === sid);
+      if (!entries.length) return;
+      const remaining = entries.some(isJobSourceWarningGating)
+        ? current.filter(x => x?.sourceId !== sid || isJobSourceWarningGating(x))
+        : current.filter(x => x?.sourceId !== sid);
+      // An all-gating source has nothing to trim; skip the write so the
+      // optimistic path cannot churn hub data (and re-render) for no change.
+      if (remaining.length === current.length) return;
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
     };

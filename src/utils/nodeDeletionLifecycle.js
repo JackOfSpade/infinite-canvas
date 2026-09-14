@@ -240,3 +240,54 @@ export function settleJobWorkflowDeletion(ids) {
 export function isJobWorkflowDeletionPending(nodeId) {
   return !!nodeId && pendingJobWorkflowDeletions.has(nodeId);
 }
+
+// Component unmount is also used for canvas navigation and is therefore not
+// evidence that the user deleted anything — this is the same principle
+// collectDeletedJobRunDiscards documents at canvasInteractions.js:453-457,
+// applied to a second non-deletion unmount cause: nested-canvas absorption
+// (dragging a hub/board/SellHub into a sub-canvas group) unmounts the moved
+// node exactly like a delete would, and each module's unmount handler treats
+// unmount as "this hub is gone" (Job Search deletes its source cards, Job
+// Board aborts its backend run, SellHub deletes its comp/marketplace cards).
+// Mark the relocated ids synchronously before the `setNodes` that removes
+// them so those handlers can tell a move apart from a real delete.
+//
+// A separate Map from `pendingJobWorkflowDeletions`: a relocation must never
+// settle a pending deletion, or vice versa — they are independent reversible
+// boundaries that can legitimately overlap (e.g. a Clear Canvas deletion
+// racing an in-flight drag) and each must only clear its own transaction.
+const pendingJobWorkflowRelocations = new Map();
+
+export function markJobWorkflowRelocationPending(nodes) {
+  const ids = new Set();
+  visitNodeTree(nodes, (node) => {
+    if ((node?.type === 'jobhub' || node?.type === 'jobboard' || node?.type === 'sellhub') && node.id) {
+      ids.add(node.id);
+    }
+  });
+  let changed = false;
+  for (const id of ids) {
+    const priorCount = pendingJobWorkflowRelocations.get(id) || 0;
+    pendingJobWorkflowRelocations.set(id, priorCount + 1);
+    if (priorCount === 0) changed = true;
+  }
+  if (changed) publishDeletionLifecycleChange();
+  return [...ids];
+}
+
+export function settleJobWorkflowRelocation(ids) {
+  let changed = false;
+  for (const id of new Set(Array.isArray(ids) ? ids : [])) {
+    const priorCount = pendingJobWorkflowRelocations.get(id) || 0;
+    if (priorCount <= 1) {
+      if (pendingJobWorkflowRelocations.delete(id)) changed = true;
+    } else {
+      pendingJobWorkflowRelocations.set(id, priorCount - 1);
+    }
+  }
+  if (changed) publishDeletionLifecycleChange();
+}
+
+export function isJobWorkflowRelocationPending(nodeId) {
+  return !!nodeId && pendingJobWorkflowRelocations.has(nodeId);
+}

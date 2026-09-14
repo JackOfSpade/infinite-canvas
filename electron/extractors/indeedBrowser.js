@@ -178,7 +178,39 @@ const DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
 const MAX_ENRICH_ATTEMPTS_PER_JOB = 4;
 
 function indeedDescriptionLength(job) {
-  return String(job?.description || job?.snippet || '').replace(/\s+/g, ' ').trim().length;
+  // Keep the field priority and whitespace normalization exactly in sync with
+  // filterJobsByDescriptionEvidence. A recovery row can contain both fields
+  // while an extractor is transitioning it, so choosing the other field here
+  // would let a row bypass retry despite failing the scorer's gate.
+  return String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length;
+}
+
+// This is deliberately the same two-part admission contract as the scoring
+// gate: substantial normalized text and no deferred/unavailable marker. The
+// exact-detail retry and its remaining count must use this instead of treating
+// a stale long snippet as complete.
+export function isIndeedScoreSafeDescription(job) {
+  return !job?.descriptionDeferredReason
+    && indeedDescriptionLength(job) >= DESCRIPTION_EVIDENCE_MIN_CHARS;
+}
+
+export function needsIndeedDescriptionRetry(job) {
+  return !isIndeedScoreSafeDescription(job);
+}
+
+// The exact-detail retry operates on recovery rows that may still carry a
+// transient unavailable/deferred marker. Clear it only once the replacement
+// text passes the same normalized 400-character evidence boundary used by
+// downstream scoring admission. Kept small and exported for a deterministic
+// regression test; callers retain their existing attempt provenance.
+export function acceptIndeedScoreSafeDescription(job, description) {
+  if (!job || typeof job !== 'object' || indeedDescriptionLength({ snippet: description }) < DESCRIPTION_EVIDENCE_MIN_CHARS) {
+    return false;
+  }
+  job.description = description;
+  job.snippet = description;
+  delete job.descriptionDeferredReason;
+  return true;
 }
 
 // Keep per-listing enrichment provenance small enough to retain on a recovery
@@ -199,7 +231,7 @@ export function recordIndeedEnrichmentAttempt(job, { stage, outcome, reason = nu
 
 function logIndeedResidualEnrichmentDiagnostics(jobs) {
   const residual = (Array.isArray(jobs) ? jobs : [])
-    .filter(job => indeedDescriptionLength(job) < DESCRIPTION_EVIDENCE_MIN_CHARS)
+    .filter(needsIndeedDescriptionRetry)
     .slice(0, 8);
   for (const job of residual) {
     const attempts = Array.isArray(job._enrichAttempts) ? job._enrichAttempts : [];
@@ -210,7 +242,7 @@ function logIndeedResidualEnrichmentDiagnostics(jobs) {
 
 function retainIndeedResidualDiagnostics(jobs) {
   for (const job of Array.isArray(jobs) ? jobs : []) {
-    if (indeedDescriptionLength(job) >= DESCRIPTION_EVIDENCE_MIN_CHARS) delete job._enrichAttempts;
+    if (isIndeedScoreSafeDescription(job)) delete job._enrichAttempts;
   }
 }
 
@@ -474,9 +506,7 @@ async function getChallengeSignals(page) {
  */
 export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir = null) {
   const rows = (Array.isArray(jobs) ? jobs : []).map(job => ({ ...job, source: 'indeed' }));
-  const targets = rows.filter(job =>
-    String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
-  );
+  const targets = rows.filter(needsIndeedDescriptionRetry);
   if (isBackgroundE2E()) {
     return {
       jobs: rows,
@@ -577,9 +607,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
           continue;
         }
         const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-        if (description.length >= 400) {
-          job.description = description;
-          job.snippet = description;
+        if (acceptIndeedScoreSafeDescription(job, description)) {
           recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'recovered', length: description.length });
           recovered++;
         } else {
@@ -600,9 +628,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
 
     const unavailableKeys = new Set(unavailable.map(item => item.key));
     const activeRows = rows.filter(job => !unavailableKeys.has(sourceJobKey(job)));
-    const remaining = activeRows.filter(job =>
-      String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length < 400
-    ).length;
+    const remaining = activeRows.filter(needsIndeedDescriptionRetry).length;
     retainIndeedResidualDiagnostics(activeRows);
     logger.info(`[Indeed/Browser] Exact description retry complete: ${recovered}/${targets.length} recovered, ${unavailable.length} unavailable, ${remaining} still incomplete`);
     return { jobs: activeRows, attempted: targets.length, recovered, remaining, unavailable, challengeReason };

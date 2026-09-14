@@ -46,6 +46,16 @@ const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies re
 // closes and gets reported rather than hanging.
 const NATIVE_LOGIN_COOKIE_COMMIT_CEILING_MS = 34_000;
 const NATIVE_LOGIN_COOKIE_COMMIT_POLL_MS = 500;
+// `cookieFlushMs` is reported as a single "pre-close wait" column, but the three
+// producers below measure three DIFFERENT things, and two of them are not a
+// pre-close wait at all: the child-exit path observes the profile checkpoint
+// AFTER Chrome is already gone. A reader cannot tell those apart from the number
+// alone, so each producer stamps the phase it measured rather than letting the
+// renderer infer one from the surrounding fields.
+//   pre-close-fixed      — a fixed sleep taken before the close was issued
+//   pre-close-checkpoint — waited for the observed profile checkpoint, then closed
+//   post-close-observe   — measured after the window was already closed/exited
+const AUTH_COOKIE_FLUSH_PHASES = Object.freeze(['pre-close-fixed', 'pre-close-checkpoint', 'post-close-observe']);
 const LOGIN_BROWSER_GRACEFUL_EXIT_MS = 12_000;   // successful auth must get a real profile checkpoint
 // Native Chrome windows are spawned child processes, not Puppeteer browsers;
 // their manual close paths still need their own child-exit bounds.
@@ -700,6 +710,13 @@ export function buildAuthAttemptRecord(diag = {}) {
     pollCount: Number.isFinite(rawNativeChallenge.pollCount) ? Math.max(0, Math.round(rawNativeChallenge.pollCount)) : null,
     pollErrorCount: Number.isFinite(rawNativeChallenge.pollErrorCount) ? Math.max(0, Math.round(rawNativeChallenge.pollErrorCount)) : null,
     lastPollAt: Number.isFinite(rawNativeChallenge.lastPollAt) ? rawNativeChallenge.lastPollAt : null,
+    // The two facts that separate "we watched the challenge page and it never
+    // cleared" from "the observer never saw anything at all". Without them both
+    // render as `last=unknown`, and a denied Apple event is indistinguishable
+    // from forty polls of a real wall — which is exactly the ambiguity that
+    // made the original handoff failure undiagnosable.
+    sawFirstPartyTab: typeof rawNativeChallenge.sawFirstPartyTab === 'boolean' ? rawNativeChallenge.sawFirstPartyTab : null,
+    firstPollError: String(rawNativeChallenge.firstPollError || '').replace(/[\r\n\t]+/g, ' ').slice(0, 200) || null,
     lastClassification: String(rawNativeChallenge.lastClassification || '').slice(0, 50) || null,
     lastTabUrl: String(rawNativeChallenge.lastTabUrl || '').slice(0, 300) || null,
     lastTabTitle: String(rawNativeChallenge.lastTabTitle || '').slice(0, 120) || null,
@@ -733,6 +750,11 @@ export function buildAuthAttemptRecord(diag = {}) {
     profileDir: (String(diag.userDataDir || '').slice(0, 320)) || null,
     closeDisposition: diag.closeDisposition || null,
     cookieFlushMs: Number.isFinite(diag.cookieFlushMs) ? diag.cookieFlushMs : null,
+    // WHEN cookieFlushMs was measured, stamped by the producer that measured it
+    // (see AUTH_COOKIE_FLUSH_PHASES). Allowlisted like every other field here:
+    // an unrecognised value becomes null rather than reaching the report, so a
+    // renderer can only ever see a phase this file actually produces.
+    cookieFlushPhase: AUTH_COOKIE_FLUSH_PHASES.includes(diag.cookieFlushPhase) ? diag.cookieFlushPhase : null,
     // Whether Chromium was OBSERVED to checkpoint the profile's cookie store
     // before this window was closed (native windows only — the Puppeteer path
     // gets a flush from browser.close()). null = not applicable / not observed.
@@ -805,8 +827,75 @@ export async function findGoogleSafeChromePath(fallbackPath) {
   return fallbackPath;
 }
 
+// Apple-event round trip budget for one tab inventory. The callers poll on a
+// 1s cadence through createNonOverlappingRunner, so a slow tick costs cadence,
+// not correctness — while a budget SHORTER than a busy Chrome's reply turns
+// every poll into a timeout, and the caller then observes nothing at all for
+// the whole window. Chrome answers AppleScript on its main thread, which a
+// challenge page's script can occupy for seconds.
+const NATIVE_TAB_QUERY_TIMEOUT_MS = 5_000;
+// A user with many restored tabs produces a large inventory; the default 1MB
+// execFile buffer would reject the whole read (indistinguishable from a denial).
+const NATIVE_TAB_QUERY_MAX_BUFFER = 8 * 1024 * 1024;
+// How many DISTINCT tab-inventory failures one handoff may log. Deduping by
+// message alone is not a bound: a message carrying a varying pid/timestamp is
+// distinct every poll and would flood the log exactly as the un-deduped version
+// did. Four variants is more than any real failure sequence has shown.
+const NATIVE_POLL_ERROR_LOG_VARIANT_CAP = 4;
+
+/**
+ * Turn an execFile rejection from the tab-inventory osascript into a message
+ * that is worth storing and logging.
+ *
+ * execFile builds its rejection message as `Command failed: <cmd> <args…>` with
+ * the process stderr appended, and our single argument is the ENTIRE ~500-char
+ * AppleScript source. The consumers bound what they keep, so a raw message lost
+ * the only part that identifies the failure — the stderr tail carrying
+ * osascript's own text (an Automation-permission denial, a "not scriptable"
+ * report, …) — and kept a verbatim copy of a script the reader already has.
+ * Dropping the echo first is what makes the bounded copy diagnostic.
+ *
+ * Also the dedupe key: the poll loop compares each new message against the
+ * value it STORED, so normalization has to be idempotent — running it on an
+ * already-normalized message must return that same message, or the comparison
+ * never matches and every poll re-logs.
+ *
+ * @param {unknown} rawMessage      the rejection's `.message` (or String(error))
+ * @param {{echoedScript?: string, maxLength?: number}} options
+ *        `echoedScript` is the exact argument execFile echoed back, so the echo
+ *        can be removed by identity rather than by guessing at its shape.
+ * @returns {string|null} bounded single-line reason, or null when nothing is left
+ */
+export function normalizeNativeTabQueryError(rawMessage, { echoedScript = '', maxLength = 200 } = {}) {
+  let message = String(rawMessage ?? '');
+  const echoIndex = echoedScript ? message.indexOf(echoedScript) : -1;
+  if (echoIndex >= 0) {
+    message = message.slice(echoIndex + echoedScript.length);
+  } else {
+    // The echo is only removable by identity when the caller passed the script.
+    // Without it, strip the fixed `Command failed: …osascript [-e]` preamble so
+    // at least the command path stops eating the budget; anything the preamble
+    // does not cover is left alone rather than guessed at.
+    message = message.replace(/^Command failed:\s*\S*osascript(?:\s+-e)?\s*/i, '');
+  }
+  message = message.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  if (!message) return null;
+  // Mark the cut. An unmarked slice reads as the whole reason, and a reader
+  // cannot tell a complete short message from the head of a long one.
+  const TRUNCATION_MARK = '… (truncated)';
+  if (message.length > maxLength) {
+    message = `${message.slice(0, Math.max(0, maxLength - TRUNCATION_MARK.length)).trimEnd()}${TRUNCATION_MARK}`;
+  }
+  return message;
+}
+
 async function getNativeChromeTabs() {
   if (process.platform !== 'darwin') return [];
+  // `id of tab` is Chrome's own stable per-tab identifier. Window/tab INDEXES
+  // are front-to-back positions that renumber whenever the user focuses another
+  // Chrome window, so they cannot identify a tab across time on their own; the
+  // id is read inside a `try` so a Chrome build without it degrades to indexes
+  // instead of failing the whole inventory.
   const script = `
 tell application "Google Chrome"
   set output to ""
@@ -814,28 +903,45 @@ tell application "Google Chrome"
     set w to window wi
     repeat with ti from 1 to (count of tabs of w)
       set t to tab ti of w
-      set output to output & (wi as string) & "||" & (ti as string) & "||" & (URL of t as string) & "||" & (title of t as string) & linefeed
+      set tabId to ""
+      try
+        set tabId to (id of t as string)
+      end try
+      set output to output & (wi as string) & "||" & (ti as string) & "||" & tabId & "||" & (URL of t as string) & "||" & (title of t as string) & linefeed
     end repeat
   end repeat
   return output
 end tell`;
   try {
-    const { stdout } = await execFile('/usr/bin/osascript', ['-e', script], { timeout: 3000 });
+    const { stdout } = await execFile('/usr/bin/osascript', ['-e', script], {
+      timeout: NATIVE_TAB_QUERY_TIMEOUT_MS,
+      maxBuffer: NATIVE_TAB_QUERY_MAX_BUFFER,
+    });
     return String(stdout || '')
       .split(/\r?\n/)
       .map(line => line.trim())
       .filter(Boolean)
       .map(line => {
-        const [windowIndex = '', tabIndex = '', url = '', ...titleParts] = line.split('||');
+        const [windowIndex = '', tabIndex = '', tabId = '', url = '', ...titleParts] = line.split('||');
         return {
           windowIndex: Number(windowIndex) || null,
           tabIndex: Number(tabIndex) || null,
+          tabId: String(tabId || '').trim() || null,
           url,
           title: titleParts.join('||'),
         };
       });
   } catch (error) {
-    return [{ url: '', title: '', error: error?.message || String(error) }];
+    const reason = normalizeNativeTabQueryError(error?.message ?? String(error), { echoedScript: script });
+    // A killed osascript (the timeout/maxBuffer path) usually writes nothing to
+    // stderr, so stripping the script echo can leave nothing at all. Report the
+    // lifecycle facts we actually hold instead of an empty string — and only
+    // those facts: `killed` is set for both the time budget and the buffer cap,
+    // so this must not claim which one fired.
+    const killedNote = error?.killed
+      ? `osascript produced no error output and was killed (signal ${error.signal || 'none'}) under a ${NATIVE_TAB_QUERY_TIMEOUT_MS}ms / ${NATIVE_TAB_QUERY_MAX_BUFFER}-byte budget`
+      : null;
+    return [{ url: '', title: '', error: reason || killedNote || 'osascript failed without a message' }];
   }
 }
 
@@ -1113,8 +1219,12 @@ export function waitForBrowserProcessExit(proc, timeoutMs) {
 }
 
 async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false } = {}) {
-  const cookieFlushMs = loginConfirmed ? NATIVE_LOGIN_COOKIE_FLUSH_MS : 0;
-  if (cookieFlushMs > 0) {
+  // null, not 0, when no login was confirmed: 0 reads as "we waited and measured
+  // zero", which is a claim about a wait that never happened. The bug report
+  // renders a missing measurement as '—' and would otherwise print a flush of 0ms
+  // next to a window that was closed without any flush attempt at all.
+  const cookieFlushMs = loginConfirmed ? NATIVE_LOGIN_COOKIE_FLUSH_MS : null;
+  if (cookieFlushMs) {
     logger.info(`[StealthBrowser] ${label} login confirmed — waiting ${cookieFlushMs}ms for the auth cookie/profile checkpoint before closing`);
     await new Promise(resolve => setTimeout(resolve, cookieFlushMs));
   }
@@ -1131,6 +1241,9 @@ async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false 
   return {
     closeDisposition: outcome.disposition === 'already-closed' ? 'graceful-exit' : outcome.disposition,
     cookieFlushMs,
+    // Stamped even when the wait was skipped — the phase says WHICH measurement
+    // this path takes, so a null duration stays attributable to this producer.
+    cookieFlushPhase: 'pre-close-fixed',
     processExitObserved: outcome.exited,
   };
 }
@@ -1746,9 +1859,16 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
         // Not a fixed timer: SIGTERM does not flush Chromium's batched cookie
         // store, so closing on a duration guess is what silently discarded the
         // login. Close on the observed checkpoint instead.
+        // The poll interval and the open-window ceiling are both disarmed above,
+        // so an unhandled rejection here would leave the window open with
+        // nothing left to close it. Close on the confirmed login regardless.
         void waitForNativeProfileCookieCommit(userDataDir, platformId).then(({ committed, waitedMs }) => {
           if (settled) return;
-          void requestNativeClose({ ...pendingSuccessResult, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+          void requestNativeClose({ ...pendingSuccessResult, cookieFlushMs: waitedMs, cookieFlushPhase: 'pre-close-checkpoint', cookieStoreCommitted: committed });
+        }).catch(error => {
+          logger.warn(`[StealthBrowser] Native ${platformId} cookie-checkpoint wait failed: ${error?.message || error} — closing on the confirmed login`);
+          if (settled) return;
+          void requestNativeClose({ ...pendingSuccessResult, cookieStoreCommitted: false });
         });
         return;
       }
@@ -1879,11 +1999,17 @@ export function classifyNativeIndeedChallengeTab(tab = {}) {
   return 'unknown';
 }
 
-// Chrome's AppleScript API has no stable tab UUID that works across all
-// supported Chrome versions.  window/tab indexes are stable for the lifetime
-// of this small --app window, which is enough to continue following it when
-// Indeed moves from secure.indeed.com to a regional public host after solving.
+// Identity used to keep following THIS handoff's tab when Indeed moves it from
+// secure.indeed.com to a regional public host after solving.
+//
+// Chrome's AppleScript `id of tab` is a stable per-tab identifier and is used
+// whenever the inventory carries it. The window/tab index pair is only a
+// FALLBACK: AppleScript orders `windows` front-to-back, so those indexes
+// renumber as soon as the user focuses another Chrome window — an identity that
+// silently stops matching (and, worse, can start matching a different tab).
 export function nativeIndeedChallengeTabIdentity(tab = {}) {
+  const tabId = String(tab?.tabId || '').trim();
+  if (tabId) return `id:${tabId}`;
   const windowIndex = Number(tab?.windowIndex);
   const tabIndex = Number(tab?.tabIndex);
   return Number.isInteger(windowIndex) && windowIndex > 0
@@ -1896,7 +2022,7 @@ export function nativeIndeedChallengeTabIdentity(tab = {}) {
 // spawned for this handoff. Restrict polling to the exact first-party hostname
 // and prefer the same path as the requested challenge URL, so an older Indeed
 // search tab cannot accidentally clear this recovery flow.
-export function selectNativeIndeedChallengeTab(tabs, challengeUrl, { trackedTabIdentity = null } = {}) {
+export function selectNativeIndeedChallengeTab(tabs, challengeUrl, { trackedTabIdentity = null, sawTargetHostTab = false } = {}) {
   let target;
   try { target = new URL(String(challengeUrl || '')); } catch { return null; }
   if (!isStrictIndeedHttpsUrl(target.toString())) return null;
@@ -1919,10 +2045,34 @@ export function selectNativeIndeedChallengeTab(tabs, challengeUrl, { trackedTabI
   const sameHost = firstPartyTabs.filter(tab => {
     try { return new URL(String(tab.url)).hostname === target.hostname; } catch { return false; }
   });
-  const samePath = sameHost.filter(tab => {
+  // Indeed moves a solved page to a REGIONAL host (www.indeed.com → ca.indeed.com),
+  // and it can do that before any poll ever saw the challenge — a wall that
+  // auto-progresses, or one cleared inside the first second, never yields the
+  // 'pending' snapshot the tracked identity is armed from. Pinning selection to
+  // the requested hostname then leaves the poll permanently blind: no tab, no
+  // classification, and a window the user actually cleared ends as `closed`.
+  //
+  // Relaxing the hostname needs POSITIVE evidence that this handoff's own
+  // window is in the inventory we are reading, which `sawTargetHostTab` carries:
+  // some poll has seen a tab sitting at the REQUESTED host. Without it the
+  // relaxation is unsound, because only one Chrome instance answers an Apple
+  // event addressed to "Google Chrome" — when the handoff child is not that
+  // instance, the inventory is the user's ordinary Chrome, and a lone unrelated
+  // indeed.com tab there would be read as this handoff's window: classified
+  // 'cleared', SIGTERM'ing the child out from under a user still solving the
+  // real wall, and reporting a clearance nobody observed.
+  //
+  // Being strict costs nothing. A handoff whose window was never visible now
+  // selects nothing and settles 'closed', and 'closed' is INCONCLUSIVE to the
+  // caller — it falls through to the resume scrape, which is the authoritative
+  // proof of whether the challenge actually cleared. A wrong 'cleared' has no
+  // such recovery.
+  const hostPool = sameHost.length ? sameHost
+    : (sawTargetHostTab && firstPartyTabs.length === 1 ? firstPartyTabs : []);
+  const samePath = hostPool.filter(tab => {
     try { return new URL(String(tab.url)).pathname === target.pathname; } catch { return false; }
   });
-  const candidates = samePath.length ? samePath : sameHost;
+  const candidates = samePath.length ? samePath : hostPool;
   return candidates.find(tab => isNativeIndeedChallengePending(tab.url, tab.title))
     || candidates.find(tab => isNativeIndeedChallengeHardBlock(tab.url, tab.title))
     || candidates.find(tab => isNativeIndeedChallengeCleared(tab.url, tab.title))
@@ -2010,6 +2160,8 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         pollErrorCount: 0,
         lastPollAt: null,
         lastClassification: 'unknown',
+        sawFirstPartyTab: false,
+        firstPollError: null,
         lastTabUrl: null,
         lastTabTitle: null,
         terminalSource: null,
@@ -2033,6 +2185,8 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         pollErrorCount: 0,
         lastPollAt: null,
         lastClassification: 'unknown',
+        sawFirstPartyTab: false,
+        firstPollError: null,
         lastTabUrl: null,
         lastTabTitle: null,
         terminalSource: null,
@@ -2041,9 +2195,52 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       let nativeCloseInFlight = false;
       let childExitObserved = false;
       let unregisterShutdownCloser = () => {};
+      // What the AppleScript observer actually managed to SEE. Without this a
+      // handoff that ended `closed` is indistinguishable between "we watched the
+      // page and it never cleared" and "we never saw the window at all" (the
+      // osascript inventory failed, or no Indeed tab was ever in it). The caller
+      // reports the outcome, so the distinguishing facts have to travel with it
+      // — the auth-attempt diagnostic list is capped and can drop these rows.
+      let sawFirstPartyTab = false;
+      let firstPollErrorMessage = null;
+      // Distinct osascript failures already logged. The dedupe key is the
+      // NORMALIZED message getNativeChromeTabs returns, which is what we also
+      // store — comparing a raw message against a stored/bounded copy never
+      // matched, so a permanently denied Apple event re-logged its (then
+      // script-sized) message on every single poll and flooded the ring buffer
+      // that holds the rest of this handoff's evidence. Capped so a message
+      // that varies per poll cannot reopen the same flood by another route.
+      const loggedPollErrors = new Set();
+      // Positive evidence that the window this handoff opened is in the
+      // inventory we can read: some poll saw a tab AT the requested host. It
+      // gates the hostname relaxation in selectNativeIndeedChallengeTab — see
+      // the reasoning there.
+      const requestedTarget = new URL(url);
+      let sawTargetHostTab = false;
       const updateNativeChallenge = (patch = {}) => {
         nativeChallenge = { ...nativeChallenge, ...patch };
         updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', nativeChallenge });
+      };
+      const pollEvidence = () => ({
+        pollCount: nativeChallenge.pollCount,
+        pollErrorCount: nativeChallenge.pollErrorCount,
+        sawFirstPartyTab,
+        lastClassification: nativeChallenge.lastClassification,
+        firstPollError: firstPollErrorMessage,
+        trackedTabIdentity,
+      });
+      // One line, only observations: counts of what ran, what errored, and
+      // whether an indeed.com tab was ever in the inventory. It must never
+      // assert WHY — a missing tab and a denied Apple event look identical here.
+      const pollEvidenceSummary = () => {
+        const parts = [`${nativeChallenge.pollCount} tab poll(s)`];
+        if (nativeChallenge.pollErrorCount > 0) {
+          parts.push(`${nativeChallenge.pollErrorCount} failed to read Chrome's tab inventory${firstPollErrorMessage ? ` (first: ${firstPollErrorMessage})` : ''}`);
+        }
+        parts.push(sawFirstPartyTab
+          ? `last page state observed: ${nativeChallenge.lastClassification}`
+          : 'no indeed.com tab was ever visible to the observer');
+        return parts.join('; ');
       };
       const settle = async (result) => {
         if (settled) return;
@@ -2053,8 +2250,13 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         if (sender) sender.removeListener('destroyed', onSenderDestroyed);
         if (signal) signal.removeEventListener('abort', onAbort);
         unregisterShutdownCloser();
+        const evidence = pollEvidence();
+        const evidenceSummary = pollEvidenceSummary();
+        if (result?.result !== 'cleared') {
+          logger.warn(`[StealthBrowser] Native Indeed challenge handoff ended '${result?.result}' — ${evidenceSummary}`);
+        }
         finishAuthWindowDiagnostic(diagnosticPlatformId, { ...result, mode: 'native-chrome' });
-        resolve({ nativeChrome: true, ...result });
+        resolve({ nativeChrome: true, ...result, pollEvidence: evidence, pollEvidenceSummary: evidenceSummary });
       };
       const requestNativeClose = async (result) => {
         if (settled || nativeCloseInFlight || childExitObserved) return;
@@ -2086,6 +2288,11 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         settled = true;
         if (signal) signal.removeEventListener('abort', onAbort);
         unregisterShutdownCloser();
+        // This rejection releases the shared-profile reservation in the caller's
+        // `finally`. A Chrome that DID spawn and then errored would otherwise
+        // keep owning browser-data with nothing tracking it, and the next
+        // Puppeteer launch would hit the profile lock instead.
+        try { if (child.pid && !isBrowserProcessExited(child)) child.kill('SIGKILL'); } catch { /* already gone */ }
         finishAuthWindowDiagnostic(diagnosticPlatformId, { result: 'launch-error', error: error?.message || String(error), mode: 'native-chrome' });
         reject(error);
       });
@@ -2104,6 +2311,10 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         // because it had not survived the additional stability window yet.
         // Conversely, a bare close remains `closed`: a profile write alone is
         // not proof that Cloudflare accepted the verification.
+        // Chrome is ALREADY gone on this path, so `waitedMs` below is time spent
+        // watching the profile after the close, not a wait taken before it. Both
+        // settles stamp 'post-close-observe' so the report cannot present it as a
+        // pre-close flush the app chose to take.
         void observeProfileCookieCommitAfterClose(userDataDir, cookieStoreBaseline).then(({ committed, waitedMs }) => {
           const exitDisposition = nativeIndeedChallengeExitDisposition({
             cleanObservationAtExit, startedAt, cookieStoreCommitted: committed,
@@ -2126,11 +2337,15 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
             void settle({
               result: 'cleared', currentUrl: cleanObservationAtExit.url, title: cleanObservationAtExit.title,
               exitCode: code, signal, closeDisposition: 'user-close-after-clean-observation',
-              processExitObserved: true, cookieFlushMs: waitedMs, cookieStoreCommitted: committed,
+              processExitObserved: true, cookieFlushMs: waitedMs, cookieFlushPhase: 'post-close-observe',
+              cookieStoreCommitted: committed,
             });
             return;
           }
-          void settle({ result: 'closed', exitCode: code, signal, processExitObserved: true, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+          void settle({
+            result: 'closed', exitCode: code, signal, processExitObserved: true,
+            cookieFlushMs: waitedMs, cookieFlushPhase: 'post-close-observe', cookieStoreCommitted: committed,
+          });
         }).catch(error => {
           updateNativeChallenge({ terminalSource: 'child-exit', postCloseVerify: { outcome: 'verify-error', reason: String(error?.message || error).slice(0, 180) } });
           void settle({ result: 'closed', exitCode: code, signal, processExitObserved: true });
@@ -2139,13 +2354,32 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       // Frozen-page tracking for the stall rule above.
       let lastSeenSignature = null;
       let signatureUnchangedSince = 0;
+      // Log-rate state: the tab's URL is logged on change (like the native login
+      // window does), and "no tab visible" on a heartbeat.
+      let lastLoggedTabUrl = null;
+      let lastNoTabHeartbeatAt = 0;
       const runPoll = createNonOverlappingRunner(async () => {
         if (settled || childExitObserved) return;
         const tabs = await getNativeChromeTabs();
         if (settled || childExitObserved) return;
         const pollError = tabs.find(tab => tab?.error)?.error || null;
-        const tab = selectNativeIndeedChallengeTab(tabs, url, { trackedTabIdentity });
+        // Arm the relaxation gate BEFORE selecting, so a poll that is the first
+        // to see the requested host can already use the widened pool. Only a
+        // strict first-party Indeed URL at the exact requested hostname counts.
+        if (!sawTargetHostTab) {
+          sawTargetHostTab = tabs.some(candidate => {
+            try {
+              const parsed = new URL(String(candidate?.url || ''));
+              return isStrictIndeedHttpsUrl(parsed.toString()) && parsed.hostname === requestedTarget.hostname;
+            } catch {
+              return false;
+            }
+          });
+        }
+        const tab = selectNativeIndeedChallengeTab(tabs, url, { trackedTabIdentity, sawTargetHostTab });
         const classification = tab ? classifyNativeIndeedChallengeTab(tab) : 'unknown';
+        if (tab) sawFirstPartyTab = true;
+        if (pollError && !firstPollErrorMessage) firstPollErrorMessage = pollError;
         updateNativeChallenge({
           pollCount: nativeChallenge.pollCount + 1,
           pollErrorCount: nativeChallenge.pollErrorCount + (pollError ? 1 : 0),
@@ -2155,12 +2389,70 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           lastTabTitle: tab?.title || null,
           noMatchingTab: !tab,
           nativePollError: pollError,
+          // The two facts that decide how a 'closed' handoff should be read.
+          // They live on the durable record too, because the live diagnostic is
+          // cleared at settle and the auth-attempt list is what the report has
+          // left: without them a denied Apple event and an observer that watched
+          // a real challenge page forty times both render as 'last=unknown'.
+          sawFirstPartyTab,
+          firstPollError: firstPollErrorMessage,
         });
-        if (!tab) return;
+        // A failed tab inventory is the one failure that makes this whole
+        // observer blind, and it used to be recorded ONLY in a capped diagnostic
+        // list — the window then ended `closed` with nothing in the log to say
+        // the poll never saw anything. Log the message itself (osascript reports
+        // an Automation-permission denial, a busy-Chrome timeout and a
+        // not-scriptable Chrome with different text), once per distinct message.
+        // getNativeChromeTabs already normalized and bounded it, so the message
+        // compared here is byte-identical to the one stored above.
+        if (pollError && !loggedPollErrors.has(pollError) && loggedPollErrors.size < NATIVE_POLL_ERROR_LOG_VARIANT_CAP) {
+          loggedPollErrors.add(pollError);
+          logger.warn(`[StealthBrowser] Native Indeed challenge tab inventory failed: ${pollError} — the handoff cannot observe the window while this persists`);
+        }
+        if (!tab) {
+          // Same reason: "no indeed.com tab in the inventory" is a decisive
+          // observation and was previously invisible. Heartbeat it instead of
+          // logging every second.
+          if (Date.now() - lastNoTabHeartbeatAt > AUTH_HEARTBEAT_LOG_MS) {
+            lastNoTabHeartbeatAt = Date.now();
+            logger.info(`[StealthBrowser] Native Indeed challenge poll sees no indeed.com tab yet (${tabs.filter(t => !t?.error).length} Chrome tab(s) in the inventory, ${Math.round((Date.now() - startedAt) / 1000)}s open)`);
+          }
+          return;
+        }
         const tabIdentity = nativeIndeedChallengeTabIdentity(tab);
-        if (!trackedTabIdentity && classification === 'pending' && tabIdentity) {
+        // Latch onto the tab this handoff is watching so a later REGIONAL
+        // redirect (www.indeed.com → ca.indeed.com) stays attributable.
+        //
+        // Catching a 'pending' snapshot is not required: a wall that
+        // auto-progresses, or one solved between two polls, never produces one,
+        // and a pending-only latch then left the poll pinned to a hostname the
+        // page had already left. But the latch still needs a POSITIVE tie to
+        // this handoff, because it is what the relaxed hostname selection rides
+        // on afterwards — latching onto whatever tab happened to be selected
+        // once the settle delay had elapsed would let a foreign indeed.com tab
+        // become "this handoff's window" for the rest of the run. So: either
+        // the tab is showing a challenge (only this handoff opened one), or it
+        // is still at the host+path we requested.
+        //
+        // The settle delay remains on top of that — it is the same gate the
+        // clear path uses, and it keeps the very first probe (fired before this
+        // window can exist) from latching at all.
+        const atRequestedLocation = (() => {
+          try {
+            const parsed = new URL(String(tab.url || ''));
+            return parsed.hostname === requestedTarget.hostname && parsed.pathname === requestedTarget.pathname;
+          } catch {
+            return false;
+          }
+        })();
+        if (!trackedTabIdentity && tabIdentity && (classification === 'pending' || atRequestedLocation)
+          && Date.now() - startedAt >= NATIVE_CHALLENGE_SETTLE_MS) {
           trackedTabIdentity = tabIdentity;
           updateNativeChallenge({ trackedTabIdentity });
+        }
+        if (tab.url && tab.url !== lastLoggedTabUrl) {
+          lastLoggedTabUrl = tab.url;
+          logger.info(`[StealthBrowser] Native Indeed challenge tab now ${tab.url} [${classification}] "${tab.title || 'untitled'}"`);
         }
         updateAuthWindowDiagnostic(diagnosticPlatformId, { mode: 'native-chrome', currentUrl: tab.url || '', title: tab.title || '', nativePollError: pollError });
         if (classification === 'hard-block') {
@@ -2207,9 +2499,21 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
           // Same checkpoint rule as the native login window: a SIGTERM'd Chrome
           // can drop the clearance cookie the user just earned, which would send
           // the resumed scrape straight back into the challenge.
+          // The interval AND the open-window ceiling have both been disarmed
+          // above, so this chain is now the only thing that can settle the
+          // handoff: a rejection here would leave the promise pending forever —
+          // an un-cancellable Solve holding the shared browser profile. Close on
+          // the observed clearance anyway and report the checkpoint failure.
           void waitForNativeProfileCookieCommit(userDataDir, 'indeed challenge handoff').then(({ committed, waitedMs }) => {
             if (settled) return;
-            void requestNativeClose({ result: 'cleared', currentUrl: tab.url, title: tab.title, cookieFlushMs: waitedMs, cookieStoreCommitted: committed });
+            void requestNativeClose({
+              result: 'cleared', currentUrl: tab.url, title: tab.title,
+              cookieFlushMs: waitedMs, cookieFlushPhase: 'pre-close-checkpoint', cookieStoreCommitted: committed,
+            });
+          }).catch(error => {
+            logger.warn(`[StealthBrowser] Native Indeed challenge cookie-checkpoint wait failed: ${error?.message || error} — closing on the observed clearance`);
+            if (settled) return;
+            void requestNativeClose({ result: 'cleared', currentUrl: tab.url, title: tab.title, cookieStoreCommitted: false, cookieCheckpointError: String(error?.message || error).slice(0, 180) });
           });
         }
       });

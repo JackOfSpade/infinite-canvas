@@ -1,6 +1,9 @@
 import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
+// Imported at the source: the shared test-dependencies barrel is edited by
+// other areas, and this helper is only exercised here.
+import { normalizeNativeTabQueryError } from '../../electron/ipc/browser/authWindows.js';
 
 export default [
 {
@@ -533,6 +536,50 @@ export default [
     },
   },
 {
+    // The bug report shows cookieFlushMs under one "Pre-close wait ms" heading,
+    // but the child-exit path measures the profile checkpoint AFTER Chrome is
+    // already gone. Without a phase stamped by the producer, a post-close
+    // observation reads as a wait the app chose to take before closing — the
+    // renderer has no field left to tell them apart. Pin the vocabulary: it is
+    // the contract the report renderer reads.
+    name: 'buildAuthAttemptRecord: cookieFlushPhase records WHEN the flush was measured',
+    run: () => {
+      for (const phase of ['pre-close-fixed', 'pre-close-checkpoint', 'post-close-observe']) {
+        const record = buildAuthAttemptRecord({ platformId: 'indeed', cookieFlushMs: 1800, cookieFlushPhase: phase });
+        assert(record.cookieFlushPhase === phase && record.cookieFlushMs === 1800,
+          `cookieFlushPhase '${phase}' survives into the durable record → ${record.cookieFlushPhase}`);
+      }
+      // Allowlisted like every other field in the record: an unrecognised phase
+      // is dropped rather than forwarded, so the renderer can only ever receive
+      // a value this file actually produces.
+      for (const bogus of ['post-close', 'PRE-CLOSE-FIXED', 'whenever', 42, { phase: 'pre-close-fixed' }, '']) {
+        const record = buildAuthAttemptRecord({ platformId: 'indeed', cookieFlushMs: 1800, cookieFlushPhase: bogus });
+        assert(record.cookieFlushPhase === null,
+          `an unrecognised cookieFlushPhase (${JSON.stringify(bogus)}) is nulled, not forwarded → ${JSON.stringify(record.cookieFlushPhase)}`);
+      }
+      assert(buildAuthAttemptRecord({ platformId: 'indeed', cookieFlushMs: 1800 }).cookieFlushPhase === null,
+        'a producer that stamped no phase reports null rather than a guessed one');
+
+      // The producers are private to authWindows.js, so pin them at the source.
+      const authSrc = fs.readFileSync(path.join('electron', 'ipc', 'browser', 'authWindows.js'), 'utf8');
+      // The login window's fixed pre-close sleep is SKIPPED when no login was
+      // confirmed. Reporting 0 there claims a wait was measured at zero; the
+      // only honest value for a wait that never happened is null.
+      assert(authSrc.includes('const cookieFlushMs = loginConfirmed ? NATIVE_LOGIN_COOKIE_FLUSH_MS : null;'),
+        'the login close path must report a null cookieFlushMs when it took no flush wait, not 0');
+      assert(authSrc.includes("cookieFlushPhase: 'pre-close-fixed'"),
+        "the login window's fixed pre-close sleep must stamp cookieFlushPhase: 'pre-close-fixed'");
+      // Every producer that reports a duration must say which phase it measured.
+      // Catches a future cookieFlushMs write added without a phase — which would
+      // land in the report's pre-close column with no way to tell it apart.
+      const unstamped = authSrc.split(/\r?\n/).filter(line =>
+        /cookieFlushMs:\s/.test(line) && !line.includes('diag.cookieFlushMs') && !line.includes('cookieFlushPhase'));
+      assert(unstamped.length === 0,
+        `every cookieFlushMs producer must stamp cookieFlushPhase on the same write → unstamped: ${JSON.stringify(unstamped.map(l => l.trim()))}`);
+      return { ok: true };
+    },
+  },
+{
     name: 'auth browser process-exit wait observes healthy closes and already-exited children',
     run: async () => {
       const listeners = new Set();
@@ -622,6 +669,45 @@ export default [
       };
       const tabIdentity = nativeIndeedChallengeTabIdentity(initialChallengeTab);
       assert(tabIdentity === '4:1', 'native tab identity is a bounded window/tab pair');
+      // AppleScript orders `windows` front-to-back, so the index pair renumbers
+      // whenever the user focuses another Chrome window. Chrome's own stable tab
+      // id wins whenever the inventory carries it; indexes stay as the fallback.
+      assert(nativeIndeedChallengeTabIdentity({ ...initialChallengeTab, tabId: '2125944271' }) === 'id:2125944271',
+        'a stable Chrome tab id is preferred over the front-to-back window/tab indexes');
+      const followedById = selectNativeIndeedChallengeTab([
+        { windowIndex: 1, tabIndex: 1, tabId: '77', url: 'https://www.indeed.com/jobs?q=old', title: 'Old search | Indeed' },
+        { windowIndex: 2, tabIndex: 3, tabId: '2125944271', url: 'https://ca.indeed.com/jobs?q=architect', title: 'Software Architect Jobs | Indeed' },
+      ], initialChallengeTab.url, { trackedTabIdentity: 'id:2125944271' });
+      assert(followedById?.tabId === '2125944271',
+        'the tracked tab is followed by its stable id even after its window/tab indexes move');
+      // A challenge that auto-progresses (or is solved between two polls) never
+      // yields the 'pending' snapshot the tracked identity is armed from, and
+      // Indeed moves the solved page to a regional host. The hostname pin may
+      // be relaxed for that — but ONLY once some poll has actually seen a tab at
+      // the requested host, which is the only positive evidence that the window
+      // this handoff opened is in the inventory answering our Apple events.
+      const soloIndeedInventory = [
+        { windowIndex: 1, tabIndex: 1, tabId: '9', url: 'https://ca.indeed.com/jobs?q=architect', title: 'Software Architect Jobs | Indeed' },
+        { windowIndex: 1, tabIndex: 2, tabId: '10', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox' },
+      ];
+      const regionallyRedirected = selectNativeIndeedChallengeTab(
+        soloIndeedInventory, 'https://www.indeed.com/jobs?q=architect', { sawTargetHostTab: true });
+      assert(regionallyRedirected?.tabId === '9' && classifyNativeIndeedChallengeTab(regionallyRedirected) === 'cleared',
+        'a handoff window that WAS seen at the requested host is still followed through a regional redirect the poll never saw start');
+      // The regression this gate exists for: only one Chrome instance answers an
+      // Apple event addressed to "Google Chrome". When the handoff child is not
+      // that instance, this inventory is the user's ordinary Chrome and tab 9 is
+      // their own unrelated Indeed tab. Selecting it would classify 'cleared',
+      // SIGTERM the child while the user is still solving the real wall, and
+      // report a clearance nobody observed. Selecting nothing settles 'closed',
+      // which falls through to the resume scrape — so strictness costs nothing.
+      assert(selectNativeIndeedChallengeTab(soloIndeedInventory, 'https://www.indeed.com/jobs?q=architect') === null,
+        'a handoff whose window was never seen at the requested host selects nothing, however lonely the foreign Indeed tab is');
+      assert(selectNativeIndeedChallengeTab([
+        { windowIndex: 1, tabIndex: 1, tabId: '9', url: 'https://ca.indeed.com/jobs?q=architect', title: 'Software Architect Jobs | Indeed' },
+        { windowIndex: 1, tabIndex: 2, tabId: '10', url: 'https://secure.indeed.com/settings/account', title: 'Account settings' },
+      ], 'https://www.indeed.com/jobs?q=architect', { sawTargetHostTab: true }) === null,
+      'with two Indeed tabs and none at the requested host the selection stays strict — a restored tab can never clear a handoff');
       const redirected = selectNativeIndeedChallengeTab([
         { windowIndex: 1, tabIndex: 1, url: 'https://www.indeed.com/jobs?q=old', title: 'Old search | Indeed' },
         { windowIndex: 4, tabIndex: 1, url: 'https://ca.indeed.com/jobs?q=architect', title: 'Software Architect Jobs | Indeed' },
@@ -673,6 +759,138 @@ export default [
         'a clean first-party tab captured before the child exits resumes the handoff even if the stability timer had not elapsed');
       assert(bareClose.result === 'closed' && bareClose.postCloseOutcome === 'profile-checkpoint-only',
         'a profile checkpoint after a manual close is diagnostic evidence, not clearance success without a clean tab snapshot');
+      return { ok: true };
+    },
+  },
+{
+    // The poll loop is a closure over a live Chrome child, so the two rules that
+    // decide WHICH tab a handoff is allowed to believe in are pinned at the
+    // source. Both exist for the same failure: only ONE Chrome instance answers
+    // an Apple event addressed to "Google Chrome", so the inventory a handoff
+    // reads is not necessarily the inventory its own window is in.
+    name: 'Native Indeed challenge poll only widens its tab search on evidence of its own window',
+    run: () => {
+      const authSrc = fs.readFileSync(path.join('electron', 'ipc', 'browser', 'authWindows.js'), 'utf8');
+      assert(authSrc.includes('selectNativeIndeedChallengeTab(tabs, url, { trackedTabIdentity, sawTargetHostTab })'),
+        'the poll must pass its own observation of the requested host into the selection, not let it default');
+      // Ordering is load-bearing: the poll that is the FIRST to see the
+      // requested host must already be allowed to use the widened pool.
+      const selectAt = authSrc.indexOf('selectNativeIndeedChallengeTab(tabs, url, {');
+      const armAt = authSrc.indexOf('if (!sawTargetHostTab) {');
+      assert(armAt > 0 && selectAt > armAt,
+        'sawTargetHostTab must be armed from the fresh inventory BEFORE that inventory is selected from');
+      // The latch is what the relaxed selection rides on afterwards, so it needs
+      // a positive tie to this handoff too. Latching on any tab that happened to
+      // be selected after the settle delay would promote a foreign indeed.com
+      // tab into "this handoff's window" for the rest of the run.
+      assert(/if \(!trackedTabIdentity && tabIdentity && \(classification === 'pending' \|\| atRequestedLocation\)/.test(authSrc),
+        "the tracked-tab latch must require a challenge classification or the requested host+path, not merely the settle delay");
+      assert(!/if \(!trackedTabIdentity && tabIdentity && Date\.now\(\) - startedAt >= NATIVE_CHALLENGE_SETTLE_MS\)/.test(authSrc),
+        'the settle-delay-only latch admitted an arbitrary Indeed tab and must not come back');
+      // Dedupe by the value actually STORED. Comparing a raw execFile message
+      // against a stored/bounded copy never matched, so a permanently denied
+      // Apple event re-logged ~500 chars of AppleScript on every poll.
+      assert(authSrc.includes('if (pollError && !loggedPollErrors.has(pollError)'),
+        'the tab-inventory failure log must dedupe against the normalized message it stores');
+      assert(!authSrc.includes('pollError !== firstPollErrorMessage'),
+        'the raw-vs-sliced comparison that re-logged on every poll must not come back');
+      return { ok: true };
+    },
+  },
+{
+    // execFile's rejection reads `Command failed: /usr/bin/osascript -e <the
+    // whole ~500-char AppleScript>` with the real stderr appended. Stored raw
+    // and cut to 200 chars, what survived was the script the reader already has
+    // — and the reason, the only part that identifies the failure, was dropped.
+    name: 'osascript tab-inventory failures keep the reason, mark the cut, and dedupe',
+    run: () => {
+      const script = '\ntell application "Google Chrome"\n  set output to ""\n  return output\nend tell';
+      const denial = 'execution error: Not authorized to send Apple events to Google Chrome. (-1743)';
+      const raw = `Command failed: /usr/bin/osascript -e ${script}\n${denial}\n`;
+      const normalized = normalizeNativeTabQueryError(raw, { echoedScript: script });
+      assert(normalized === denial,
+        `the echoed script is dropped and the osascript reason survives → ${JSON.stringify(normalized)}`);
+      assert(!normalized.includes('tell application') && !normalized.includes('Command failed'),
+        'neither the command echo nor the AppleScript source may reach the stored message');
+      // Idempotence is what makes the poll-loop dedupe work at all: the message
+      // compared on poll N+1 must equal the one stored on poll N byte for byte.
+      assert(normalizeNativeTabQueryError(normalized, { echoedScript: script }) === normalized,
+        'normalizing an already-normalized message returns it unchanged');
+      // Any remaining cut is marked. An unmarked slice reads as a whole reason,
+      // and a reader cannot tell a short message from the head of a long one.
+      const long = normalizeNativeTabQueryError(`Command failed: /usr/bin/osascript -e ${script}\n${'x'.repeat(900)}`, { echoedScript: script });
+      assert(long.length <= 200 && long.endsWith('… (truncated)'),
+        `an over-long reason is bounded and explicitly marked as truncated → ${JSON.stringify(long.slice(-30))}`);
+      assert(normalizeNativeTabQueryError(long, { echoedScript: script }) === long,
+        'a truncated message is stable under a second normalization, so the dedupe still matches');
+      // Without the script to strip by identity, the fixed preamble still goes.
+      assert(normalizeNativeTabQueryError('Command failed: /usr/bin/osascript -e foo\nreal reason') === 'foo real reason',
+        'the osascript preamble is stripped even when the caller passed no script to match');
+      // Errors that never carried the preamble are left intact.
+      assert(normalizeNativeTabQueryError('stdout maxBuffer length exceeded') === 'stdout maxBuffer length exceeded',
+        'a non-execFile-shaped message is passed through unchanged');
+      // Nothing left is reported as nothing, not as an empty string that would
+      // render as a blank reason — the caller substitutes the lifecycle facts.
+      assert(normalizeNativeTabQueryError(`Command failed: /usr/bin/osascript -e ${script}\n`, { echoedScript: script }) === null,
+        'an error whose entire text was the echoed script yields null rather than an empty reason');
+      assert(normalizeNativeTabQueryError('') === null && normalizeNativeTabQueryError(null) === null,
+        'an absent message yields null');
+      // The producer must hand the poll a message that is already normalized —
+      // otherwise the stored value and the dedupe key diverge again.
+      const authSrc = fs.readFileSync(path.join('electron', 'ipc', 'browser', 'authWindows.js'), 'utf8');
+      assert(authSrc.includes("normalizeNativeTabQueryError(error?.message ?? String(error), { echoedScript: script })"),
+        'getNativeChromeTabs must normalize with the exact script it executed, so the echo is removed by identity');
+      return { ok: true };
+    },
+  },
+{
+    // A handoff that ends 'closed' is only actionable if the report can say
+    // whether the observer saw ANYTHING. Both of these live on the durable
+    // record because the live diagnostic is cleared at settle.
+    name: 'buildAuthAttemptRecord: native challenge retains what the observer could see',
+    run: () => {
+      const watched = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'closed', mode: 'native-chrome',
+        nativeChallenge: {
+          initialChallengeObserved: true, pollCount: 40, pollErrorCount: 0,
+          sawFirstPartyTab: true, firstPollError: null, lastClassification: 'pending',
+        },
+      });
+      assert(watched.nativeChallenge?.sawFirstPartyTab === true && watched.nativeChallenge?.firstPollError === null,
+        'an observer that watched a real challenge page reports it saw a first-party tab');
+      const blind = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'closed', mode: 'native-chrome',
+        nativeChallenge: {
+          pollCount: 40, pollErrorCount: 40, sawFirstPartyTab: false,
+          firstPollError: 'execution error: Not authorized to send Apple events to Google Chrome. (-1743)',
+          lastClassification: 'unknown',
+        },
+      });
+      assert(blind.nativeChallenge?.sawFirstPartyTab === false
+        && blind.nativeChallenge?.firstPollError?.includes('-1743'),
+      'a denied Apple event is distinguishable from a watched challenge instead of collapsing to last=unknown');
+      // Same allowlist discipline as every neighbouring field: bounded, single
+      // line, and never a guessed boolean.
+      const messy = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'closed', mode: 'native-chrome',
+        nativeChallenge: { sawFirstPartyTab: 'yes', firstPollError: `line1\nline2\t${'z'.repeat(400)}` },
+      });
+      assert(messy.nativeChallenge?.sawFirstPartyTab === null,
+        'a non-boolean sawFirstPartyTab is reported as unknown rather than coerced into a claim');
+      assert(messy.nativeChallenge?.firstPollError.length <= 200
+        && !/[\r\n\t]/.test(messy.nativeChallenge.firstPollError),
+      'firstPollError is single-line and length-capped so it cannot break the report table');
+      const absent = buildAuthAttemptRecord({
+        platformId: 'indeed-native-challenge', result: 'closed', mode: 'native-chrome',
+        nativeChallenge: { pollCount: 3 },
+      });
+      assert(absent.nativeChallenge?.sawFirstPartyTab === null && absent.nativeChallenge?.firstPollError === null,
+        'a producer that stamped neither field reports null for both');
+      // The producer side: the poll must stamp them through the same update that
+      // writes the rest of the evidence, or the durable record never sees them.
+      const authSrc = fs.readFileSync(path.join('electron', 'ipc', 'browser', 'authWindows.js'), 'utf8');
+      assert(/sawFirstPartyTab,\n\s+firstPollError: firstPollErrorMessage,\n\s+\}\);/.test(authSrc),
+        'the poll loop must stamp sawFirstPartyTab and firstPollError onto the native-challenge record');
       return { ok: true };
     },
   },

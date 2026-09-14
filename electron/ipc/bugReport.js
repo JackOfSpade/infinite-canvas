@@ -131,6 +131,23 @@ export function buildNativeChallengeHistoryEvidence(attempt = {}) {
   if (Number.isFinite(native.pollErrorCount) && native.pollErrorCount > 0) {
     bits.push(`poll errors=${Math.max(0, Math.round(native.pollErrorCount))}`);
   }
+  // `polls=40; last=unknown` cannot separate "the observer watched a real
+  // challenge page forty times and it never cleared" from "the observer never
+  // had a tab to watch" — Chrome's Apple-event permission denied, or no
+  // indeed.com tab ever in the inventory. Both render identically, and that
+  // ambiguity is the entire reason this evidence exists, so print the two facts
+  // authWindows now records. Absent on a record that predates the fields: print
+  // nothing rather than a `no`, because "not recorded" is not an observation of
+  // absence.
+  if (typeof native.sawFirstPartyTab === 'boolean') {
+    bits.push(`first-party tab seen=${native.sawFirstPartyTab ? 'yes' : 'no'}`);
+  }
+  // 200 is the producer's own cap on this field (authWindows slices it there
+  // after collapsing whitespace), so rendering at the same width means this
+  // renderer can never add a second, unmarked cut on top of the record's: what
+  // prints here is exactly what the record retains.
+  const firstPollError = nativeChallengeText(native.firstPollError, 200);
+  if (firstPollError) bits.push(`first poll error=${firstPollError}`);
   const classification = nativeChallengeText(native.lastClassification, 50);
   if (classification) bits.push(`last=${classification}`);
   const tabUrl = redactNativeChallengeUrl(native.lastTabUrl);
@@ -152,6 +169,212 @@ export function buildNativeChallengeHistoryEvidence(attempt = {}) {
     bits.push(`post-close=${outcome}${status}${reason ? ` (${reason})` : ''}${finalUrl ? ` → ${finalUrl}` : ''}`);
   }
   return bits.length ? ` · native: ${bits.join('; ')}` : '';
+}
+
+// authWindows.js already bounds the completed-window ring (its AUTH_HISTORY_CAP
+// keeps the newest 16 completed auth windows). A SECOND, smaller cap inside a
+// renderer therefore buys no size safety — it only decides WHICH of the <=16
+// retained records a report is allowed to show, and that is exactly what cost
+// the Indeed native-handoff incident its evidence: the ring held 15 records, so
+// nothing had been evicted upstream, yet a blind newest-12 slice pushed all
+// three `indeed-native-challenge` rows out behind 12 routine `captcha:` rows —
+// emptying the ONLY render site of buildNativeChallengeHistoryEvidence at
+// filter code FULL, the most verbose setting there is.
+//
+// The selection is widened to the whole retained ring rather than reserving a
+// lane for "interesting" records: it costs at most four extra lines, there is
+// no selection rule that can itself pick the wrong records, and strict
+// newest-first ordering — which every row's "Xs ago" reading depends on —
+// survives by construction instead of by a merge that has to re-sort a union.
+// This mirrors the non-exported AUTH_HISTORY_CAP; scripts/tests/job-diagnostics.js
+// pins the two together so this cannot silently drift back into re-capping the
+// ring below what the ring retains.
+const AUTH_HISTORY_RING_CAP = 16;
+
+/**
+ * Newest-first selection over an auth-window history, with COMPUTED counts.
+ *
+ * Callers must not assume how many rows they got: the truncation marker below
+ * may only state numbers that were actually measured here, and `retained` is
+ * the length of the list as handed in — never a constant. PURE for tests.
+ */
+export function selectAuthHistoryForReport(history, limit = AUTH_HISTORY_RING_CAP) {
+  const retainedRows = (Array.isArray(history) ? history : []).filter(Boolean);
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : retainedRows.length;
+  const rows = retainedRows.slice(-cap).reverse();
+  return {
+    rows,
+    shown: rows.length,
+    retained: retainedRows.length,
+    dropped: Math.max(0, retainedRows.length - rows.length),
+  };
+}
+
+/**
+ * Truncation marker for a rendered auth-history list.
+ *
+ * Emitted ONLY when rows were actually dropped, and worded so that nothing in
+ * it can be falsified: both counts come from selectAuthHistoryForReport's
+ * measurement of this very render, and the ring bound is the one this process
+ * applies upstream. A complete list prints nothing — a marker on a list that
+ * shows everything it holds would read as evidence of a loss that never
+ * happened, which is the same failure in the other direction as the prose this
+ * replaced ("Every completed login/captcha window") claiming completeness on a
+ * list that was silently cut.
+ */
+export function formatAuthHistoryTruncationNote(selection, label = 'record(s)') {
+  if (!selection || !(selection.dropped > 0)) return '';
+  return `\n_(Truncated: showing the ${selection.shown} newest of ${selection.retained} ${label} this process still retains; ${selection.dropped} older retained record(s) are not shown here. The session ring keeps at most ${AUTH_HISTORY_RING_CAP} completed auth windows, so anything older than that was already discarded upstream and is not counted in either number.)_\n`;
+}
+
+/**
+ * "### Completed auth-browser close lifecycle" — the close/checkpoint table.
+ *
+ * Exported and pure so a test can drive it with a fixture ring: the live
+ * auth-window ring has no seam a report-level test can seed, which is why the
+ * column contract below (and the mislabelled pre-close column it replaces)
+ * went unguarded.
+ */
+export function buildAuthLifecycleTableMarkdown(history) {
+  // Basename / trailing-slice truncation — keeps the lifecycle table readable
+  // while still distinguishing "which binary" and "which profile dir" a login
+  // window used, the two facts needed to tell whether it could share cookies
+  // with the scrape that read the session back afterward (see PPID / Indeed:
+  // a native login and a Puppeteer-launched scrape use different OSCrypt keys
+  // even on the SAME userDataDir when their executable differs).
+  const execLabel = (value) => value ? path.basename(String(value)) : '—';
+  const profileLabel = (value) => {
+    const s = String(value || '');
+    if (!s) return '—';
+    return s.length > 40 ? `…${s.slice(-40)}` : s;
+  };
+  const retainedRecords = (Array.isArray(history) ? history : []).filter(Boolean);
+  const isLifecycleMode = (item) => item?.mode === 'puppeteer-visible' || item?.mode === 'native-chrome';
+  const selection = selectAuthHistoryForReport(retainedRecords.filter(isLifecycleMode));
+  // This table renders TWO of the ring's modes, so an empty body is not evidence
+  // that no auth window completed: a session whose only visible windows were
+  // `captcha-resolve` windows retains those records and still empties this
+  // table. Saying "no completed auth window this process" there asserts an
+  // absence the report did not observe, on the exact table a reader consults to
+  // decide whether a window ever opened. Count what the filter actually excluded
+  // and name the modes it saw, so the empty state describes the filter rather
+  // than the ring.
+  const excludedRecords = retainedRecords.filter(item => !isLifecycleMode(item));
+  const excludedModes = Array.from(new Set(excludedRecords.map(item => (
+    item?.mode ? String(item.mode).slice(0, 40) : 'no mode recorded'
+  )))).slice(0, 6);
+  const lifecycleRows = selection.rows.map(item => {
+    const cookies = (Array.isArray(item.authCookiesBeforeClose) ? item.authCookiesBeforeClose : [])
+      .map(cookie => `${cookie.name || '?'}:${cookie.persistent ? 'persistent' : 'session'}${cookie.expiresAt ? ` exp=${new Date(cookie.expiresAt * 1000).toISOString()}` : ''}`)
+      .join(', ') || 'none captured';
+    const loginDetected = item.loginDetected == null
+      ? (item.mode === 'native-chrome' && String(item.platformId || '').endsWith('-native-challenge')
+          ? `n/a (challenge ${item.result || 'completed'})`
+          : 'not recorded')
+      : (item.loginDetected ? 'yes' : 'no');
+    // cookieFlushMs alone cannot say WHEN it was measured, and the old column
+    // header ("Pre-close wait ms") asserted a phase for every producer: on the
+    // child-exit path the number is a POST-close observation of the profile's
+    // cookie store, i.e. Chrome was already gone when it was taken. Print the
+    // stamped phase beside the number and, when no phase is stamped (records
+    // written before the producers stamped one), say that rather than name a
+    // phase this record never carried.
+    const flushMs = Number.isFinite(item.cookieFlushMs) ? item.cookieFlushMs : null;
+    const flushPhase = item.cookieFlushPhase ? String(item.cookieFlushPhase) : null;
+    const flushCell = `${flushMs ?? '—'} (${flushPhase ? `phase ${flushPhase}` : 'phase not recorded'})`;
+    return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${loginDetected} | ${flushCell} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
+  }).join('\n');
+  // A Markdown table cell cannot contain a literal `|`, so the mode list is
+  // comma-joined and this sentence carries none.
+  const emptyLifecycleCell = retainedRecords.length === 0
+    ? "this process's auth-window ring retains no completed auth window at all"
+    : `no retained record has mode \`puppeteer-visible\` or \`native-chrome\`, the two modes this table renders; the ${excludedRecords.length} other retained record(s) it holds (mode: ${excludedModes.join(', ')}) are excluded by that filter — they are listed under "Recent login and captcha attempts (this session)" in Auth Window Diagnostics whenever that section is part of the report`;
+  return `### Completed auth-browser close lifecycle (newest first)
+> The completed auth windows this process still retains **whose mode is
+> \`puppeteer-visible\` or \`native-chrome\`**, newest first. Other retained
+> modes (e.g. \`captcha-resolve\`) are not rows here.
+> **Cookie flush wait** is the measured wait around the profile cookie-store
+> check plus the phase its producer stamped: \`pre-close-fixed\` and
+> \`pre-close-checkpoint\` were measured while the window was still open;
+> \`post-close-observe\` was measured after the child process had already
+> exited, so it is not a wait taken before closing. \`phase not recorded\`
+> means this record carries no stamped phase.
+
+| Platform | Mode | Login detected | Cookie flush wait ms (phase) | Store checkpointed | Close disposition | Process exit observed | Executable | Profile | Auth cookie metadata before close |
+|---|---|---:|---|---|---|---:|---|---|---|
+${lifecycleRows || `| — | — | — | — | — | — | — | — | — | (${emptyLifecycleCell}) |`}${formatAuthHistoryTruncationNote(selection, 'completed auth-window record(s)')}`;
+}
+
+/**
+ * "### Native Chrome challenge handoffs" — ALWAYS rendered.
+ *
+ * buildNativeChallengeHistoryEvidence had exactly one render site: inside the
+ * capped "Recent login and captcha attempts" list, itself inside a block that
+ * only renders when an auth window or a launch collision exists. Its output was
+ * therefore all-or-nothing, and in the Indeed incident all three
+ * `indeed-native-challenge` records fell out of that list, leaving a FULL
+ * report with no trace of why three real user verifications were never observed
+ * as cleared. This section reads the same ring with the same predicate as that
+ * call site, renders unconditionally, and has an explicit empty state, so the
+ * evidence can no longer be evicted by unrelated captcha traffic.
+ *
+ * Bounded and privacy-safe by construction: the ring holds at most
+ * AUTH_HISTORY_RING_CAP records, redactNativeChallengeUrl strips query strings
+ * (Cloudflare challenge URLs carry short-lived tokens), and no cookie value is
+ * read here.
+ */
+export function buildNativeChallengeSessionMarkdown(history) {
+  const selection = selectAuthHistoryForReport(
+    (Array.isArray(history) ? history : []).filter(item => item?.mode === 'native-chrome'
+      && String(item?.platformId || '').endsWith('-native-challenge')),
+  );
+  const lines = selection.rows.map(item => {
+    const finishedAt = item.finishedAt ? new Date(item.finishedAt) : null;
+    const finishedMs = finishedAt && !Number.isNaN(finishedAt.getTime()) ? finishedAt.getTime() : null;
+    const finishedIso = finishedMs == null ? 'not recorded' : new Date(finishedMs).toISOString();
+    const age = finishedMs == null ? 'age not recorded' : `${Math.max(0, Math.round((Date.now() - finishedMs) / 1000))}s ago`;
+    const open = Number.isFinite(item.openMs) ? `${(item.openMs / 1000).toFixed(1)}s` : 'not recorded';
+    const committed = item.cookieStoreCommitted == null ? 'not observed' : (item.cookieStoreCommitted ? 'yes' : 'NO');
+    const native = item.nativeChallenge && typeof item.nativeChallenge === 'object' ? item.nativeChallenge : null;
+    const exitObserved = !!native && (native.exitCode != null || !!native.exitSignal);
+    // A bare `—` here reads as "we have no idea how this window ended", which is
+    // wrong on the path that matters most: when the child process exit is the
+    // terminal observation there IS no app-initiated close to stamp. Report both
+    // observations side by side and let the reader draw the conclusion.
+    const closeDisposition = item.closeDisposition
+      ? `\`${item.closeDisposition}\``
+      : exitObserved
+        ? `none stamped on this record; the child process exit WAS observed (exit code ${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeText(native.exitSignal, 40)}` : ''}${native.terminalSource ? `, terminal source ${nativeChallengeText(native.terminalSource, 60)}` : ''})`
+        : 'none stamped on this record, and no child process exit was observed on it either';
+    const evidence = buildNativeChallengeHistoryEvidence(item)
+      || ' · native: no bounded handoff evidence is retained on this record';
+    return `- \`${item.platformId || '?'}\` — finished ${finishedIso} (${age}) · result **${item.result || 'not recorded'}** · open ${open} · cookie store checkpointed ${committed} · close disposition: ${closeDisposition}${evidence}`;
+  });
+  const body = lines.length > 0
+    ? lines.join('\n')
+    : "_No native challenge handoff record is retained in this process's auth-window ring. That describes what the ring currently holds; it is not an observation that no native challenge handoff occurred — the ring keeps at most "
+      + `${AUTH_HISTORY_RING_CAP} completed auth windows and starts empty at every app start._`;
+  return `### Native Chrome challenge handoffs (newest first)
+> Always rendered, independently of the Auth Window Diagnostics attempt list
+> (which is itself conditional and capped), so whatever bounded evidence a
+> native handoff record retained reaches the report instead of being evicted by
+> unrelated captcha traffic. What a record retains varies, and each bit below is
+> printed only when that record carries it: the poll counters, whether a
+> first-party tab was ever seen (\`first-party tab seen=no\` means no tab the
+> observer could read as this handoff's own appeared in any inventory read — it
+> does not say why, and a denied Apple-event permission and a tab that never
+> opened look identical here; it is, however, not the same observation as
+> watching a challenge page that never cleared), the first tab-read error, the
+> last classification, the child exit, and any post-close verification. A record that
+> carries none of them says so rather than rendering as an empty trace.
+> \`result\` is what the app
+> OBSERVED, not what the user did: \`closed\` means no affirmative clearance
+> observation was recorded before the window went away, which is not the same as
+> the verification having failed. Metadata only — URL query strings are stripped
+> and no cookie value is read.
+
+${body}${formatAuthHistoryTruncationNote(selection, 'native challenge handoff record(s)')}
+`;
 }
 
 /**
@@ -1517,33 +1740,6 @@ function buildSessionPersistenceMarkdown() {
     const cacheEntries = Object.entries(cache);
     const restoredIds = cacheEntries.filter(([, entry]) => entry?.restoredFromDisk).map(([id]) => id);
     const currentBrowser = profile.browser || {};
-    // Basename / trailing-slice truncation — keeps the lifecycle table readable
-    // while still distinguishing "which binary" and "which profile dir" a login
-    // window used, the two facts needed to tell whether it could share cookies
-    // with the scrape that read the session back afterward (see PPID / Indeed:
-    // a native login and a Puppeteer-launched scrape use different OSCrypt keys
-    // even on the SAME userDataDir when their executable differs).
-    const execLabel = (value) => value ? path.basename(String(value)) : '—';
-    const profileLabel = (value) => {
-      const s = String(value || '');
-      if (!s) return '—';
-      return s.length > 40 ? `…${s.slice(-40)}` : s;
-    };
-    const lifecycleRows = (Array.isArray(authDiag.history) ? authDiag.history : [])
-      .filter(item => item?.mode === 'puppeteer-visible' || item?.mode === 'native-chrome')
-      .slice(-12)
-      .reverse()
-      .map(item => {
-        const cookies = (Array.isArray(item.authCookiesBeforeClose) ? item.authCookiesBeforeClose : [])
-          .map(cookie => `${cookie.name || '?'}:${cookie.persistent ? 'persistent' : 'session'}${cookie.expiresAt ? ` exp=${new Date(cookie.expiresAt * 1000).toISOString()}` : ''}`)
-          .join(', ') || 'none captured';
-        const loginDetected = item.loginDetected == null
-          ? (item.mode === 'native-chrome' && String(item.platformId || '').endsWith('-native-challenge')
-              ? `n/a (challenge ${item.result || 'completed'})`
-              : 'not recorded')
-          : (item.loginDetected ? 'yes' : 'no');
-        return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${loginDetected} | ${item.cookieFlushMs ?? '—'} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
-      }).join('\n');
     // Auth-cookie-on-disk presence per platform with a known session cookie
     // (PLATFORM_AUTH_COOKIES). Written under `lastTrace` by writeStatusCache
     // (extras spread), not `trace` — read the wrong key here and every row
@@ -1601,11 +1797,9 @@ ${fileLine('Default/Preferences', profile.preferences)}
 ${authCookiePresenceLines}
 ${indeedPpidCrossReference}
 
-### Completed auth-browser close lifecycle (newest first)
-| Platform | Mode | Login detected | Pre-close wait ms | Store checkpointed | Close disposition | Process exit observed | Executable | Profile | Auth cookie metadata before close |
-|---|---|---:|---:|---|---|---:|---|---|---|
-${lifecycleRows || '| — | — | — | — | — | — | — | — | — | (no completed auth window this process) |'}
-`;
+${buildAuthLifecycleTableMarkdown(authDiag.history)}
+
+${buildNativeChallengeSessionMarkdown(authDiag.history)}`;
   return sessionPersistenceMarkdown;
 }
 
@@ -1737,9 +1931,14 @@ function buildAuthWindowMarkdown() {
       // for "I just logged into X but it says logged out": `detected` ⇒ the window
       // confirmed login (so a later logged-out state = the session didn't persist
       // or the re-verify rejected it), `not detected` ⇒ the login never completed.
-      const historyRows = (Array.isArray(diag?.history) ? diag.history : [])
-        .slice(-12)
-        .reverse()
+      // Newest-first over the WHOLE retained ring, not a second newest-12 cut:
+      // the ring is already bounded upstream, and the narrower cut is what
+      // erased three `indeed-native-challenge` rows behind 12 routine `captcha:`
+      // rows — at the time the only place buildNativeChallengeHistoryEvidence
+      // rendered at all (it now also has an unconditional section in Session
+      // Persistence Diagnostics). See AUTH_HISTORY_RING_CAP.
+      const historySelection = selectAuthHistoryForReport(diag?.history);
+      const historyRows = historySelection.rows
         .map(h => {
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
           const detected = formatAuthAttemptStatus(h);
@@ -1757,7 +1956,7 @@ function buildAuthWindowMarkdown() {
           return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${nativeEvidence}${title}${h.url ? ` — \`${redactReportUrl(h.url)}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
-        ? `\n### Recent login and captcha attempts (this session)\n> Every completed login/captcha window. Login rows state whether the window CONFIRMED login: **detected** ⇒ a later logged-out state means the session did not persist or re-verification rejected it; **NOT detected** ⇒ login did not complete in that window. Captcha rows state challenge clearance only — clearing a challenge is not a login assertion. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n`
+        ? `\n### Recent login and captcha attempts (this session)\n> The completed login/captcha windows this process still retains, newest first. Login rows state whether the window CONFIRMED login: **detected** ⇒ a later logged-out state means the session did not persist or re-verification rejected it; **NOT detected** ⇒ login did not complete in that window. Captcha rows state challenge clearance only — clearing a challenge is not a login assertion. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n${formatAuthHistoryTruncationNote(historySelection, 'completed login/captcha window record(s)')}`
         : '';
       // Scrape/stealth browser liveness — a captcha/login window launches a
       // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here

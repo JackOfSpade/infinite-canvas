@@ -89,6 +89,18 @@ export const MINIMAP_NODE_COLORS = {
   jobcard: '#22c55e',
   jobhub: '#4285f4',
   sellhub: '#10b981',
+  // Matches JobBoardNode's own header accent (bg-indigo-500/15 / text-indigo-300).
+  jobboard: '#6366f1',
+  // Matches JobGroupNode's 'role' (leaf/most common) kind accent border #14b8a655.
+  jobgroup: '#14b8a6',
+  // No single brand color (JobSourceCardNode's accent is per-platform/dynamic);
+  // rose keeps it visually distinct from every other entry above.
+  jobsourcecard: '#f43f5e',
+  // Matches MarketplaceStatusNode's own accent (border-sky-500/30 / text-sky-400).
+  marketplacestatus: '#0ea5e9',
+  // No single brand color (CompSourceCardNode's accent is per-platform/dynamic);
+  // fuchsia keeps it visually distinct from every other entry above.
+  compsourcecard: '#d946ef',
 };
 
 /** Default dimensions per node type */
@@ -101,6 +113,20 @@ const NODE_DIMS = {
   jobcard:  { w: 180, h: 90  },
   jobhub:   { w: 280, h: 350 },
   sellhub:  { w: 280, h: 350 },
+  // JobBoardNode's HubContainer is a fixed width={260} (JobBoardNode.jsx). Height
+  // is content-driven (no fixed prop) — estimated from a typical connected+done
+  // render: header (~56px) + JobBoardSearchSelection (legend + a source list
+  // capped at max-h-44 = 176px, JobBoardSearchSelection.jsx) + JobBoardDoneState's
+  // result summary (~110px), matching the jobhub/sellhub height convention above.
+  jobboard: { w: 260, h: 320 },
+  // MarketplaceStatusNode computes nodeWidth dynamically per platform-card grid
+  // (marketplaceStatusLayout.js) — no single fixed size exists. This is the
+  // node's own single-platform-row size: marketplaceStatusNodeWidth(1) = 1*CARD_W
+  // + 2*PAD = 296; height = OVERHEAD_EST (HEADER_H + BUTTON_BLOCK_H + 2*PAD = 110)
+  // + CARD_H_EST (104) = 214 — the smallest realistic non-empty layout (the
+  // all-empty state uses its own fixed 300px width with no cards, per
+  // MarketplaceStatusNode.jsx).
+  marketplacestatus: { w: 296, h: 214 },
 };
 
 /** Extracts or estimates width/height of a node */

@@ -2722,7 +2722,18 @@ function createJobsTelemetry() {
   // stamped only from node/run-scoped progress events and is therefore safe to
   // return through the report's sender/window + current-hub ownership gate.
   // { [sourceId]: [{ runId, announcedAt, dispatchedAt, terminalAt, lastAt,
-  //                  announcedStatus, terminalStatus, warning: { code, severity } | null }] }
+  //                  announcedStatus, terminalStatus, warning: { code, severity } | null,
+  //                  resolvePassCount, resolvePasses,
+  //                  resumeAttemptCount, resumeAttempts }] }
+  // `resolvePasses` is a tiny, redacted per-Solve trail for description
+  // recovery. It is deliberately owned by this source/run receipt instead of
+  // the single current `resolves` entry, which is ambiguous when a report has
+  // more than one current Job Search hub.
+  // `resumeAttempts` is the same idea for Continue/Log in/Solve clicks, and
+  // exists for a stronger reason: the live `resumeAttempts` map below is wiped
+  // by this hub's next search AND is unreadable at all on a multi-hub canvas,
+  // so the clicks that a user reports as "nothing happened" had no durable
+  // record anywhere.
   sourceRunHistory: {},
   // Live search-jobs heartbeat. Unlike `search` (written only at the successful
   // end), this survives while the IPC task is awaiting sources/enrichment and
@@ -3051,6 +3062,95 @@ export function getJobsSourceRunHistoryForReport(currentNodeIds, reportWindowId 
 }
 
 /**
+ * The hub-attribution gate getJobsSourceRunHistoryForReport applies inline,
+ * returned as [nodeId, telemetry] pairs so the two accessors below cannot
+ * drift away from it. Every branch is deliberately identical to the sibling's:
+ * the contextless ambient fallback, the reportWindowId check, the synthetic
+ * handler seam (a real Electron WebContents has getURL(), so a real window
+ * that produced no sender-local telemetry fails closed rather than borrowing
+ * another window's), and the `ids.has(nodeId) && telemetry?.nodeId === nodeId`
+ * predicate. Note the one consequence that is inherited on purpose: a
+ * telemetry record with NO nodeId is attributable to no hub here, even though
+ * the contextless branch of getJobsTelemetryForReport still returns it.
+ */
+function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null) {
+  const context = getCurrentIpcRequestContext();
+  const sender = context?.sender;
+  const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
+  const ambient = () => {
+    const nodeId = latestJobsTelemetry?.nodeId;
+    return nodeId && ids.has(nodeId) ? [[nodeId, latestJobsTelemetry]] : [];
+  };
+  if (!sender) return ambient();
+  if (reportWindowId != null && sender.id !== reportWindowId) return [];
+  const byNode = jobsTelemetryBySender.get(sender);
+  if (!byNode) {
+    if (typeof sender?.getURL === 'function') return [];
+    return ambient();
+  }
+  return [...byNode.entries()]
+    .filter(([nodeId, telemetry]) => ids.has(nodeId) && telemetry?.nodeId === nodeId)
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+}
+
+/**
+ * How many current-canvas hubs hold attributable telemetry in this window.
+ *
+ * getJobsTelemetryForReport fails closed at two or more matches, which is
+ * correct — no single hub owns the combined funnel, and summing three hubs'
+ * search/scoring/taxonomy counts would present one hub's numbers as another's.
+ * But every reader of that null then printed "no search recorded this session"
+ * / "no scoring recorded this session" / "not retained in this process" for a
+ * process that had demonstrably just run three searches. That is an assertion
+ * of absence the report never observed. This count is the observation it can
+ * state instead: N hubs hold telemetry, so no single hub owns this section.
+ */
+export function getJobsTelemetryHubCountForReport(currentNodeIds, reportWindowId = null) {
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId).length;
+}
+
+/**
+ * The per-hub records that ARE independently attributable even when the
+ * combined funnel is not.
+ *
+ * `indeedSession` and `resumeAttempts` are written through the nodeId-scoped
+ * telemetry proxy (getScopedJobsTelemetry keys on the request context's
+ * nodeId), so each hub's copy describes only that hub's own Continue / Log in
+ * / Solve clicks and the session its own scrape observed. Nothing is summed or
+ * merged here, which is exactly what makes them safe to show per hub while the
+ * funnel stays single-owner: a hub's row is either shown under its own nodeId
+ * or not shown at all. Dropping the Resume attempts block on a multi-hub
+ * canvas removed the single piece of evidence that explains "I clicked
+ * Continue and nothing happened".
+ */
+export function getJobsResumeAttributionForReport(currentNodeIds, reportWindowId = null) {
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId)
+    .map(([nodeId, telemetry]) => {
+      const resumeAttempts = Object.entries(telemetry?.resumeAttempts || {})
+        // Attempts are only ever recorded for a known provider id. Re-check
+        // that at the report boundary too, so malformed in-memory state cannot
+        // introduce an unbounded or unknown source key into a diagnostics
+        // export, and re-apply the producer's own newest-12 cap: an in-memory
+        // list mutated by anything other than recordResumeAttemptTelemetry
+        // must not be able to grow the exported payload.
+        .filter(([sourceId, attempts]) => ALL_SOURCE_IDS.includes(sourceId)
+          && Array.isArray(attempts) && attempts.length > 0)
+        .map(([sourceId, attempts]) => ({
+          sourceId,
+          attempts: attempts.slice(-MAX_RESUME_ATTEMPTS_PER_SOURCE),
+        }))
+        .sort((a, b) => a.sourceId.localeCompare(b.sourceId));
+      const indeedSession = telemetry?.indeedSession || null;
+      // A hub that has neither observed a session nor been resumed has nothing
+      // to report. Omit it rather than emitting an empty row that reads like a
+      // hub which was asked and answered "nothing".
+      if (!indeedSession && resumeAttempts.length === 0) return null;
+      return { nodeId, indeedSession, resumeAttempts };
+    })
+    .filter(Boolean);
+}
+
+/**
  * Build the only job-search data allowed into a durable post-run receipt.
  * Hub-scoped telemetry is still run-filtered, so a late same-hub completion
  * never borrows a replacement run's funnel.
@@ -3176,6 +3276,10 @@ function sourceRunHistorySummary(sourceId, runId, now = Date.now()) {
       announcedStatus: null,
       terminalStatus: null,
       warning: null,
+      resolvePassCount: 0,
+      resolvePasses: [],
+      resumeAttemptCount: 0,
+      resumeAttempts: [],
     };
     history.push(summary);
     if (history.length > MAX_SOURCE_RUN_HISTORY_PER_SOURCE) {
@@ -3321,6 +3425,218 @@ export function __canWriteJobResolveTelemetryForTests(nodeId, jobRunId) {
   return canWriteJobResolveTelemetry(nodeId, jobRunId);
 }
 
+// A source receipt is retained for only three runs, so this must remain much
+// smaller than the general in-memory resolve timestamp trail. Keep enough
+// observations to show a user-visible retry loop while bounding a long-lived
+// hub at 36 compact rows per source. The count below intentionally survives
+// trimming, so a report can distinguish "twelve retries" from "twelve of many
+// retries retained".
+const SOURCE_RUN_RESOLVE_PASS_TRAIL_CAP = 12;
+const SOURCE_RUN_RESOLVE_OUTCOMES = new Set(['completed', 'blocked', 'rejected', 'failed']);
+const SOURCE_RUN_RESOLVE_RECOMMENDATIONS = new Set(['retry', 'skip', 'none']);
+const SOURCE_RUN_RESOLVE_CHECKPOINTS = new Set(['saved', 'unchanged', 'not-ready', 'failed', 'not-applicable']);
+const SOURCE_RUN_RESOLVE_SEVERITIES = new Set(['block', 'throttle', 'warn', 'info']);
+// Warning codes are implementation-owned identifiers, not a free-form report
+// field. Keep this conservative list so a bad renderer payload cannot smuggle
+// job text, a URL, a query, or a location through a nominal diagnostic code.
+const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
+  'description-appcast-temporary-restriction',
+  'description-card-unavailable',
+  'description-detail-error',
+  'description-detail-challenge',
+  'description-detail-hard-block',
+  'description-detail-miss',
+  'description-detail-navigation',
+  'description-detail-session-reset',
+  'description-listing-unavailable',
+  'description-panel-http-error',
+  'description-rate-limited',
+  'description-recovery-not-ready',
+  'description-recovery-persist-failed',
+  'description-recovery-snapshot-stale',
+  'description-recovery-snapshot-unavailable',
+  'description-unsupported-url',
+  'resolve-description-incomplete',
+  'resolve-detail-enrichment-failed',
+  'cloudflare-hard-block',
+]);
+const SOURCE_RUN_RESOLVE_COUNT_FIELDS = [
+  'providerRowsLoaded',
+  'targeted',
+  'attempted',
+  'recovered',
+  'completeTotal',
+  'empty',
+  'unavailable',
+  'consecutiveNoMatchPasses',
+  'consecutiveNoProgressPasses',
+];
+
+function sourceRunResolveCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0
+    ? Math.min(1_000_000, Math.floor(numeric))
+    : null;
+}
+
+function normalizeSourceRunResolvePass(pass = {}, now = Date.now()) {
+  const outcome = SOURCE_RUN_RESOLVE_OUTCOMES.has(pass?.outcome)
+    ? pass.outcome
+    : 'completed';
+  const normalized = {
+    // The recorder supplies this timestamp. Tests may supply a finite value so
+    // retention order can be asserted without a clock seam.
+    at: Number.isFinite(Number(pass?.at)) ? Math.max(0, Number(pass.at)) : now,
+    outcome,
+  };
+  for (const field of SOURCE_RUN_RESOLVE_COUNT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(pass, field)) continue;
+    const count = sourceRunResolveCount(pass[field]);
+    if (count != null) normalized[field] = count;
+  }
+  const recommendation = pass?.recommendation ?? pass?.recoveryRecommendation;
+  if (SOURCE_RUN_RESOLVE_RECOMMENDATIONS.has(recommendation)) normalized.recommendation = recommendation;
+  if (SOURCE_RUN_RESOLVE_CHECKPOINTS.has(pass?.checkpoint)) normalized.checkpoint = pass.checkpoint;
+  const code = pass?.warning?.code;
+  const severity = pass?.warning?.severity;
+  if (SOURCE_RUN_RESOLVE_WARNING_CODES.has(code) && SOURCE_RUN_RESOLVE_SEVERITIES.has(severity)) {
+    normalized.warning = { code, severity };
+  }
+  return normalized;
+}
+
+/**
+ * Append one redacted generic Solve observation to the independently
+ * attributable source/run receipt. This must never accept report prose or
+ * listing identifiers: only fixed enums, bounded counts, and known warning
+ * codes survive normalization.
+ */
+function recordJobSourceResolvePass(sourceId, pass = {}, { nodeId = null, jobRunId = null } = {}) {
+  if (!canWriteJobResolveTelemetry(nodeId, jobRunId)) return null;
+  const runId = String(jobRunId || jobsTelemetry.pipeline?.runId || 'unscoped');
+  const summary = sourceRunHistorySummary(sourceId, runId);
+  if (!summary) return null;
+  const normalized = normalizeSourceRunResolvePass(pass);
+  const prior = Array.isArray(summary.resolvePasses) ? summary.resolvePasses : [];
+  summary.resolvePassCount = Math.max(0, Number(summary.resolvePassCount) || 0) + 1;
+  summary.resolvePasses = [...prior, normalized].slice(-SOURCE_RUN_RESOLVE_PASS_TRAIL_CAP);
+  summary.lastAt = normalized.at;
+  return normalized;
+}
+
+export function __recordJobSourceResolvePassForTests(sourceId, pass = {}, ownership = null) {
+  return recordJobSourceResolvePass(sourceId, pass, ownership || {});
+}
+
+// The cap on the in-memory per-source resume trail (jobsTelemetry.resumeAttempts,
+// written by recordResumeAttemptTelemetry) and on the report payload built from
+// it. Declared here, ahead of both readers, because the durable receipt below
+// must use the same number.
+const MAX_RESUME_ATTEMPTS_PER_SOURCE = 12;
+// The resume twin of SOURCE_RUN_RESOLVE_PASS_TRAIL_CAP above, and deliberately
+// the same number as the in-memory producer's cap: a source receipt that showed
+// a different number of Continue clicks than the live trail would read as two
+// contradictory observations of the same user action. `resumeAttemptCount`
+// survives trimming for the same reason `resolvePassCount` does — so a report
+// can distinguish "three clicks" from "three of many clicks retained".
+const SOURCE_RUN_RESUME_ATTEMPT_TRAIL_CAP = MAX_RESUME_ATTEMPTS_PER_SOURCE;
+// The resumeState.mode values a source card can actually be showing when the
+// user clicks. 'native-login' and 'native-challenge'/'retry-later' are written
+// by indeedBrowser.js's warning builders, 'retry-descriptions' by the card's
+// own description retry, and 'resume' is the recorder's default for a warning
+// that carried a resumeState with no mode at all.
+const SOURCE_RUN_RESUME_MODES = new Set([
+  'resume',
+  'native-login',
+  'native-challenge',
+  'retry-later',
+  'retry-descriptions',
+]);
+// Every outcome recorded by a recordResumeAttempt call site in the
+// resume-job-source handler. 'cleared' and 'unverified' are both handoff
+// states, not terminal ones: the native verification window reported a clean
+// first-party tab, or it reported something that is neither a clearance nor an
+// observed negative (see NATIVE_CHALLENGE_OBSERVED_NEGATIVES). Either way the
+// resume scrape runs next and records its own 'resolved'/'blocked' line, so a
+// receipt reads e.g. "unverified -> resolved".
+const SOURCE_RUN_RESUME_OUTCOMES = new Set([
+  'resolved',
+  'blocked',
+  'cleared',
+  'logged-in',
+  'login-failed',
+  'unverified',
+  'error',
+]);
+// The terminal values openNativeIndeedChallengeWindow can settle with
+// (electron/ipc/browser/authWindows.js), plus 'launch-error' for the throw the
+// handler catches before any result exists. 'unknown' is the explicit marker
+// for a missing or unrecognised value: this is the exact field the incident
+// turned on, so "the window reported nothing we recognise" must stay readable
+// as itself rather than collapsing into one of the real terminals.
+const SOURCE_RUN_RESUME_NATIVE_TERMINALS = new Set([
+  'cleared',
+  'closed',
+  'timeout',
+  'hard-block',
+  'aborted',
+  'app-window-destroyed',
+  'launch-error',
+  'unknown',
+]);
+
+function normalizeSourceRunResumeAttempt(attempt = {}, now = Date.now()) {
+  const mode = String(attempt?.mode || '') || 'resume';
+  const outcome = String(attempt?.outcome || '');
+  const normalized = {
+    // The recorder supplies this timestamp. Tests may supply a finite value so
+    // retention order can be asserted without a clock seam.
+    at: Number.isFinite(Number(attempt?.at)) ? Math.max(0, Number(attempt.at)) : now,
+    // 'unrecognized' is itself an observation, not a guess. Folding an unknown
+    // mode into 'resume' would report a plain retry click the user never made,
+    // and folding an unknown outcome into 'blocked' would invent a block.
+    mode: SOURCE_RUN_RESUME_MODES.has(mode) ? mode : 'unrecognized',
+    outcome: SOURCE_RUN_RESUME_OUTCOMES.has(outcome) ? outcome : 'unrecognized',
+  };
+  if (attempt?.nativeResult != null) {
+    const nativeResult = String(attempt.nativeResult);
+    normalized.nativeResult = SOURCE_RUN_RESUME_NATIVE_TERMINALS.has(nativeResult)
+      ? nativeResult
+      : 'unknown';
+  }
+  return normalized;
+}
+
+/**
+ * Append one redacted Continue/Log in/Solve observation to the independently
+ * attributable source/run receipt.
+ *
+ * jobsTelemetry.resumeAttempts answers the same question but cannot be relied
+ * on: it is wiped when this hub starts its next search, and a report with more
+ * than one current hub drops the whole live-telemetry surface, so three
+ * Continue clicks could leave no retrievable trace of themselves at all. This
+ * receipt survives both, and it inherits the resolve trail's hardening rules
+ * verbatim — fixed enums and bounded counts only, never prose, URLs, or job
+ * text. `detail` is deliberately not a parameter here: it is free-form and can
+ * embed an osascript error string.
+ */
+function recordJobSourceResumeAttempt(sourceId, attempt = {}, { nodeId = null, jobRunId = null } = {}) {
+  if (!canWriteJobResolveTelemetry(nodeId, jobRunId)) return null;
+  const runId = String(jobRunId || jobsTelemetry.pipeline?.runId || 'unscoped');
+  const summary = sourceRunHistorySummary(sourceId, runId);
+  if (!summary) return null;
+  const normalized = normalizeSourceRunResumeAttempt(attempt);
+  const prior = Array.isArray(summary.resumeAttempts) ? summary.resumeAttempts : [];
+  summary.resumeAttemptCount = Math.max(0, Number(summary.resumeAttemptCount) || 0) + 1;
+  summary.resumeAttempts = [...prior, normalized].slice(-SOURCE_RUN_RESUME_ATTEMPT_TRAIL_CAP);
+  summary.lastAt = normalized.at;
+  return normalized;
+}
+
+export function __recordJobSourceResumeAttemptForTests(sourceId, attempt = {}, ownership = null) {
+  return recordJobSourceResumeAttempt(sourceId, attempt, ownership || {});
+}
+
 // A rejected fresh start temporarily owns global diagnostics while it performs
 // preflight. Restore the previous snapshot only if that same rejected token is
 // still current: an overlapping later search may have legitimately claimed it
@@ -3424,11 +3740,13 @@ export function recordResolveMergeOutcome(sourceId, merge = {}, ownership = null
 // clears it internally, so the report can tell a native-login click from a
 // plain retry-later click. Mirrors the linkedinEnrich cap (see
 // recordLinkedinEnrichPass) — newest last, capped at 12.
+// The cap is MAX_RESUME_ATTEMPTS_PER_SOURCE, declared beside the durable
+// source/run receipt that has to agree with it.
 function recordResumeAttemptTelemetry(sourceId, mode, outcome, detail, ownership = null) {
   if (!sourceId || !canWriteJobResolveTelemetry(ownership?.nodeId, ownership?.jobRunId)) return;
   const list = jobsTelemetry.resumeAttempts[sourceId] || (jobsTelemetry.resumeAttempts[sourceId] = []);
   list.push({ t: Date.now(), mode: mode || 'resume', outcome, detail: String(detail || '').slice(0, 200) });
-  if (list.length > 12) list.shift();
+  if (list.length > MAX_RESUME_ATTEMPTS_PER_SOURCE) list.shift();
 }
 
 // Narrow test seam for the ownership-sensitive resume trail. Handler-local
@@ -3471,6 +3789,78 @@ function summarizeIndeedResumeEnrichment(jobs) {
 let lastIndeedLoginConfirmedAt = 0;
 const RECENT_INDEED_LOGIN_MS = 60_000;
 
+/**
+ * Forget the stamp above the moment this process learns the Indeed session it
+ * recorded is gone.
+ *
+ * The stamp suppresses a redundant second login window, and that suppression is
+ * only correct while the login it recorded still describes the shared profile.
+ * Once the session is deliberately invalidated — Settings -> Reset Indeed
+ * session, the all-profile clear, or a scrape that came back needs-login — it
+ * describes a profile that no longer exists. Leaving it set made the next
+ * "Log in" click inside RECENT_INDEED_LOGIN_MS open no window at all while
+ * recording 'logged-in' in both the live trail and the durable receipt: from the
+ * user's side the button did nothing, the resume scrape then ran against the
+ * freshly wiped profile and returned needs-login, and the diagnostics beside it
+ * asserted a login that had just been erased.
+ */
+function forgetIndeedLoginConfirmation(reason) {
+  if (lastIndeedLoginConfirmedAt === 0) return;
+  lastIndeedLoginConfirmedAt = 0;
+  logger.info(`[Jobs] Cleared the recent-Indeed-login dedupe stamp: ${reason}`);
+}
+
+// The openNativeIndeedChallengeWindow outcomes that are DIRECT NEGATIVE
+// OBSERVATIONS rather than the mere absence of a positive one. Only these may
+// hard-block a "Continue" click:
+//   'hard-block'           the observer read an Indeed/Cloudflare block page, or
+//                          a wall whose URL and title never changed at all.
+//   'aborted'              the AbortSignal has already fired, so the resume
+//                          scrape's own withSharedProfileLock(..., signal) would
+//                          reject immediately and record that rejection as a
+//                          scrape error the user never caused.
+//   'app-window-destroyed' the renderer that asked for this is gone; there is
+//                          nobody left to receive rows a scrape would find.
+// Everything else — 'closed', 'timeout', or an unrecognised/missing value — is
+// INCONCLUSIVE and must fall through to the resume scrape. 'closed' is produced
+// by nativeIndeedChallengeExitDisposition (electron/ipc/browser/authWindows.js)
+// with postCloseReason 'no-affirmative-clean-tab': the AppleScript tab poll
+// never made a positive clean-page observation before the window exited. That
+// is exactly what a wholesale poll failure also looks like — getNativeChromeTabs
+// returns a single [{ url: '', title: '', error }] row when the Apple event is
+// denied — and what a user who really did solve the check and then closed the
+// window produces. Hard-blocking it told that user "no automated retry was
+// attempted" while their clearance sat unused in the shared profile. The resume
+// scrape is the only authoritative proof available here and needs no new
+// plumbing: resumeState already carries { mode, challengeUrl, remainingQueries,
+// startPage }.
+const NATIVE_CHALLENGE_OBSERVED_NEGATIVES = new Set(['hard-block', 'aborted', 'app-window-destroyed']);
+
+/**
+ * Classify one openNativeIndeedChallengeWindow terminal into the decision the
+ * resume handler acts on.
+ *
+ *   'blocked'    a direct negative observation (the set above): return a
+ *                blocking warning rather than spend a scrape on a wall the
+ *                observer actually read.
+ *   'cleared'    the observer made an affirmative clean first-party tab
+ *                observation.
+ *   'unverified' everything else, INCLUDING an empty or unrecognised terminal —
+ *                the absence of a positive observation, never a negative one.
+ *                Falls through to the resume scrape, the only authority that can
+ *                settle whether the user's verification landed.
+ *
+ * Exported because the handler below calls it: the test asserts the shipped
+ * decision over the whole enum instead of re-reading the shape of the branch's
+ * source text, which a reformat would break and a revert that moved the same
+ * hard block into a helper would still pass.
+ */
+export function nativeChallengeTerminalDisposition(outcome) {
+  const terminal = String(outcome || '');
+  if (NATIVE_CHALLENGE_OBSERVED_NEGATIVES.has(terminal)) return 'blocked';
+  return terminal === 'cleared' ? 'cleared' : 'unverified';
+}
+
 // Stamp the last-observed Indeed scrape session preflight (see
 // jobsTelemetry.indeedSession). sessionDiagnostics comes straight from
 // fetchIndeedListingsBrowser's return value — pass it through as-is rather
@@ -3495,9 +3885,16 @@ export function indeedWarningRequiresManualVerification(warning) {
  */
 export function authenticatedIndeedScrapeStatus(sessionDiagnostics, warning) {
   if (!sessionDiagnostics || warning?.code === 'needs-login') return null;
-  const authenticated = sessionDiagnostics.preflightStatus === 'authenticated'
-    || sessionDiagnostics.hasPPID === true;
-  if (!authenticated) return null;
+  // The preflight's OWN verdict is the only thing allowed to promote a session
+  // to connected. classifyIndeedSessionPreflight (electron/extractors/indeedBrowser.js)
+  // evaluates the challenge signal BEFORE any auth inference, so a Cloudflare
+  // wall classifies as 'challenge' while the shared profile's cookie jar can
+  // still hold a PPID left over from an older — possibly dead — session.
+  // Accepting that bare cookie stamped "freshly observed an authenticated
+  // session", complete with a synthesized 'scrape-preflight' verify trace, in
+  // the same second the source failed with scrape-failed; the bug report then
+  // showed an authenticated-session claim contradicting the failure beside it.
+  if (sessionDiagnostics.preflightStatus !== 'authenticated') return null;
   const url = String(sessionDiagnostics.landedUrl || 'https://secure.indeed.com/settings/account');
   const signal = sessionDiagnostics.hasPPID === true ? 'PPID auth cookie' : 'authenticated account page';
   return {
@@ -3522,6 +3919,10 @@ export function authenticatedIndeedScrapeStatus(sessionDiagnostics, warning) {
 async function invalidateIndeedSessionIfNeedsLogin(warning) {
   if (warning?.code !== 'needs-login') return;
   await invalidatePlatformSessionStatus('indeed', warning.evidence || 'Indeed scrape returned needs-login.');
+  // The scrape just disproved the session, so a login this process watched
+  // finish moments ago no longer describes the profile. The cache invalidation
+  // and the dedupe stamp must move together — see forgetIndeedLoginConfirmation.
+  forgetIndeedLoginConfirmation('an Indeed scrape returned needs-login');
 }
 
 async function syncIndeedSessionStatusFromScrape(sessionDiagnostics, warning, { telemetryOwnership = null } = {}) {
@@ -3535,6 +3936,32 @@ async function syncIndeedSessionStatusFromScrape(sessionDiagnostics, warning, { 
   }
   const fresh = authenticatedIndeedScrapeStatus(sessionDiagnostics, warning);
   if (fresh) await writeStatusCache('indeed', true, fresh);
+}
+
+/**
+ * The observation to add to the "Not logged in" search-preflight rejection when
+ * this process's LAST look at the Indeed session was a challenge page.
+ *
+ * authenticatedIndeedScrapeStatus promotes a session to connected only on its
+ * own 'authenticated' preflight verdict (a bare leftover PPID cookie is not one
+ * — that promotion is the bug it exists to prevent). A profile that is genuinely
+ * signed in but served an interstitial on every preflight therefore never
+ * refreshes its cached status and eventually reads as not connected. Refusing
+ * the search is still right: nothing here observed a live session. But the bare
+ * copy asserted a state ("not logged in") that contradicted the preflightStatus
+ * printed beside it in the report and steered the user at a login they may not
+ * need. State what was observed and stop there — never why the challenge
+ * appeared, and never whether the account is in fact signed in.
+ */
+function indeedPreflightObservationNote(notLoggedInSourceIds = []) {
+  if (!notLoggedInSourceIds.includes('indeed')) return '';
+  const session = jobsTelemetry.indeedSession;
+  if (session?.preflightStatus !== 'challenge') return '';
+  const reason = session.preflightReason ? ` (${session.preflightReason})` : '';
+  const observedAt = Number(session.ts);
+  const ageMs = Number.isFinite(observedAt) ? Date.now() - observedAt : NaN;
+  const when = Number.isFinite(ageMs) && ageMs >= 0 ? `${Math.round(ageMs / 1000)}s ago` : 'earlier this session';
+  return `Indeed's last scrape preflight ${when} was observed as a challenge page${reason}, not a sign-in page; a challenge says nothing either way about the account session, so the cached connection status could not be refreshed from it. `;
 }
 
 /** Convert only navigation-issued Google task URLs into report keywords. */
@@ -3711,11 +4138,16 @@ export const applyFinalJobTitleRelevanceGate = acceptProviderSearchResults;
 
 // Resolve windows can extract list cards from a page whose detail panel is
 // unavailable (Glassdoor's DOM fallback deliberately emits blank snippets).
-// A non-empty title/company is not evidence the scorer received a JD. Keep the
-// threshold modest so compact but genuine listings survive, while a list-card
-// stub or "Job description" label remains retryable instead of being scored.
-function hasResolvedJobDescription(job, minChars = 120) {
-  return String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length >= minChars;
+// A resolver must use the exact same admission contract as scoring: a long
+// enough description and no explicit deferral marker. Otherwise a partial
+// panel read can be called "recovered" here and then rejected later, leaving
+// the recovery pool unchanged while retry guidance is reset indefinitely.
+function hasResolvedJobDescription(job) {
+  // Deliberately delegate instead of duplicating the condition. This helper is
+  // also passed directly to Array#filter in the postprocessor-failure fallback;
+  // accepting a second parameter there would accidentally receive the array
+  // index as a character threshold and let short rows through.
+  return filterJobsByDescriptionEvidence([job]).jobs.length === 1;
 }
 
 /**
@@ -3752,6 +4184,21 @@ export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeR
 
   if (rootWarning?.code === 'description-listing-unavailable') {
     const guidance = rootWarning.recoveryGuidance || null;
+    // An unavailable-list warning can coexist with cards that were found but
+    // repeatedly failed detail extraction. That no-progress observation is
+    // stronger than another generic "retry once" promise: expose it first so
+    // the card does not keep steering the user into a known stalled loop.
+    if (guidance?.stalled === true) {
+      const stalledPasses = Math.max(0, Number(guidance.consecutiveNoProgressPasses) || 0);
+      return {
+        ...rootWarning,
+        severity: 'block',
+        shortLabel: 'Skip recommended',
+        actionLabel: 'Retry anyway',
+        evidence: `${accounting} The last ${stalledPasses} Solve passes each opened the available unresolved listing(s) and recovered no description.`,
+        suggestion: `Repeating the same pass is not making progress. Skip to continue without ${emptyRows.length === 1 ? 'this listing' : 'these listings'} — they are not recorded as seen, so a later run can still collect them — or choose Retry anyway if you have since changed network/IP or waited out a source throttle.`,
+      };
+    }
     const skipRecommended = guidance?.recommendation === 'skip';
     const observedPasses = Math.max(0, Number(guidance?.consecutiveNoMatchPasses) || 0);
     const listingLabel = emptyRows.length === 1
@@ -3759,14 +4206,56 @@ export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeR
       : `${emptyRows.length} unresolved listings`;
     const message = skipRecommended
       ? `${listingLabel} ${emptyRows.length === 1 ? 'was' : 'were'} not found in ${observedPasses} consecutive checks. Skip is recommended, or choose Check anyway to retry.`
-      : `${listingLabel} ${emptyRows.length === 1 ? 'was' : 'were'} not found in the current Google results. Retry once more; if ${emptyRows.length === 1 ? 'it is' : 'they are'} still missing, Skip will be recommended.`;
+      : `${listingLabel} ${emptyRows.length === 1 ? 'was' : 'were'} not found in the current ${sourceLabel} results. Retry once more; if ${emptyRows.length === 1 ? 'it is' : 'they are'} still missing, Skip will be recommended.`;
     return {
       ...rootWarning,
       severity: 'block',
-      shortLabel: rootWarning.shortLabel || (skipRecommended ? 'Skip recommended' : 'Retry recommended'),
-      actionLabel: rootWarning.actionLabel || (skipRecommended ? 'Check anyway' : 'Retry'),
+      // The durable observation owns the recommendation. A simultaneous
+      // panel-warning may have supplied its own retry copy, but preserving it
+      // here would contradict the promise made after the first no-match pass.
+      shortLabel: skipRecommended ? 'Skip recommended' : (rootWarning.shortLabel || 'Retry recommended'),
+      // A non-interactive hard block still cannot be retried in this window;
+      // retain that explicit action policy while making the Skip advice clear.
+      actionLabel: skipRecommended && rootWarning.action !== 'none'
+        ? 'Check anyway'
+        : (rootWarning.actionLabel || 'Retry'),
       evidence: message,
       suggestion: null,
+    };
+  }
+
+  // A provider pass can have two independent failures: one deferred listing is
+  // absent from the fully revealed list, while another visible card returns a
+  // panel warning. The panel code must remain available for diagnosis (and a
+  // hard block must retain its non-interactive policy), but it must not mask
+  // the separately persisted no-match recommendation. Otherwise activity on
+  // another card makes the source card say Retry forever even after the exact
+  // missing listing has crossed the advertised Skip threshold.
+  const noMatchGuidance = rootWarning?.recoveryGuidance || null;
+  if (noMatchGuidance?.recommendation === 'skip') {
+    const observedPasses = Math.max(0, Number(noMatchGuidance.consecutiveNoMatchPasses) || 0);
+    // `emptyRows` can also include a card that WAS found but whose panel
+    // failed. The no-match streak only proves the unavailable identity set is
+    // stable, so never overstate that every outstanding row disappeared.
+    const unavailableSet = noMatchGuidance.unavailableCount === 1
+      ? 'The same unavailable listing'
+      : 'The same unavailable listing set';
+    const nonInteractive = rootWarning.action === 'none';
+    const recommendation = nonInteractive
+      ? 'Skip is recommended if you want to continue without the unavailable listing(s); otherwise wait, then rerun after the block clears.'
+      : 'Skip is recommended, or choose Check anyway to retry.';
+    return {
+      ...rootWarning,
+      severity: 'block',
+      shortLabel: 'Skip recommended',
+      actionLabel: nonInteractive
+        ? 'Wait, then rerun'
+        : 'Check anyway',
+      evidence: `${rootWarning?.evidence ? `${rootWarning.evidence} ` : ''}${unavailableSet} was not found in ${observedPasses} consecutive checks. ${recommendation}`,
+      // A hard block's remediation remains relevant. Other panel warnings are
+      // superseded by the no-match decision rather than promising a third
+      // identical retry.
+      suggestion: nonInteractive ? rootWarning.suggestion || null : null,
     };
   }
 
@@ -3894,6 +4383,40 @@ export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCR
   };
 }
 
+// The `descriptionDeferredReason` values that mean the LISTING ITSELF is gone,
+// as opposed to "this pass could not read its description". Only
+// classifyIndeedUnavailablePage (electron/extractors/indeedBrowser.js) produces
+// them, and only when the detail page itself says the posting no longer exists;
+// the re-enrichment pass stores its verdict as `indeed-<reason>`.
+// Deliberately excluded: 'description-rate-limited',
+// 'description-panel-http-error', 'description-card-unavailable' and the
+// detail-block reprobe codes. Every one of those is written onto rows the
+// scraper explicitly RETAINED for a later pass to recover.
+const RETIRED_LISTING_DEFERRED_REASONS = new Set(['indeed-page-unavailable', 'indeed-job-unavailable']);
+
+/**
+ * The keys an INCREMENTAL APPEND pass may report as `removedItemKeys`.
+ *
+ * The renderer (src/utils/jobSourceResolveMerge.js) reads removedItemKeys as
+ * "this listing is retired" and deletes those rows from pendingJobs outright.
+ * Sending the entire description-evidence drop set therefore destroyed rows a
+ * PREVIOUS Solve had already recovered with a full description, the moment a
+ * later pass re-served the same listing with a throttled or empty detail panel.
+ * A short or empty snippet means "not recovered yet" — the append pass must
+ * leave those rows in place. Only an explicit retirement marker removes one.
+ * The retry-descriptions branch applies this filter too, on top of the
+ * unconditional `retried.unavailable` retirements it also sends — that list
+ * already means exactly "retired" and carries its own key/title/url rows. Its
+ * replaceMatchingItems pairing does NOT make the raw drop set safe there; see
+ * the comment on that branch's return.
+ */
+function retiredListingKeys(droppedJobs = []) {
+  return (Array.isArray(droppedJobs) ? droppedJobs : [])
+    .filter(job => RETIRED_LISTING_DEFERRED_REASONS.has(String(job?.descriptionDeferredReason || '')))
+    .map(sourceJobKey)
+    .filter(Boolean);
+}
+
 /**
  * Apply the pinned-target-role title gate and log what it did.
  *
@@ -3964,6 +4487,20 @@ export function reconcileResolvedDescriptionRecovery(recoveryJobs, sourceId, res
 }
 
 /**
+ * A resolved browser row is deliberately merged over its recovery candidate so
+ * stable card identity/list fields survive a partial panel payload. Do not,
+ * however, carry a historical deferral marker forward once the *new* row has
+ * passed the same evidence contract used by scoring. Object spread cannot
+ * express that absence, and retaining the candidate marker would immediately
+ * re-defer the just-recovered row during reconciliation.
+ */
+export function mergeResolvedDescriptionRecoveryCandidate(candidate, resolvedRow, sourceId) {
+  const merged = { ...candidate, ...resolvedRow, source: sourceId };
+  if (hasResolvedJobDescription(resolvedRow)) delete merged.descriptionDeferredReason;
+  return merged;
+}
+
+/**
  * Select only current-run deferred rows that are actually present in the fully
  * revealed provider list. History filtering has already happened before the
  * recovery snapshot was written; applying it again here would discard the very
@@ -3999,10 +4536,11 @@ export function partitionResolvedDescriptionRecoveryCandidates(recoveryJobs, sou
  * Advance the durable recommendation shown for an unresolved provider row.
  *
  * TWO separate streaks are tracked, and they must stay separate. The first,
- * `consecutiveNoMatchPasses`, counts only an exact no-card observation: a full
- * list loaded, nothing attempted/recovered, and the same residual identities
- * and totals remained. Any real card attempt resets it, so an extractor/detail
- * failure is never mislabeled as an external disappearance.
+ * `consecutiveNoMatchPasses`, counts each full-list check where the same
+ * deferred identities are unavailable. It intentionally ignores attempts,
+ * recoveries, and totals for OTHER rows: progress elsewhere does not make an
+ * unchanged missing listing any more likely to reappear, and must not break
+ * the explicit "retry once more, then Skip" promise shown for that listing.
  *
  * That deliberate narrowness left a gap with no stall signal at all: a row that
  * IS found on the list every pass and fails during detail extraction never
@@ -4026,16 +4564,11 @@ export function nextDescriptionRecoveryGuidance(previousState, observation, skip
   const recovered = Math.max(0, Number(observation?.recovered) || 0);
   const empty = Math.max(0, Number(observation?.empty) || 0);
   const completeTotal = Math.max(0, Number(observation?.completeTotal) || 0);
-  const qualifies = providerRowsLoaded > 0
-    && unavailableKeys.length > 0
-    && attempted === 0
-    && recovered === 0;
-  const sameResidual = qualifies
-    && previousState?.unavailableSignature === unavailableSignature
-    && Number(previousState?.empty) === empty
-    && Number(previousState?.completeTotal) === completeTotal;
-  const consecutiveNoMatchPasses = qualifies
-    ? (sameResidual ? Math.max(0, Number(previousState?.consecutiveNoMatchPasses) || 0) + 1 : 1)
+  const unavailableObserved = providerRowsLoaded > 0 && unavailableKeys.length > 0;
+  const sameUnavailableSet = unavailableObserved
+    && previousState?.unavailableSignature === unavailableSignature;
+  const consecutiveNoMatchPasses = unavailableObserved
+    ? (sameUnavailableSet ? Math.max(0, Number(previousState?.consecutiveNoMatchPasses) || 0) + 1 : 1)
     : 0;
   // Cards were opened and none of them yielded a description. Recovering even
   // one row is progress and resets the streak, because the next pass then has
@@ -4070,6 +4603,7 @@ export function nextDescriptionRecoveryGuidance(previousState, observation, skip
       recommendation: consecutiveNoMatchPasses >= threshold ? 'skip' : 'retry',
       consecutiveNoMatchPasses,
       consecutiveNoProgressPasses,
+      unavailableCount: unavailableKeys.length,
       stalled: consecutiveNoProgressPasses >= threshold,
       threshold,
     },
@@ -6664,7 +7198,7 @@ Return a JSON object with four arrays of search query strings:
     const preferLinkedInAuthenticated = cache.linkedin?.connected === true;
     const notLoggedIn = browserJobPlatforms.filter(sourceId => !cache[sourceId]?.connected);
     if (!resumeGatheredOnly && notLoggedIn.length > 0) {
-      const error = `Not logged in to: ${notLoggedIn.join(', ')}. Open Settings → Job Platforms to connect.`;
+      const error = `Not logged in to: ${notLoggedIn.join(', ')}. ${indeedPreflightObservationNote(notLoggedIn)}Open Settings → Job Platforms to connect.`;
       retirePipeline('preflight-rejected', error);
       return { success: false, notLoggedIn, error };
     }
@@ -9852,6 +10386,10 @@ Return a JSON object with four arrays of search query strings:
     const recoveryBlocksResolve = sourceId === 'google';
     const recoveryLabel = resolveSourceLabel(sourceId);
     let sourceRecoveryCheckpointOwned = false;
+    // This is pass-local state, not a replacement for durable recovery data.
+    // It is reported only as a fixed outcome so a multi-hub report can tell
+    // whether the recommendation it shows actually reached the checkpoint.
+    let recoveryCheckpointOutcome = 'not-applicable';
     const unusableRecoverySnapshot = (code, evidence, suggestion) => {
       sourceRecoverySnapshot = null;
       sourceRecoveryJobs = [];
@@ -9872,6 +10410,7 @@ Return a JSON object with four arrays of search query strings:
         try {
           loaded = await loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId);
           sourceRecoveryCheckpointOwned = true;
+          recoveryCheckpointOutcome = 'unchanged';
         } catch (error) {
           checkpointError = error;
           if (!recoveryBlocksResolve) loaded = await loadJobAnalysisSnapshot(canvasFilePath, nodeId, jobRunId);
@@ -9921,6 +10460,13 @@ Return a JSON object with four arrays of search query strings:
               'Run the search again, then retry Solve from its current source card.',
             );
       }
+      if (blocked) {
+        recordJobSourceResolvePass(sourceId, {
+          outcome: 'rejected',
+          warning: blocked.warning,
+          checkpoint: 'not-ready',
+        }, { nodeId, jobRunId });
+      }
       if (blocked) return blocked;
     }
     const persistSourceRecoveryJobs = async (
@@ -9953,12 +10499,18 @@ Return a JSON object with four arrays of search query strings:
             ?? scoringJobs.length,
         },
       });
-      const persisted = requireDescriptionRecoveryCheckpointPersisted(
-        await saveDescriptionRecoverySnapshotIfCurrent(nextSnapshot, { nodeId, jobRunId }),
-      );
-      sourceRecoverySnapshot = nextSnapshot;
-      sourceRecoveryJobs = descriptionRecoveryJobs.filter(job => job?.source === sourceId);
-      return persisted;
+      try {
+        const persisted = requireDescriptionRecoveryCheckpointPersisted(
+          await saveDescriptionRecoverySnapshotIfCurrent(nextSnapshot, { nodeId, jobRunId }),
+        );
+        sourceRecoverySnapshot = nextSnapshot;
+        sourceRecoveryJobs = descriptionRecoveryJobs.filter(job => job?.source === sourceId);
+        recoveryCheckpointOutcome = 'saved';
+        return persisted;
+      } catch (error) {
+        recoveryCheckpointOutcome = 'failed';
+        throw error;
+      }
     };
     // The normal manual-scrape path expands Glassdoor list rows into full detail
     // descriptions before returning them. A captcha/review-gate resolve used to
@@ -10089,7 +10641,9 @@ Return a JSON object with four arrays of search query strings:
           const emptyRows = [];
           for (const candidate of candidates) {
             const row = byKey.get(sourceJobKey(candidate));
-            if (hasResolvedJobDescription(row)) completeRows.push({ ...candidate, ...row, source: sourceId });
+            if (hasResolvedJobDescription(row)) {
+              completeRows.push(mergeResolvedDescriptionRecoveryCandidate(candidate, row, sourceId));
+            }
             else emptyRows.push(candidate);
           }
 
@@ -10185,14 +10739,32 @@ Return a JSON object with four arrays of search query strings:
       : null;
 
     logger.info(`[Jobs][${nodeId}] Opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
-    const result = await withSharedProfileLock(() => openCaptchaResolveWindow(
-      url,
-      event.sender,
-      signal,
-      inlineExtractorJS,
-      secondTabUrl || null,
-      inlineItemsPostprocessor,
-    ), signal, `job source resolve:${sourceId}`);
+    let result;
+    try {
+      result = await withSharedProfileLock(() => openCaptchaResolveWindow(
+        url,
+        event.sender,
+        signal,
+        inlineExtractorJS,
+        secondTabUrl || null,
+        inlineItemsPostprocessor,
+      ), signal, `job source resolve:${sourceId}`);
+    } catch (error) {
+      // `handleSafe` intentionally preserves this throw as the IPC failure.
+      // Still retain the terminal Solve state in the compact source/run receipt:
+      // before this guard, a launch/navigation/postprocessor exception was the
+      // one outcome missing from the pass trail. Do not retain error text here
+      // (it can include a URL or provider text); the fixed code is enough to
+      // distinguish it from a blocked-but-returned visible window.
+      if (!signal?.aborted) {
+        recordJobSourceResolvePass(sourceId, {
+          outcome: 'failed',
+          warning: { code: 'description-detail-error', severity: 'block' },
+          checkpoint: recoveryCheckpointOutcome,
+        }, { nodeId, jobRunId });
+      }
+      throw error;
+    }
     const resolverNeedsDescriptions = !!resolveConfig?.requiresDescriptionEnrichment;
     const postprocessOutcome = result?.diag?.postprocessOutcome || null;
     const rawResolvedItems = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
@@ -10263,6 +10835,30 @@ Return a JSON object with four arrays of search query strings:
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
     // re-resolving the same source replaces its entry (latest wins).
     const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);
+    // Keep a separate, source/run-owned record of each generic Solve. The
+    // existing `resolves[sourceId]` object intentionally remains latest-wins;
+    // it cannot answer a retry-loop question when more than one current hub is
+    // present in a FULL report. Do not pass samples, URLs, evidence, or other
+    // listing-bearing values into this strict normalizer.
+    const recordGenericResolvePass = (outcome, warning, checkpoint = recoveryCheckpointOutcome) => recordJobSourceResolvePass(
+      sourceId,
+      {
+        outcome,
+        warning,
+        providerRowsLoaded: enrichmentMeta?.providerRowsLoaded,
+        targeted: enrichmentMeta?.targeted,
+        attempted: enrichmentMeta?.attempted,
+        recovered: enrichmentMeta?.succeeded ?? enrichmentMeta?.enriched,
+        completeTotal: enrichmentMeta?.completeTotal,
+        empty: enrichmentMeta?.empty,
+        unavailable: enrichmentMeta?.unavailable,
+        consecutiveNoMatchPasses: enrichmentMeta?.consecutiveNoMatchPasses,
+        consecutiveNoProgressPasses: enrichmentMeta?.consecutiveNoProgressPasses,
+        recommendation: enrichmentMeta?.recoveryRecommendation,
+        checkpoint,
+      },
+      { nodeId, jobRunId },
+    );
     if (canWriteTelemetry()) {
       const priorResolveMergeNet = Number(jobsTelemetry.resolves[sourceId]?.cumulativeMergeNet) || 0;
       jobsTelemetry.resolves[sourceId] = {
@@ -10368,6 +10964,7 @@ Return a JSON object with four arrays of search query strings:
             error,
             `${recoveryLabel} cleared a blocked query but could not checkpoint the remaining query order.`,
           );
+          recordGenericResolvePass('failed', warning, 'failed');
           return {
             resolved: false,
             staleRun: error?.code === 'DESCRIPTION_RECOVERY_SUPERSEDED',
@@ -10384,6 +10981,12 @@ Return a JSON object with four arrays of search query strings:
     if (canWriteTelemetry() && jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
     const nextBlockedUrl = remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
+    recordGenericResolvePass(
+      resolveWarning?.severity === 'block' || resolveWarning?.severity === 'throttle'
+        ? 'blocked'
+        : (result?.resolved === false ? 'failed' : 'completed'),
+      resolveWarning,
+    );
     // JobSourceCardNode's onResolved handler already reads `warning` off this
     // return to re-derive the hub's ScrapeWarningsPanel.
     return {
@@ -10400,7 +11003,10 @@ Return a JSON object with four arrays of search query strings:
       // items. Other sources recover a visible subset and must merge, not
       // replace, or an unreached page would look like it vanished.
       replaceSourceItems: sourceId === 'google' && !!sourceRecoverySnapshot,
-      removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
+      // Append semantics: this pass adds recovered rows, it does not restate the
+      // source's full set. Reporting every evidence drop as removed deleted
+      // listings an earlier Solve had already completed — see retiredListingKeys.
+      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped),
     };
     };
     // Every generic Solve may now consume an exact checkpoint-owned URL queue,
@@ -10420,8 +11026,23 @@ Return a JSON object with four arrays of search query strings:
       return { resolved: false, staleRun: true, items: [] };
     }
     const canWriteTelemetry = () => canWriteJobResolveTelemetry(nodeId, jobRunId);
-    const recordResumeAttempt = (attemptSourceId, mode, outcome, detail) => {
+    // `observed` carries only fixed, enumerated observations for the durable
+    // receipt (today: the native verification window's terminal value). It is
+    // deliberately separate from `detail`, which is free-form prose for the
+    // live trail and can embed an osascript error string or a poll summary.
+    const recordResumeAttempt = (attemptSourceId, mode, outcome, detail, observed = null) => {
       recordResumeAttemptTelemetry(attemptSourceId, mode, outcome, detail, { nodeId, jobRunId });
+      // Durable per-source/run twin of the line above, recorded HERE rather
+      // than at each branch so every present and future call site in this
+      // handler is covered by construction. The live trail alone could not
+      // answer this incident: it is wiped by this hub's next search, and a
+      // report with more than one current Job Search hub drops that whole
+      // surface, so three Continue clicks left no retrievable record at all.
+      recordJobSourceResumeAttempt(attemptSourceId, {
+        mode,
+        outcome,
+        nativeResult: observed?.nativeResult,
+      }, { nodeId, jobRunId });
     };
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     // The mode a "Continue"/"Log in"/"Solve" click was showing when the user
@@ -10487,13 +11108,31 @@ Return a JSON object with four arrays of search query strings:
         resolved: true,
         items,
         replaceMatchingItems: true,
+        // `retried.unavailable` is an explicit retirement observation — Indeed
+        // served a "this job is no longer available" page — so it retires rows
+        // unconditionally. The evidence drops go through the same retirement
+        // filter the append paths use, for a reason replaceMatchingItems does
+        // not cover: this pass can stop early. retryIndeedJobDescriptions breaks
+        // out of its loop on the first challenge signal, so every target it
+        // never opened comes back exactly as it went in — still description-less
+        // — and lands in the drop set. replaceMatchingItems only protects rows
+        // whose keys are present in `items`, and an unreached row is by
+        // definition absent from it, so deriving removedItemKeys from the whole
+        // drop set deleted listings this retry never even attempted. See
+        // retiredListingKeys.
         removedItemKeys: [
           ...(Array.isArray(retried.unavailable) ? retried.unavailable : []).map(item => item?.key),
-          ...descriptionEvidence.dropped.map(sourceJobKey),
+          ...retiredListingKeys(descriptionEvidence.dropped),
         ].filter(Boolean),
       };
     }
     let effectiveResumeState = resumeState || {};
+    // Whether a real Chrome window has owned the screen since the ownership
+    // check at the top of this handler. Both native branches below hand the
+    // shared profile to a window the user can leave open for an unbounded
+    // stretch of wall-clock time; see this flag's one reader, just above the
+    // resume scrape.
+    let nativeWindowSettled = false;
     // "Continue" used to just re-run the same failing scrape: a logged-out
     // Indeed session redirects to its sign-in page, which flashed onscreen for
     // a second or two inside the "Job Collector / Checking session… /
@@ -10513,7 +11152,16 @@ Return a JSON object with four arrays of search query strings:
       // instead of on the disk cache, which is exactly the thing that can be
       // stale (a stale connected:true is what produced this bug in the first
       // place, so it must never be allowed to skip the window on its own).
-      if (canWriteTelemetry() && Date.now() - lastIndeedLoginConfirmedAt < RECENT_INDEED_LOGIN_MS) {
+      // Deliberately NOT fenced by canWriteTelemetry(): this stamp and its read
+      // are a browser-resource decision about the single shared Chrome profile,
+      // not a diagnostics write. A card restored from its durable manifest is
+      // authorized by canPerformJobSourceAction (from disk) yet legitimately
+      // does not own the in-process telemetry, so fencing left the stamp
+      // unwritten, disarmed the dedupe process-wide, and opened a redundant
+      // second native login window seconds after the user finished signing in.
+      // The trail entry below stays fenced — inside recordResumeAttemptTelemetry,
+      // which is the correct layer for it.
+      if (Date.now() - lastIndeedLoginConfirmedAt < RECENT_INDEED_LOGIN_MS) {
         logger.info(`[Jobs][${nodeId}] Indeed login already completed ${Math.round((Date.now() - lastIndeedLoginConfirmedAt) / 1000)}s ago — resuming without opening a second window`);
         recordResumeAttempt(sourceId, attemptMode, 'logged-in', 'reused the login completed moments earlier');
         effectiveResumeState = { ...effectiveResumeState, mode: null };
@@ -10571,7 +11219,10 @@ Return a JSON object with four arrays of search query strings:
       // that reports success and STILL leaves the scrape logged out is
       // exactly the failure this whole change exists to make visible.
       recordResumeAttempt(sourceId, attemptMode, 'logged-in', loginResult?.reason || 'native login confirmed connected');
-      if (canWriteTelemetry()) lastIndeedLoginConfirmedAt = Date.now();
+      // Unfenced for the same reason as the read above: a shared-profile fact,
+      // not telemetry. Do not reintroduce a run fence here.
+      lastIndeedLoginConfirmedAt = Date.now();
+      nativeWindowSettled = true;
       effectiveResumeState = { ...effectiveResumeState, mode: null };
     }
     if (effectiveResumeState.mode === 'native-challenge') {
@@ -10587,7 +11238,7 @@ Return a JSON object with four arrays of search query strings:
         // shared profile; the helper itself transfers/resolves the reservation.
         nativeResult = await withSharedProfileLock(() => openNativeIndeedChallengeWindow(challengeUrl, event.sender, { challengeObserved: true, signal }), signal, 'job Indeed native challenge');
       } catch (error) {
-        recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error));
+        recordResumeAttempt(sourceId, attemptMode, 'error', error?.message || String(error), { nativeResult: 'launch-error' });
         return {
           resolved: false, items: [],
           warning: {
@@ -10598,20 +11249,57 @@ Return a JSON object with four arrays of search query strings:
           },
         };
       }
-      if (nativeResult?.result !== 'cleared') {
-        recordResumeAttempt(sourceId, attemptMode, 'blocked', `native challenge ended ${nativeResult?.result || 'without clearing'}`);
+      const nativeOutcome = String(nativeResult?.result || '');
+      // Already an observation-only sentence built by the window itself (poll
+      // counts, poll errors, and whether an indeed.com tab was ever visible).
+      // Carry it verbatim into the warning; never let the copy around it assert
+      // a cause the observer did not actually see.
+      const pollSummary = String(nativeResult?.pollEvidenceSummary || '').trim();
+      // recordResumeAttemptTelemetry slices `detail` at 200 characters and the
+      // summary can embed a 200-character osascript error, so the trail gets a
+      // self-marked short form rather than a silently amputated tail. The
+      // warning above keeps the full text.
+      const pollSummaryForTrail = pollSummary.length > 90 ? `${pollSummary.slice(0, 90)}… (truncated; see warning)` : pollSummary;
+      // The split itself lives in nativeChallengeTerminalDisposition so the
+      // shipped decision is the thing under test, not a restatement of it.
+      const nativeDisposition = nativeChallengeTerminalDisposition(nativeOutcome);
+      if (nativeDisposition === 'blocked') {
+        recordResumeAttempt(sourceId, attemptMode, 'blocked', `native challenge ended ${nativeOutcome}${pollSummaryForTrail ? `; ${pollSummaryForTrail}` : ''}`, { nativeResult: nativeOutcome });
         return {
           resolved: false, items: [],
           warning: {
             code: 'scrape-failed', severity: 'block',
-            evidence: `Native Indeed verification ended ${nativeResult?.result || 'without clearing'}; no automated retry was attempted.`,
-            suggestion: nativeResult?.result === 'hard-block'
+            evidence: `Native Indeed verification ended ${nativeOutcome}.${pollSummary ? ` Observer: ${pollSummary}.` : ''}`,
+            suggestion: nativeOutcome === 'hard-block'
               ? 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.'
               : 'Complete the check in the real Chrome window, then click Continue again.',
             resumeState: effectiveResumeState,
           },
         };
       }
+      if (nativeDisposition !== 'cleared') {
+        // Inconclusive, not negative — see NATIVE_CHALLENGE_OBSERVED_NEGATIVES.
+        // Fall through to the resume scrape and let it decide: if the profile is
+        // still walled it returns its own challenge/needs-login warning, and if
+        // the user's verification really did land the rows simply arrive.
+        // Recorded as a distinct outcome so the trail can tell "cleared then
+        // resumed" apart from "no clearance observed, probed anyway"; the scrape
+        // below records its own entry, the same two-line pattern the native-login
+        // branch uses ("logged-in -> resolved").
+        // `nativeResult` is the enum half of the same observation: an empty or
+        // unrecognised terminal normalizes to 'unknown' rather than being
+        // dropped, because "the window reported nothing we recognise" is
+        // exactly the state that produced this incident.
+        recordResumeAttempt(sourceId, attemptMode, 'unverified', `native challenge ended ${nativeOutcome || 'with no reported result'}; probing with the resume scrape${pollSummaryForTrail ? `; ${pollSummaryForTrail}` : ''}`, { nativeResult: nativeOutcome || 'unknown' });
+      } else {
+        // The affirmative half of the same distinction. Without this line the
+        // trail showed nothing at all for a window that DID report a clean
+        // first-party tab, so a report could not tell a user's successful
+        // verification apart from a Continue click that never reached the
+        // window — and 'cleared' would never appear in the durable receipt.
+        recordResumeAttempt(sourceId, attemptMode, 'cleared', `native challenge ended cleared${pollSummaryForTrail ? `; ${pollSummaryForTrail}` : ''}`, { nativeResult: 'cleared' });
+      }
+      nativeWindowSettled = true;
       effectiveResumeState = { ...effectiveResumeState, mode: null };
     }
     if (effectiveResumeState.mode === 'retry-later') {
@@ -10620,6 +11308,19 @@ Return a JSON object with four arrays of search query strings:
       // report shows this was a deliberate immediate retry, not a silent
       // no-op that happens to look identical to one.
       logger.info(`[Jobs][${nodeId}] Retrying Indeed after a non-interactive block (mode=retry-later)`);
+    }
+    // A native window can own the screen for the full five-minute ceiling, and
+    // the run that authorized this click can retire inside it: the user gives up,
+    // closes the window, and starts a fresh search on this same hub, which writes
+    // a new jobRunId over this run's manifest. Nothing further down would notice.
+    // The resume would queue on the FIFO shared-profile lock, run a COMPLETE
+    // Indeed pass for a retired run, delay the new search by exactly that pass,
+    // and emit job-source-progress under a token the renderer discards. Re-read
+    // the same durable manifest the handler entry checked — it is the only input
+    // that can have changed while the window was up.
+    if (nativeWindowSettled && !(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId))) {
+      logger.info(`[Jobs][${nodeId}] Indeed resume abandoned after the native window settled: its durable run is no longer current`);
+      return { resolved: false, staleRun: true, items: [] };
     }
     const { remainingQueries, startPage = 0 } = effectiveResumeState;
     if (!Array.isArray(remainingQueries) || remainingQueries.length === 0) {
@@ -10779,7 +11480,10 @@ Return a JSON object with four arrays of search query strings:
       // still collected and must be reflected in the 397 total.
       gatheredCount: gathered,
       warning,
-      removedItemKeys: descriptionEvidence.dropped.map(sourceJobKey).filter(Boolean),
+      // Append semantics, same as the generic resolve return: a resumed page
+      // contributes rows, so only an explicitly retired listing may retire one
+      // the renderer already holds. See retiredListingKeys.
+      removedItemKeys: retiredListingKeys(descriptionEvidence.dropped),
     };
   });
 
@@ -10826,6 +11530,10 @@ Return a JSON object with four arrays of search query strings:
       const result = await resetPlatformSession('indeed');
       if (result.success) {
         await invalidatePlatformSessionStatus('indeed', 'Indeed session reset by user.');
+        // The cookies this stamp implicitly vouched for are gone; the next
+        // "Log in" click must open a real window instead of deduping against
+        // them. See forgetIndeedLoginConfirmation.
+        forgetIndeedLoginConfirmation('the Indeed session was reset from Settings');
       }
       return result;
     }, signal, 'job reset Indeed session');
@@ -10844,6 +11552,9 @@ Return a JSON object with four arrays of search query strings:
       try {
         await clearBrowserSession();
         clearAllSessionStatusCache();
+        // Same reason as the targeted reset above: this wiped the very profile
+        // the recent-login stamp describes.
+        forgetIndeedLoginConfirmation('all browser sessions were cleared');
         return { success: true, reason: 'All browser sessions and their cached connection statuses were cleared.' };
       } catch (error) {
         return { success: false, code: error?.code || 'reset-failed', reason: error?.message || String(error) };

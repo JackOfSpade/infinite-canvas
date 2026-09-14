@@ -1,8 +1,8 @@
 import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
-import { nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
-import { buildResolvedDescriptionWarning } from '../test-dependencies.js';
+import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
+import { buildResolvedDescriptionWarning, filterJobsByDescriptionEvidence } from '../test-dependencies.js';
 import { generateMarkdown } from '../test-dependencies.js';
 import {
   createTextDocumentSessionRegistry,
@@ -13,7 +13,7 @@ import {
 import { completionTimestampIso, formatCompletionTimestamp, normalizeCompletionTimestamp } from '../../src/utils/completionTimestamp.js';
 import { QUIT_COMMIT_SETTLE_FALLBACK_MS, settlePreFenceCanvasBatches } from '../../src/utils/quitCommitSettle.js';
 
-import { JOBHUB_CAREER_IDENTITY_FIELDS, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, mergeGlassdoorPanelDetail, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
+import { JOBHUB_CAREER_IDENTITY_FIELDS, acceptIndeedScoreSafeDescription, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, isIndeedScoreSafeDescription, mergeExpandedJobDetail, mergeGlassdoorPanelDetail, needsIndeedDescriptionRetry, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
 import { getManualScraperTelemetry, recordManualScraperTelemetry, resetManualScraperTelemetry, scrapeManualSources } from '../test-dependencies.js';
 
 export default [
@@ -340,7 +340,7 @@ export default [
         complete,
         deferred.slice(-1),
       );
-      const resetAfterRealAttempt = nextDescriptionRecoveryGuidance(secondNoMatch.state, {
+      const thirdNoMatchAfterOtherAttempt = nextDescriptionRecoveryGuidance(secondNoMatch.state, {
         unavailableRows: partialPartition.unavailable,
         providerRowsLoaded: 121,
         attempted: 1,
@@ -367,8 +367,8 @@ export default [
         && skipWarning?.actionLabel === 'Check anyway'
         && skipWarning?.evidence === '"Deferred 82" was not found in 2 consecutive checks. Skip is recommended, or choose Check anyway to retry.'
         && skipWarning?.suggestion === null
-        && resetAfterRealAttempt.state.consecutiveNoMatchPasses === 0
-        && resetAfterRealAttempt.guidance.recommendation === 'retry'
+        && thirdNoMatchAfterOtherAttempt.state.consecutiveNoMatchPasses === 3
+        && thirdNoMatchAfterOtherAttempt.guidance.recommendation === 'skip'
         && warning?.severity === 'block',
       'a 119-raw / 24-complete / 83-unresolved Google run must retain its pool, ignore the duplicate mounted slice, and target all deferred identities after full reveal');
       return { raw: rawGoogleRows, postAge: resolved.recoveryJobs.length, complete: resolved.completeRows.length, unresolved: resolved.emptyRows.length };
@@ -741,8 +741,209 @@ export default [
         && warnAfterSecond.evidence.includes('recovered no description'),
         'a stalled recovery must stop advising the action that has already failed twice');
       return { stalled: second.guidance.stalled, shortLabel: warnAfterSecond.shortLabel };
-    },
   },
+},
+{
+    name: 'Description recovery uses score-safe evidence and recommends Skip for a stable mixed residual',
+    run: () => {
+      // A real Google Solve repeatedly read a short detail panel. The old
+      // resolver treated >=120 chars as a recovery while the score gate requires
+      // 400, so it retried that same listing forever without ever recommending
+      // Skip. Keep the recovery accounting on the exact scorer boundary.
+      const shortText = 's'.repeat(399);
+      const scoreSafeText = 'l'.repeat(400);
+      const recoveredCard = {
+        source: 'google', title: 'Recovered listing', company: 'Acme', location: 'Toronto',
+        googleCardUrl: 'https://www.google.com/search?htidocid=recovered-card', snippet: '',
+      };
+      const unavailableCard = {
+        source: 'google', title: 'Unavailable listing', company: 'Acme', location: 'Toronto',
+        googleCardUrl: 'https://www.google.com/search?htidocid=unavailable-card', snippet: '',
+      };
+      const evidence = filterJobsByDescriptionEvidence([
+        { ...recoveredCard, snippet: shortText },
+        { ...unavailableCard, snippet: scoreSafeText },
+      ]);
+      const recovered = reconcileResolvedDescriptionRecovery(
+        [recoveredCard, unavailableCard],
+        'google',
+        [{ ...recoveredCard, snippet: scoreSafeText }],
+      );
+      // The generic resolver merges the fresh detail row over a persisted
+      // candidate so card identity fields are retained. Its explicit prior
+      // deferral must not leak through that spread when the fresh row is
+      // markerless and score-safe.
+      const markedCandidate = {
+        ...recoveredCard,
+        descriptionDeferredReason: 'description-rate-limited',
+      };
+      const freshResolvedRow = { ...recoveredCard, snippet: scoreSafeText };
+      const mergedResolvedRow = mergeResolvedDescriptionRecoveryCandidate(
+        markedCandidate,
+        freshResolvedRow,
+        'google',
+      );
+      const mergedRecovery = reconcileResolvedDescriptionRecovery(
+        [markedCandidate],
+        'google',
+        [mergedResolvedRow],
+      );
+      const remainingCandidates = selectResolvedDescriptionRecoveryCandidates(
+        recovered.recoveryJobs,
+        'google',
+        [{ ...recoveredCard, snippet: '' }, { ...unavailableCard, snippet: '' }],
+      );
+      const mixedObservation = {
+        // The unavailable identity stayed absent, while another card was opened
+        // and recovered. That independent success must not reset the unavailable
+        // listing's retry/Skip guidance.
+        unavailableRows: [unavailableCard],
+        emptyRows: [unavailableCard],
+        providerRowsLoaded: 2,
+        attempted: 1,
+        recovered: 1,
+        empty: 1,
+        completeTotal: 1,
+      };
+      const firstMixed = nextDescriptionRecoveryGuidance(null, mixedObservation);
+      const secondMixed = nextDescriptionRecoveryGuidance(firstMixed.state, mixedObservation);
+      const mixedWarning = buildResolvedDescriptionWarning(
+        'google',
+        { code: 'description-listing-unavailable', recoveryGuidance: secondMixed.guidance },
+        [recoveredCard],
+        [unavailableCard],
+      );
+      // A real pass can also carry a detail-panel warning from a different
+      // visible card. Its source diagnosis must survive, but must not mask the
+      // persisted no-match Skip recommendation for the stable absent card.
+      const mixedExpansionWarning = buildResolvedDescriptionWarning(
+        'google',
+        {
+          code: 'description-card-unavailable',
+          severity: 'block',
+          shortLabel: 'Retry recommended',
+          actionLabel: 'Retry',
+          evidence: 'The visible detail panel did not expose a description.',
+          recoveryGuidance: secondMixed.guidance,
+        },
+        [recoveredCard],
+        [unavailableCard],
+      );
+      const mixedHardBlockWarning = buildResolvedDescriptionWarning(
+        'google',
+        {
+          code: 'description-detail-hard-block',
+          severity: 'block',
+          action: 'none',
+          shortLabel: 'Wait, then rerun',
+          evidence: 'Google returned a non-interactive verification page.',
+          suggestion: 'Wait for the restriction to cool down before rerunning.',
+          recoveryGuidance: secondMixed.guidance,
+        },
+        [recoveredCard],
+        [unavailableCard],
+      );
+      const stalledUnavailableWarning = buildResolvedDescriptionWarning(
+        'google',
+        {
+          code: 'description-listing-unavailable',
+          recoveryGuidance: {
+            recommendation: 'retry',
+            stalled: true,
+            consecutiveNoProgressPasses: 2,
+          },
+        },
+        [],
+        [unavailableCard],
+      );
+
+      assert(evidence.jobs.length === 1 && evidence.jobs[0].title === 'Unavailable listing'
+        && evidence.dropped.length === 1 && evidence.dropped[0].title === 'Recovered listing',
+      'a 399-character detail remains deferred while 400 characters is score-safe');
+      assert(recovered.completeRows.length === 1
+        && recovered.completeRows[0].title === 'Recovered listing'
+        && recovered.emptyRows.length === 1
+        && recovered.emptyRows[0].title === 'Unavailable listing'
+        && remainingCandidates.length === 1
+        && remainingCandidates[0].title === 'Unavailable listing',
+      'a score-safe recovered Google identity must leave the deferred pool and never be selected again');
+      assert(!mergedResolvedRow.descriptionDeferredReason
+        && mergedRecovery.completeRows.length === 1
+        && mergedRecovery.emptyRows.length === 0,
+      'a markerless score-safe detail row must clear the stale candidate deferral through the generic merge and reconciliation seam');
+      assert(firstMixed.guidance.consecutiveNoMatchPasses === 1
+        && secondMixed.guidance.consecutiveNoMatchPasses === 2
+        && secondMixed.guidance.recommendation === 'skip'
+        && mixedWarning?.shortLabel === 'Skip recommended'
+        && mixedWarning?.actionLabel === 'Check anyway',
+      'a stable unavailable residual must reach Skip recommendation even when another card was attempted and recovered');
+      assert(mixedExpansionWarning?.code === 'description-card-unavailable'
+        && mixedExpansionWarning?.shortLabel === 'Skip recommended'
+        && mixedExpansionWarning?.actionLabel === 'Check anyway'
+        && mixedExpansionWarning?.evidence.includes('visible detail panel')
+        && mixedExpansionWarning?.evidence.includes('not found in 2 consecutive checks'),
+      'a simultaneous panel warning must preserve its diagnostic cause while the stable unavailable listing still reaches Skip advice');
+      assert(mixedHardBlockWarning?.code === 'description-detail-hard-block'
+        && mixedHardBlockWarning?.action === 'none'
+        && mixedHardBlockWarning?.shortLabel === 'Skip recommended'
+        && mixedHardBlockWarning?.actionLabel === 'Wait, then rerun'
+        && !mixedHardBlockWarning?.evidence.includes('Check anyway')
+        && mixedHardBlockWarning?.evidence.includes('Skip is recommended if')
+        && mixedHardBlockWarning?.suggestion?.includes('cool down'),
+      'Skip advice must not turn a non-interactive hard block into a misleading retry action');
+      assert(stalledUnavailableWarning?.shortLabel === 'Skip recommended'
+        && stalledUnavailableWarning?.actionLabel === 'Retry anyway',
+      'description-listing-unavailable must not hide a stalled recovery Skip recommendation');
+      return {
+        scoreSafe: evidence.jobs.length,
+        remainingCandidates: remainingCandidates.length,
+        recommendation: secondMixed.guidance.recommendation,
+      };
+    },
+},
+{
+    name: 'Accepted detail descriptions clear stale deferrals while blank or short retries retain them',
+    run: () => {
+      const deferredZip = {
+        source: 'ziprecruiter', title: 'Deferred Zip role', snippet: '',
+        descriptionDeferredReason: 'description-rate-limited',
+      };
+      const zipRecovered = mergeExpandedJobDetail(deferredZip, {
+        text: 'Zip navigation detail text', descriptionCapture: 'zip-detail',
+      });
+      const zipMiss = mergeExpandedJobDetail(deferredZip, { text: '' });
+      const zipWhitespaceMiss = mergeExpandedJobDetail(deferredZip, { text: ' \n\t ' });
+      const deferredIndeed = {
+        source: 'indeed', title: 'Deferred Indeed role', snippet: '',
+        descriptionDeferredReason: 'indeed-unavailable',
+      };
+      const indeedRecovered = { ...deferredIndeed };
+      const indeedShort = { ...deferredIndeed };
+      const markedLongIndeed = { ...deferredIndeed, snippet: 'I'.repeat(400) };
+      const cleanLongIndeed = { source: 'indeed', snippet: 'I'.repeat(400) };
+      const acceptedIndeed = acceptIndeedScoreSafeDescription(indeedRecovered, 'I'.repeat(400));
+      const acceptedShortIndeed = acceptIndeedScoreSafeDescription(indeedShort, 'I'.repeat(399));
+
+      assert(!zipRecovered.descriptionDeferredReason
+        && zipRecovered.snippet === 'Zip navigation detail text'
+        && zipMiss.descriptionDeferredReason === 'description-rate-limited'
+        && zipWhitespaceMiss.descriptionDeferredReason === 'description-rate-limited',
+      'a nonempty ZipRecruiter navigation detail clears an inherited deferral, while blank detail text (including whitespace) preserves it');
+      assert(acceptedIndeed
+        && indeedRecovered.snippet.length === 400
+        && !indeedRecovered.descriptionDeferredReason
+        && !acceptedShortIndeed
+        && indeedShort.descriptionDeferredReason === 'indeed-unavailable',
+      'an Indeed exact retry clears its inherited deferral only after score-safe detail evidence; a short retry remains deferred');
+      assert(needsIndeedDescriptionRetry(markedLongIndeed)
+        && !isIndeedScoreSafeDescription(markedLongIndeed)
+        && !needsIndeedDescriptionRetry(cleanLongIndeed)
+        && isIndeedScoreSafeDescription(cleanLongIndeed)
+        && !needsIndeedDescriptionRetry(indeedRecovered),
+      'a marked 400-character Indeed row remains a retry target until a fresh accepted detail clears its marker');
+      return { zipRecovered: !zipRecovered.descriptionDeferredReason, indeedAccepted: acceptedIndeed };
+    },
+},
 {
     name: 'Detail selection compares entity-encoded headings against their decoded job title',
     run: () => {
@@ -1406,7 +1607,12 @@ export default [
       const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
       const currentCanvasRead = generationIndexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
-      const originRead = generationIndexOf('const originHub = getNode(originHubId);');
+      // getLiveNode, not getNode: the origin Job Search can sit on another
+      // canvas level once a module has been absorbed into a sub-canvas, and a
+      // level-scoped miss here reads as "the module was deleted". The ordering
+      // invariant this line anchors (re-read AFTER owning the lease) is
+      // unchanged — only the resolver widened.
+      const originRead = generationIndexOf('const originHub = getLiveNode(originHubId);');
       const queueIpc = generationIndexOf('await window.electronAPI.queueLocalApplication({');
       const release = generationIndexOf('lease?.release();');
       const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
@@ -1443,15 +1649,19 @@ export default [
       assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
         && canvasSource.includes('currentFile, getCurrentFile'),
       'Canvas navigation must expose a stable latest-file accessor for queued Save As operations');
+      // getLiveNode is the single whole-graph resolver in JobCardNode (it absorbed
+      // the former getLiveJobCard, which was a byte-identical duplicate). The
+      // invariant asserted here is unchanged: resolve against the complete
+      // navigation graph, never isMountedRef or a level-scoped getNode.
       assert(!generationScope.includes('if (!isMountedRef.current) return;')
-        && generationScope.includes('if (!getLiveJobCard(idRef.current)) {')
-        && generationScope.includes('const expectedPriorLocalApplication = getLiveJobCard(idRef.current)?.data?.localApplication || null;')
+        && generationScope.includes('if (!getLiveNode(idRef.current)) {')
+        && generationScope.includes('const expectedPriorLocalApplication = getLiveNode(idRef.current)?.data?.localApplication || null;')
         && generationScope.includes('const settlement = queuedLocalApplicationSettlement(')
         && generationScope.includes('expectedPriorLocalApplication,')
         && generationScope.includes('discardLocalApplication'),
       'a hidden-but-extant card must persist or deliberately replace its durable handoff globally, while an actually deleted or superseded card discards that exact handoff');
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
-        && source.includes('if (!getLiveJobCard(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
+        && source.includes('if (!getLiveNode(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
         && source.includes('additionalNotes: additionalNotes.trim()')

@@ -29,6 +29,7 @@ import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../u
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
 import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
 import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
+import { isJobWorkflowRelocationPending } from '../utils/nodeDeletionLifecycle';
 import {
   normalizePriceDropMustSellDate,
   normalizePriceDropReminderWeeks,
@@ -555,11 +556,16 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     cancelCleanCompCardDismiss();
   }, [id, getNodes, getEdges, deleteElements, cancelCleanCompCardDismiss]);
 
-  // On hub DELETE, reap EVERYTHING that belongs to it — the ephemeral comp-source
-  // cards AND the marketplacecard platform cards spawned after pricing (the
-  // eBay/Swappa/… listing cards). cleanupCompSourceCards above is reused for
-  // pre-run/cancel cleanup, which must leave the spawned platform cards alone, so
-  // the unmount cascade needs its own wider sweep. Mirrors Job Search Module's cleanupAllJobChildren.
+  // Runs on ANY hub unmount, not only a DELETE — component unmount is also how
+  // canvas navigation and nested-canvas relocation work, so this reaps EVERYTHING
+  // that belongs to the hub (the ephemeral comp-source cards AND the marketplacecard
+  // platform cards spawned after pricing, e.g. the eBay/Swappa/… listing cards).
+  // cleanupCompSourceCards above is reused for pre-run/cancel cleanup, which must
+  // leave the spawned platform cards alone, so this wider sweep is separate.
+  // Mirrors Job Search Module's cleanupAllJobChildren. Excluded below when the
+  // unmount is a relocation (dragging the hub into a sub-canvas group) rather
+  // than a real delete — SellHub has no deletion transaction of its own, so the
+  // relocation fence is the only check it needs.
   const cleanupAllHubChildren = useCallback(() => {
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id,
@@ -567,10 +573,18 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     });
   }, [id, getNodes, getEdges, deleteElements]);
 
-  // If the hub is deleted, reap its comp cards (no listener for their progress
-  // events otherwise) and its spawned marketplace cards (orphaned otherwise).
-  useUnmountEffect(cleanupAllHubChildren);
+  // Reap comp cards (no listener for their progress events otherwise) and
+  // spawned marketplace cards (orphaned otherwise) on any unmount that is not
+  // a relocation — see cleanupAllHubChildren above.
   useUnmountEffect(() => {
+    if (isJobWorkflowRelocationPending(id)) {
+      EventLogger.log(`[SellHub][${id}] Unmount child cleanup deferred to pending relocation transaction`);
+      return;
+    }
+    cleanupAllHubChildren();
+  });
+  useUnmountEffect(() => {
+    if (isJobWorkflowRelocationPending(id)) return;
     moduleRunQueue.cancelQueuedRunsForNode(id);
   });
   // The clean-card dismissal grace timer (see scheduleCleanCompCardDismiss)
