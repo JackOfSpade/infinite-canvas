@@ -1,4 +1,4 @@
-import { assert, assertAnthropicStructuredOutputLimits, assertResponseMatchesSchema, assertResponseSchemaVocabularySupported, auditResponseSchemaVocabulary, buildAnthropicMessageParams, canonicalizeResponseSchemaEnums, validateResponseSchema } from '../test-dependencies.js';
+import { assert, assertResponseMatchesSchema, assertResponseSchemaVocabularySupported, auditResponseSchemaVocabulary, canonicalizeResponseSchemaEnums, validateResponseSchema } from '../test-dependencies.js';
 import * as responseSchemas from '../../electron/ipc/aiSchemas.js';
 
 export default [
@@ -77,13 +77,6 @@ export default [
       assert(matcherError?.code === 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD',
         'post-response validation reuses the same vocabulary assertion if called independently');
 
-      let builderError = null;
-      try { buildAnthropicMessageParams('fixture', { model: 'claude-sonnet-4-6', maxTokens: 100, responseSchema: schema }); }
-      catch (error) { builderError = error; }
-      assert(builderError?.code === 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD'
-        && builderError.message.includes('$.minProperties'),
-      'the Claude request builder rejects an unsupported response contract before it can reach a token-count or billed API request');
-
       const liveSchemas = Object.entries(responseSchemas)
         .filter(([name, value]) => name.endsWith('_SCHEMA') && value && typeof value === 'object')
         .map(([name, value]) => ({ name, problems: auditResponseSchemaVocabulary(value) }));
@@ -126,54 +119,6 @@ export default [
       assert(union === 'Ready' && validateResponseSchema(union, { anyOf: [{ const: 'Ready' }, { const: 'Pending' }] }).length === 0,
         'enum canonicalization also selects a uniquely valid union branch');
       return { condition: normalized.condition };
-    },
-  },
-  {
-    name: 'Claude structured-output validation: Anthropic explicit grammar limits reject generated schemas before a request',
-    run: () => {
-      const optionalOverLimit = {
-        type: 'object', properties: Object.fromEntries(Array.from({ length: 25 }, (_, index) => [`f${index}`, { type: 'string' }])),
-      };
-      const unionOverLimit = {
-        type: 'object', required: ['fields'], properties: {
-          fields: {
-            type: 'array', items: {
-              type: 'object', required: Array.from({ length: 17 }, (_, index) => `f${index}`),
-              properties: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`f${index}`, { type: ['string', 'null'] }])),
-            },
-          },
-        },
-      };
-      const oneOfOverLimit = {
-        type: 'object', required: ['fields'], properties: {
-          fields: {
-            type: 'array', items: {
-              type: 'object', required: Array.from({ length: 17 }, (_, index) => `f${index}`),
-              properties: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [
-                `f${index}`, { oneOf: [{ type: 'string' }, { type: 'null' }] },
-              ])),
-            },
-          },
-        },
-      };
-      let optionalError = null;
-      let unionError = null;
-      let oneOfError = null;
-      try { assertAnthropicStructuredOutputLimits(optionalOverLimit, { task: 'limit-test' }); } catch (error) { optionalError = error; }
-      try { assertAnthropicStructuredOutputLimits(unionOverLimit); } catch (error) { unionError = error; }
-      try { assertAnthropicStructuredOutputLimits(oneOfOverLimit); } catch (error) { oneOfError = error; }
-      assert(optionalError?.code === 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX' && /25 optional/.test(optionalError.message),
-        'the 25th optional parameter fails locally instead of returning an Anthropic compilation 400');
-      assert(unionError?.code === 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX' && /17 union/.test(unionError.message),
-        'the 17th union parameter fails locally instead of returning an Anthropic compilation 400');
-      assert(oneOfError?.code === 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX' && /17 union/.test(oneOfError.message),
-        'oneOf-bearing parameters are counted because the SDK sends them as anyOf unions');
-      let builderError = null;
-      try { buildAnthropicMessageParams('fixture', { model: 'claude-sonnet-5', maxTokens: 100, responseSchema: optionalOverLimit }); }
-      catch (error) { builderError = error; }
-      assert(builderError?.code === 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX',
-        'the request builder applies Anthropic complexity preflight to billed and token-count shapes alike');
-      return { optionalLimit: 24, unionLimit: 16 };
     },
   },
 ];

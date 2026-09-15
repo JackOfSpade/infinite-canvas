@@ -58,7 +58,7 @@ function hasUnstartedImportWorkEvidence(data) {
   ) return true;
   if (data?.manualAiResume || data?.terminalFinalizationRecovery) return true;
   if (Array.isArray(data?.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0) return true;
-  if (Array.isArray(data?.pendingJobs) || data?.pendingBatch || data?.pendingTargetRole || data?.pendingCareerData) return true;
+  if (Array.isArray(data?.pendingJobs) || data?.pendingTargetRole || data?.pendingCareerData) return true;
   if (data?.pendingJobPreferences || data?.pendingJobPreferencePlan || data?.pendingJobPreferencesInterpretation) return true;
   if (data?.queries || data?.queryCacheKey || data?.queryModel || data?.queryCount) return true;
   // `locationSnapshot` and `lastCompletedRunAt` are setup bookkeeping: the

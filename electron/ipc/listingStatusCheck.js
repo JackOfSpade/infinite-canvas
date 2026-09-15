@@ -12,9 +12,18 @@
  *   2. A signal-shaped prompt that explicitly says "the page may be any of
  *      these formats; find the most specific evidence."
  *
- * scanSellerHubPages: multi-page hub aggregation → per-platform status +
- * attention items (a superseded single-URL "classify one listing" engine
- * that predated the hub-scan approach was removed — see git history).
+ * Multi-page hub aggregation → per-platform status + attention items (a
+ * superseded single-URL "classify one listing" engine that predated the
+ * hub-scan approach was removed — see git history), split into two stages
+ * a multi-platform caller can run apart:
+ *   - prepareHubPages: fetch + strip every hub URL and resolve transport-level
+ *     outcomes (auth wall, fetch error, empty) — no LLM call.
+ *   - scanPreparedHubPages: takes that prepared payload and does the (now
+ *     human copy/paste) LLM call + result binding.
+ * The Marketplace Status Module (marketplace.js) uses the split directly so
+ * it can scrape every platform unattended first and only then issue every
+ * platform's manual AI handoff, instead of interleaving scrape → paste →
+ * scrape → paste across up to 8 platforms.
  */
 import { callLLMText } from './llm.js';
 import { getSoftLoginWallMatch, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
@@ -218,7 +227,7 @@ const READ_STATE_RULES = [
 ];
 
 // NOTE: not idempotent — each call appends a token per match. Call exactly once
-// per page (the sole production call site is in scanSellerHubPages); never wrap
+// per page (the sole production call site is in prepareHubPages); never wrap
 // an already-annotated string.
 export function annotateReadState(html) {
   if (!html) return html;
@@ -357,29 +366,24 @@ export function resolveAttentionSourceUrls(attention, hubUrls) {
 const HUB_HEAD_CHARS = 8000;
 
 /**
- * Marketplace Status Module scanner — NOT listing-specific.
+ * Stage 1 of the hub scan: fetch + strip every hub URL in parallel and
+ * resolve transport-level outcomes (auth wall, fetch error, empty) up front
+ * so they never cost an LLM call. Pure I/O + classification — no prompt is
+ * built and no LLM is called here, which is exactly what lets a
+ * multi-platform caller run this stage for every platform BEFORE issuing any
+ * platform's manual AI handoff (see scanPreparedHubPages below).
  *
- * Fetches a single platform's aggregate hub page(s) (the per-platform watch URLs
- * the user configured in Settings: seller dashboard, notifications feed, activity
- * center, messages inbox) and asks the model to surface anything across ALL of
- * the seller's listings that needs action or is useful to know — instead of
- * tracking one listing's live/sold/ended state.
- *
- * Uses the same transport shortcuts throughout (auth wall → needs-login,
- * fetch error → error, empty → unknown) so a logged-out platform
- * reports cleanly without an LLM call. All readable pages go into ONE
- * consolidated `marketplace-hub-scan` call.
- *
- * @returns {{ status:'ok'|'needs-login'|'error'|'unknown', message:string,
- *   summary:string, attention:object[], sources:object[] }}
+ * @returns {{ platformId:string, llmInputs:object[], sources:object[],
+ *   readState:{read:number, unread:number} }} `sources` here holds only the
+ *   TERMINAL outcomes resolved at this stage (needs-login/error/unknown pages
+ *   that will never reach an LLM); `llmInputs` holds the prepared pages that
+ *   still need scanPreparedHubPages's prompt + LLM call.
  */
-export async function scanSellerHubPages({ urlSpecs, platformId, signal, llmText = callLLMText }) {
+export async function prepareHubPages({ urlSpecs, platformId, signal }) {
   if (!Array.isArray(urlSpecs) || urlSpecs.length === 0) {
-    return { status: 'unknown', message: 'No watch URLs configured for this platform.', summary: '', attention: [], sources: [] };
+    return { platformId, llmInputs: [], sources: [], readState: { read: 0, unread: 0 } };
   }
 
-  // Fetch + strip every hub URL in parallel; resolve transport-level outcomes
-  // (auth wall, fetch error, empty) up front so they never cost an LLM call.
   const prepared = await Promise.all(urlSpecs.map(async (s) => {
     const spec = s && typeof s === 'object' ? s : {};
     const { url, urlLabel } = spec;
@@ -520,12 +524,29 @@ export async function scanSellerHubPages({ urlSpecs, platformId, signal, llmText
     unread: acc.unread + (p.readState?.unread || 0),
   }), { read: 0, unread: 0 });
 
+  return { platformId, llmInputs, sources, readState };
+}
+
+/**
+ * Stage 2 of the hub scan: takes prepareHubPages's output and does the LLM
+ * call (now a human copy/paste handoff via callLLMText) + result binding.
+ * Skips the call entirely when every hub page already resolved to a terminal
+ * transport outcome in stage 1 (`llmInputs` empty) — mirrors the original
+ * single-function behavior exactly, just split at the point where the prompt
+ * is first built.
+ *
+ * @returns {{ status:'ok'|'needs-login'|'error'|'unknown', message:string,
+ *   summary:string, attention:object[], sources:object[] }}
+ */
+export async function scanPreparedHubPages({ platformId, llmInputs: rawInputs, sources: terminalSources, readState, signal, llmText = callLLMText }) {
+  const inputs = Array.isArray(rawInputs) ? rawInputs : [];
+  const sources = Array.isArray(terminalSources) ? [...terminalSources] : [];
   let attention = [];
   let summary = '';
 
-  if (llmInputs.length > 0) {
+  if (inputs.length > 0) {
     const platformName = getSellMonitorConfig(platformId)?.name || platformId || 'this marketplace';
-    const sections = llmInputs.map((p, i) =>
+    const sections = inputs.map((p, i) =>
       `--- HUB PAGE ${i + 1} (label: ${p.spec.urlLabel || 'hub'}, url: ${p.spec.url}, http: ${p.status}) ---\n${p.snippet}`
     ).join('\n\n');
 
@@ -579,19 +600,19 @@ Rules:
       const parsed = await llmText(prompt, {
         signal,
         task: 'marketplace-hub-scan',
-        hints: { urlCount: llmInputs.length },
+        hints: { urlCount: inputs.length },
         responseSchema: MARKETPLACE_HUB_SCAN_SCHEMA,
       });
       // Bind each item to the hub page it was read from (validated against the
       // pages we actually fetched) so the card can offer a jump-to-page button.
-      attention = resolveAttentionSourceUrls(sanitizeAttention(parsed?.attention), llmInputs.map((p) => p.spec.url));
+      attention = resolveAttentionSourceUrls(sanitizeAttention(parsed?.attention), inputs.map((p) => p.spec.url));
       // Scrub read-state sentinels from the summary too (sanitizeAttention already
       // does this for headline/evidence). The summary is a free-form model line
       // that sits right next to the annotated message text, so a non-compliant
       // model can leak a ⟦READ⟧/⟦UNREAD⟧ token into it — strip before it reaches
       // the card and the bug report.
       summary = cleanMessage(stripReadStateTokens(parsed?.summary));
-      for (const p of llmInputs) {
+      for (const p of inputs) {
         sources.push({
           url: p.spec.url,
           urlLabel: p.spec.urlLabel,
@@ -602,7 +623,7 @@ Rules:
       }
     } catch (err) {
       if (signal?.aborted || err?.name === 'AbortError') throw err;
-      for (const p of llmInputs) {
+      for (const p of inputs) {
         sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'error', message: `AI scan failed: ${err?.message || String(err)}` });
       }
     }
@@ -620,7 +641,7 @@ Rules:
     : 'Could not read this platform’s hub pages.'
   );
 
-  return { status, message, summary, attention, sources, readState };
+  return { status, message, summary, attention, sources, readState: readState || { read: 0, unread: 0 } };
 }
 
 function hostOf(url) {

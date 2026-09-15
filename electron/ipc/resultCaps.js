@@ -1,5 +1,4 @@
 import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
-import { modelMeta } from './tokenWindow.js';
 
 /**
  * Result-count caps — how many results reach the LLM, and the per-source
@@ -13,7 +12,6 @@ import { modelMeta } from './tokenWindow.js';
  * derived from the same constants (≈200 tok/comp on a base, 24576 hard cap) and
  * cannot drift. The job-scoring lane's constants are a LOCAL conservative
  * approximation, not shared with llm.js — see JOB_TOKENS_PER_JOB.
- * (Coordinates with tokenBudget.js, which self-calibrates that cap on churn.)
  *
  * Job collection breadth is deliberately NOT configured here. It is a persisted
  * per-hub user setting (`collectionLimits`) so a run can be reproduced and does
@@ -25,9 +23,10 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // Single source of truth for the price-synthesis token shape — llm.js
 // TASK_MAX_TOKENS['price-synthesis'] imports priceSynthesisMaxTokens() below, so
 // the output budget and the comp-count ceiling (MAX_COMPS_BY_BUDGET) are derived
-// from the SAME constants and can never drift apart. 200 tok/comp is the
-// heavy-fallback-model calibration (the binding constraint — the preferred Flash
-// model uses ~87/comp); see llm.js for the real-world telemetry behind it.
+// from the SAME constants and can never drift apart. 200 tok/comp is a
+// conservative seed: the manual handoff can land in any chat app the user
+// chooses, and different apps vary in how verbose their JSON output is — see
+// llm.js for the real-world telemetry behind it.
 const PRICE_SYNTH_TOKEN_HARD_CAP = 24576;
 const PRICE_BASE_TOKENS          = 3000;
 const PRICE_TOKENS_PER_COMP      = 200;
@@ -45,25 +44,24 @@ const BUDGET_SAFETY         = 0.8;
 
 // ── Compensation-research fit gate ────────────────────────────────────────────
 // Minimum matchScore a job must clear before the competitive-pay check runs
-// on it. Compensation research is NOT cheap: each cohort (jobs grouped by
-// role/seniority/experience/employment-type/location/currency) costs TWO LLM
-// calls — one grounded market-research call plus one assessment call — and
-// cohorts fragment by the job's own city, so a single multi-employer, multi-city
-// search can fragment into dozens of cohorts. Every one of those calls starts at
-// the SAME shared Gemini ladder head, whose free tier is a flat 20 requests/day
-// — so an ungated run can exhaust that quota and starve unrelated scoring/
-// bucketing calls in the same run. Gating on fit score keeps the comparison to
-// jobs the user could realistically pursue: a competitive-pay verdict only
-// changes a decision on a job worth applying to.
+// on it. Compensation research is NOT cheap on the manual-handoff transport:
+// each cohort (jobs grouped by role/seniority/experience/employment-type/
+// location/currency) costs TWO separate copy/paste round trips — one grounded
+// market-research prompt plus one assessment prompt — and cohorts fragment by
+// the job's own city, so a single multi-employer, multi-city search can
+// fragment into dozens of cohorts. Every one of those round trips is a manual
+// interruption for the person running the search, so an ungated run could
+// demand dozens of handoffs just for compensation research on jobs the user
+// was never going to pursue. Gating on fit score keeps the comparison to jobs
+// the user could realistically pursue: a competitive-pay verdict only changes
+// a decision on a job worth applying to.
 export const COMPENSATION_MIN_FIT_SCORE = 70;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
-// returns the whole pool unchanged, so cappedForBudget is always 0.
-// ⚠️ This is deliberately ABOVE what the FREE Gemini tier can sustain — scoring
-// hundreds of jobs will rate-limit (429) and fall back to weaker models until the
-// paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
-// sources via selectTopAcrossSources) when on paid.
+// returns the whole pool unchanged, so cappedForBudget is always 0. The manual
+// handoff transport has no request quota to exhaust, so there is no longer a
+// reason to cap this short of the batching/paste effort itself.
 // Test mode can still skip expensive scoring, but it no longer changes what the
 // user asked the collectors to fetch.
 export const JOB_SCORE_CAP = JOB_SEARCH_TEST_MODE.skipAI ? 0 : Infinity;
@@ -112,52 +110,41 @@ export function compsForPricing(soldAvailable = 0, activeAvailable = 0) {
 
 const MIN_SCORING_BATCH = 5;
 
-// Per-job OUTPUT token cost by provider family — the budget backstop behind the
-// batch size (it must never let a batch request more output than the cap allows).
-// Gemini Flash engages heavy thinking on this task (~325 tok/job observed), and
-// adaptive-thinking Claude can also spend substantial output on the detailed
-// evidence schema. Use the same conservative coefficient for both lanes. In
-// practice the quality ceiling below binds before this budget backstop.
-const JOB_OUT_TOKENS_PER_JOB = { claude: JOB_TOKENS_PER_JOB, gemini: JOB_TOKENS_PER_JOB, default: JOB_TOKENS_PER_JOB };
+// Per-job OUTPUT token cost — the budget backstop behind the batch size (it
+// must never let a batch request more output than the cap allows). The
+// serving model (via the manual handoff) can engage heavy reasoning on this
+// task and spend substantial output on the detailed evidence schema, so this
+// stays a conservative per-job coefficient. In practice the quality ceiling
+// below binds before this budget backstop.
+const JOB_OUT_TOKENS_PER_JOB = JOB_TOKENS_PER_JOB;
 
-// Per-provider scoring-batch CEILING. This is a SCORING-QUALITY bound, not an
+// How many jobs ride in ONE scoring call. (Unrelated to the retired
+// `scoring-batch` hub state — that was the deleted Batch API; this is simply
+// how many jobs share a prompt.) This is a SCORING-QUALITY bound, not an
 // input-window one: an LLM ranking too many jobs in one shot compresses scores
-// and rushes the reasoning, while a bigger batch has a larger truncation/retry
-// blast radius. Adaptive-thinking Claude can consume substantial hidden output
-// on the detailed evidence schema, so it shares the proven 15-job ceiling with
-// Gemini. Keeping each batch below the job-scoring formula's live 12000-token
-// clamp avoids a single oversized first batch holding an entire run at 0/M.
-const SCORING_BATCH_CEILING = { claude: 15, gemini: 15, default: 15 };
+// and rushes the reasoning, while a bigger batch has a larger truncation blast
+// radius. A model can consume substantial hidden output on the detailed
+// evidence schema, so 15 is the proven ceiling. Keeping each batch below the
+// job-scoring formula's live 12000-token clamp avoids a single oversized
+// first batch holding an entire run at 0/M — and since every call is now a
+// human copy/paste handoff, each batch is also one dialog the user works
+// through, so this doubles as the bound on how much one paste is worth.
+const SCORING_BATCH_CEILING = 15;
 
 /**
- * Jobs to score per LLM call, sized to the model that will actually serve scoring
- * (pass llm.js `modelForTask('job-scoring')`). Two binding limits:
+ * Jobs to score per LLM call. Two binding limits:
  *   1. OUTPUT budget — each job costs ~JOB_OUT_TOKENS_PER_JOB output tokens and
  *      the whole batch must fit the billing-safe output cap (so a call can never
  *      request a budget the model won't honor → no silent truncation).
- *   2. A per-provider scoring-QUALITY ceiling.
+ *   2. The scoring-QUALITY ceiling (SCORING_BATCH_CEILING).
  * The model's INPUT window is deliberately NOT the driver — it dwarfs even ~50
  * full JDs — but it isn't ignored: the free token-count preflight (scoreBatch /
  * splitBatchesToFitWindow in jobs.js) verifies every REAL batch fits the serving
  * model's window and halves it if a pathological JD set doesn't. So this returns
  * a TARGET; input-safety is guaranteed downstream by the count API.
- *
- * @param {string} [model] resolved scoring transport/model id; unknown/manual → safe default
  */
-export function jobScoringBatchSize(model) {
-  // Job scoring is a manual copy/paste handoff. Its work-unit size must not
-  // change when the user switches an unrelated Claude/Gemini API setting.
-  if (model === 'non-api-ai') model = null;
-  const meta = modelMeta(model);
-  // A missing model id → conservative 'default' lane (the small 15 ceiling); a
-  // real id trusts its resolved provider. (modelMeta defaults unknowns to claude,
-  // so only an absent arg is treated as "don't know".)
-  const lane = model ? meta.provider : 'default';
-  const perJob  = JOB_OUT_TOKENS_PER_JOB[lane] ?? JOB_OUT_TOKENS_PER_JOB.default;
-  const ceiling = SCORING_BATCH_CEILING[lane]  ?? SCORING_BATCH_CEILING.default;
-  // Cap output at min(model max, billing hard cap) so big-output models can't
-  // request runaway billing; the per-provider ceiling is what binds in practice.
-  const outputCap = Math.min(meta.maxOutput || PRICE_SYNTH_TOKEN_HARD_CAP, PRICE_SYNTH_TOKEN_HARD_CAP);
-  const byOutput  = Math.floor((outputCap * BUDGET_SAFETY - JOB_BASE_TOKENS) / perJob);
-  return clamp(Math.min(byOutput, ceiling), MIN_SCORING_BATCH, ceiling);
+export function jobScoringBatchSize() {
+  const outputCap = PRICE_SYNTH_TOKEN_HARD_CAP;
+  const byOutput  = Math.floor((outputCap * BUDGET_SAFETY - JOB_BASE_TOKENS) / JOB_OUT_TOKENS_PER_JOB);
+  return clamp(Math.min(byOutput, SCORING_BATCH_CEILING), MIN_SCORING_BATCH, SCORING_BATCH_CEILING);
 }

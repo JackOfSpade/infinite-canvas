@@ -140,10 +140,10 @@ export function parseNativeReadOutput(stdout) {
 
 /**
  * Map one native read into the { ok, status, finalUrl, html } shape that
- * scanSellerHubPages's fetcher contract expects — classifying the blocked cases
+ * prepareHubPages's fetcher contract expects — classifying the blocked cases
  * (toggle off / login bounce / challenge / empty) as terminal `ok:false` with a
  * precise message, so they surface in the bug report's "Blocked / unreadable hub
- * sources" section WITHOUT triggering scanSellerHubPages's headless disambiguate
+ * sources" section WITHOUT triggering prepareHubPages's headless disambiguate
  * (which would relaunch the very CDP browser this path exists to avoid).
  */
 export function nativeReadToFetchResult({ requestedUrl, finalUrl, title, html, error, sentinel } = {}) {
@@ -534,7 +534,7 @@ async function navigateAndRead(targetUrl, matchHost) {
 /**
  * Read a platform's hub watch URLs through a non-CDP native Chrome and return a
  * Map<url, { ok, status, finalUrl, html } | { ok:false, error }> — the exact
- * fetcher-result shape scanSellerHubPages consumes, so the caller can feed these
+ * fetcher-result shape prepareHubPages consumes, so the caller can feed these
  * straight into the normal hub-scan analysis.
  *
  * Lifecycle: closes the headless stealth browser (one Chrome per userDataDir) and

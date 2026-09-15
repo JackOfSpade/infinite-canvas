@@ -2,9 +2,7 @@ import { useState, useCallback, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
-import { useToast } from '../components/ToastProvider';
 import { computeTidiedNodes } from '../utils/layoutUtils';
-import { useIsMountedRef } from './useIsMountedRef';
 import { nodeSupportsCustomization } from '../utils/nodeCustomization';
 
 // Helper to determine if an action applies to a single clicked node or the entire selected group
@@ -24,15 +22,12 @@ export function useCanvasContextMenu({
   clearCanvas,
   extractToParent,
   depth,
-  updateGlobal,
   duplicateNodes,
   isAnimatingRef
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
-  const isMountedRef = useIsMountedRef();
   const { deleteElements } = reactFlow;
-  const { addToast } = useToast();
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
@@ -152,41 +147,6 @@ export function useCanvasContextMenu({
     setMenu(null);
   }, [setNodes, takeSnapshot, isAnimatingRef]);
 
-  const aiPolishText = useCallback(async () => {
-    if (isAnimatingRef?.current) return;
-    if (!menu?.node || !window.electronAPI) return;
-    if (menu.node.data?.locked) return; // Cannot modify locked nodes
-    const text = menu.node.data?.text || '';
-    if (!text.trim()) {
-       setMenu(null);
-       return;
-    }
-    takeSnapshot();
-    const nodeId = menu.node.id;
-    
-    // Immediately close menu to prevent double clicks and avoid unmount race conditions
-    setMenu(null);
-    
-    try {
-      const res = await window.electronAPI.aiPolishText(text);
-      if (!isMountedRef.current) return;
-      if (res.success) {
-        if (updateGlobal) {
-          updateGlobal(nodeId, { text: res.text });
-        } else {
-          setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, text: res.text } } : n));
-        }
-        EventLogger.log(`AI polished text for node ${nodeId}`);
-      } else {
-        addToast({ title: 'AI Polish Failed', description: res.error, type: 'error' });
-        EventLogger.log("AI Polish failed: " + res.error);
-      }
-    } catch (err) {
-      EventLogger.error('[ContextMenu] AI polish crashed:', err);
-      if (!isMountedRef.current) return;
-    }
-  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, isAnimatingRef, isMountedRef]);
-
   const toggleStickyNote = useCallback(() => {
     if (isAnimatingRef?.current) return;
     if (!menu?.node) return;
@@ -222,7 +182,7 @@ export function useCanvasContextMenu({
   // a function identity for event handlers — we're deriving a rendered value.
   //
   /* eslint-disable react-hooks/refs */
-  // The callbacks below (bringToFront, aiPolishText, etc.) hold closures that reference
+  // The callbacks below (bringToFront, toggleStickyNote, etc.) hold closures that reference
   // isAnimatingRef?.current, but they are only invoked on user interaction (onClick),
   // never during render. This is a false-positive from the v7 rule's ref-propagation tracking.
   const contextMenuItems = useMemo(() => {
@@ -297,7 +257,6 @@ export function useCanvasContextMenu({
 
       if (isText) {
         items.push({ divider: true });
-        items.push({ label: '✨ AI Polish Text', onClick: aiPolishText, disabled: isLocked });
         items.push({ label: menu.node.data?.isSticky ? 'Remove Sticky Style' : 'Make Sticky Note', onClick: toggleStickyNote, disabled: isLocked });
       }
 
@@ -314,7 +273,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
-  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent, reactFlow]);
+  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, clearCanvas, tidyNodes, toggleStickyNote, closeMenu, depth, extractToParent, reactFlow]);
   /* eslint-enable react-hooks/refs */
 
   return {

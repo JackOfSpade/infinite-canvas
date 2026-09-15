@@ -52,7 +52,6 @@ export default defineConfig({
                 chunkFileNames: '[name].cjs',
               },
               external: [
-                'google-auth-library',
                 'puppeteer-core',
                 'puppeteer-extra',
                 'puppeteer-extra-plugin-stealth',

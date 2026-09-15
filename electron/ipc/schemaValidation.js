@@ -1,11 +1,16 @@
 /**
  * Small, dependency-free JSON Schema validator for model responses.
  *
- * Anthropic Structured Outputs compiles a supported subset of JSON Schema into
- * a grammar. Its SDK turns unsupported constraints (such as numeric bounds and
- * array/string lengths) into prose descriptions before sending the request.
- * Validate the provider response against the caller's *original* schema here
- * so those constraints remain part of the application contract.
+ * Every AI call is a human copy/paste handoff now (nonApiAi.js): the app has
+ * no structured-output API to compile/enforce the schema on the way out, and
+ * whatever the human pastes back came from an arbitrary chat application that
+ * never saw this schema as anything more than JSON text in the prompt. This
+ * module is therefore the ONLY thing enforcing the response contract —
+ * nonApiAi.js's validateNonApiAiSubmission calls straight into it
+ * (assertResponseMatchesSchema, canonicalizeResponseSchemaEnums) before a
+ * pasted reply is accepted, auditing and validating against the caller's
+ * *original* schema so a chat app's inability to honor bounds/lengths/etc.
+ * natively never quietly weakens the application contract.
  *
  * This intentionally implements the JSON Schema vocabulary used by
  * aiSchemas.js. The vocabulary audit below fails loud if a response contract
@@ -31,8 +36,6 @@ const ANNOTATION_KEYWORDS = new Set([
 ]);
 
 const JSON_TYPES = new Set(['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']);
-const ANTHROPIC_MAX_OPTIONAL_PARAMETERS = 24;
-const ANTHROPIC_MAX_UNION_PARAMETERS = 16;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -115,51 +118,6 @@ function auditSchemaNode(schema, path, problems) {
   }
 }
 
-function anthropicSchemaComplexity(schema) {
-  let optionalParameters = 0;
-  let unionParameters = 0;
-  const visit = (node) => {
-    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
-    // The SDK normalizes oneOf into anyOf before sending, so both consume the
-    // same Anthropic union-parameter budget at grammar-compilation time.
-    if (Array.isArray(node.type) || Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) unionParameters += 1;
-    if (node.properties && typeof node.properties === 'object' && !Array.isArray(node.properties)) {
-      const required = new Set(Array.isArray(node.required) ? node.required : []);
-      for (const [key, child] of Object.entries(node.properties)) {
-        if (!required.has(key)) optionalParameters += 1;
-        visit(child);
-      }
-    }
-    visit(node.items);
-    if (node.additionalProperties && typeof node.additionalProperties === 'object') visit(node.additionalProperties);
-    for (const keyword of ['allOf', 'anyOf', 'oneOf']) {
-      for (const child of Array.isArray(node[keyword]) ? node[keyword] : []) visit(child);
-    }
-  };
-  visit(schema);
-  return { optionalParameters, unionParameters };
-}
-
-/**
- * Anthropic's compiled grammar has request-wide limits that are easy to exceed
- * accidentally with generated schemas. We only send one response schema per
- * app request today, so the schema's own totals are the request totals.
- */
-export function assertAnthropicStructuredOutputLimits(schema, { task = null } = {}) {
-  const { optionalParameters, unionParameters } = anthropicSchemaComplexity(schema);
-  const taskLabel = task ? ` for task '${task}'` : '';
-  if (optionalParameters > ANTHROPIC_MAX_OPTIONAL_PARAMETERS) {
-    const error = new Error(`Structured-output schema configuration error${taskLabel}: ${optionalParameters} optional parameters exceeds Anthropic's ${ANTHROPIC_MAX_OPTIONAL_PARAMETERS}-parameter limit.`);
-    error.code = 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX';
-    throw error;
-  }
-  if (unionParameters > ANTHROPIC_MAX_UNION_PARAMETERS) {
-    const error = new Error(`Structured-output schema configuration error${taskLabel}: ${unionParameters} union parameters exceeds Anthropic's ${ANTHROPIC_MAX_UNION_PARAMETERS}-parameter limit.`);
-    error.code = 'STRUCTURED_OUTPUT_SCHEMA_TOO_COMPLEX';
-    throw error;
-  }
-}
-
 /**
  * Return configuration problems for response-schema features this small local
  * validator cannot enforce. Kept separate for a deterministic repository-wide
@@ -172,10 +130,13 @@ export function auditResponseSchemaVocabulary(schema) {
 }
 
 /**
- * Fail before a provider request is built when this local validator cannot
- * enforce part of the original response contract. This protects both billed
- * Messages calls and the otherwise-free token-count preflight from accepting a
- * schema whose constraints would be only partially enforced.
+ * Fail when this local validator cannot enforce part of the original response
+ * contract, instead of silently accepting a pasted reply as though every
+ * schema constraint had been checked. Called from assertResponseMatchesSchema
+ * below, which nonApiAi.js runs on every pasted response — this is the only
+ * enforcement point there is now (no provider ever compiled the schema into a
+ * grammar), so a keyword this module can't validate must be a loud
+ * configuration error, not a silent gap.
  */
 export function assertResponseSchemaVocabularySupported(schema, { task = null } = {}) {
   const unsupported = auditResponseSchemaVocabulary(schema);
@@ -196,14 +157,17 @@ function canonicalEnumValue(value, schema) {
     ...(Object.prototype.hasOwnProperty.call(schema, 'const') ? [schema.const] : []),
   ].filter((candidate) => typeof candidate === 'string');
   const matches = candidates.filter((candidate) => candidate.toLowerCase() === value.toLowerCase());
-  // Anthropic documents a narrow enum/const casing exception. Canonicalize it
-  // before handing output to application code, but never guess where a schema
-  // itself has ambiguous case-only variants.
+  // A human-pasted reply from an arbitrary chat application has no grammar
+  // enforcing exact enum casing the way a compiled structured-output schema
+  // once did — if anything, a hand-typed/retyped value is MORE likely to drift
+  // in case than a provider's constrained output was. Canonicalize a
+  // case-insensitive match before handing output to application code, but
+  // never guess where the schema itself has ambiguous case-only variants.
   return matches.length === 1 ? matches[0] : value;
 }
 
 /**
- * Canonicalize Anthropic's documented enum/const casing exception without
+ * Canonicalize a pasted response's case-insensitive enum/const drift without
  * weakening the original schema contract. All other values are untouched.
  */
 export function canonicalizeResponseSchemaEnums(value, schema) {

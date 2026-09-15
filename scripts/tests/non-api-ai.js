@@ -1,95 +1,76 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMText, checkPromptFits, fs, generateMarkdown, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, modelForTask, NON_API_AI_TRANSPORT, NON_API_JOB_TASKS, isNonApiJobTask, materializeNonApiPrompt, providerForTask, recordTruncation, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, materializeNonApiPrompt, NON_API_AI_TRANSPORT, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 
-const JOB_TASKS = [
-  'career-file-extract',
-  'resume-parse',
-  'job-query-generation',
-  'job-scoring',
-  'job-taxonomy-plan',
-  'job-taxonomy-classify',
-  'job-compensation-research',
-  'job-compensation-assessment',
-  'job-preference-interpretation',
-  'job-preference-evaluation',
-  'job-preference-research',
-  'job-preference-research-assessment',
+// A handful of representative marketplace tasks used below to prove routing
+// and dispatch are task-agnostic now that every task shares the one manual
+// transport. (The workspace 'text-polish' task that used to sit alongside
+// these was removed outright along with its sole call site, the AI Polish
+// Text context-menu action — there is no remaining non-job task that uses
+// the raw-text request kind, so this list, and the test below, only exercise
+// structured-text dispatch; callLLMRaw's own dispatch path is covered by the
+// 'callLLMRaw is the deliberate exception' test above.)
+const MARKETPLACE_AND_WORKSPACE_TASKS = [
+  'vision-product-analysis',
+  'price-synthesis',
+  'bundle-price-synthesis',
+  'platform-fit-assessment',
+  'marketplace-hub-scan',
 ];
 
 export default [
   {
-    name: 'non-API AI: job task allowlist is exact and jobs no longer primes Claude',
+    name: 'non-API AI: every known task id routes to the single manual transport',
     run: () => {
-      assert(JSON.stringify([...NON_API_JOB_TASKS].sort()) === JSON.stringify([...JOB_TASKS].sort()),
-        'the explicit non-API job-task allowlist covers every and only the twelve job-domain LLM tasks, including Job Preferences interpretation and grounded verification');
-      assert(JOB_TASKS.every(isNonApiJobTask)
-        && !isNonApiJobTask('text-polish')
-        && !isNonApiJobTask('vision-product-analysis'),
-      'job routing cannot accidentally divert marketplace or workspace AI tasks into the manual handoff');
-
-      const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-      assert(!/import\s*\{[^}]*\bprimeClaudeModels\b[^}]*\}\s*from\s*['"]\.\/modelResolver\.js['"]/.test(jobsSource)
-        && !/\bprimeClaudeModels\s*\(/.test(jobsSource)
-        && !/\bgetLLMTextBatchStatus\s*\(/.test(jobsSource)
-        && !/\bgetLLMTextBatchResults\s*\(/.test(jobsSource)
-        && !/\bcancelLLMTextBatch\s*\(/.test(jobsSource),
-      'jobs performs no Claude model priming or legacy Batch API calls once its LLM work is routed to the non-API handoff');
-      const llmSource = readFileSync(new URL('../../electron/ipc/llm.js', import.meta.url), 'utf8');
-      const preflight = llmSource.slice(
-        llmSource.indexOf('export async function checkPromptFits'),
-        llmSource.indexOf('async function assertPromptFits'),
-      );
-      const manualBranch = preflight.indexOf("if (isNonApiJobTask(task))");
-      const resolverCall = preflight.indexOf('await ensureClaudeModelsForApiRequest(provider)');
-      const selectedModel = preflight.indexOf('const model = pickModel(provider, task, settings)');
-      assert(manualBranch >= 0 && resolverCall > manualBranch && selectedModel > resolverCall,
-        'manual job preflight returns before any provider resolution, while non-manual Claude preflight resolves before selecting its model');
-      const jobSearchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
-      assert(jobSearchSource.includes('previous API scoring run was retired')
-        && jobSearchSource.includes('getLastJobAnalysisSnapshot')
-        && jobSearchSource.includes('runScoringAndSpawn'),
-      'a legacy scoring-batch state restarts from the local saved snapshot through the normal Non-API scoring flow');
-      const mainSource = readFileSync(new URL('../../electron/main.js', import.meta.url), 'utf8');
-      const manualTextStart = llmSource.indexOf("if (isNonApiJobTask(task))", llmSource.indexOf('export async function callLLMText'));
-      const manualTextEnd = llmSource.indexOf('\n  const settings = getAISettings();', manualTextStart);
-      assert(!/\bprimeClaudeModels\s*\(/.test(mainSource)
-        && !llmSource.slice(manualTextStart, manualTextEnd).includes('ensureClaudeModelsForApiRequest')
-        && llmSource.includes('async function ensureClaudeModelsForApiRequest(provider)')
-        && llmSource.includes('await ensureClaudeModelsForApiRequest(provider);'),
-      'startup and every manual job branch stay model-list API-silent, while a later non-job Claude API request lazily resolves current models');
-      return { taskCount: NON_API_JOB_TASKS.size };
+      // There is exactly one transport left in this app: every LLM call, job
+      // and marketplace/workspace alike, goes through the human copy/paste
+      // handoff. getKnownTaskIds()/taskModelRoutingSnapshot() are the only
+      // routing surface left to assert against — there is no more per-task
+      // allowlist, provider, or model to look up.
+      const knownTasks = getKnownTaskIds();
+      assert(knownTasks instanceof Set && knownTasks.size > 10 && !knownTasks.has('default'),
+        'getKnownTaskIds() enumerates real call-site task ids and excludes the internal default fallback bucket');
+      assert(!knownTasks.has('page-status-classify'),
+        'a task id with no remaining call site is not resurrected in the known-task set');
+      const snapshot = taskModelRoutingSnapshot();
+      assert(snapshot.transport === NON_API_AI_TRANSPORT,
+        'the routing snapshot names the single manual transport at its top level');
+      for (const task of knownTasks) {
+        assert(snapshot.tasks[task]?.transport === NON_API_AI_TRANSPORT
+          && Object.keys(snapshot.tasks[task]).length === 1,
+        `task '${task}' routes to the manual handoff transport with no per-task provider or model field left to report`);
+      }
+      assert(!('page-status-classify' in snapshot.tasks) && !('default' in snapshot.tasks),
+        'the snapshot reports only real call-site tasks, never the deleted task id or the internal fallback bucket');
+      return { taskCount: knownTasks.size };
     },
   },
   {
-    name: 'non-API AI: job transport identity and copied prompt are stable across API settings',
+    name: 'non-API AI: llm.js imports no provider module and every entry point reaches requestNonApiAi',
     run: () => {
-      const geminiSettings = { provider: 'gemini', geminiApiKey: 'gemini-key' };
-      const claudeSettings = { provider: 'claude', anthropicApiKey: 'claude-key' };
-      for (const task of JOB_TASKS) {
-        assert(providerForTask(task, geminiSettings) === NON_API_AI_TRANSPORT
-          && providerForTask(task, claudeSettings) === NON_API_AI_TRANSPORT
-          && modelForTask(task, geminiSettings) === NON_API_AI_TRANSPORT
-          && modelForTask(task, claudeSettings) === NON_API_AI_TRANSPORT,
-        `'${task}' is always a non-API handoff regardless of the active API provider setting`);
-      }
-      const prompt = materializeNonApiPrompt({
-        prompt: 'DYNAMIC PAYLOAD', cachedPrefix: 'STATIC RUBRIC', task: 'job-scoring',
-        responseSchema: { type: 'object', properties: {} }, maxOutputTokens: 4000, formulaSeed: 4000,
-        transport: NON_API_AI_TRANSPORT,
-        handoffSettings: { transport: NON_API_AI_TRANSPORT, userContent: { cachedPrefix: 'inlined' } },
-      });
-      assert(prompt.includes('Transport: non-api-ai (manual copy/paste; no API request, provider selection, or provider fallback)')
-        && !/Original API provider setting|Anthropic|Gemini|Vertex|provider fallback model/i.test(prompt),
-      'the copied prompt names only the stable manual transport and cannot imply API-provider fallback');
+      // The old dual-transport router picked a live API branch per task; that
+      // guarantee used to be checked by asserting manual-branch/provider-branch
+      // ORDERING inside llm.js. With only one transport left, the guarantee
+      // that actually matters is structural: llm.js cannot name a provider at
+      // all, and every public call shape reaches the one transport function.
       const llmSource = readFileSync(new URL('../../electron/ipc/llm.js', import.meta.url), 'utf8');
-      const configStart = llmSource.indexOf('function manualRequestConfig');
-      const configEnd = llmSource.indexOf('\n}\n', configStart) + 3;
-      const config = llmSource.slice(configStart, configEnd);
-      assert(configStart >= 0 && !config.includes('getAISettings') && !config.includes('providerForTask') && !config.includes('pickModel'),
-        'manual handoff configuration derives no routing identity, model, or cap from active API settings');
-      return { transport: NON_API_AI_TRANSPORT, tasks: JOB_TASKS.length };
+      const lowered = llmSource.toLowerCase();
+      const banned = ['gemini', 'claude', 'anthropic', 'apikey', 'providerfortask', 'modelfortask'];
+      const present = banned.filter(token => lowered.includes(token));
+      assert(present.length === 0,
+        `llm.js must name no provider, credential, or removed routing helper; found: ${present.join(', ') || 'none'}`);
+      assert(llmSource.includes("import { NON_API_AI_TRANSPORT, requestNonApiAi } from './nonApiAi.js';"),
+        'llm.js imports only the manual handoff transport, never a provider SDK module');
+      for (const fn of ['callLLMText', 'callLLMRaw', 'callLLMVision', 'callLLMDocument']) {
+        const start = llmSource.indexOf(`export async function ${fn}`);
+        assert(start >= 0, `${fn} is exported from llm.js`);
+        const nextExportAt = llmSource.indexOf('\nexport ', start + 1);
+        const body = llmSource.slice(start, nextExportAt > 0 ? nextExportAt : llmSource.length);
+        assert(body.includes('requestNonApiAi({'),
+          `${fn} dispatches through requestNonApiAi — the single transport — with no provider branch to choose between`);
+      }
+      return { checkedFunctions: 4, bannedTokens: banned.length };
     },
   },
   {
@@ -214,7 +195,6 @@ export default [
         return from >= 0 && to > from ? source.slice(from, to) : '';
       };
       const usaJobs = between('const triggerUSAJobsBackgroundSearch = useCallback', 'const handleJobsSettingsChange = useCallback');
-      const legacyBatch = between('const pollBatchOnce = useCallback', 'const handlePostSearchResult = useCallback');
       const paused = between('const resumeScoring = useCallback', 'useEffect(() => {\n    resumeScoringRef.current = resumeScoring;');
       const crashResume = between('const handleResumeRun = useCallback', 'const handleDiscardResume = useCallback');
       const savedScrape = between('const handleResumeSavedScrape = useCallback', 'const autoResumedManualAiRunRef = useRef(null);');
@@ -226,12 +206,6 @@ export default [
         && usaJobs.includes('processingRunsRef.current.finish(processingToken)')
         && usaJobs.includes('await resumeScoringRef.current?.()'),
       'the USAJobs append holds the shared job lane and one workflow id, then releases before handing off paused scoring so it cannot deadlock itself');
-      assert(legacyBatch.includes("lane: 'job-search'")
-        && legacyBatch.includes('const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);')
-        && legacyBatch.includes('manualAiRunId,')
-        && legacyBatch.includes('if (!queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun')
-        && legacyBatch.includes('lease?.release();'),
-      'retired legacy batches re-score only after acquiring the shared job lane and preserve one durable manual-AI workflow id');
       assert(paused.includes("lane: 'job-search'")
         && paused.includes('const manualAiRunId = createManualAiRunId(currentId);')
         && paused.includes('completeManualAiRun(manualAiRunId);'),
@@ -257,7 +231,7 @@ export default [
         && source.includes('isSavedScrapeManualAiResume(resume)')
         && source.includes('Saved recovery queue delegated to Job Board'),
       'saved-scrape recovery is lane-serialized when standalone, reuses the Board lease when orchestrated, and routes either saved replay mode back to the exact saved snapshot after restart');
-      return { workflows: 5, lane: 'job-search' };
+      return { workflows: 4, lane: 'job-search' };
     },
   },
   {
@@ -560,18 +534,247 @@ export default [
     },
   },
   {
-    name: 'structured API and manual calls apply the same semantic validator contract',
-    run: () => {
-      const llmSource = readFileSync(new URL('../../electron/ipc/llm.js', import.meta.url), 'utf8');
-      const textSection = llmSource.slice(llmSource.indexOf('export async function callLLMText'), llmSource.indexOf('export async function callLLMRaw'));
-      const visionSection = llmSource.slice(llmSource.indexOf('export async function callLLMVision'), llmSource.indexOf('export async function callLLMDocument'));
-      const documentSection = llmSource.slice(llmSource.indexOf('export async function callLLMDocument'), llmSource.indexOf('// Back-compat shim'));
-      assert(textSection.includes('responseValidator?.(result)')
-        && visionSection.includes('responseValidator?.(result)')
-        && documentSection.includes('responseValidator?.(result)')
-        && documentSection.includes('retryOnTruncation, responseValidator'),
-      'structured API replies run the same semantic validator as a manual paste, including the Word-document text fallback');
-      return { text: true, vision: true, document: true };
+    name: 'non-API AI: callLLMVision forwards its image paths as attachments beside a structured-vision handoff',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 731, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const imagePaths = ['/tmp/non-api-vision-front.jpg', '/tmp/non-api-vision-back.jpg'];
+      handleSafe('non-api-vision-test', async (_event, _args, signal) => ({
+        result: await callLLMVision(imagePaths, 'Describe these product photos.', {
+          signal, task: 'vision-product-analysis',
+          responseSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-vision-test')({ sender }, { nodeId: 'node-vision-test' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request
+        && JSON.stringify(request.attachments) === JSON.stringify(imagePaths)
+        && request.prompt.includes('Request kind: structured-vision')
+        && request.prompt.includes('Task: vision-product-analysis'),
+      'callLLMVision hands its image paths through requestNonApiAi as Finder-revealable attachments beside a structured-vision handoff, not inlined in the prompt text');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { attachments: request.attachments.length };
+    },
+  },
+  {
+    name: 'non-API AI: callLLMDocument forwards a single file as an attachment beside a structured-document handoff',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 732, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const filePath = '/tmp/non-api-document-resume.pdf';
+      handleSafe('non-api-document-test', async (_event, _args, signal) => ({
+        result: await callLLMDocument(filePath, 'Extract the career profile.', {
+          signal, task: 'career-file-extract',
+          responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-document-test')({ sender }, { nodeId: 'node-document-test' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request
+        && JSON.stringify(request.attachments) === JSON.stringify([filePath])
+        && request.prompt.includes('Request kind: structured-document')
+        && request.prompt.includes('Task: career-file-extract'),
+      'callLLMDocument hands its single filePath through requestNonApiAi as one Finder-revealable attachment on a structured-document handoff');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { attachments: request.attachments.length };
+    },
+  },
+  {
+    // FIX regression test: callLLMVision used to have NO sensitive-path gate
+    // at all — before every LLM call became a manual handoff, this was
+    // enforced implicitly by assertAttachmentPathSafe() inside the deleted
+    // callClaudeVision/callGeminiVision provider modules (one check per
+    // element of imagePaths, run before any file was touched). A node's
+    // imagePaths/filePath is sourced from loaded canvas JSON, so an
+    // untrusted/shared canvas pointing a node at ~/.ssh/id_rsa etc. must
+    // still be refused — and refused BEFORE the path is ever Finder-revealed
+    // to the user as an attachment to paste into their own chat, i.e. before
+    // requestNonApiAi dispatches a 'non-api-ai-request' at all.
+    name: 'non-API AI: callLLMVision and callLLMDocument refuse a sensitive attachment path before any handoff is requested',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 941, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const visionSchema = { type: 'object', required: ['title'], properties: { title: { type: 'string' } } };
+
+      // The sensitive path is second in the array — the gate must check
+      // EVERY element, not just imagePaths[0].
+      handleSafe('non-api-vision-sensitive-test', async (_event, _args, signal) => ({
+        result: await callLLMVision(
+          ['/Users/x/Pictures/product.jpg', '/Users/x/.ssh/id_rsa'],
+          'Describe these product photos.',
+          { signal, task: 'vision-product-analysis', responseSchema: visionSchema },
+        ),
+      }));
+      // handleSafe never rethrows — a handler's throw comes back as a resolved
+      // { success: false, error } payload, so assert on that shape rather
+      // than expecting the invoke() promise itself to reject.
+      const visionResult = await ipcMain.__getInvokeHandler('non-api-vision-sensitive-test')({ sender }, {});
+      assert(visionResult?.success === false
+        && visionResult?.error === 'Refusing to read a sensitive system/credential path as an AI attachment: /Users/x/.ssh/id_rsa',
+        'callLLMVision throws callLLMDocument\'s exact sensitive-path error, naming the offending (non-first) path');
+      assert(!sent.some(item => item.channel === 'non-api-ai-request'),
+        'callLLMVision must throw before requestNonApiAi ever Finder-reveals the path or dispatches a handoff prompt');
+
+      // callLLMDocument's own pre-existing gate is the regression baseline —
+      // must still behave identically after adding callLLMVision's gate.
+      handleSafe('non-api-document-sensitive-test', async (_event, _args, signal) => ({
+        result: await callLLMDocument('/Users/x/.aws/credentials', 'Extract the career profile.', {
+          signal, task: 'career-file-extract',
+          responseSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+        }),
+      }));
+      const docResult = await ipcMain.__getInvokeHandler('non-api-document-sensitive-test')({ sender }, {});
+      assert(docResult?.success === false
+        && docResult?.error === 'Refusing to read a sensitive system/credential path as an AI attachment: /Users/x/.aws/credentials',
+        'callLLMDocument keeps its own sensitive-path gate unchanged');
+      assert(!sent.some(item => item.channel === 'non-api-ai-request'),
+        'callLLMDocument must also throw before any handoff is requested');
+
+      // A null/absent imagePaths (no attachments at all) must not crash the
+      // gate's loop — only a REAL sensitive path throws. The handoff still
+      // proceeds normally in this case, so drive it through to completion
+      // (cancel) rather than leaving a dangling pending request.
+      handleSafe('non-api-vision-null-paths-test', async (_event, _args, signal) => ({
+        result: await callLLMVision(null, 'Describe this.', {
+          signal, task: 'vision-product-analysis', responseSchema: visionSchema,
+        }),
+      }));
+      const nullRun = ipcMain.__getInvokeHandler('non-api-vision-null-paths-test')({ sender }, {});
+      await new Promise(resolve => setImmediate(resolve));
+      const nullRequest = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(nullRequest && Array.isArray(nullRequest.attachments) && nullRequest.attachments.length === 0,
+        'a null imagePaths is guarded by Array.isArray in the gate loop (no crash) and reaches the handoff with zero attachments');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: nullRequest.requestId });
+      await nullRun;
+
+      return { sensitivePathsRejected: 2 };
+    },
+  },
+  {
+    name: 'non-API AI: structured public LLM entry points reject a missing responseSchema, and callLLMRaw stays exempt',
+    run: async () => {
+      // assertStructuredResponseSchema() is the one shared guard: it must
+      // still fire before any handoff is dispatched for every structured
+      // entry point, so a caller can never silently get reparsed prose back
+      // for what it asked to be schema-validated JSON.
+      for (const invoke of [
+        () => callLLMText('structured result'),
+        () => callLLMVision([], 'structured result'),
+        () => callLLMDocument('/tmp/fixture.pdf', 'structured result'),
+      ]) {
+        let caught = null;
+        try { await invoke(); } catch (error) { caught = error; }
+        assert(/requires a responseSchema/.test(caught?.message || ''),
+          'structured public LLM calls cannot silently fall back to reparsed prose');
+      }
+
+      // callLLMRaw is the deliberate exception — prose/HTML/grounded research
+      // has no JSON envelope to validate — so it must reach the manual
+      // handoff dispatch with no responseSchema instead of throwing.
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 911, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-raw-schema-exempt-test', async (_event, _args, signal) => ({
+        result: await callLLMRaw('Prose response, no schema required.', { signal }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-raw-schema-exempt-test')({ sender }, { nodeId: 'node-raw-exempt' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request && request.prompt.includes('Request kind: raw-text'),
+        'callLLMRaw reaches the manual handoff without a responseSchema — it is deliberately exempt from the structured-output guard');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { guardedEntrypoints: 3, exemptEntrypoint: 'callLLMRaw' };
+    },
+  },
+  {
+    name: 'non-API AI: every marketplace and workspace task reaches the manual handoff through callLLMText/callLLMRaw',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 733, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      let counter = 0;
+      for (const task of MARKETPLACE_AND_WORKSPACE_TASKS) {
+        const channel = `non-api-marketplace-test-${counter}`;
+        handleSafe(channel, async (_event, _args, signal) => ({
+          result: await callLLMText('Return the requested JSON.', {
+            signal, task,
+            responseSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } },
+          }),
+        }));
+        const run = ipcMain.__getInvokeHandler(channel)({ sender }, { nodeId: `node-marketplace-${counter}` });
+        counter += 1;
+        await new Promise(resolve => setImmediate(resolve));
+        const request = sent[sent.length - 1]?.payload;
+        assert(sent[sent.length - 1]?.channel === 'non-api-ai-request'
+          && request?.prompt.includes(`Task: ${task}`)
+          && request.prompt.includes('Request kind: structured-text'),
+        `'${task}' dispatches through requestNonApiAi with its task id and request kind materialized into the handoff prompt, exactly like every job task`);
+        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        await run;
+      }
+      return { tasks: MARKETPLACE_AND_WORKSPACE_TASKS.length };
+    },
+  },
+  {
+    name: 'non-API AI: callLLMText threads its caller-supplied responseValidator through the pasted response before settling',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 734, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-validator-thread-test', async (_event, _args, signal) => ({
+        result: await callLLMText('Return the requested JSON.', {
+          signal, task: 'job-scoring',
+          responseSchema: { type: 'object', required: ['index'], properties: { index: { type: 'integer' } } },
+          responseValidator: (value) => {
+            if (value.index !== 0) throw new Error('index must be 0 for this single-row request.');
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-validator-thread-test')({ sender }, { nodeId: 'node-validator-thread' });
+      await new Promise(resolve => setImmediate(resolve));
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: '{"index": 7}' });
+      assert(rejected.accepted === false
+        && rejected.validationErrors?.[0] === 'index must be 0 for this single-row request.',
+      'a schema-valid but semantically wrong paste is rejected by the caller-supplied validator before the invoke can settle');
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: '{"index": 0}' });
+      const result = await run;
+      assert(accepted.accepted === true && result.success === true && result.result?.index === 0,
+        'a corrected paste that satisfies both schema and validator settles the original callLLMText invocation with the validated value');
+      return { validated: true };
     },
   },
   {
@@ -718,14 +921,16 @@ export default [
     },
   },
   {
-    name: 'non-API AI: manual scoring guidance ignores stale learned provider truncation floors',
+    name: 'non-API AI: manual scoring dispatch uses the bounded per-item task formula, not a flat cap',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
-      // Mirrors the report's historical 40K provider truncation. It must
-      // remain relevant to an actual API call, but never inflate a manual
-      // copy/paste instruction after the compact scoring contract ships.
-      recordTruncation('job-scoring', 40_000, 32_000);
+      // There is no learned/self-calibrating cap left on this transport (that
+      // was API-only retry telemetry, now deleted along with the API path).
+      // What still matters is that the manual handoff's stated output ceiling
+      // is the real per-item job-scoring formula (1600 + itemCount*600), not
+      // a stale or flat number, so the human's chat app gets an accurate
+      // budget for the actual batch size.
       const sent = [];
       const sender = {
         id: 708, isDestroyed: () => false, once: () => {}, removeListener: () => {},
@@ -746,14 +951,10 @@ export default [
         && request?.prompt.includes('Maximum output tokens: 10600')
         && request.prompt.includes('Output-cap formula seed: 10600')
         && !request.prompt.includes('Maximum output tokens: 48000'),
-      'manual job scoring exposes its 15-item workload and uses the bounded formula, never stale API self-calibration telemetry');
+      'manual job scoring exposes its 15-item workload and uses the bounded per-item formula, never a flat historical cap');
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
       await run;
-      const reportSource = readFileSync(new URL('../../electron/ipc/bugReport.js', import.meta.url), 'utf8');
-      assert(reportSource.includes('historical provider telemetry only')
-        && reportSource.includes('manual copy/paste guidance uses the bounded task seed'),
-      'bug reports distinguish historical API token telemetry from active manual-handoff guidance');
-      return { manualCap: 10600, staleApiFloor: 48000 };
+      return { manualCap: 10600 };
     },
   },
   {

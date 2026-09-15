@@ -6,6 +6,18 @@
 and several sibling files have uncommitted changes in flight — re-read the actual source before
 editing; line numbers cited here are orientation, not contracts.
 
+**UPDATE (2026-09-14) — written against infrastructure that no longer exists.** The app has since
+dropped direct Gemini/Claude API access entirely; every AI call now goes through the manual
+copy/paste handoff in `electron/ipc/nonApiAi.js` (prompt shown to the user, pasted into their own
+chat app, reply pasted back). That removes two things this design leans on: **§5**'s registration
+steps (a Gemini model map, `TASK_GROUPS`, provider/family routing — all gone, replaced by a flat
+`KNOWN_TASKS` set + `TASK_MAX_TOKENS` in `llm.js`), and **prompt caching** — every "cached prefix
+stays byte-stable" argument below (§5, §6, §12) assumed a live API session with server-side prompt
+caching, which does not exist over a manual copy/paste transport. The argument-harness *content*
+design (§1–§4, the plan/needs/revise call shapes, the rubric) is unaffected; before implementing,
+rework §5's registration steps and drop the caching-cost framing from §6/§12 in favor of "keep the
+stable rules first in the prompt because it reads better," not because it caches.
+
 ---
 
 ## 0. How to use this document
@@ -280,30 +292,35 @@ This is an additive IPC-payload change; no node schema migration is required.
 
 ## 5. Part B — the calls
 
-Register each new task in **three places** in `electron/ipc/llm.js`:
+UPDATE (2026-09-14) — rewritten for the manual-handoff transport; see the top-of-doc note. The
+three-places registration below (Gemini map / `TASK_GROUPS` / cap map), the group column in the
+table, and the cached-prefix discipline are historical — none of those mechanisms exist in
+`llm.js` anymore.
 
-1. the Gemini model map (~line 78) — `gemini-3.7-flash`, matching the application family;
-2. `TASK_GROUPS` (~line 161);
-3. the max-token cap map (~line 308).
+Register each new task in `electron/ipc/llm.js`:
+
+1. add the task id to the `KNOWN_TASKS` set;
+2. give it a `TASK_MAX_TOKENS` entry (a static number, or a `(hints) => number` function — see the
+   existing entries for the shape).
 
 Then add them to the `taskRoutes` telemetry array in `generateApplication`
 (`electron/ipc/jobApplication.js`, ~line 1106).
 
-| task | group | cap | notes |
-|---|---|---|---|
-| `application-letter-needs` | `{ group: 'generation', step: 1 }` | 2048 | feeds generation, isn't the artifact — same precedent as `company-research` |
-| `application-letter-plan` | `{ group: 'generation' }` | 3072 | where quality lives; full tier |
-| `application-cover-letter` | *(unchanged)* | 3072 | **reuse the existing task id for the prose call** |
-| `application-letter-revise` | `{ group: 'generation' }` | 3072 | conditional |
+| task | cap | notes |
+|---|---|---|
+| `application-letter-needs` | 2048 | feeds generation, isn't the artifact — same precedent as `company-research` |
+| `application-letter-plan` | 3072 | where quality lives; full tier |
+| `application-cover-letter` | 3072 | **reuse the existing task id for the prose call** |
+| `application-letter-revise` | 3072 | conditional |
 
 Reusing `application-cover-letter` for prose is deliberate: `scripts/tests/ai-models.js` asserts its
 routing (~lines 543, 577, 663) and Settings surfaces it. Renaming it buys nothing and breaks things.
 
-**Cached-prefix discipline.** Every prefix must be byte-stable across applications in a session or the
-cache never hits. Static rules, the editorial rubric, and the contrastive examples go in
-`cachedPrefix`; anything per-job (résumé, JD, research, needs, plan) goes in the tail. Career data
-leaves the letter's cached prefix entirely — accept the loss; the rubric is the large stable block and
-still caches.
+~~**Cached-prefix discipline.**~~ Does not apply — there is no API session and no server-side prompt
+cache to hit under the manual copy/paste transport; each call is a human pasting the whole prompt
+fresh. Putting the static rules, editorial rubric, and contrastive examples first in the prompt is
+still worth doing (it reads better and orients the human's chat app before the per-job specifics),
+just not for a caching payoff.
 
 ### 5.1 Call 1 — `application-letter-needs`
 
@@ -649,7 +666,8 @@ Each of these was considered and refused. Do not add them.
 4. The letter never claims the candidate is local, can commute, or will relocate unless career data
    says so.
 5. Ledger `attribution: 'context'` items are never phrased as personal wins.
-6. Cached prefixes stay byte-stable within a session.
+6. ~~Cached prefixes stay byte-stable within a session.~~ N/A under the manual handoff — no API
+   session, no server-side cache (see the 2026-09-14 update at the top of this doc).
 7. The résumé path — mining, refute, résumé prompt, receipts, fit loop — is not modified by this work
    beyond the ordering change in §4.2.
 8. The job listing and research remain wrapped by `wrapUntrustedText`. **New:** the résumé evidence

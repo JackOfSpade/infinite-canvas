@@ -490,10 +490,10 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // fed set is the tell that the price leans on very few real matches.
       if (s.compBreakdown) {
         const cb = s.compBreakdown;
-        // Guard a malformed breakdown: the model occasionally fumbles this nested
-        // object (leaks the inner counts / tool-call XML instead of nesting them),
-        // so cb arrives as a string or with non-numeric counts. claude.js repairs
-        // it, but if a malformed one still reaches here, say so — don't render the
+        // Guard a malformed breakdown: schemaValidation.js requires anchor_count/
+        // adjusted_count/bound_count as numeric fields, so a shape this broken
+        // should already be rejected before it's ever recorded here — but if a
+        // malformed one still reaches this report, say so rather than render the
         // misleading "0 anchor + 0 adjusted + 0 bound … thin anchor base" that a
         // raw `|| 0` would produce (the model DID classify; the shape was broken).
         const isNum = (v) => typeof v === 'number' && Number.isFinite(v);

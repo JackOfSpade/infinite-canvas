@@ -2,7 +2,7 @@ import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCh
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __extractCareerFileSectionsForTests, __jobBatchPathsForTests, __legacyBatchEntryOwnedByCanvasForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport } from '../../electron/ipc/jobs.js';
+import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport } from '../../electron/ipc/jobs.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
@@ -343,23 +343,6 @@ export default [
           === getJobAnalysisPaths(null, fallback, 'cloned-hub').jsonPath,
       'renderer-session scopes isolate duplicate unsaved hub IDs and exact run checkpoints, while omitted scopes preserve internal legacy compatibility');
       return { ownerNamespace: hubAPaths.ownerNamespace, legacyCanvas: path.basename(hubAPaths.legacyCanvasJsonPath) };
-    },
-  },
-  {
-    name: 'retired batch sidecars are canvas-scoped and directory-global legacy entries fail closed',
-    run: () => {
-      const root = path.join('/tmp', `ic-batch-sidecar-scope-${process.pid}-${Date.now()}`);
-      const canvasA = path.join(root, 'canvas-a.json');
-      const canvasB = path.join(root, 'canvas-b.json');
-      const pathsA = __jobBatchPathsForTests(canvasA);
-      const pathsB = __jobBatchPathsForTests(canvasB);
-      assert(pathsA.current !== pathsB.current
-        && pathsA.legacy === pathsB.legacy
-        && __legacyBatchEntryOwnedByCanvasForTests({ canvasFilePath: canvasA }, canvasA)
-        && !__legacyBatchEntryOwnedByCanvasForTests({ canvasFilePath: canvasA }, canvasB)
-        && !__legacyBatchEntryOwnedByCanvasForTests({ nodeId: 'same-cloned-hub' }, canvasA),
-      'modern retired-batch paths are per canvas, and a directory-global legacy entry cannot be replayed or deleted without exact embedded canvas ownership');
-      return { current: path.basename(pathsA.current), legacy: path.basename(pathsA.legacy) };
     },
   },
   {
@@ -1324,19 +1307,6 @@ export default [
         assert(genericResolve.includes('loadDescriptionRecoveryCheckpoint(canvasFilePath, nodeId, jobRunId)')
           && !genericResolve.includes('description recovery needs the current saved search snapshot'),
         'an unsaved hub can use its exact private app-data checkpoint for Source Solve instead of being rejected solely for lacking a canvas path');
-
-        const staleBatch = collectDeletedJobRunDiscards([{
-          id: 'mixed-hub', type: 'jobhub', data: {
-            hubState: 'sources-ready', jobRunId: 'current-run', pendingBatch: { jobRunId: 'stale-batch-run' },
-          },
-        }], pausedCanvas);
-        const activeBatch = collectDeletedJobRunDiscards([{
-          id: 'batch-hub', type: 'jobhub', data: {
-            hubState: 'scoring-batch', jobRunId: 'older-search-run', pendingBatch: { jobRunId: 'active-batch-run' },
-          },
-        }], pausedCanvas);
-        assert(staleBatch[0]?.runId === 'current-run' && activeBatch[0]?.runId === 'active-batch-run',
-          'deletion chooses the current search token outside scoring-batch and the pending-batch token only while that lifecycle owns the hub');
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }

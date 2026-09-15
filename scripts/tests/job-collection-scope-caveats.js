@@ -158,9 +158,6 @@ export default [
       'a completed source’s durable caveat is rehydrated before resumed terminal results are derived');
       assert((search.match(/collectionScopeCaveats: \[\]/g) || []).length >= 3,
         'a fresh run, Reset, and Clear career files each remove stale caveats');
-      assert(search.includes('collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats)')
-        && search.includes('collectionScopeCaveats: turnData.collectionScopeCaveats'),
-      'an in-flight legacy scoring batch retains its collection disclosure and carries it through delayed terminal recovery');
       assert(done.includes('Glassdoor country scope was not enforceable.')
         && done.includes('may follow this machine&apos;s browsing region')
         && done.includes('Set a city, state, or province')

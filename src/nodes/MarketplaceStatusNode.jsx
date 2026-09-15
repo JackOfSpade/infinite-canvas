@@ -151,8 +151,13 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
     publishMarketplaceStatusCheckingIds(id);
   }, [id]);
 
-  // The main process scans one platform at a time and emits each result as soon
-  // as that platform's fetch + AI pass completes. Patch only that platform and
+  // The main process scrapes every platform first (browser automation, one at a
+  // time, fully unattended), THEN issues every remaining platform's AI handoff
+  // together — so a platform's row can sit at "Checking…" for a while after its
+  // own scrape finished while OTHER platforms' handoffs get pasted first. Each
+  // platform still emits its own progress event the moment its result (scrape-
+  // only terminal outcome, or scrape + AI verdict) is final, in whatever order
+  // those finish — not necessarily scan order. Patch only that platform and
   // stop only its spinner; the remaining cards continue showing Checking.
   useEffect(() => {
     if (!window.electronAPI?.onMarketplaceStatusProgress) return undefined;
@@ -176,7 +181,18 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   // that one). Per-id tracking lets one row spin without freezing the rest, and
   // the FUNCTIONAL updateNodeData merge means a single-platform result patches
   // only its own key — it never clobbers the others' verdicts, even if two
-  // checks overlap (backend serializes them on the status-check lock).
+  // checks overlap.
+  //
+  // Checks CAN now genuinely overlap: the backend holds the status-check lock
+  // only for its scrape pass, then releases it before the AI copy/paste handoff
+  // (which waits on a human and is unbounded). So overlap safety rests on two
+  // renderer-side guards, not on backend serialization:
+  //   1. the `checkingIdsRef` filter below never starts a second run for a
+  //      platform this node is already checking, so one platform can never be
+  //      in two live runs here; and
+  //   2. completeMarketplaceStatusPlatform accepts a progress payload only when
+  //      its nodeId AND runId match one of THIS node's active runs, so another
+  //      hub's late handoff result can never land on this node's cards.
   const runCheck = useCallback(async (platformIds) => {
     const candidates = Array.isArray(platformIds) ? platformIds : [];
     const ids = [...new Set(candidates)].filter((p) => p && !checkingIdsRef.current.has(p));

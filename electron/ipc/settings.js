@@ -1,13 +1,11 @@
 import Store from 'electron-store';
 import electronPkg from 'electron';
-import fs from 'fs';
 import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
 import { isValidCompensationExperienceBandLadder } from './jobCompensation.js';
 import { logger } from '../logger.js';
-import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
-const { dialog, BrowserWindow, safeStorage } = electronPkg;
+const { BrowserWindow, safeStorage } = electronPkg;
 
 // ── API-key encryption at rest ──────────────────────────────────────────────
 // electron-store persists settings as plain JSON in userData — readable by
@@ -24,62 +22,12 @@ const { dialog, BrowserWindow, safeStorage } = electronPkg;
 // attempts to decrypt strings carrying the prefix, everything else passes
 // through as-is.
 const ENC_PREFIX = 'safeStorage:v1:';
-const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
 const JOBS_SECRET_KEYS = ['usajobsApiKey', 'diceApiKey'];
 
 // Bootstrap Dice key: used until the app captures a live one from dice.com. It
 // is ALSO the settings-schema default, so its presence in the store proves
 // nothing — see hasStoredDiceApiKey.
 const DICE_BOOTSTRAP_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
-const GEMINI_MODEL_RUNTIME_STATE_KEY = 'geminiModelRuntimeState';
-
-// ── Claude live-group family selection ──────────────────────────────────────
-// Mirrors llm.js's GROUP_DEFAULT_FAMILY and modelResolver's family tokens —
-// duplicated here (not imported) rather than reused, to avoid a settings.js
-// <-> llm.js import cycle: llm.js already imports getAISettings FROM this
-// module to resolve which model serves each task, and modelResolver.js (the
-// other place these tokens live) already imports getAISettings too. Family
-// tokens are extremely low-churn (four tiers, added on the order of once a
-// year), so the duplication cost is small next to the cycle it would create.
-// Application generation is a Local AI handoff, so it has no API model family
-// to configure. Keep only groups served by live Gemini/Claude API calls here.
-// A legacy persisted `generation` key is deliberately dropped on read and on
-// the next settings write because no live API route consumes it.
-const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' });
-const VALID_CLAUDE_FAMILY_TOKENS = new Set(['FABLE', 'OPUS', 'SONNET', 'HAIKU']);
-const VALID_AI_PROVIDERS = new Set(['gemini', 'claude']);
-
-/**
- * Keep the API-provider setting forward-compatible and safe to consume.
- * Local AI used to be a selectable provider, but application generation now
- * uses its separate local handoff. An edited, legacy, or otherwise invalid
- * value falls back to Gemini instead of reaching an LLM dispatch path which
- * cannot serve it.
- */
-export function normalizeAIProvider(value) {
-  return VALID_AI_PROVIDERS.has(value) ? value : 'gemini';
-}
-
-/**
- * Validate + backfill the persisted `ai.claudeModels` for the live API task
- * groups. Legacy `generation` is intentionally omitted: application work is
- * now local-only, so carrying that picker into snapshots would imply it still
- * controls something. Invalid live values fall back to their own default.
- */
-export function normalizeClaudeModels(raw) {
-  // `analysis` was the pre-redesign catch-all. Preserve a non-default legacy
-  // choice across both groups it split into; an old SONNET value is
-  // indistinguishable from the old default, so it adopts the new defaults
-  // (Judgment=Opus, Extraction=Sonnet) instead of silently weakening Judgment.
-  const legacyAnalysis = VALID_CLAUDE_FAMILY_TOKENS.has(raw?.analysis) ? raw.analysis : null;
-  const migratedLegacyChoice = legacyAnalysis && legacyAnalysis !== 'SONNET' ? legacyAnalysis : null;
-  const out = {};
-  for (const [group, def] of Object.entries(CLAUDE_MODEL_GROUP_DEFAULTS)) {
-    const v = raw?.[group];
-    out[group] = VALID_CLAUDE_FAMILY_TOKENS.has(v) ? v : (migratedLegacyChoice || def);
-  }
-  return out;
-}
 
 export function encryptSecret(plain) {
   if (!plain || typeof plain !== 'string') return plain;
@@ -100,15 +48,15 @@ export function encryptSecret(plain) {
   }
 }
 
-// Memoized on the raw ciphertext string. getAISettings/getJobsSettings/
-// getDiceApiKey are called from every LLM helper and API-source fetch — often
-// several times per job search/scoring batch — and each miss hit the OS
-// keychain/DPAPI/Secret Service (safeStorage.decryptString), not free
-// in-process work. Safe with zero explicit invalidation: safeStorage encrypts
-// with a fresh IV each call, so an actual credential change (re-encrypted by
-// update-settings) always produces a NEW ciphertext string — a different Map
-// key — while an untouched secret's ciphertext (preserved as-is by
-// encryptSecret's idempotency guard) keeps hitting the same cached entry.
+// Memoized on the raw ciphertext string. getJobsSettings/getDiceApiKey are
+// called from every API-source fetch — often several times per job search —
+// and each miss hit the OS keychain/DPAPI/Secret Service
+// (safeStorage.decryptString), not free in-process work. Safe with zero
+// explicit invalidation: safeStorage encrypts with a fresh IV each call, so an
+// actual credential change (re-encrypted by update-settings) always produces
+// a NEW ciphertext string — a different Map key — while an untouched secret's
+// ciphertext (preserved as-is by encryptSecret's idempotency guard) keeps
+// hitting the same cached entry.
 const decryptCache = new Map();
 
 export function decryptSecret(stored) {
@@ -167,19 +115,6 @@ function getStore() {
   if (_store) return _store;
   _store = new Store({
     defaults: {
-      ai: {
-        provider: 'gemini',
-        anthropicApiKey: '',
-        geminiApiKey: '',
-        // Absolute path to a Google service-account JSON. When set, takes
-        // precedence over the legacy `process.cwd()/service-account.json`
-        // lookup, so the user can keep the file anywhere on disk and reuse
-        // it across canvases without copying.
-        serviceAccountPath: '',
-        // Per-live-group Claude family. Application Generate is handled by
-        // Local AI and therefore deliberately has no API model setting.
-        claudeModels: { judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' },
-      },
       // Aggregate seller pages scanned by the Marketplace Status Module, keyed
       // by platformId: dashboards, notification centers, messages, sold-items
       // tabs, etc. Legacy per-listing checks also use them as extra evidence.
@@ -198,22 +133,18 @@ function getStore() {
     },
   });
 
-  // One-shot migrations: model selection moved from user-controlled to
-  // per-task auto-selection in llm.js TASK_MODELS, and Local AI stopped being
-  // an API-provider choice. Strip stale model fields and replace only the
-  // legacy `provider: 'local'` value with Gemini. Spreading the stored object
-  // preserves encrypted API keys and Claude group choices byte-for-byte.
+  // One-shot cleanup: the app dropped all live LLM API transport in favor of
+  // the non-API human copy/paste handoff (see nonApiAi.js) — there is no more
+  // key, model, or account credential to configure. A pre-existing install
+  // may still have an `ai` section (possibly holding an encrypted key) and a
+  // model quota-health cache left on disk from before this change; nothing
+  // reads either anymore, so drop them silently rather than let stale
+  // credential material linger on disk or let some other reader choke on a
+  // shape it no longer expects. Never invents a replacement value; it only
+  // deletes.
   try {
-    const ai = _store.get('ai') || {};
-    const hasLegacyModel = 'claudeModel' in ai || 'geminiModel' in ai;
-    const hasLegacyLocalProvider = ai.provider === 'local';
-    if (hasLegacyModel || hasLegacyLocalProvider) {
-      const { claudeModel: _drop1, geminiModel: _drop2, ...rest } = ai;
-      _store.set('ai', {
-        ...rest,
-        ...(hasLegacyLocalProvider ? { provider: 'gemini' } : {}),
-      });
-    }
+    if (_store.has('ai')) _store.delete('ai');
+    if (_store.has('geminiModelRuntimeState')) _store.delete('geminiModelRuntimeState');
   } catch { /* never block startup on settings migration */ }
 
   return _store;
@@ -227,54 +158,6 @@ export function tryGetStore() {
   }
 }
 
-/**
- * Normalize the non-secret, credential-hash-scoped Gemini model-health cache.
- * Expired suppression and warning rows are discarded on read/write so a past
- * quota event cannot grow the settings file indefinitely or reappear after it
- * should have naturally cleared.
- */
-export function normalizeGeminiModelRuntimeState(raw, now = Date.now()) {
-  const out = {};
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  for (const [key, record] of Object.entries(raw)) {
-    if (typeof key !== 'string' || key.length === 0 || key.length > 1024 || !record || typeof record !== 'object') continue;
-    const suppressedUntil = Number(record.suppressedUntil);
-    const activeSuppression = Number.isFinite(suppressedUntil) && suppressedUntil > now ? suppressedUntil : null;
-    const sourceRuntime = record.runtime;
-    const warnUntil = Number(sourceRuntime?.warnUntil);
-    const activeRuntime = sourceRuntime && typeof sourceRuntime === 'object'
-      && Number.isFinite(warnUntil) && warnUntil > now
-      && typeof sourceRuntime.model === 'string' && sourceRuntime.model.length > 0
-      && typeof sourceRuntime.classification === 'string' && sourceRuntime.classification.length > 0
-      ? {
-          model: sourceRuntime.model.slice(0, 200),
-          classification: sourceRuntime.classification.slice(0, 100),
-          message: typeof sourceRuntime.message === 'string' ? sourceRuntime.message.slice(0, 300) : '',
-          observedAt: Number.isFinite(Number(sourceRuntime.observedAt)) ? Number(sourceRuntime.observedAt) : now,
-          suppressedUntil: activeSuppression,
-          warnUntil,
-        }
-      : null;
-    if (activeSuppression || activeRuntime) {
-      out[key] = { ...(activeSuppression ? { suppressedUntil: activeSuppression } : {}), ...(activeRuntime ? { runtime: activeRuntime } : {}) };
-    }
-  }
-  return out;
-}
-
-/** Read Gemini health state without exposing API-key material (keys are hashes). */
-export function getGeminiModelRuntimeState() {
-  return normalizeGeminiModelRuntimeState(tryGetStore()?.get(GEMINI_MODEL_RUNTIME_STATE_KEY));
-}
-
-/** Persist the complete, normalized Gemini model-health snapshot. */
-export function saveGeminiModelRuntimeState(snapshot) {
-  const store = tryGetStore();
-  if (!store) return false;
-  store.set(GEMINI_MODEL_RUNTIME_STATE_KEY, normalizeGeminiModelRuntimeState(snapshot));
-  return true;
-}
-
 // The renderer's Settings UI round-trips the actual key value into an
 // editable input (not a masked placeholder), so both get-settings and
 // update-settings's return value must hand back DECRYPTED secrets — only
@@ -285,14 +168,6 @@ function decryptedStoreSnapshot(s) {
   const data = s.store;
   return {
     ...data,
-    // claudeModels goes through the same normalizeClaudeModels() as
-    // getAISettings() — the renderer sees only live, valid API groups, never
-    // a legacy application-generation token with no effect.
-    ai: {
-      ...decryptSectionSecrets(AI_SECRET_KEYS, data.ai),
-      provider: normalizeAIProvider(data.ai?.provider),
-      claudeModels: normalizeClaudeModels(data.ai?.claudeModels),
-    },
     jobs: decryptSectionSecrets(JOBS_SECRET_KEYS, data.jobs),
   };
 }
@@ -300,36 +175,12 @@ function decryptedStoreSnapshot(s) {
 /**
  * Merge one `updates[section]` object onto the section's current stored
  * value — the core of update-settings' "shallow-merge per top-level section"
- * contract (a partial update, e.g. only `ai.serviceAccountPath`, must not
- * wipe sibling keys). Exported (pure, no store/encryption side effects) so
- * the nested-merge behavior below is directly unit-testable.
- *
- * `ai.claudeModels` is itself a {judgment,extraction,light} object.
- * SettingsPanel's updateAISetting/updateClaudeModelGroup send ONE changed
- * top-level `ai` key per call, so a single family-dropdown change arrives as
- * `{ claudeModels: { judgment: 'FABLE' } }`. A bare top-level shallow merge
- * (`{ ...current, ...value }`) would REPLACE `claudeModels` wholesale with
- * that partial object, silently dropping sibling groups back to
- * undefined — getAISettings() papers over it with defaults on the next read,
- * but the user's OTHER two picks would be gone, not just the one they
- * changed. Deep-merge this one nested key instead of trusting the top-level
- * shallow merge to handle it.
+ * contract (a partial update, e.g. only one jobs field, must not wipe sibling
+ * keys). Exported (pure, no store/encryption side effects) so this behavior
+ * is directly unit-testable.
  */
 export function mergeSettingsSection(section, current, value) {
-  const merged = { ...(current || {}), ...value };
-  if (section === 'ai') {
-    // Normalize on every AI write, including an unrelated credential update.
-    // That makes a legacy persisted `generation` selection self-cleaning
-    // without treating a read as a surprising disk mutation.
-    const requestedModels = value?.claudeModels && typeof value.claudeModels === 'object'
-      ? value.claudeModels
-      : {};
-    merged.claudeModels = normalizeClaudeModels({
-      ...normalizeClaudeModels(current?.claudeModels),
-      ...requestedModels,
-    });
-  }
-  return merged;
+  return { ...(current || {}), ...value };
 }
 
 export function registerSettingsHandlers() {
@@ -338,21 +189,13 @@ export function registerSettingsHandlers() {
   });
 
   // Shallow-merges per top-level section so a partial update (e.g. only
-  // changing `ai.serviceAccountPath`) doesn't wipe sibling keys — see
-  // mergeSettingsSection() for the one nested exception (ai.claudeModels).
+  // changing one jobs field) doesn't wipe sibling keys.
   handleSafe('update-settings', async (_event, updates) => {
     const s = getStore();
     for (const [section, value] of Object.entries(updates || {})) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         let merged = mergeSettingsSection(section, s.get(section), value);
-        if (section === 'ai') {
-          // Provider is a small closed enum. Normalize at the persistence
-          // boundary too, rather than merely making renderer snapshots look
-          // valid while a malformed on-disk setting continues to exist.
-          merged.provider = normalizeAIProvider(merged.provider);
-          merged = encryptSectionSecrets(AI_SECRET_KEYS, merged);
-        }
-        else if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
+        if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
         s.set(section, merged);
       } else {
         s.set(section, value);
@@ -367,32 +210,6 @@ export function registerSettingsHandlers() {
     });
     return decryptedStoreSnapshot(s);
   });
-
-  // Native file picker for the service-account JSON. Returns the chosen
-  // absolute path (or null if the user canceled). The renderer is responsible
-  // for then calling update-settings to persist it.
-  handleSafe('pick-service-account-file', async () => {
-    if (isBackgroundE2E()) return { path: null };
-    const { canceled, filePaths } = await dialog.showOpenDialog({
-      title: 'Select Google service-account.json',
-      properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-    });
-    if (canceled || !filePaths?.[0]) return { path: null };
-    return { path: filePaths[0] };
-  });
-}
-
-export function getAISettings() {
-  const ai = decryptSectionSecrets(AI_SECRET_KEYS, tryGetStore()?.get('ai') || {});
-  // Every caller (every LLM call in the app) needs a fully-populated,
-  // validated claudeModels — see normalizeClaudeModels()'s doc for why a
-  // raw/missing/corrupted value can't just pass through here.
-  return {
-    ...ai,
-    provider: normalizeAIProvider(ai.provider),
-    claudeModels: normalizeClaudeModels(ai.claudeModels),
-  };
 }
 
 /**
@@ -561,22 +378,4 @@ export function getMarketplaceWatchUrls(platformId) {
   if (!platformId) return [];
   const all = tryGetStore()?.get('marketplaceWatchUrls') || {};
   return normalizeMarketplaceWatchUrls(all[platformId]);
-}
-
-/**
- * Resolves the active service-account.json path:
- *   1. Explicit user-configured path in settings (preferred).
- *   2. Legacy `process.cwd()/service-account.json` (back-compat for repo dev).
- * Returns null if neither exists or is readable.
- */
-export function resolveServiceAccountPath() {
-  const ai = getAISettings() || {};
-  const candidates = [
-    ai.serviceAccountPath,
-    `${process.cwd()}/service-account.json`,
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { fs.accessSync(p, fs.constants.R_OK); return p; } catch { /* try next */ }
-  }
-  return null;
 }

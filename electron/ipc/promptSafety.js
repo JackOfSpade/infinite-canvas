@@ -17,11 +17,13 @@ import { randomUUID } from 'crypto';
  * contains a fake closing tag to try to escape early) — an attacker would
  * need to guess the nonce for this specific call, which they can't.
  *
- * This is a mitigation, not a guarantee — both providers respond to this
- * kind of explicit, tagged boundary more reliably than a plain fence, but a
- * sufficiently sophisticated injection can still sometimes succeed. Treat
- * generated output (a résumé claim, a match score) as needing the same
- * human review the app already expects for AI output in general.
+ * This is a mitigation, not a guarantee — LLMs generally respond to this kind
+ * of explicit, tagged boundary more reliably than a plain fence, but a
+ * sufficiently sophisticated injection can still sometimes succeed, and the
+ * app has no control over which chat application a given handoff actually
+ * lands in (nonApiAi.js). Treat generated output (a résumé claim, a match
+ * score) as needing the same human review the app already expects for AI
+ * output in general.
  */
 export function wrapUntrustedText(label, text) {
   const nonce = randomUUID().slice(0, 8);

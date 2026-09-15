@@ -17,8 +17,10 @@ export function applicationConvergenceInstruction({ revisionAttempt = 1, unchang
 // iterating for as long as the editor returns a novel candidate. Returning the
 // current document unchanged is the editor's explicit diminishing-returns
 // signal; returning any earlier candidate is a convergence cycle and stops the
-// loop for the same reason. Provider credit exhaustion remains a provider
-// failure, not an app-authored attempt cap.
+// loop for the same reason. There is no engineered maximum-attempt cap here:
+// the only other way this loop stops is an external abort of the manual
+// handoff itself (the user cancelling, or the window closing), not a billing
+// or quota failure — every call is a free human copy/paste handoff now.
 function assessApplicationRevision({ currentHash = '', candidateHash = '', seenHashes = [] } = {}) {
   if (candidateHash === currentHash) {
     return { accept: false, diminishingReturns: true, reason: 'the revision was byte-for-byte unchanged' };

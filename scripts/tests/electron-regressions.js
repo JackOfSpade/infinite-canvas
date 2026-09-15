@@ -15,7 +15,6 @@ import {
   createFileWatchRegistry,
   electronPkg,
   fs,
-  getDesignSystemDir,
   handleSafe,
   isTrustedCanvasNavigation,
   isBackgroundE2E,
@@ -23,7 +22,6 @@ import {
   os,
   path,
   readValidatedTextFile,
-  readEditorialRubric,
   registerFilesystemHandlers,
   resolveAllowedOpenFilePath,
   resolvePortableFilePaths,
@@ -1899,20 +1897,6 @@ export default [
         process.umask(originalUmask);
         await fs.promises.rm(root, { recursive: true, force: true });
       }
-    },
-  },
-  {
-    name: 'job application editorial rubric reads Git-tracked readme.md casing from disk',
-    run: () => {
-      const designSystemDir = getDesignSystemDir();
-      const rubric = readEditorialRubric(designSystemDir);
-      const skill = fs.readFileSync(path.join(designSystemDir, 'SKILL.md'), 'utf8');
-      const readme = fs.readFileSync(path.join(designSystemDir, 'readme.md'), 'utf8');
-      assert(rubric.includes(skill), 'rubric must include the real SKILL.md contents');
-      assert(rubric.includes(readme), 'rubric must include the real lowercase readme.md contents');
-      assert(rubric === `${skill}\n\n---\n\n${readme}`,
-        'rubric must preserve both real editorial sources in their documented order');
-      return { designSystemDir, readme: path.join(designSystemDir, 'readme.md') };
     },
   },
   {

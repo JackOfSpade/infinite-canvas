@@ -385,9 +385,11 @@ async function researchCompanyCriterion(request, { signal, callRaw, callText, pr
       task: 'job-preference-research-assessment',
       responseSchema: JOB_PREFERENCE_RESEARCH_ASSESSMENT_SCHEMA,
       hints: { itemCount: 1 },
-      // API and manual providers both enforce this before the result is
-      // accepted. The redundant checks below remain a defense for direct/test
-      // callers that supply their own AI functions.
+      // The manual-handoff transport already enforces this before a pasted
+      // result is accepted (responseValidator runs inside nonApiAi.js's
+      // validateNonApiAiSubmission). This redundant check remains a defense
+      // for direct/test callers that inject their own callText/callRaw and
+      // bypass that path.
       responseValidator: value => validateJobPreferenceResearchSubmission(value, {
         preferenceId: match.preferenceId,
         groundedResearch,

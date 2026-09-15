@@ -1,4 +1,16 @@
-import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, normalizeMarketplaceWatchUrls, resolveAttentionSourceUrls, scanSellerHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes } from '../test-dependencies.js';
+import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, fs, normalizeMarketplaceWatchUrls, path, prepareHubPages, resolveAttentionSourceUrls, scanPreparedHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes, withStatusCheckLock } from '../test-dependencies.js';
+
+// Runs the real two-stage production sequence — prepareHubPages (scrape +
+// transport-outcome classification, no LLM call) then scanPreparedHubPages
+// (the human copy/paste LLM handoff + result binding) — instead of the
+// deleted scanSellerHubPages convenience wrapper that used to compose them
+// for exactly this kind of single-platform test. This is what
+// marketplace.js's Check-All handler actually calls, so exercising it here
+// is strictly better coverage than the wrapper gave.
+async function runHubScan({ urlSpecs, llmText, signal, platformId = 'test-platform' }) {
+  const prepared = await prepareHubPages({ urlSpecs, platformId, signal });
+  return scanPreparedHubPages({ ...prepared, signal, llmText });
+}
 
 export default [
 {
@@ -53,8 +65,7 @@ export default [
       const messages = 'https://example.com/messages';
       const readableHtml = `<main>${'Quiet seller dashboard. '.repeat(20)}</main>`;
       let llmCalls = 0;
-      const result = await scanSellerHubPages({
-        platformId: 'test-platform',
+      const result = await runHubScan({
         urlSpecs: [
           { url: dashboard, urlLabel: 'hub', fetcher: async () => { throw new Error('network down'); } },
           { url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) },
@@ -79,14 +90,12 @@ export default [
       assert(result.attention.every(item => item.sourceUrl === messages), 'attention items keep their validated source URL');
 
       let shouldNotCall = 0;
-      const failed = await scanSellerHubPages({
-        platformId: 'test-platform',
+      const failed = await runHubScan({
         urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => { throw new Error('offline'); } }],
         llmText: async () => { shouldNotCall += 1; return {}; },
       });
       assert(failed.status === 'error' && shouldNotCall === 0, 'all fetch failures return error without an LLM call');
-      const invalidResponse = await scanSellerHubPages({
-        platformId: 'test-platform',
+      const invalidResponse = await runHubScan({
         urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => null }],
         llmText: async () => { shouldNotCall += 1; return {}; },
       });
@@ -95,21 +104,27 @@ export default [
       // A hub URL that RESOLVES to a 4xx/5xx with a styled error body (fetchHtmlAuthed
       // reports ok:true for any HTTP status) must terminate as an error — NOT get
       // stripped and sent to the token-heavy hub-scan LLM as if it were content.
-      const brokenWatch = await scanSellerHubPages({
-        platformId: 'test-platform',
+      const brokenWatch = await runHubScan({
         urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 404, finalUrl: dashboard, html: `<main>${'Page not found. '.repeat(40)}</main>` }) }],
         llmText: async () => { shouldNotCall += 1; return {}; },
       });
       assert(brokenWatch.status === 'error' && /HTTP 404/.test(brokenWatch.sources[0]?.message || ''),
         `a 4xx hub page becomes a terminal error, got ${brokenWatch.status} / ${brokenWatch.sources[0]?.message}`);
       assert(shouldNotCall === 0, '4xx hub page must not reach the LLM');
-      const noUrls = await scanSellerHubPages({ platformId: 'test-platform', urlSpecs: null, llmText: async () => ({}) });
+      // No watch URLs: the deleted scanSellerHubPages wrapper used to short-circuit
+      // this with its own "No watch URLs configured" message before ever touching
+      // prepareHubPages. That message is gone along with it — production
+      // (marketplace.js) never reaches prepareHubPages with an empty list; it checks
+      // watchUrls.length itself first. What's still guaranteed, and worth locking
+      // down here, is that prepareHubPages handles urlSpecs:null structurally
+      // (empty llmInputs/sources, no throw) and scanPreparedHubPages turns that into
+      // the same clean 'unknown' shape via deriveHubScanStatus on an empty list.
+      const noUrls = await runHubScan({ urlSpecs: null, llmText: async () => ({}) });
       assert(noUrls.status === 'unknown' && noUrls.sources.length === 0, 'missing URL list returns a clean unknown result');
       assert(deriveHubScanStatus([{ status: 'needs-login' }, { status: 'error' }]) === 'needs-login', 'needs-login wins when no page was readable');
       assert(deriveHubScanStatus([{ status: 'unknown' }, { status: 'error' }]) === 'unknown', 'mixed unknown/error remains unknown');
 
-      const aiFailed = await scanSellerHubPages({
-        platformId: 'test-platform',
+      const aiFailed = await runHubScan({
         urlSpecs: [{ url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) }],
         llmText: async () => { throw new Error('model unavailable'); },
       });
@@ -120,9 +135,8 @@ export default [
       // ⟦READ⟧/⟦UNREAD⟧ sentinels into headline/evidence/summary and emit an
       // invalid urgency/category. The scan must scrub the tokens everywhere and
       // coerce to low/other — this backs the read-message false-flag fix and is
-      // only reachable through scanSellerHubPages (sanitizeAttention isn't exported).
-      const scrubbed = await scanSellerHubPages({
-        platformId: 'test-platform',
+      // only reachable through scanPreparedHubPages (sanitizeAttention isn't exported).
+      const scrubbed = await runHubScan({
         urlSpecs: [{ url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) }],
         llmText: async () => ({
           summary: `Quiet ${READ_STATE_READ_TOKEN} inbox`,
@@ -148,8 +162,11 @@ export default [
       controller.abort();
       let abortPropagated = false;
       try {
-        await scanSellerHubPages({
-          platformId: 'test-platform',
+        // Abort ownership lives entirely in stage 1: prepareHubPages rethrows an
+        // AbortError from a fetcher instead of swallowing it into a terminal page
+        // failure (see its per-URL catch), so this throws before runHubScan ever
+        // reaches scanPreparedHubPages.
+        await runHubScan({
           signal: controller.signal,
           urlSpecs: [{
             url: messages,
@@ -167,6 +184,202 @@ export default [
       }
       assert(abortPropagated, 'abort errors propagate instead of being downgraded to a page failure');
       return { sources: result.sources.length, attention: result.attention.length };
+    },
+  },
+{
+    // marketplace.js's check-marketplace-status handler runs a Check All scan
+    // as two passes over prepareHubPages/scanPreparedHubPages (the split this
+    // test targets) specifically so browser scraping for every platform
+    // finishes before any platform's manual AI handoff is issued — otherwise
+    // a human would have to paste platform A's prompt before platform B's
+    // scrape even starts. This proves the property directly against the real
+    // exported functions marketplace.js composes, using the SAME two-phase
+    // shape (collect every prepare, THEN Promise.all every scan) it uses, and
+    // guards the composition itself with a source check so a regression to
+    // an inline per-platform prepare-then-scan loop is caught even though the
+    // full check-marketplace-status handler (browser automation + IPC) is out
+    // of reach for a unit test.
+    name: 'Marketplace hub scan: prepare-then-scan split completes every platform\'s page fetch before any AI handoff is issued',
+    run: async () => {
+      const order = [];
+      // Three simulated platforms with deliberately uneven fetch latency —
+      // the slowest (platform-a) must still finish its fetch before the
+      // FASTEST platform's (platform-c) AI handoff fires, which only holds if
+      // every prepareHubPages call is awaited before any scanPreparedHubPages
+      // call begins (the actual two-pass shape), not if scan were interleaved
+      // per platform as the loop went.
+      const platforms = [
+        { id: 'platform-a', delayMs: 12 },
+        { id: 'platform-b', delayMs: 6 },
+        { id: 'platform-c', delayMs: 0 },
+      ];
+      const urlFor = (id) => `https://example.com/${id}/hub`;
+
+      // Pass 1 — mirrors marketplace.js's per-platform loop: call
+      // prepareHubPages for every platform and collect the pending ones;
+      // nothing here awaits an LLM call.
+      const pendingScans = [];
+      for (const platform of platforms) {
+        const prepared = await prepareHubPages({
+          platformId: platform.id,
+          urlSpecs: [{
+            url: urlFor(platform.id),
+            urlLabel: 'hub',
+            fetcher: async () => {
+              if (platform.delayMs > 0) await new Promise(resolve => setTimeout(resolve, platform.delayMs));
+              order.push(`fetch:${platform.id}`);
+              return { ok: true, status: 200, finalUrl: urlFor(platform.id), html: `<main>${'Quiet seller dashboard. '.repeat(20)}</main>` };
+            },
+          }],
+        });
+        pendingScans.push({ platformId: platform.id, prepared });
+      }
+
+      // Pass 2 — mirrors marketplace.js's Promise.all(pendingScans.map(...)):
+      // every remaining platform's manual handoff is issued together, only
+      // after pass 1 has finished for ALL platforms.
+      await Promise.all(pendingScans.map(({ platformId, prepared }) => scanPreparedHubPages({
+        ...prepared,
+        llmText: async () => {
+          order.push(`llm:${platformId}`);
+          return { summary: '', attention: [] };
+        },
+      })));
+
+      const lastFetchIndex = Math.max(...order.map((entry, i) => entry.startsWith('fetch:') ? i : -1));
+      const firstLlmIndex = order.findIndex(entry => entry.startsWith('llm:'));
+      assert(order.filter(e => e.startsWith('fetch:')).length === 3 && order.filter(e => e.startsWith('llm:')).length === 3,
+        `every platform must both fetch and get scanned exactly once, got: ${order.join(', ')}`);
+      assert(firstLlmIndex > lastFetchIndex,
+        `no AI handoff may be issued before every platform's page fetch has completed, got order: ${order.join(', ')}`);
+
+      // Guard the composition itself: marketplace.js must call prepareHubPages
+      // inside its per-platform loop (never scanPreparedHubPages there) and
+      // defer every scan into one batched Promise.all AFTER that loop — the
+      // shape this test exercises above.
+      const marketplaceSource = fs.readFileSync(path.resolve('electron/ipc/marketplace.js'), 'utf8');
+      const handlerStart = marketplaceSource.indexOf("handleSafe('check-marketplace-status'");
+      assert(handlerStart >= 0, 'check-marketplace-status handler must still exist in marketplace.js');
+      const loopStart = marketplaceSource.indexOf('const pendingScans = [];', handlerStart);
+      const pass2Start = marketplaceSource.indexOf('await Promise.all(pendingScans.map(', handlerStart);
+      assert(loopStart > handlerStart && pass2Start > loopStart,
+        'the handler must declare a pendingScans collector before batching every platform\'s AI handoff in one Promise.all');
+      const perPlatformLoop = marketplaceSource.slice(loopStart, pass2Start);
+      // The loop may finalize a platform inline ONLY when prepareHubPages found
+      // no LLM-eligible page (every hub page already hit a terminal transport
+      // outcome, so scanPreparedHubPages makes no AI call) — that immediate
+      // scanPreparedHubPages call costs nothing to await early. Any platform
+      // WITH llm-eligible pages must instead be queued onto pendingScans and
+      // deferred to pass 2, never scanned inline.
+      assert(perPlatformLoop.includes('await prepareHubPages('),
+        'the per-platform loop must scrape via prepareHubPages');
+      const inlineFinalizeIndex = perPlatformLoop.indexOf('llmInputs.length === 0');
+      const pendingPushIndex = perPlatformLoop.indexOf('pendingScans.push(');
+      assert(inlineFinalizeIndex >= 0 && pendingPushIndex > inlineFinalizeIndex,
+        'a platform may only be scanned inline (no queued handoff) when its prepared payload has zero llm-eligible pages; every other platform must be queued onto pendingScans instead');
+      return { fetches: 3, handoffs: 3, orderedAfterAllFetches: true };
+    },
+  },
+{
+    // FIX 2 regression test. statusCheckLock exists SOLELY to cap request-
+    // burst concurrency against the seller's one residential IP — its own
+    // header promises every queued check "settles on its own fetch timeouts
+    // ... it cannot wedge here the way an indefinite captcha-wait scrape
+    // could" (see statusCheckLock.js). Pass 2 of the hub scan (the manual AI
+    // handoff) makes no network request at all — it waits on an unbounded
+    // human copy/paste that can take minutes or forever now that every LLM
+    // call is a manual handoff. If check-marketplace-status held the lock
+    // across pass 2, one hub's unanswered handoff dialog would starve every
+    // OTHER hub's Check-All / per-card recheck behind it, forever — exactly
+    // the failure mode the lock's own header says can't happen. This proves
+    // it two ways: (1) functionally, against the real withStatusCheckLock,
+    // that a second caller's lock-held work is NOT blocked by a first
+    // caller's still-pending post-release work — the shape the fixed handler
+    // relies on; and (2) structurally, against marketplace.js's actual
+    // source, that the handler is built in that shape (lock wraps only the
+    // pass-1 loop; pass 2's Promise.all and the final return sit outside it)
+    // — full end-to-end coverage of the real handler is out of reach for a
+    // unit test (browser automation + IPC), same as the sibling test above.
+    name: 'Marketplace status check: statusCheckLock must not be held across the AI-handoff pass',
+    run: async () => {
+      const order = [];
+      // Run A's "pass 1": a short, lock-held bit of scrape-shaped work.
+      const runAPass1 = withStatusCheckLock(async () => {
+        order.push('A:pass1:start');
+        await new Promise(resolve => setTimeout(resolve, 5));
+        order.push('A:pass1:end');
+      });
+      await runAPass1;
+      // Run A's "pass 2": simulates the unbounded human copy/paste handoff —
+      // deliberately NOT wrapped in withStatusCheckLock, mirroring the fixed
+      // handler. Held open under our own control (not a timer) so the test
+      // proves ordering rather than racing a clock.
+      let resolveAPass2;
+      const aPass2 = new Promise(resolve => { resolveAPass2 = resolve; });
+      const runAPass2 = (async () => {
+        order.push('A:pass2:start');
+        await aPass2;
+        order.push('A:pass2:end');
+      })();
+
+      // Run B's pass 1 is issued WHILE run A's pass 2 is still pending. If the
+      // lock were (incorrectly) held across pass 2, this would queue behind
+      // run A's handoff and never start until resolveAPass2() fires below —
+      // which this test never calls before asserting. Under the fix, run A
+      // already released the lock after its pass 1, so run B's pass 1 can
+      // acquire and finish immediately.
+      const runBPass1 = withStatusCheckLock(async () => {
+        order.push('B:pass1:start');
+        order.push('B:pass1:end');
+      });
+      await runBPass1;
+
+      assert(order.includes('B:pass1:end') && !order.includes('A:pass2:end'),
+        `a second check's pass 1 must complete while the first check's AI handoff is still pending, got order: ${order.join(', ')}`);
+
+      // Release run A's handoff and confirm the full sequence resolves cleanly.
+      resolveAPass2();
+      await runAPass2;
+      assert(order.join(',') === 'A:pass1:start,A:pass1:end,A:pass2:start,B:pass1:start,B:pass1:end,A:pass2:end',
+        `unexpected interleaving: ${order.join(', ')}`);
+
+      // Sanity check that the assertion above actually exercises the bug FIX 2
+      // prevents, rather than passing vacuously: reproduce the ORIGINAL
+      // composition (pass 2 awaited INSIDE the lock callback) and confirm it
+      // really does starve a second check's pass 1 the way the bug report
+      // described — a held lock across an unanswered handoff dialog.
+      let releaseBuggyHandoff;
+      const buggyHandoff = new Promise(resolve => { releaseBuggyHandoff = resolve; });
+      const buggyRunA = withStatusCheckLock(async () => {
+        await buggyHandoff; // the bug: pass 2 awaited while still holding the lock
+      });
+      let buggyBFinished = false;
+      const buggyRunB = withStatusCheckLock(async () => { buggyBFinished = true; });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      assert(buggyBFinished === false,
+        'the pre-fix composition (pass 2 inside withStatusCheckLock) really does block a second check\'s pass 1 for as long as the first check\'s handoff is unanswered — confirms the assertions above are testing a real invariant, not a vacuous one');
+      releaseBuggyHandoff();
+      await Promise.all([buggyRunA, buggyRunB]);
+      assert(buggyBFinished === true, 'the buggy composition eventually unblocks once its handoff is answered (queue is not itself broken)');
+
+      // Structural guard on the real handler: the lock must wrap ONLY the
+      // pass-1 per-platform loop, with results/recordResult/pendingScans
+      // hoisted above it so pass 2 (after release) can still reach them.
+      const marketplaceSource = fs.readFileSync(path.resolve('electron/ipc/marketplace.js'), 'utf8');
+      const handlerStart = marketplaceSource.indexOf("handleSafe('check-marketplace-status'");
+      assert(handlerStart >= 0, 'check-marketplace-status handler must still exist in marketplace.js');
+      const resultsDeclIndex = marketplaceSource.indexOf('const results = {};', handlerStart);
+      const pendingScansDeclIndex = marketplaceSource.indexOf('const pendingScans = [];', handlerStart);
+      const lockCallIndex = marketplaceSource.indexOf('withStatusCheckLock(async () => {', handlerStart);
+      assert(resultsDeclIndex >= 0 && pendingScansDeclIndex >= 0 && lockCallIndex >= 0
+        && resultsDeclIndex < lockCallIndex && pendingScansDeclIndex < lockCallIndex,
+        'results/pendingScans must be declared OUTSIDE (before) the withStatusCheckLock callback so pass 2 can still use them after release');
+      const releaseMarkerIndex = marketplaceSource.indexOf('statusCheckLock released above', lockCallIndex);
+      const pass2Index = marketplaceSource.indexOf('await Promise.all(pendingScans.map(', lockCallIndex);
+      const returnResultsIndex = marketplaceSource.lastIndexOf('return { results };');
+      assert(releaseMarkerIndex > lockCallIndex && pass2Index > releaseMarkerIndex && returnResultsIndex > pass2Index,
+        'pass 2 (the AI handoff Promise.all) and the final return must sit textually AFTER the lock is released, never inside the withStatusCheckLock callback');
+      return { order: order.length, structuralGuardOk: true };
     },
   },
 {

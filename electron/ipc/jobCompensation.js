@@ -511,10 +511,11 @@ export function resolveCompensationLocation(job = {}, context = {}, remoteReside
  *
  * Every cohort that reaches research costs TWO model calls (a grounded market
  * lookup plus an assessment), and cohorts fragment by location — so an ungated
- * 42-job run can spend dozens of calls and exhaust the shared provider quota
- * that scoring and bucketing also draw on. A pay comparison only changes a
- * decision on a job the user could realistically pursue, so it is reserved for
- * the stronger matches.
+ * 42-job run can spend dozens of calls, and every one of those calls is now a
+ * manual copy/paste handoff (nonApiAi.js) the human has to sit through, on top
+ * of whatever scoring and bucketing already asked of them in the same run. A
+ * pay comparison only changes a decision on a job the user could realistically
+ * pursue, so it is reserved for the stronger matches.
  *
  * Returns a TRI-STATE, not a boolean, because "we checked and this job scored
  * below the bar" and "we never got a score for this job" are different facts
@@ -638,10 +639,15 @@ function canonicalHttpUrl(value) {
  * response, preventing an extraction pass from inventing provenance.
  */
 export function sourcesPresentInGroundedResearch(sources, groundedResearch) {
-  // New provider adapters prefix an authoritative metadata appendix. When it
-  // exists, arbitrary model prose (or hostile copied page text) cannot bless
-  // a URL as provenance. Legacy cached/provider text has no appendix, so keep
-  // the conservative whole-prose scan for backward compatibility only.
+  // groundedSourceAppendix.js's writer can prefix an authoritative metadata
+  // appendix; when one exists, arbitrary model prose (or hostile copied page
+  // text) cannot bless a URL as provenance. Nothing produces that appendix any
+  // more (grounding is a human copy/paste handoff now — see that file's
+  // header), so `hasMetadataAppendix` is only ever true for research strings
+  // persisted before that migration. Every current grounded-research string is
+  // plain pasted prose with no appendix, which makes the conservative
+  // whole-prose scan below the NORMAL path today, not just a backward-
+  // compatibility fallback.
   const researchText = String(groundedResearch || '');
   const hasMetadataAppendix = researchText === GROUNDED_SOURCE_METADATA_MARKER
     || researchText.startsWith(`${GROUNDED_SOURCE_METADATA_MARKER}\n`)

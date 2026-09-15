@@ -6,7 +6,6 @@ const ACTIVE_INPUT_STATES = new Set([
   'querying',
   'researching',
   'scoring',
-  'scoring-batch',
   'searching',
 ]);
 

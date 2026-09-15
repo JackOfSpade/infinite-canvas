@@ -56,10 +56,8 @@
     ]
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.96.0",
     "chromium-bidi": "^14.0.0",
     "electron-store": "^11.0.2",
-    "google-auth-library": "^10.6.2",
     "html-to-text": "^9.0.5",
     "jsdom": "^29.0.2",
     "pdf-lib": "^1.17.1",

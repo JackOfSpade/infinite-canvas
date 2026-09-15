@@ -1,15 +1,14 @@
 /**
  * Response schemas for AI calls.
  *
- * Passed to callLLM*({ responseSchema }) — Gemini uses them as
- * `generationConfig.responseSchema`, Claude uses them as
- * `output_config.format` JSON schemas.
- * Both providers then guarantee the model output matches the schema exactly:
- * valid JSON, required fields present, enums respected, types correct.
+ * Passed to callLLM*({ responseSchema }) — there is no provider API to enforce
+ * this natively anymore: the schema is written as JSON straight into the
+ * manual-handoff prompt (materializeNonApiPrompt), and the human's pasted
+ * reply is checked against it ourselves afterward (schemaValidation.js's
+ * assertResponseMatchesSchema), not by any chat application.
  *
  * Format: standard JSON Schema (lowercase types, properties, required, enum,
- * items). Gemini's converter (in gemini.js) lifts to its UPPERCASE format.
- * Claude consumes as-is.
+ * items).
  *
  * Keep these schemas in sync with the prompt's described shape. The schema
  * is the authoritative contract — if the prompt mentions a field the schema
@@ -148,9 +147,9 @@ export const BUNDLE_PRICE_SCHEMA = {
 
 // ── Platform-fit assessment: per-platform good/unfit verdict ────────────────
 // Built per-call from the caller's platform list because the key set is
-// dynamic and Gemini's responseSchema doesn't support `additionalProperties`.
-// Each platform id becomes an explicit required property so the model can't
-// silently skip platforms or invent new ids.
+// dynamic. Each platform id becomes an explicit required property so the
+// pasted-back response can't silently skip platforms or invent new ids —
+// our own post-hoc validator (schemaValidation.js) checks this exactly.
 export function buildPlatformFitSchema(platformIds) {
   const properties = {};
   for (const id of platformIds) {
@@ -209,11 +208,12 @@ export const MARKETPLACE_HUB_SCAN_SCHEMA = {
 //      the frozen roleFamilies vocabulary.
 //
 // This deliberately stays a FIXED schema regardless of job count. An earlier
-// index-keyed object generated one required property for every job. Claude
-// Structured Outputs compiles those properties into its output grammar, and large
-// board combines (for example 124 jobs) exceed Anthropic's grammar-size limit
-// before the model sees the request. Exact length/nonblank validation is
-// therefore a local, atomic guard below rather than a provider grammar rule.
+// index-keyed object generated one required property for every job — for a
+// large board combine (for example 124 jobs) that schema, pasted as literal
+// JSON into the manual-handoff prompt, becomes an unreviewable wall of
+// boilerplate a person has to eyeball before pasting into their chat. Exact
+// length/nonblank validation is therefore a local, atomic guard below rather
+// than something baked into the schema shape.
 export const JOB_TAXONOMY_ROLE_FAMILY_LIMIT = 12;
 
 const SALARY_RANGES_SCHEMA = {
@@ -969,11 +969,11 @@ export const ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA = {
         properties: {
           label: { type: 'string' },
           // The persisted ladder validator requires whole-year, contiguous
-          // bands. Keep the provider contract equally strict so a response
-          // such as 0–2.5 does not pass schema enforcement then fail later.
+          // bands. Keep this schema equally strict so a response such as
+          // 0–2.5 does not pass validation then fail later.
           minYears: { type: 'integer' },
-          // Use a finite high endpoint (for example 99 for "12+ years") so
-          // both Claude and Gemini can enforce the same portable schema.
+          // Use a finite high endpoint (for example 99 for "12+ years") so a
+          // plain integer schema can enforce the whole range.
           maxYears: { type: 'integer' },
         },
       },

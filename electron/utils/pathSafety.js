@@ -189,16 +189,3 @@ export function isSensitivePath(resolvedPath) {
   if (SENSITIVE_DOTENV_PATTERNS.some(p => verificationPath.includes(p))) return true;
   return SENSITIVE_PATH_PATTERNS.some(p => verificationPath.includes(p));
 }
-
-// A document/image node's filePath is sourced from loaded canvas JSON, which
-// (unlike the local-file:// preview protocol) had NO path check at all before
-// being read and uploaded to an AI provider — an untrusted/shared canvas
-// could point a node at e.g. ~/.aws/credentials and have it previewed AND,
-// via a normal "AI polish/analyze" action, exfiltrated to a third-party API.
-// Shared by every provider's attachment path (gemini.js, claude.js) so the
-// guard can't drift out of sync between them.
-export function assertAttachmentPathSafe(filePath) {
-  if (isSensitivePath(path.resolve(String(filePath || '')))) {
-    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
-  }
-}

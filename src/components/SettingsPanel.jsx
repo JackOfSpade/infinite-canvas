@@ -27,40 +27,6 @@ const BG_OPTIONS = [
   { key: 'none',  label: 'None' },
 ];
 
-// Claude family tiers, most-to-least capable — mirrors electron/ipc/
-// modelResolver.js's CLAUDE_FAMILY_LADDER. Duplicated as plain strings
-// (renderer code can't import the main-process module), so keep this in
-// sync by hand if a family is ever added/removed there.
-const CLAUDE_FAMILY_OPTIONS = [
-  { token: 'FABLE',  label: 'Fable',  desc: 'highest tier · ~2x Opus price' },
-  { token: 'OPUS',   label: 'Opus',   desc: 'most capable' },
-  { token: 'SONNET', label: 'Sonnet', desc: 'balanced' },
-  { token: 'HAIKU',  label: 'Haiku',  desc: 'fastest & cheapest' },
-];
-
-// The live API task GROUPS a Claude family is picked for (llm.js TASK_GROUPS) —
-// `defaultToken` mirrors llm.js's GROUP_DEFAULT_FAMILY so the "(default)"
-// hint in each dropdown stays accurate without an extra IPC round trip.
-const CLAUDE_MODEL_GROUPS = [
-  {
-    key: 'judgment', label: 'Judgment', defaultToken: 'OPUS',
-    note: 'Pricing and bundle-price decisions. Job scoring and compensation research use the manual non-API handoff instead.',
-  },
-  {
-    key: 'extraction', label: 'Extraction', defaultToken: 'SONNET',
-    note: 'Vision/product analysis, plus fallback for unmapped tasks. Résumé parsing, query generation, and job bucketing use the manual non-API handoff instead.',
-  },
-  {
-    key: 'light', label: 'Light', defaultToken: 'HAIKU',
-    note: 'Platform-fit and page-status checks, marketplace hub scans, and light text edits.',
-  },
-];
-
-const AI_PROVIDER_OPTIONS = [
-  { key: 'gemini', label: 'Gemini API' },
-  { key: 'claude', label: 'Claude API' },
-];
-
 const isMac = (() => {
   const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
   return p.toLowerCase().includes('mac');
@@ -427,231 +393,20 @@ function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
   );
 }
 
-/** Seconds → "Xs" / "Ym Zs". */
-function fmtSecLeft(s) {
-  if (s == null) return null;
-  return s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? ` ${s % 60}s` : ''}` : `${s}s`;
-}
-
-/**
- * Per-provider availability card: a live "Check availability" button plus the
- * last verdict. Claude shows REAL remaining/limit/reset pulled from the response
- * headers; Gemini shows real RPM/RPD/TPM from Cloud Monitoring when a service
- * account is configured, or ping-only when using only an API key.
- * Presentational only.
- */
-function AIProviderStatus({ provider, status, checking, onCheck }) {
-  const probe = status?.lastProbe || null;
-  const tele = status?.telemetry || null;
-  const isClaude = provider === 'claude';
-  const hasQuotaStats = !isClaude && (probe?.hasQuotaStats === true);
-
-  const line = (label, b) => b && (
-    <div>{label}: <span className="text-white/65">{b.remaining ?? '?'}</span> / {b.limit ?? '?'} left{b.resetInSec != null ? ` · resets ${fmtSecLeft(b.resetInSec)}` : ''}</div>
-  );
-
-  // Verdict for a SINGLE probe result (Claude per-model, or the one Gemini probe).
-  // The model name is rendered separately, so the text here omits it.
-  const verdictFor = (p) => {
-    if (!p) return null;
-    if (p.ok) return { cls: 'text-emerald-400', text: '✅ Available' };
-    const prl = p.rateLimit || null;
-    if (p.classification === 'no-quota') {
-      return { cls: 'text-red-400', text: '❌ No quota allocated — dashboard 0 / 0 is not consumed usage' };
-    }
-    if (p.classification === 'daily-quota') {
-      return { cls: 'text-amber-400', text: '⚠️ Daily quota exhausted' };
-    }
-    if (p.status === 429) {
-      const hint = isClaude
-        ? (prl?.requests?.resetInSec != null ? `resets in ${fmtSecLeft(prl.requests.resetInSec)}` : '')
-        : (p.retryAfterMs != null ? `retry in ${fmtSecLeft(Math.round(p.retryAfterMs / 1000))}` : '');
-      return { cls: 'text-amber-400', text: `⚠️ Temporarily rate-limited${hint ? ` — ${hint}` : ''}` };
-    }
-    if (p.status === 401) return { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
-    // A 403 can mean a bad key OR that this specific model isn't enabled for the
-    // key/project (a Pro preview that needs allow-listing). The fallback chain
-    // keeps using the other models, so don't imply the whole key is dead.
-    if (p.status === 403) return { cls: 'text-red-400', text: '❌ Unauthorized — key invalid or this model not enabled for it' };
-    return { cls: 'text-red-400', text: `❌ ${p.error || `Error ${p.status ?? ''}`}` };
-  };
-
-  // Backward-compatible rendering for an older single-model Gemini probe.
-  // Current Gemini and Claude checks both render their per-model rows above.
-  const geminiVerdict = (!isClaude && probe && !probe.models) ? (() => {
-    const v = verdictFor(probe);
-    if (v && probe.ok && probe.model) v.text = `✅ Available — ${probe.model} responded`;
-    return v;
-  })() : null;
-
-  /** Render a single quota stat cell: "6 / 5" with amber when over limit.
-   *  Comparison always runs on the raw numbers — `format` only affects display,
-   *  so a K-formatted limit can't defeat the `>=` check (NaN) or get compared
-   *  lexicographically as a string. */
-  const QuotaCell = ({ used, limit, format }) => {
-    if (used == null || limit == null) return <span className="text-white/30">—</span>;
-    const over = limit > 0 && used >= limit;
-    const display = format || ((n) => n.toLocaleString());
-    return (
-      <span className={over ? 'text-amber-400 font-semibold' : 'text-white/60'}>
-        {display(used)} / {display(limit)}
-        {over && <span className="ml-0.5">⚠️</span>}
-      </span>
-    );
-  };
-
-  /** Format large token numbers as e.g. "87.4K" */
-  function fmtK(n) {
-    if (n == null) return null;
-    return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
-  }
-
-  return (
-    <div className="mt-1 pt-2 border-t border-white/5 space-y-1.5">
-      <div className="flex items-center justify-between">
-        <div className="text-white/50 text-[11px]">Availability</div>
-        <button
-          onClick={() => onCheck(provider)}
-          disabled={checking}
-          className="px-2 py-1 rounded-md bg-blue-500/20 hover:bg-blue-500/30 disabled:opacity-50 text-blue-300 text-[10px] font-medium border border-blue-500/30 transition-colors"
-        >
-          {checking ? 'Checking…' : 'Check availability'}
-        </button>
-      </div>
-
-      {/* Models list */}
-      {probe?.models && (
-        <div className="space-y-2">
-          <div className="text-white/40 text-[10px]">
-            {isClaude
-              ? 'Per model in use (Anthropic rate limits are per-model):'
-              : hasQuotaStats
-                ? 'Per model in use (live usage from Cloud Monitoring API — peak last 25h):'
-                : 'Per model in use (Gemini fallback chain):'
-            }
-          </div>
-          {probe.models.map((m, i) => {
-            const v = verdictFor(m);
-            const mrl = m.rateLimit || null;
-            const qs = m.quotaStats || null;
-            return (
-              <div key={m.model || i} className="space-y-0.5">
-                <div className="text-[11px] font-medium leading-snug">
-                  <span className="text-white/70 font-mono">{m.model || '(unknown model)'}</span>
-                  {v && <> — <span className={v.cls}>{v.text}</span></>}
-                </div>
-                {/* Claude per-model rate limit rows */}
-                {mrl && isClaude && (
-                  <div className="text-white/45 text-[10px] leading-relaxed font-mono pl-3">
-                    {line('requests', mrl.requests)}
-                    {line('tokens', mrl.tokens)}
-                    {line('input tok', mrl.input_tokens)}
-                    {line('output tok', mrl.output_tokens)}
-                  </div>
-                )}
-                {/* Gemini Cloud Monitoring quota stats */}
-                {qs && !isClaude && (
-                  <div className="text-[10px] leading-relaxed font-mono pl-3 flex flex-wrap gap-x-3 gap-y-0.5">
-                    {qs.rpm && (
-                      <span className="text-white/40">
-                        RPM: <QuotaCell used={qs.rpm.used} limit={qs.rpm.limit} />
-                      </span>
-                    )}
-                    {qs.rpd && (
-                      <span className="text-white/40">
-                        RPD: <QuotaCell used={qs.rpd.used} limit={qs.rpd.limit} />
-                      </span>
-                    )}
-                    {qs.tpm && (
-                      <span className="text-white/40">
-                        TPM: <QuotaCell used={qs.tpm.used} limit={qs.tpm.limit} format={fmtK} />
-                      </span>
-                    )}
-                    {/* These figures are project-wide, not model-specific — say so
-                        rather than implying each model has its own numbers. */}
-                    {qs.scope === 'project' && (qs.rpm || qs.rpd || qs.tpm) && (
-                      <span className="text-white/25" title="Reported at the project level by Cloud Monitoring — not a per-model breakdown. See Google's dashboard for model-specific limits (e.g. Pro at 0/0).">project-wide</span>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {!isClaude && geminiVerdict && <div className={`text-[11px] font-medium ${geminiVerdict.cls}`}>{geminiVerdict.text}</div>}
-
-      {!isClaude && (
-        <div className="text-white/40 text-[10px] leading-relaxed space-y-0.5">
-          {Array.isArray(tele?.compatibleModels) && tele.compatibleModels.length > 0 && (
-            <div>Compatible fallback catalog: <span className="text-white/55">{tele.compatibleModels.length}</span></div>
-          )}
-          {/* Entitlement-gated tiers (Pro). Reported from a live minimal probe,
-              not a hard-coded assumption — so "why isn't it using Pro?" has a
-              visible, checkable answer instead of being invisible app policy.
-              `lastProbe.tierEntitlement` is the fresh Check-availability result;
-              `tele.tierEntitlement` is the cached verdict the cascade is using. */}
-          {(probe?.tierEntitlement || tele?.tierEntitlement || []).map((t) => (
-            <div key={t.tier}>
-              <span className="capitalize">{t.tier}</span> tier:{' '}
-              {t.allowed
-                ? <span className="text-emerald-400/70">available — leads the quality chain</span>
-                : <span className="text-white/45">{t.known ? 'not available on this key (no quota) — chain starts at Flash' : 'not checked yet'}</span>}
-              {t.model && <span className="text-white/30 font-mono"> ({t.model})</span>}
-            </div>
-          ))}
-          {tele?.lastSuccessfulModel && tele.lastSuccessfulModel !== '(none)' && (
-            <div>Last success: <span className="text-white/55">{tele.lastSuccessfulModel}</span></div>
-          )}
-          {tele?.lastAttemptedError && tele.lastAttemptedError !== '(none)' && (
-            <div className="text-amber-400/70 truncate" title={tele.lastAttemptedError}>Last error: {tele.lastAttemptedError.slice(0, 90)}</div>
-          )}
-          {Array.isArray(tele?.warnings) && tele.warnings.length > 0 && (
-            <div className="pt-1 space-y-1">
-              <div className="text-amber-400/70">Model warnings:</div>
-              {tele.warnings.map((warning, i) => (
-                <div
-                  key={`${warning.model || 'model'}-${warning.type || 'warning'}-${i}`}
-                  className="pl-2 text-amber-300/55"
-                  title={warning.message}
-                >
-                  <span className="font-mono">{warning.model}</span>: {String(warning.message || '').slice(0, 160)}
-                </div>
-              ))}
-            </div>
-          )}
-          <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">View quota dashboard ↗</a>
-          {hasQuotaStats
-            ? <div className="text-emerald-500/50 text-[9px]">✓ Usage data sourced from Cloud Monitoring API — 100% confirmed from Google.</div>
-            : <div className="text-white/25 text-[9px]">No service account configured — live checks distinguish available, temporary rate limits, daily exhaustion, and zero allocated quota. Add a service-account.json to see project-wide RPM/RPD/TPM.</div>
-          }
-        </div>
-      )}
-
-      {!probe && <div className="text-white/30 text-[10px]">Click for a live up / rate-limited / bad-key check.</div>}
-    </div>
-  );
-}
-
 /**
  * Application settings panel.
- * Sections: AI, Marketplace Monitors, Animation Speed, View, Keyboard Shortcuts.
+ * Sections: Job Sources, Job Platform Logins, Marketplace Monitors, Animation
+ * Speed, View, Keyboard Shortcuts. AI provider/model/credential settings were
+ * removed entirely — every AI call now goes through the non-API human
+ * copy/paste handoff (see electron/ipc/nonApiAi.js), which needs no key,
+ * model choice, or availability check.
  */
 export function SettingsPanel({ isOpen, onClose, settings, updateSetting, updateShortcut, resetShortcuts }) {
   const { addToast } = useToast();
   const [capturingId, setCapturingId] = useState(null);
-  const [aiSettings, setAiSettings] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
   const watchUrlsByPlatformRef = useRef(watchUrlsByPlatform);
-  const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
-  const [checkingProvider, setCheckingProvider] = useState(null);
-  // Live Claude family -> resolved model id (e.g. { OPUS: 'claude-opus-5', ... }),
-  // so each family dropdown option can show proof the always-latest resolver is
-  // actually working, not just a static family name. Empty until the IPC round
-  // trip resolves — dropdown options render without the id suffix until then.
-  const [claudeModelIds, setClaudeModelIds] = useState({});
   useLayoutEffect(() => {
     watchUrlsByPlatformRef.current = watchUrlsByPlatform;
   }, [watchUrlsByPlatform]);
@@ -676,7 +431,6 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     window.electronAPI.getSettings()
       .then((storeData) => {
         if (cancelled) return;
-        if (storeData && storeData.ai) setAiSettings(storeData.ai);
         if (storeData && storeData.jobs) setJobsSettings(storeData.jobs);
         if (storeData && storeData.marketplaceWatchUrls) {
           watchUrlsByPlatformRef.current = storeData.marketplaceWatchUrls;
@@ -684,43 +438,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
         }
       })
       .catch(() => { /* IPC unavailable — leave loading state until next open */ });
-    // Last-known AI availability (passive — the button does a live re-check).
-    window.electronAPI.getAIStatus?.()
-      .then((res) => { if (!cancelled && res?.success) setAiStatus({ gemini: res.gemini || null, claude: res.claude || null }); })
-      .catch(() => { /* ignore — card falls back to "click to check" */ });
-    // Resolved Claude model ids for the family dropdowns below.
-    window.electronAPI.getClaudeModelMap?.()
-      .then((res) => { if (!cancelled && res?.success) setClaudeModelIds(res.resolved || {}); })
-      .catch(() => { /* ignore — dropdowns still show family names, just without the resolved id */ });
     return () => { cancelled = true; };
   }, [isOpen]);
-
-  const checkAvailability = useCallback(async (provider) => {
-    if (!window.electronAPI?.checkAIAvailability) return;
-    setCheckingProvider(provider);
-    try {
-      const res = await window.electronAPI.checkAIAvailability({ provider });
-      if (res?.success) {
-        setAiStatus(prev => ({
-          ...prev,
-          [provider]: {
-            ...(prev[provider] || {}),
-            lastProbe: res,
-            ...(res.telemetry ? { telemetry: res.telemetry } : {}),
-          },
-        }));
-      } else {
-        addToast({
-          title: `${provider} availability check failed`,
-          description: res?.error || 'The check returned no result.',
-          type: 'error',
-        });
-      }
-    } catch (err) {
-      addToast({ title: `${provider} availability check failed`, description: err?.message || String(err), type: 'error' });
-    }
-    finally { setCheckingProvider(null); }
-  }, [addToast]);
 
   // handleSafe resolves { success:false, error } instead of rejecting, so a
   // failed store write is otherwise invisible to this panel — the optimistic
@@ -737,43 +456,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     }
   }, [addToast]);
 
-  const updateAISetting = useCallback((key, value) => {
-    if (!window.electronAPI?.updateSettings || !aiSettings) return;
-    setAiSettings(prev => ({ ...prev, [key]: value }));
-    // Send ONLY the changed key — the backend shallow-merges per section, so a
-    // single-key payload preserves sibling keys (incl. any the main process
-    // wrote at runtime after this panel's snapshot was taken). Echoing back the
-    // whole stale section would clobber those concurrent writes. IPC is outside
-    // the setState updater so it fires exactly once (strict/concurrent mode may
-    // invoke updaters twice, which would double-write).
-    persistSettings({ ai: { [key]: value } });
-  }, [aiSettings, persistSettings]);
-
-  // Sets ONE live API group's Claude family (Judgment/Extraction/Light — llm.js
-  // TASK_GROUPS). Persist only the changed group. Sending the entire local
-  // object looks harmless, but two quick picker changes can have stale React
-  // closures and the second request would overwrite the first group's new
-  // value. settings.js owns the deep merge, so this payload preserves changes
-  // from another picker (or another renderer) while the local UI updates
-  // optimistically.
-  const updateClaudeModelGroup = useCallback((group, token) => {
-    if (!window.electronAPI?.updateSettings || !aiSettings) return;
-    // Merge against React's latest state as well as persisting only this group.
-    // Two selections can land before this callback is recreated; using the
-    // captured aiSettings object here would leave the panel displaying the
-    // second change with the first one visually reverted even though the
-    // backend deep-merge correctly saved both.
-    setAiSettings(prev => ({
-      ...prev,
-      claudeModels: { ...(prev?.claudeModels || {}), [group]: token },
-    }));
-    persistSettings({ ai: { claudeModels: { [group]: token } } });
-  }, [aiSettings, persistSettings]);
-
   const updateJobsSetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !jobsSettings) return;
     setJobsSettings(prev => ({ ...prev, [key]: value }));
-    // Send ONLY the changed key (see updateAISetting): the panel's `jobsSettings`
+    // Send ONLY the changed key: the panel's `jobsSettings`
     // snapshot is taken once on open and never re-synced, so it can hold a stale
     // diceApiKey / glassdoorLocIds that the main process refreshed at runtime
     // (saveDiceApiKey on a Dice 500, saveGlassdoorLocId on a location resolve).
@@ -840,176 +526,6 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
 
         {/* Scrollable Content */}
         <div className="px-6 py-5 space-y-6 overflow-y-auto custom-scrollbar flex-1">
-
-          {/* ── AI Models & APIs ─────────────────────────────────────── */}
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <Sparkles size={13} className="text-white/30" />
-              <span className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
-                AI Models & APIs
-              </span>
-            </div>
-
-            {aiSettings ? (
-              <div className="space-y-4">
-                {/* Provider Selection */}
-                <div>
-                  <div className="text-white/50 text-[11px] mb-1.5">API Provider</div>
-                  <div className="flex gap-1.5">
-                    {AI_PROVIDER_OPTIONS.map(({ key, label }) => (
-                      <button
-                        key={key}
-                        onClick={() => updateAISetting('provider', key)}
-                        className={`flex-1 py-1.5 rounded-lg text-[11px] font-medium transition-all whitespace-nowrap ${
-                          aiSettings.provider === key
-                            ? 'bg-blue-500/30 border border-blue-500/50 text-blue-300'
-                            : 'bg-white/[0.03] border border-white/[0.06] text-white/35 hover:bg-white/[0.07] hover:text-white/60'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-1.5 text-white/30 text-[9px] leading-relaxed">
-                    Used by in-app AI features. Application Generate uses the separate local application handoff.
-                  </p>
-                </div>
-
-                {/* Gemini Settings */}
-                {aiSettings.provider === 'gemini' && (
-                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task and falls back down a capability ladder — Pro, then Flash, then Flash-Lite — with Flash preferred for quality-sensitive work and Flash-Lite for status checks and light edits. Pro is used only if a live check confirms your key is entitled to it; free-tier keys report no Pro quota, so the chain starts at Flash. Run Check availability after upgrading a key.
-                    </div>
-                    <div>
-                      <div className="flex justify-between items-end mb-1">
-                        <div className="text-white/50 text-[11px]">API Key (AI Studio)</div>
-                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
-                      </div>
-                      <input
-                        type="password"
-                        placeholder="AIzaSy..."
-                        value={aiSettings.geminiApiKey || ''}
-                        onChange={(e) => updateAISetting('geminiApiKey', e.target.value)}
-                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                      />
-                    </div>
-
-                    {/* Vertex AI service-account.json — alternative to the API key */}
-                    <div>
-                      <div className="text-white/50 text-[11px] mb-1">
-                        Or service-account.json (Vertex AI)
-                      </div>
-                      <div className="flex gap-1.5">
-                        <input
-                          type="text"
-                          readOnly
-                          placeholder="No file selected"
-                          value={aiSettings.serviceAccountPath || ''}
-                          className="flex-1 bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[10px] text-white/60 focus:outline-none truncate"
-                          title={aiSettings.serviceAccountPath || ''}
-                        />
-                        <button
-                          onClick={async () => {
-                            const res = await window.electronAPI?.pickServiceAccountFile?.();
-                            if (res?.path) updateAISetting('serviceAccountPath', res.path);
-                          }}
-                          className="px-2 py-1.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 text-[10px] font-medium border border-blue-500/30 transition-colors"
-                        >
-                          Browse…
-                        </button>
-                        {aiSettings.serviceAccountPath && (
-                          <button
-                            onClick={() => updateAISetting('serviceAccountPath', '')}
-                            className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/40 text-[10px] border border-white/10 transition-colors"
-                            title="Clear configured path"
-                          >
-                            Clear
-                          </button>
-                        )}
-                      </div>
-                      <p className="text-white/30 text-[9px] mt-1">
-                        Either credential works. When both are set, the AI Studio API key is used; clear it to use the Vertex service account.
-                      </p>
-                    </div>
-
-                    <AIProviderStatus provider="gemini" status={aiStatus.gemini} checking={checkingProvider === 'gemini'} onCheck={checkAvailability} />
-                  </div>
-                )}
-
-                {/* Claude-only configuration. It is intentionally absent until
-                    Claude is the active provider: none of these controls
-                    affect Gemini's capability-ladder path. Values persist, so
-                    switching back to Claude restores prior selections. */}
-                {aiSettings.provider === 'claude' && (
-                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div className="text-white/40 text-[10px] leading-snug">
-                      The app resolves the newest compatible model in each selected family automatically. The displayed id is the current resolved model, not a setting you need to pin.
-                    </div>
-
-                    {/* Per-group Claude family — replaces the old hard-coded
-                        per-task tier assignment. Each option shows the id it
-                        currently resolves to (claudeModelIds, fetched via
-                        getClaudeModelMap) as live proof the always-latest
-                        resolver is working, not just a static family name. */}
-                    <div className="space-y-2.5">
-                      {CLAUDE_MODEL_GROUPS.map(({ key, label, defaultToken, note }) => {
-                        const selected = aiSettings.claudeModels?.[key] || defaultToken;
-                        return (
-                          <div key={key}>
-                            <div className="text-white/50 text-[11px] mb-1">{label}</div>
-                            <select
-                              value={selected}
-                              onChange={(e) => updateClaudeModelGroup(key, e.target.value)}
-                              className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[11px] text-white/80 focus:outline-none focus:border-blue-500/50"
-                            >
-                              {CLAUDE_FAMILY_OPTIONS.map(({ token, label: familyLabel, desc }) => {
-                                const modelId = claudeModelIds[token];
-                                const isDefault = defaultToken === token;
-                                return (
-                                  <option key={token} value={token}>
-                                    {familyLabel}{modelId ? ` — ${modelId}` : ''} ({desc}{isDefault ? ', default' : ''})
-                                  </option>
-                                );
-                              })}
-                            </select>
-                            <p className="text-white/30 text-[9px] mt-1">{note}</p>
-                            {key === 'judgment' && selected === 'HAIKU' && (
-                              <p className="text-amber-300/80 text-[9px] mt-1">
-                                Haiku is usable, but pricing and bundle-price decisions are recommendations you act on directly, so weaker judgment carries real cost. Sonnet or Opus is recommended here.
-                              </p>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between items-end mb-1">
-                        <div className="text-white/50 text-[11px]">
-                          API Key
-                        </div>
-                        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
-                      </div>
-                      <input
-                        type="password"
-                        placeholder="sk-ant-api..."
-                        value={aiSettings.anthropicApiKey || ''}
-                        onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
-                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                      />
-                    </div>
-
-                    <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
-            )}
-          </div>
-
-          <div className="w-full h-px bg-white/[0.06]" />
 
           {/* ── Job Sources ─────────────────────────────────────────── */}
           {/* Per-source credentials for job-search APIs that require keys.

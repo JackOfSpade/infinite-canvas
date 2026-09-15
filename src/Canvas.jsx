@@ -712,7 +712,7 @@ export function Canvas() {
     clearCanvas,
     duplicateNodes,
     extractToParent: navigation.extractToParent,
-    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally,
+    depth: navigation.depth,
     isAnimatingRef: isNavigationAnimatingRef
   });
 

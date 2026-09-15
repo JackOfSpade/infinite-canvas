@@ -2313,7 +2313,6 @@ export default [
 
       const contracts = [
         ['scored settlement', 'const completion = completeRun && jobRunId', 'updateGlobal(id, {'],
-        ['lost legacy batch', "? await completeJobRun(terminalRunId, 'failed', 'incomplete', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(id, live ==='],
         ['post-search zero', "? await completeJobRun(jobRunId, 'completed', 'zero', cfp, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
         ['preference-filtered zero', "? await completeJobRun(searchResult.runId, 'completed', 'preference-filtered', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],
         ['collection-only', "? await completeJobRun(searchResult.runId, 'completed', 'collection-only', canvasFilePath, 0, moduleFingerprint([]), cancelled)", 'updateGlobal(currentId, {'],

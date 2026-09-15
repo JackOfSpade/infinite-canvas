@@ -7,9 +7,10 @@ import { logger } from '../logger.js';
  * mis-anchoring the span). Handles both ```json and bare ``` wrappers.
  *
  * Despite living under a Gemini-sounding name for a while (parseGeminiJSON),
- * this is the shared JSON-repair parser for BOTH providers — llm.js calls it
- * on Claude's raw text output too. Relocated to this neutral file so that
- * isn't a readability trap for the next reader.
+ * this parser is provider-agnostic: nonApiAi.js calls it on whatever text the
+ * user pastes back from their own chosen chat application (Claude, Gemini,
+ * ChatGPT, or anything else), not a specific provider's output. Relocated to
+ * this neutral file so that isn't a readability trap for the next reader.
  */
 export function parseAiJson(raw) {
   if (!raw) return null;

@@ -1,4 +1,4 @@
-import { CLAUDE_FAMILY, CODE_EXT_RE, CONDITION_VALUES, DEFAULT_CONDITION, FINGERPRINT_PROFILES, GEMINI_MODEL_FALLBACKS, LANGUAGE_LABELS, LEDGER_CAP, MARKETPLACE_STATUS_GRID, MINING_TARGET, MODEL_FLOOR, PDFDocument, PDFLib, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, TIMINGS, TOKEN_HARD_CAP, WORD_DOC_EXT, _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, claudeModelsInUse, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, decryptSecret, deepAddElements, deepUpdateNode, dedupAgainstHistory, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveCap, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getAISettings, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getGeminiModelRuntimeState, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, isWordDoc, languageLabel, ledgerById, loadJobsHistory, markManualSolveRequired, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, modelForTask, normalizeClaudeModels, normalizeGeminiModelRuntimeState, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, pickEdgeHandles, pickFamilyModel, publishMarketplaceStatusCheckingIds, readPlainTextDocument, reconcileBatchScores, recordLaunchCollision, recordOutcome, recordTokenUsage, recordTruncation, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, saveGeminiModelRuntimeState, serializeLedgerForPrompt, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, CODE_EXT_RE, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, CONDITION_VALUES, decryptSecret, dedupAgainstHistory, deepAddElements, deepUpdateNode, DEFAULT_CONDITION, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, FINGERPRINT_PROFILES, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, LANGUAGE_LABELS, languageLabel, LEDGER_CAP, ledgerById, loadJobsHistory, MARKETPLACE_STATUS_GRID, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, markManualSolveRequired, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeSettingsSection, mergeSourceIntoComps, MINING_TARGET, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, pdfContainsType3Fonts, PDFDocument, PDFLib, pickEdgeHandles, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, publishMarketplaceStatusCheckingIds, readPlainTextDocument, recordLaunchCollision, recordOutcome, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, taskModelRoutingSnapshot, TIMINGS, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
 
 export default [
@@ -174,28 +174,6 @@ export default [
       const dead = buildScoredJob(job, null, { fallbackScore: 50, allNull: true });
       assert(dead.reasoning === 'AI format error', 'whole-batch miss → AI format error');
       return { ok: true };
-    },
-  },
-{
-    // Regression: a present-but-fully-unmatched scores array (empty, or all
-    // indices out of range) must report 'AI format error' + a failedBatch,
-    // identically to the real-time path (results.every(r=>!r)) — not the
-    // softer 'Unable to score'/0 the old `allNull = !scores` produced.
-    name: 'Batch reconcile: empty/out-of-range scores array == whole-batch failure (lockstep with live path)',
-    run: () => {
-      const batch = [{ id: 'a' }, { id: 'b' }];
-      const empty = reconcileBatchScores([batch], { b0: { scores: [] } }, { fallbackScore: 50 });
-      assert(empty.failedBatches === 1, `empty scores array → failedBatches=1 (got ${empty.failedBatches})`);
-      assert(empty.scoredJobs.every(j => j.reasoning === 'AI format error'), 'empty scores → AI format error');
-      const oob = reconcileBatchScores([batch], { b0: { scores: [{ index: 5, matchScore: 9 }, { index: 6, matchScore: 8 }] } }, { fallbackScore: 50 });
-      assert(oob.failedBatches === 1, `all-out-of-range indices → failedBatches=1 (got ${oob.failedBatches})`);
-      assert(oob.scoredJobs.every(j => j.reasoning === 'AI format error'), 'out-of-range → AI format error');
-      // A partially-matched batch is NOT a whole-batch failure: the unmatched job
-      // gets the lone-miss 'Unable to score', and the batch is not counted failed.
-      const partial = reconcileBatchScores([batch], { b0: { scores: [{ index: 0, matchScore: 80, careerDirection: 'Eng' }] } }, { fallbackScore: 50 });
-      assert(partial.failedBatches === 0, `partial match → failedBatches=0 (got ${partial.failedBatches})`);
-      assert(partial.scoredJobs.find(j => j.id === 'b').reasoning === 'Unable to score', 'lone miss in good batch → Unable to score');
-      return { ok: true, empty: empty.failedBatches, oob: oob.failedBatches, partial: partial.failedBatches };
     },
   },
 {
@@ -708,61 +686,6 @@ export default [
     },
   },
 {
-    name: 'tokenBudget: seed/hard-cap pure paths + non-finite samples rejected',
-    run: () => {
-      assert(TOKEN_HARD_CAP === 64000, 'hard cap leaves the 32,000 scoring floor room to self-heal past an observed 40,000-token truncation');
-      // No recorded data → returns the seed unchanged (the common path).
-      assert(effectiveCap('tb-unit-seed', 5000) === 5000, 'no data → seed unchanged');
-      // A non-positive seed falls back to the hard cap (max headroom).
-      assert(effectiveCap('tb-unit-zero', 0) === TOKEN_HARD_CAP, 'zero seed → HARD_CAP');
-      assert(effectiveCap('tb-unit-neg', -10) === TOKEN_HARD_CAP, 'negative seed → HARD_CAP');
-      // The Infinity/NaN guard: a non-finite sample must be a no-op (no throw, no poison).
-      recordTokenUsage('tb-unit-inf', Infinity);
-      recordTokenUsage('tb-unit-inf', NaN);
-      recordTruncation('tb-unit-inf', Infinity);
-      assert(effectiveCap('tb-unit-inf', 4000) === 4000, 'Infinity/NaN samples do not poison the cap');
-      recordTruncation('tb-unit-scoring-hard-cap', 40000, 32000);
-      assert(effectiveCap('tb-unit-scoring-hard-cap', 32000) === 48000,
-        'a real scoring truncation at the former 40,000 ceiling immediately self-heals with 20% headroom');
-      return { ok: true };
-    },
-  },
-{
-    name: 'settings: Gemini model-health snapshots persist active quota suppression for hydration on restart',
-    run: () => {
-      const now = 1_000_000;
-      const key = 'ai:credential-hash\x00gemini-3.7-flash';
-      const persisted = normalizeGeminiModelRuntimeState({
-        [key]: {
-          suppressedUntil: now + 60_000,
-          runtime: {
-            model: 'gemini-3.7-flash', classification: 'daily-quota', message: 'Daily quota exhausted.',
-            observedAt: now - 5_000, suppressedUntil: now + 60_000, warnUntil: now + 60_000,
-          },
-        },
-        expired: {
-          suppressedUntil: now - 1,
-          runtime: { model: 'old', classification: 'daily-quota', message: 'old', observedAt: now - 10, warnUntil: now - 1 },
-        },
-      }, now);
-      assert(Object.keys(persisted).join(',') === key, 'expired runtime rows are pruned before a later app launch can reload them');
-      assert(persisted[key].suppressedUntil === now + 60_000 && persisted[key].runtime?.classification === 'daily-quota',
-        'an active daily-quota suppression and its warning survive the persistence round-trip');
-      assert(Object.keys(normalizeGeminiModelRuntimeState(null, now)).length === 0,
-        'a missing or malformed persisted snapshot safely hydrates as an empty model-health cache');
-      const before = getGeminiModelRuntimeState();
-      try {
-        assert(saveGeminiModelRuntimeState(persisted), 'the electron-store-backed Gemini runtime snapshot writes successfully');
-        const reread = getGeminiModelRuntimeState();
-        assert(JSON.stringify(reread) === JSON.stringify(normalizeGeminiModelRuntimeState(persisted)),
-          'a fresh settings read receives the durable suppression and warning snapshot for process-start hydration');
-      } finally {
-        saveGeminiModelRuntimeState(before);
-      }
-      return { retained: Object.keys(persisted).length };
-    },
-  },
-{
     name: 'settings: role-family cache treats prototype property names as ordinary own keys',
     run: () => {
       const raw = JSON.parse('{"__proto__":{"roleFamily":"__proto__"},"constructor":{"roleFamily":"constructor"}}');
@@ -920,18 +843,6 @@ export default [
     },
   },
 {
-    name: 'docUtils.isWordDoc: extension detection (case/path/dotfile safe)',
-    run: () => {
-      assert(isWordDoc('Resume.DOCX') === true, 'uppercase extension');
-      assert(isWordDoc('legacy.doc') === true && isWordDoc('report.pdf') === false, 'doc vs non-doc');
-      assert(isWordDoc(null) === false && isWordDoc(undefined) === false, 'null-safe');
-      assert(isWordDoc('/a/b/c.docx') === true, 'path with directories');
-      assert(isWordDoc('archive.docx.bak') === false, 'only the final extension counts');
-      assert(WORD_DOC_EXT.has('.docx') && WORD_DOC_EXT.has('.doc'), 'the extension set');
-      return { ok: true };
-    },
-  },
-{
     name: 'docUtils.readPlainTextDocument: reads text career files verbatim and defers everything else',
     run: async () => {
       // Not os.tmpdir(): macOS resolves it under /var/folders, and /var is a
@@ -1028,29 +939,23 @@ export default [
     },
   },
 {
-    name: 'llm/claude: every known task maps to a real model; Claude catalog is current',
+    // There is exactly one transport now (the human copy/paste handoff in
+    // nonApiAi.js) — no provider/model selection survives to test. This
+    // stands in for the old per-task "resolves to a known model" sweep,
+    // asserting the shape taskModelRoutingSnapshot() promises callers: a
+    // non-empty, 'default'-excluded task set that all route through the
+    // single NON_API_AI_TRANSPORT, with no argument required.
+    name: 'llm: taskModelRoutingSnapshot reports the single manual transport for every known task',
     run: () => {
-      // The catalog is now the resolver's pinned MODEL_FLOOR (claudeModels.js),
-      // not a hand-copied literal list — a version bump there updates this test
-      // for free instead of needing a second manual sync. The test runner never
-      // primes the resolver (no Anthropic key in the stubbed settings store), so
-      // every Claude task resolves to exactly its floor id here — this is the
-      // resolver-aware equivalent of the old "catalog is current" assertion.
-      const catalog = new Set(Object.values(MODEL_FLOOR));
-      const modelsInUse = claudeModelsInUse();
-      assert(modelsInUse.length === 3, `three Claude models in use (got ${modelsInUse.length})`);
-      assert(modelsInUse.every(m => catalog.has(m)), 'claudeModelsInUse() are current floor ids');
+      const snapshot = taskModelRoutingSnapshot();
+      assert(snapshot.transport === NON_API_AI_TRANSPORT, 'top-level transport is the single manual handoff transport');
       const tasks = getKnownTaskIds();
-      assert(tasks.size > 0 && !tasks.has('default'), 'known task set is non-empty and excludes "default"');
-      // Every task must resolve to a real Gemini fallback OR a current Claude id —
-      // catches a typo'd / retired model id slipped into the per-task table.
-      const validModels = new Set([...GEMINI_MODEL_FALLBACKS, ...catalog, NON_API_AI_TRANSPORT]);
+      assert(tasks.size > 0 && !tasks.has('default'), 'known task set is non-empty and excludes the internal "default" fallback');
+      assert(Object.keys(snapshot.tasks).length === tasks.size, 'snapshot enumerates exactly the known tasks, no more, no fewer');
       for (const t of tasks) {
-        const m = modelForTask(t);
-        assert(validModels.has(m), `task "${t}" resolves to a known model (got ${m})`);
+        assert(snapshot.tasks[t]?.transport === NON_API_AI_TRANSPORT,
+          `task "${t}" routes through the single manual transport (got ${JSON.stringify(snapshot.tasks[t])})`);
       }
-      // An unknown task falls back to the default model without throwing.
-      assert(validModels.has(modelForTask('totally-unknown-task-xyz')), 'unknown task → default model (no throw)');
       return { ok: true, tasks: tasks.size };
     },
   },
@@ -1216,8 +1121,8 @@ export default [
 {
     name: 'settings: decryptSecret memoizes on ciphertext, sparing a repeat OS-keychain call',
     run: () => {
-      // getAISettings/getJobsSettings/getDiceApiKey are called repeatedly (every
-      // LLM helper, every API-source fetch) — decryptSecret must not hit
+      // getJobsSettings/getDiceApiKey are called repeatedly (every
+      // API-source fetch) — decryptSecret must not hit
       // safeStorage.decryptString again for a ciphertext it already decrypted.
       const realDecrypt = electronPkg.safeStorage.decryptString;
       let calls = 0;
@@ -1239,78 +1144,21 @@ export default [
     },
   },
 {
-    name: 'settings: normalizeClaudeModels migrates Analysis and keeps only live API groups',
+    // mergeSettingsSection used to special-case an 'ai' section's claudeModels
+    // key with a nested nested-merge + legacy migration — that entire tier
+    // selection feature is gone along with every live LLM API. What survives
+    // is a plain top-level shallow merge, exercised directly here.
+    name: 'settings: mergeSettingsSection is a plain top-level shallow merge',
     run: () => {
-      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
-        'an older config with no claudeModels key at all gets the live default set');
-      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
-        'null input is treated the same as absent');
-      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ judgment: 'OPUS', extraction: 'SONNET', light: 'HAIKU' }),
-        'an empty object still backfills every group');
-
-      // A valid non-default legacy Analysis pick remains a deliberate choice
-      // for both successor groups; the retired generation token is dropped.
-      const migrated = normalizeClaudeModels({ generation: 'FABLE', analysis: 'HAIKU', light: null });
-      assert(migrated.judgment === 'HAIKU' && migrated.extraction === 'HAIKU',
-        'a deliberate legacy Analysis selection migrates to both Judgment and Extraction');
-      assert(migrated.light === 'HAIKU', 'an unchanged Light selection retains its own default');
-      assert(!('generation' in migrated) && !('analysis' in migrated), 'retired generation and legacy analysis keys are dropped');
-
-      // A legacy SONNET selection is indistinguishable from the old default,
-      // so it adopts the stronger new Judgment default instead of weakening it.
-      const legacyDefault = normalizeClaudeModels({ analysis: 'SONNET', light: 'FABLE' });
-      assert(legacyDefault.judgment === 'OPUS' && legacyDefault.extraction === 'SONNET' && legacyDefault.light === 'FABLE',
-        'legacy default Analysis migrates to the redesigned defaults while retaining Light');
-
-      // An invalid value in one group falls back to only that group.
-      const partiallyValid = normalizeClaudeModels({ judgment: 'nonsense-typo', extraction: 'FABLE', light: null });
-      assert(partiallyValid.judgment === 'OPUS', 'an unrecognized token in one group falls back to that group\'s own default');
-      assert(partiallyValid.extraction === 'FABLE', 'a valid sibling group is preserved verbatim');
-      assert(partiallyValid.light === 'HAIKU', 'a null token falls back to that group\'s default');
-      return { ok: true };
-    },
-  },
-{
-    name: 'settings: getAISettings() always returns a fully-populated, validated claudeModels',
-    run: () => {
-      const ai = getAISettings();
-      assert(ai.claudeModels && typeof ai.claudeModels === 'object', 'getAISettings() always includes a claudeModels object');
-      for (const group of ['judgment', 'extraction', 'light']) {
-        assert(typeof ai.claudeModels[group] === 'string' && ai.claudeModels[group].length > 0,
-          `getAISettings().claudeModels.${group} is a non-empty string (got ${JSON.stringify(ai.claudeModels[group])})`);
-      }
-      return { ok: true };
-    },
-  },
-{
-    name: 'settings: mergeSettingsSection deep-merges redesigned Claude groups and migrates legacy Analysis',
-    run: () => {
-      const current = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' } };
-
-      // Regression: a single-family update (exactly what SettingsPanel's
-      // updateClaudeModelGroup sends) must NOT wipe the other two groups —
-      // a naive top-level `{ ...current, ...value }` shallow merge would
-      // replace `claudeModels` wholesale with `{ judgment: 'FABLE' }`,
-      // silently dropping sibling groups back to undefined.
-      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { judgment: 'FABLE' } });
-      assert(afterOneFamilyChange.claudeModels.judgment === 'FABLE', 'the changed group is applied');
-      assert(afterOneFamilyChange.claudeModels.extraction === 'SONNET', 'a migrated sibling group survives an unrelated single-group update');
-      assert(afterOneFamilyChange.claudeModels.light === 'HAIKU', 'a sibling group (light) survives an unrelated single-group update');
-      assert(!('generation' in afterOneFamilyChange.claudeModels) && !('analysis' in afterOneFamilyChange.claudeModels), 'a settings write removes retired model-group keys');
-
-      // A normal top-level key (e.g. serviceAccountPath) still shallow-merges
-      // as before — the nested-merge exception is scoped to claudeModels only.
-      const afterUnrelatedKey = mergeSettingsSection('ai', current, { serviceAccountPath: '/tmp/sa.json' });
-      assert(afterUnrelatedKey.serviceAccountPath === '/tmp/sa.json', 'an unrelated ai key merges normally');
-      assert(afterUnrelatedKey.claudeModels.judgment === 'OPUS' && afterUnrelatedKey.claudeModels.extraction === 'SONNET' && afterUnrelatedKey.claudeModels.light === 'HAIKU', 'live claudeModels survive an unrelated update');
-      assert(!('generation' in afterUnrelatedKey.claudeModels) && !('analysis' in afterUnrelatedKey.claudeModels), 'even an unrelated AI update cleans retired keys');
-
-      // A non-'ai' section never applies the nested-merge special case, even
-      // if it happens to carry a key named claudeModels (defensive: the
-      // special case is keyed on section === 'ai', not the key's mere presence).
-      const nonAiSection = mergeSettingsSection('jobs', { claudeModels: { generation: 'OPUS' } }, { claudeModels: { generation: 'FABLE' } });
-      assert(JSON.stringify(nonAiSection.claudeModels) === JSON.stringify({ generation: 'FABLE' }),
-        'a non-ai section shallow-merges claudeModels like any other key (no special nested handling)');
+      const current = { provider: 'claude', anthropicApiKey: 'x', nested: { a: 1, b: 2 } };
+      const merged = mergeSettingsSection('ai', current, { anthropicApiKey: 'y' });
+      assert(merged.anthropicApiKey === 'y' && merged.provider === 'claude',
+        'an unrelated sibling key survives a partial update');
+      const replaced = mergeSettingsSection('ai', current, { nested: { a: 99 } });
+      assert(JSON.stringify(replaced.nested) === JSON.stringify({ a: 99 }),
+        'a nested object key is replaced wholesale, not deep-merged — there is no more per-section special casing');
+      assert(JSON.stringify(mergeSettingsSection('ai', null, { x: 1 })) === JSON.stringify({ x: 1 }),
+        'a missing current section merges onto an empty object rather than throwing');
       return { ok: true };
     },
   },
@@ -1610,9 +1458,6 @@ export default [
       assert(w1.confidence === 'medium', 'verdict "weaken" demotes confidence one step (high -> medium)');
       assert(w1.caveats === 'preexisting caveat. market tailwind explains most of this.', 'verdict "weaken" APPENDS suggestedCaveat to any existing caveat, does not overwrite it');
       assert(w1.flags.includes('refute-weakened'), 'verdict "weaken" is flagged for downstream telemetry');
-      const candidatePromptLedger = serializeLedgerForPrompt(out);
-      assert(!candidatePromptLedger.includes('[w1]') && candidatePromptLedger.includes('[s1]'),
-        'refute-weakened items remain auditable in the ledger but are withheld from employer-facing generation prompts');
       const s1 = out.find((i) => i.id === 's1');
       assert(s1.attribution === 'led' && s1.confidence === 'medium', 'verdict "stands" passes the item through unchanged');
       assert(stats.droppedByRefute === 1 && stats.weakened === 1, 'stats tally exactly one drop and one weaken');
@@ -1620,11 +1465,15 @@ export default [
     },
   },
 {
-    // Cache correctness, not cosmetics (design doc §11): a JSON.stringify over
-    // an object whose key order varies between calls would silently miss the
-    // Anthropic prompt cache on the ledger prefix, and the entire cost
-    // argument for hub-level mining rests on that cache hit landing every time.
-    name: 'achievementLedger: serializeLedgerForPrompt is byte-stable across repeated calls and independent of the input object\'s key insertion order',
+    // The receipt-lookup primitives the résumé post-process (resumeHtml.js)
+    // depends on: ledgerById is a plain id->item map, derivationTooltip joins
+    // figure/derivation/caveats with " — ", dropping empty parts.
+    // (achievementLedger.js also had a cached-prompt serialization helper,
+    // serializeLedgerForPrompt, that protected an Anthropic prompt-cache hit
+    // across résumé/cover-letter calls; it was removed as dead code once
+    // every AI call became a human copy/paste handoff with no provider-side
+    // cache to protect.)
+    name: 'achievementLedger: id-lookup and derivation-tooltip receipt primitives',
     run: () => {
       const itemA = {
         id: 'a1', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 90, attribution: 'led', confidence: 'high',
@@ -1632,26 +1481,6 @@ export default [
         computed: { isNumeric: true, display: '74% ($4.2M → $1.1M)' },
         evidence: [{ file: 'f1.txt', quote: 'q1' }],
       };
-      // Same logical item — every key reinserted in a different order,
-      // mimicking object-spread order after applyRefuteVerdicts or however
-      // the model happened to emit its JSON.
-      const itemB = {
-        evidence: [{ quote: 'q1', file: 'f1.txt' }],
-        computed: { display: '74% ($4.2M → $1.1M)', isNumeric: true },
-        caveats: '', derivation: 'x -> y', claim: 'Cut debt', confidence: 'high',
-        attribution: 'led', strength: 90, roleAnchor: 'CFO, Acme', kind: 'delta', id: 'a1',
-      };
-      const s1 = serializeLedgerForPrompt([itemA]);
-      const s2 = serializeLedgerForPrompt([itemB]);
-      assert(s1 === s2, 'serialization is INDEPENDENT of the source object\'s key insertion order (explicit field-order list, not Object.keys/JSON.stringify)');
-      const s3 = serializeLedgerForPrompt([itemA]);
-      assert(s1 === s3, 'serializing the SAME ledger twice is byte-identical (repeat-call stability)');
-      assert(s1 === `[a1] kind=delta roleAnchor=CFO, Acme strength=90 attribution=led confidence=high claim=Cut debt derivation=x -> y figure=74% ($4.2M → $1.1M) caveats=\n  evidence file=f1.txt quote="q1"`,
-        'serialized line matches the exact PROMPT_FIELD_ORDER shape');
-
-      // The receipt-lookup primitives the résumé post-process (resumeHtml.js)
-      // depends on: ledgerById is a plain id->item map, derivationTooltip
-      // joins figure/derivation/caveats with " — ", dropping empty parts.
       const map = ledgerById([itemA]);
       assert(map.get('a1') === itemA, 'ledgerById: exact-id lookup returns the same item reference');
       assert(map.get('missing') === undefined, 'ledgerById: an id not in the ledger is undefined, not a thrown error');
@@ -1659,58 +1488,6 @@ export default [
       assert(tooltip === '74% ($4.2M → $1.1M) — x -> y — a divestiture explains part of this.', 'derivationTooltip: figure — derivation — caveats, joined in that order');
       assert(derivationTooltip({ ...itemA, caveats: '' }) === '74% ($4.2M → $1.1M) — x -> y', 'derivationTooltip: an empty caveat is dropped, not rendered as a trailing " — "');
       assert(derivationTooltip({ derivation: 'unsupported claim, no figure', caveats: '', computed: { isNumeric: false, display: '' } }) === 'unsupported claim, no figure', 'derivationTooltip: a non-numeric item (no figure) still produces a tooltip from derivation alone');
-      return { ok: true };
-    },
-  },
-{
-    // Model resolution (design doc §8) — pure selection logic, fixture model
-    // lists, no network. This is what makes it safe to run in this suite.
-    name: 'modelResolver.pickFamilyModel: family match excludes Fable/Mythos, newest-created_at wins, capability gate skips to next-newest, version floor rejects older candidates, empty API list falls to MODEL_FLOOR',
-    run: () => {
-      const FLOOR = MODEL_FLOOR;
-
-      // Family match on id substring, but Fable/Mythos are excluded from
-      // auto-tracking ENTIRELY, even when the id also contains the family
-      // token — they're a different price tier + API contract, matched only
-      // on their own exact family tokens, never "newest Claude model".
-      const r1 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
-        { id: 'claude-opus-5', created_at: '2026-06-01T00:00:00Z' },
-        { id: 'claude-opus-fable-1', created_at: '2026-08-01T00:00:00Z' },
-        { id: 'claude-mythos-opus-1', created_at: '2026-08-05T00:00:00Z' },
-      ], FLOOR.OPUS);
-      assert(r1.id === 'claude-opus-5', 'Fable/Mythos ids are excluded even though they are newer and contain the family token');
-
-      // Newest-by-created_at wins among real family candidates.
-      const r2 = pickFamilyModel(CLAUDE_FAMILY.SONNET, [
-        { id: 'claude-sonnet-5', created_at: '2026-01-01T00:00:00Z' },
-        { id: 'claude-sonnet-5-1', created_at: '2026-07-01T00:00:00Z' },
-      ], FLOOR.SONNET);
-      assert(r2.id === 'claude-sonnet-5-1', 'newest created_at wins among family candidates');
-
-      // A candidate reporting structured_outputs.supported === false is
-      // skipped in favour of the next-newest (which has no capabilities tree
-      // at all, and is accepted — absence means "not reported", not "unsupported").
-      const r3 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
-        { id: 'claude-opus-5', created_at: '2026-01-01T00:00:00Z' },
-        { id: 'claude-opus-5-2', created_at: '2026-07-01T00:00:00Z', capabilities: { structured_outputs: { supported: false } } },
-      ], FLOOR.OPUS);
-      assert(r3.id === 'claude-opus-5', 'the newer candidate failing the capability gate is skipped, falling to the next-newest');
-      assert(r3.skipped.length === 1 && r3.skipped[0].id === 'claude-opus-5-2', 'the skipped candidate is recorded (not silently dropped) so a bug report can show it');
-
-      // Version floor: a candidate older than the floor's own created_at
-      // (when the floor id itself appears in the API list) is rejected even
-      // though it is the only OTHER candidate available.
-      const r4 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
-        { id: FLOOR.OPUS, created_at: '2026-06-01T00:00:00Z' },
-        { id: 'claude-opus-4-8', created_at: '2025-01-01T00:00:00Z' },
-      ], FLOOR.OPUS);
-      assert(r4.id === FLOOR.OPUS, 'a candidate older than the pinned floor is rejected, even with nothing newer to fall to');
-
-      // Empty / unreachable API list -> MODEL_FLOOR, never a throw.
-      const r5 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [], FLOOR.OPUS);
-      assert(r5.id === FLOOR.OPUS && r5.skipped.length === 0, 'an empty API model list resolves to MODEL_FLOOR, not a throw');
-      const r6 = pickFamilyModel(CLAUDE_FAMILY.OPUS, null, FLOOR.OPUS);
-      assert(r6.id === FLOOR.OPUS, 'a null/unreachable API model list resolves to MODEL_FLOOR, not a throw');
       return { ok: true };
     },
   },

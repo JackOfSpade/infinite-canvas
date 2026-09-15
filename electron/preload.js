@@ -159,8 +159,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   completeJobRun: (args) => ipcRenderer.invoke('complete-job-run', args),
   discardJobRun:  (args) => ipcRenderer.invoke('discard-job-run', args),
   discardUnknownOwnerJobRun: (args) => ipcRenderer.invoke('discard-unknown-owner-job-run', args),
-  pollJobBatch:    (args) => ipcRenderer.invoke('poll-job-batch', args),
-  discardJobBatch: (args) => ipcRenderer.invoke('discard-job-batch', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
   // Board Combine runs this after global taxonomy validation and before cards
@@ -241,23 +239,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return await ipcRenderer.invoke('reset-platform-session', args);
   },
 
-  // ── AI Tools ────────────────────────────────────────────────────────────
-  aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
-  // AI provider availability/quota: live probe ("Check availability") and the
-  // last-known passive status for the Settings panel.
-  checkAIAvailability: (args) => ipcRenderer.invoke('check-ai-availability', args),
-  getAIStatus: () => ipcRenderer.invoke('get-ai-status'),
-  // Live Claude family -> resolved model id map, for the Settings panel's
-  // per-live-group (Judgment/Extraction/Light) family dropdowns — see llm.js
-  // registerLlmHandlers().
-  getClaudeModelMap: () => ipcRenderer.invoke('get-claude-model-map'),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
   generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
 
   // ── Settings ────────────────────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (updates) => ipcRenderer.invoke('update-settings', updates),
-  pickServiceAccountFile: () => ipcRenderer.invoke('pick-service-account-file'),
   onSettingsChanged: createListener('settings-changed'),
 
   // ── Chrome manual-launch handshake ──────────────────────────────────────

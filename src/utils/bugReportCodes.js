@@ -151,7 +151,7 @@ export const CODE_DEFINITIONS = {
     label: 'Job Scoring Consistency',
     description: 'Job-scoring audit — batch outcomes plus bounded per-job score/direction/reason evidence and cross-batch drift flags for effectively identical postings. Use when similar jobs received inconsistent scores. Included automatically in FULL; keeps the compact Job Search Pipeline section while dropping heavy canvas/media dumps.',
     logFilter: line =>
-      /scor(?:e|ed|ing)|batch|job|gemini|claude|taxonomy|bucket/i.test(line),
+      /scor(?:e|ed|ing)|batch|job|taxonomy|bucket/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
@@ -271,7 +271,7 @@ export const CODE_DEFINITIONS = {
     label: 'Job Search Pipeline',
     description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
     logFilter: line =>
-      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed/i.test(line),
+      /\bjob|career|resume|scrape|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

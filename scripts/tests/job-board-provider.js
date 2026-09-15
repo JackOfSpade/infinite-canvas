@@ -277,7 +277,6 @@ export default [
         { manualAiCleanupReceipts: [{ runId: 'cleanup-run' }] },
         { pendingJobs: [{ title: 'Pending' }] },
         { pendingJobs: [] },
-        { pendingBatch: { batchId: 'batch-run' } },
         { queries: ['provider query'] },
         { terminalFinalizationRecovery: { kind: 'terminal-finalization', runId: 'terminal-run' } },
         { resultDisposition: 'empty-complete' },
@@ -977,7 +976,7 @@ export default [
     run() {
       const selection = readFileSync(new URL('../../src/nodes/jobboard/JobBoardSearchSelection.jsx', import.meta.url), 'utf8');
       const selectionPolicy = readFileSync(new URL('../../src/utils/jobBoardSearchSelection.js', import.meta.url), 'utf8');
-      assert(selectionPolicy.includes("'scoring-batch',")
+      assert(selectionPolicy.includes("'evaluating-preferences', 'scoring',")
         && selection.includes('const idsByLabel = new Map();')
         && selection.includes('const suffix = shortestUniqueIdSuffix(row.module.id, peerIds);')
         && selection.includes('if (peerIds.length < 2) return { ...row, discriminator: null };')
@@ -986,7 +985,7 @@ export default [
         && selection.includes('aria-label={discriminator?.accessibleName || `Select ${label} to start or continue`}')
         && selection.includes('jobBoardModuleReadiness(module)'),
       'the selector must render every active Search phase consistently, and only colliding role/location labels receive a stable visible and accessible node-id suffix');
-      return { collisionScoped: true, visible: true, accessible: true, scoringBatchActive: true };
+      return { collisionScoped: true, visible: true, accessible: true };
     },
   },
   {
@@ -2986,8 +2985,6 @@ export default [
       assert(connectedSig.includes('manualAiResumeTask: n.data?.manualAiResume?.task ||')
         && connectedSig.includes('manualAiRecoveryMode: n.data?.manualAiResume?.recoveryMode ||')
         && connectedSig.includes('manualAiRetirementPending: n.data?.manualAiResume?.retirementPending === true')
-        && connectedSig.includes("pendingBatchId: n.data?.pendingBatch?.batchId || ''")
-        && connectedSig.includes("pendingBatchJobRunId: n.data?.pendingBatch?.jobRunId || ''")
         && connectedSig.includes('hasCancellationPendingManualAiCleanup: hasCancellationPendingManualAiCleanup(n.data)')
         && connectedSig.includes('canonicalLocation: n.data?.canonicalLocation ||'),
       'the reactive connected-Search key must wake readiness for same-run manual mode/cleanup transitions and legacy canonical-location changes');
@@ -2999,11 +2996,8 @@ export default [
       const readiness = board.slice(readinessStart, readinessEnd);
       assert(readiness.includes('if (isJobWorkflowDeletionPending(node?.id))')
         && readiness.includes("statusLabel: 'Deletion pending'")
-        && readiness.includes('legacyBatchRecovery = false,')
-        && readiness.includes('const exactBoardLegacyBatchRecovery = isExactBoardLegacyBatchRecovery(')
-        && readiness.includes('if (ACTIVE_SEARCH_STATES.has(hubState) && !exactBoardLegacyBatchRecovery)')
-        && readiness.includes("statusLabel: 'Resume saved scoring'"),
-      'a pending deletion must be non-runnable while the exact Board-owned legacy batch remains resumable inside the parent lane');
+        && readiness.includes('if (ACTIVE_SEARCH_STATES.has(hubState))'),
+      'a pending deletion must be non-runnable before a live hub state can be treated as busy');
       const liveAdmissionAt = scan.indexOf('const liveBoardDataAtAdmission = getNode(id)?.data || data;');
       const liveLockGuardAt = scan.indexOf('|| liveBoardDataAtAdmission.locked', liveAdmissionAt);
       assert(liveAdmissionAt >= 0 && liveLockGuardAt > liveAdmissionAt
@@ -3091,13 +3085,9 @@ export default [
       const scanRecoveryEnd = board.indexOf("document.addEventListener('non-api-ai-node-cancelled'", scanRecoveryStart);
       const scanRecovery = board.slice(scanRecoveryStart, scanRecoveryEnd);
       assert(scanRecovery.includes('const sourceRecoveryOwner = sourceData.manualAiResume?.runId')
-        && scanRecovery.includes('const exactBoardLegacyBatchRecovery = isExactBoardLegacyBatchRecovery(')
-        && scanRecovery.includes('ACTIVE_SEARCH_STATES.has(sourceData.hubState) && !exactBoardLegacyBatchRecovery')
+        && scanRecovery.includes('} else if (ACTIVE_SEARCH_STATES.has(sourceData.hubState)) {')
         && scanRecovery.includes('connectedSig, data.boardCancellation'),
-      'reload recovery must wake on child state changes and let only the exact plan owner retire a legacy scoring batch inside its reacquired Board lane');
-      assert(scan.includes('legacyBatchRecovery: !!iterationPlan')
-        && scan.includes('&& iterationPlan.activeSourceId === sourceId,'),
-      'a fresh Board that merely reserves a selected Search must not adopt that Search\'s preexisting legacy batch as though it were the interrupted active child');
+      'reload recovery must wake on child state changes and let only the exact plan owner replay a paused source inside its reacquired Board lane');
       assert(scan.includes('const boardRunId = resumePlan?.boardRunId || `job-board-scan:${id}:${entropy}`')
         && scan.includes('const admissionPlanCommitted = await waitForBoardPlanCommit({')
         && scan.includes('The Job Board scan recovery plan was not committed before queue admission.')
@@ -3321,7 +3311,6 @@ export default [
         && activeChildCancel.includes('acknowledgedRunIds: [...controlManualAiRunIds],')
         && !activeChildCancel.includes('await retireManualAiRunDurably(control.manualAiRunId)')
         && childCancel.includes('liveRunId !== priorRunId')
-        && childCancel.includes('pendingBatchRunId !== priorRunId')
         && childCancel.includes('cancelQueuedRunsForNode(\n            cancellationLeaseOwnerId,')
         && !childCancel.includes('cancelQueuedRunsForNode(id'),
       'child cancellation must verify exact Board ownership, invalidate late continuations, restore the pre-run snapshot, durably fan out every acknowledged manual-AI id through both Search and Board receipts before retirement, clean only the abandoned run artifacts, and leave other Boards’ queued turns intact');
@@ -3528,8 +3517,8 @@ export default [
         /isJobWorkflowDeletionPending\((?:currentId|id)\)\) throw new Error\('Node deleted'\);/g,
       ) || [];
       const laneCommitBarriers = search.match(/if \(lease\) await waitForRendererCommitFrame\(\);/g) || [];
-      assert(deletionPendingStartChecks.length >= 9
-        && laneCommitBarriers.length >= 8
+      assert(deletionPendingStartChecks.length >= 8
+        && laneCommitBarriers.length >= 7
         && search.includes('if (emptyContinuationLease) await waitForRendererCommitFrame();')
         && pipeline.includes("node?.data?.queuedModuleRun?.label === 'Job search'")
         && search.includes("node?.data?.queuedModuleRun?.label === 'Resuming job search'")
@@ -3741,7 +3730,7 @@ export default [
         && readinessHelper.includes('if (hasCancellationPendingManualAiCleanup(liveData))')
         && readinessHelper.indexOf('if (hasCancellationPendingManualAiCleanup(liveData))')
           < readinessHelper.indexOf('if (!recoveryOwner || (')
-        && search.includes("const BOARD_BUSY_SEARCH_STATES = new Set([...PROCESSING_STATES, 'scoring-batch'])")
+        && search.includes('const BOARD_BUSY_SEARCH_STATES = new Set(PROCESSING_STATES);')
         && readinessHelper.includes('&& !pausedScoringContinuation'),
       'the Board child executor must fence unfinished cancellation cleanup and revalidate live paused, batch, active, connection-verification, recovery, location, source, and career-input state before creating a run or clearing recovery');
 
@@ -3932,49 +3921,7 @@ export default [
         && usaWakeEffect.includes('hubState'),
       'a provider-refresh latch deferred by unrelated local work must react when that workflow leaves its queued/running state and retry after its admission ref is released');
 
-      const batchStart = search.indexOf('const pollBatchOnce = useCallback');
-      const batchEnd = search.indexOf("useEffect(() => {\n    if (\n      hubState !== 'scoring-batch'", batchStart);
-      const legacyBatch = search.slice(batchStart, batchEnd);
-      const admissionReadAt = legacyBatch.indexOf('const admissionData = getNode(id)?.data || null;');
-      const durableOwnerAt = legacyBatch.indexOf(
-        'findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())',
-        admissionReadAt,
-      );
-      const claimedAt = legacyBatch.indexOf('batchCompletingRef.current = true;', durableOwnerAt);
-      const batchLeaseAt = legacyBatch.indexOf('lease = await moduleRunQueue.acquireModuleRun', claimedAt);
-      const liveTurnAt = legacyBatch.indexOf('const turnData = getNode(id)?.data || null;', batchLeaseAt);
-      const pollAt = legacyBatch.indexOf('window.electronAPI.pollJobBatch', liveTurnAt);
-      const admissionOwnerBlock = legacyBatch.slice(durableOwnerAt, claimedAt);
-      const liveFenceBlock = legacyBatch.slice(liveTurnAt, pollAt);
-      const batchEffect = search.slice(batchEnd, search.indexOf('/**', batchEnd));
-      assert(batchStart >= 0 && batchEnd > batchStart
-        && admissionReadAt >= 0 && durableOwnerAt > admissionReadAt
-        && claimedAt > durableOwnerAt
-        && batchLeaseAt > claimedAt
-        && legacyBatch.includes("priority: 'continuation'")
-        && liveTurnAt > batchLeaseAt && pollAt > liveTurnAt
-        && admissionOwnerBlock.includes("return searchRunOutcome('paused'")
-        && !admissionOwnerBlock.includes('updateGlobal(')
-        && !admissionOwnerBlock.includes('pollJobBatch')
-        && liveFenceBlock.includes("turnData.hubState !== 'scoring-batch'")
-        && liveFenceBlock.includes('turnData.pendingBatch?.batchId !== admissionBatchId')
-        && liveFenceBlock.includes('processingRunsRef.current.active')
-        && liveFenceBlock.includes('boardRunControlRef.current')
-        && liveFenceBlock.includes('findJobSearchBoardActiveRecoveryOwner')
-        && legacyBatch.includes('if (!queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun')
-        && legacyBatch.includes('boardPlan.boardRunId !== boardRunId')
-        && legacyBatch.includes('boardPlan.activeSourceId !== id')
-        && legacyBatch.includes('boardPlan.activeSourceIds) && boardPlan.activeSourceIds.includes(id)')
-        && legacyBatch.includes('const exactExternalControl = queueManagedExternally')
-        && legacyBatch.includes('const exactExternalOwner = queueManagedExternally')
-        && legacyBatch.indexOf('lease?.release();', pollAt) > pollAt
-        && legacyBatch.includes('getNode, getNodes, getEdges, epoch')
-        && batchEffect.includes('|| activeBoardRecoveryOwnerKey')
-        && batchEffect.includes('deletionLifecycleRevision')
-        && batchEffect.includes('[activeBoardRecoveryOwnerKey, data.pendingBatch?.batchId, deletionLifecycleRevision, hubState, pollBatchOnce]'),
-      'legacy batch retirement must yield to a preexisting durable Board plan, otherwise acquire the continuation lane and re-read the exact batch plus active in-memory owner before its first sidecar mutation');
-
-      return { usaJobsBoardFence: true, legacyBatchLaneFence: true };
+      return { usaJobsBoardFence: true };
     },
   },
   {

@@ -17,6 +17,18 @@ Claude pin (reverted — see the note under the task table) and §5's "PDF gener
 entirely" (reversed — a PDF companion came back, see the note under §5.1). Everything else in
 this document remains an accurate record of what was decided and why.
 
+UPDATE (2026-09-14) — **the app has since dropped direct Gemini/Claude API access entirely.**
+Every AI call, including the achievement-mining and refute tasks below, now goes through the
+manual copy/paste handoff in `electron/ipc/nonApiAi.js`: the user is shown a prompt, pastes it
+into their own chat app, and pastes the reply back. There is exactly one transport — no provider
+setting, no model family, no Models API resolver, no prompt caching, and no cap-raise retry.
+Consequently **§8 (Part F — Always-latest model selection) describes a `modelResolver.js` that
+was never built and now never will be** — `providerForTask`/`modelForTask` and the whole
+Claude/Gemini routing layer this section extends were removed, not upgraded. §3.1's `TASK_MODELS`
+table, §10's registration checklist, §11's `modelResolver` test bullet, and §12's build-order item
+0 are historical context only; a task is registered today by adding its id to the plain
+`KNOWN_TASKS` set and giving it a `TASK_MAX_TOKENS` entry in `electron/ipc/llm.js` — nothing else.
+
 ---
 
 ## Executive Summary
@@ -30,10 +42,10 @@ strongest line on the résumé, and the candidate should not have to find it the
 
 Six changes, in dependency order:
 
-0. **Always-latest model selection** — `TASK_MODELS` pins literal IDs and has drifted two
-   generations behind (`claude-opus-4-8` / `claude-sonnet-4-6` vs the current `claude-opus-5` /
-   `claude-sonnet-5`, at identical or lower price). Replace the literals with family tokens
-   resolved against the Models API. Smallest change here, immediate payoff.
+0. ~~Always-latest model selection~~ — MOOT (see the 2026-09-14 UPDATE above). This item proposed
+   replacing `TASK_MODELS`' literal Claude IDs with a Models-API resolver; the whole direct-API
+   layer it would have resolved against was removed instead, so there is no model selection left
+   to keep current.
 1. **Retired: applied-jobs store** — this explicit status action was removed. The canvas-scoped
    shown-job history remains the only search deduplication mechanism.
 2. **HTML-first output** — stop generating PDFs *the old way*. Ship a single-file HTML workspace the user
@@ -175,6 +187,13 @@ hub), so the ledger can never go stale. No invalidation logic needed.
 
 ### 3.1 New LLM tasks
 
+UPDATE (2026-09-14) — as built today, registration is just adding the task id to the `KNOWN_TASKS`
+set and giving it a `TASK_MAX_TOKENS` entry in `electron/ipc/llm.js`; the `TASK_MODELS` table, the
+per-task Claude/Gemini/pin columns below, and `resolveTask`'s `'default'` fallback no longer exist
+— every task shares the single manual-handoff transport. The paragraph and table immediately below
+describe the routing table as it stood when this was written; kept for the reasoning, not as a
+contract.
+
 Register in `electron/ipc/llm.js` — **both** `TASK_MODELS` (`:45-77`) and `TASK_MAX_TOKENS`
 (`:96-182`). A missing `TASK_MODELS` entry silently falls back to `'default'`
 (`resolveTask`, `:184-190`) — a quality regression with no crash, so do not skip it.
@@ -202,6 +221,11 @@ is now a Local AI handoff, so the historical `generation` and `analysis` groups 
 above are no longer live routing concepts. This section's mining/refute group and ladder-step
 details are retained as historical design context only, not an implementation contract.
 
+UPDATE (2026-09-14) — those three Settings groups (`Judgment`/`Extraction`/`Light`) are themselves
+gone now: `ai.claudeModels` was removed from Settings along with `ai.provider` and the API-key
+fields, and `TASK_GROUPS`/`GROUP_DEFAULT_FAMILY` were deleted from `llm.js`. Every task, mining and
+refute included, is a manual copy/paste handoff with no group, family, or provider distinction.
+
 The mining cap is deliberately above the 16384 used by `career-file-extract`: a ledger of ~40
 items each carrying verbatim evidence quotes is a larger output than a single file's
 transcription, and a truncated ledger silently drops achievements — the same argument the
@@ -209,6 +233,12 @@ codebase already makes at `llm.js:132-138`. Caps bill on actual output, so the h
 
 `effectiveCap()` (`tokenBudget.js:98-122`) self-calibrates upward from observed usage, so these
 seeds are floors, not tuned finals.
+
+UPDATE (2026-09-14) — `tokenBudget.js` was deleted with the rest of the direct-API layer; there is
+no cap-raise retry or self-calibration under the manual handoff. `TASK_MAX_TOKENS` in `llm.js` is
+now a static, one-shot ceiling written into the copied prompt as guidance for the human's chosen
+chat app — a paste that got cut off is a failure the user has to notice and re-paste, not a caught
+truncation, so size these seeds generously rather than counting on upward drift.
 
 ### 3.2 Ledger schema
 
@@ -677,6 +707,14 @@ Without this change the ledger has nothing to join, and the whole feature underp
 
 ## 8. Part F — Always-latest model selection
 
+UPDATE (2026-09-14) — **superseded, not built.** This whole section proposes a
+`electron/ipc/modelResolver.js` that resolves Claude family tokens against the Models API. The app
+instead removed direct Claude/Gemini API access entirely — `claude.js`, `gemini.js`,
+`modelResolver.js`, `claudeModels.js`, `tokenWindow.js`, and `tokenBudget.js` are gone, and every
+task routes through the manual copy/paste handoff (`electron/ipc/nonApiAi.js`) with no model
+selection of any kind. Kept below as historical record of a rejected direction, not a design to
+implement.
+
 Not specific to achievement mining, but the new tasks in §3.1 would otherwise add two more literal
 model IDs to a table that already goes stale on its own.
 
@@ -798,11 +836,19 @@ PDF-companion path and remains a live reconnect point: `DEFAULT_CREAM_RGB` must 
 
 ## 10. Registration checklist
 
-- [ ] `TASK_MODELS` + `TASK_MAX_TOKENS` entries for both new tasks (`llm.js`)
-- [ ] `electron/ipc/modelResolver.js` + family tokens replacing literal Claude IDs in `TASK_MODELS`
-- [ ] `MODEL_FLOOR` pinned constants; capability gate; Fable/Mythos exclusion
-- [ ] `claudeModels.js` context/max-output driven from the Models API; `CLAUDE_MODELS_IN_USE`
-      derived from the resolver
+UPDATE (2026-09-14) — the four bullets below describe registering against the removed direct-API
+layer. As built today: add both task ids to the `KNOWN_TASKS` set and give each a `TASK_MAX_TOKENS`
+entry in `llm.js`. That's the entire registration surface — no resolver, floor, capability gate, or
+`claudeModels.js` to touch.
+
+- [ ] ~~`TASK_MODELS` + `TASK_MAX_TOKENS` entries for both new tasks (`llm.js`)~~ — now just
+      `KNOWN_TASKS` + `TASK_MAX_TOKENS`
+- [ ] ~~`electron/ipc/modelResolver.js` + family tokens replacing literal Claude IDs in
+      `TASK_MODELS`~~ — file deleted, not built
+- [ ] ~~`MODEL_FLOOR` pinned constants; capability gate; Fable/Mythos exclusion~~ — moot, no model
+      selection exists
+- [ ] ~~`claudeModels.js` context/max-output driven from the Models API; `CLAUDE_MODELS_IN_USE`
+      derived from the resolver~~ — `claudeModels.js` deleted
 - [ ] `ACHIEVEMENT_LEDGER_SCHEMA`, `ACHIEVEMENT_REFUTE_SCHEMA` (`aiSchemas.js`)
 - [ ] `src/utils/achievementLedger.js` (pure, unit-tested)
 - [ ] `data.achievements` **not** added to `JOBSEARCH_TRANSIENT_KEYS`; **no** `MIGRATIONS` entry
@@ -833,7 +879,9 @@ wiring — it works off the `task` string automatically.
   the ~30 cap applied *after* refutation.
 - **Ledger serialization** — byte-stable across repeated serialization of the same ledger (cache
   correctness).
-- **`modelResolver`** — family match excludes Fable/Mythos; newest-by-`created_at` wins; a model
+- ~~**`modelResolver`**~~ — UPDATE (2026-09-14): not built, the module was deleted along with the
+  rest of the direct-API layer; nothing to test here. Was: family match excludes Fable/Mythos;
+  newest-by-`created_at` wins; a model
   failing the capability gate is skipped in favour of the next-newest; an unreachable Models API
   returns `MODEL_FLOOR` rather than throwing; a resolution is stable across repeated calls within
   one run (cache correctness — a flip mid-run re-bills every cached prefix).
@@ -848,8 +896,9 @@ wiring — it works off the `task` string automatically.
 
 Each phase ships something usable on its own.
 
-0. **Model resolver** (§8) — smallest change, immediate payoff, and it lands before the new tasks
-   add two more literal IDs to the table. Independent of everything below.
+0. ~~**Model resolver**~~ (§8) — DROPPED (2026-09-14), see the UPDATE note under §8. Was: smallest
+   change, immediate payoff, and it lands before the new tasks add two more literal IDs to the
+   table. Independent of everything below.
 1. **HTML-first output** — inlined CSS, injected chrome, font detection, print hint, edit mode;
    retire the puppeteer/OCG path. Independent of the ledger.
 2. **Broadened transcription prompt.** One prompt edit, large leverage, must precede the ledger.
@@ -874,6 +923,8 @@ Each phase ships something usable on its own.
   model emits an id; code injects the text (§4.3).
 - **Literal model IDs in `TASK_MODELS`** — they go stale silently and cost quality for nothing
   (§8). Family tokens + a pinned floor instead. Fable/Mythos stay excluded from auto-tracking.
+  UPDATE (2026-09-14): moot — `TASK_MODELS` and the whole model-selection layer it named were
+  deleted, not fixed.
 - **Additive career-data drops / hub unlock** — a new corpus means a new hub. Old hubs stay on the
   canvas as previous runs.
 - **Vendoring fonts** — see §5.3.

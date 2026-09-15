@@ -25,6 +25,16 @@
 // queued check waits at most a bounded number of those — it cannot wedge here
 // the way an indefinite captcha-wait scrape could.
 //
+// THAT BOUND IS LOAD-BEARING, AND IT IS NOW A RULE ABOUT WHAT CALLERS MAY HOLD
+// THIS LOCK ACROSS. Every AI call in this app is a human copy/paste handoff
+// (nonApiAi.js) that resolves only when someone pastes a reply — it has no
+// timeout at all. Never hold this lock across one: check-marketplace-status
+// deliberately releases it after its scrape pass and runs the hub-scan handoff
+// outside (see the pass-1/pass-2 split in marketplace.js). Holding it across a
+// handoff would starve every other hub's Check All behind an unanswered dialog,
+// which is exactly the unbounded wedge the paragraph above promises cannot
+// happen. The lock guards the single-IP FETCH burst — nothing else.
+//
 // Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
 // in the plain-node test runner.
 //

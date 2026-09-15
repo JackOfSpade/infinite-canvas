@@ -1492,7 +1492,7 @@ export default [
       assert(parsedWithTitle.finalUrl === 'https://swappa.com/my/swappa' && parsedWithTitle.title === 'Just a moment...' && /AppleScript/.test(parsedWithTitle.error), 'splits finalUrl + title + JavaScript error');
       assert(parseNativeReadOutput('NRERR:NOWINDOW').sentinel === 'NRERR:NOWINDOW', 'surfaces the no-window sentinel');
 
-      // Result classification → the scanSellerHubPages fetcher contract.
+      // Result classification → the prepareHubPages fetcher contract.
       const good = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/account/listings', finalUrl: 'https://swappa.com/account/listings', html: '<html>'.padEnd(500, 'x') + '</html>' });
       assert(good.ok === true && good.status === 200, 'real content → ok:200');
 

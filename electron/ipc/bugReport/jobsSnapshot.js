@@ -9,7 +9,6 @@ import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '.
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
-import { modelResolutionSnapshot } from '../modelResolver.js';
 import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
 import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
@@ -2837,7 +2836,7 @@ const MAX_BOARD_DIAGNOSTIC_LABEL_CONTEXT_IDS = MAX_BOARD_DIAGNOSTIC_ROWS * MAX_B
 
 const JOB_BOARD_DIAGNOSTIC_ACTIVE_SEARCH_STATES = new Set([
   'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
-  'evaluating-preferences', 'scoring', 'scoring-batch',
+  'evaluating-preferences', 'scoring',
 ]);
 const JOB_BOARD_DIAGNOSTIC_ADMISSION_KINDS = new Set([
   'invalid', 'reuse-terminal', 'terminal-requires-fresh-input',
@@ -4296,11 +4295,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } else {
     applicationSync = null;
   }
-  // Model resolution is app-global rather than scoped to a job run, so it can
-  // carry signal even when no fresh search ran in this session.
-  let modelRes = null;
-  try { modelRes = modelResolutionSnapshot(); } catch { /* resolver may not be loaded */ }
-  const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const visibleLocalApplications = Array.isArray(localApplications)
     ? localApplications.filter(item => item?.localApplication?.id)
     : [];
@@ -4323,7 +4317,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // principle reach compensation research with those absent (e.g. replayed from
   // a batch-reconcile path). Omitting it here would risk the same silent
   // whole-section drop the resumeAttempts comment above already documents.
-  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
+  if (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.scoringHeartbeat && !t.bucketing && !t.compensation && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !t.indeedSession && !hasResumeAttempts && !hasSourceRunHistory && !hasMultiHubAttribution && visibleLocalApplications.length === 0) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
@@ -6924,9 +6918,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // after taxonomy generation on every merged scored job). This is the only place the compensation
   // funnel is visible at all — there is no per-cohort card or log line that
   // survives past the ~60-line main-process ring buffer, and each cohort costs
-  // TWO LLM calls (a grounded research call + an assessment call) that share
-  // the SAME Gemini free-tier quota as scoring/bucketing. Absent entirely →
-  // render nothing (no guessed zeros); a present-but-null field prints "not
+  // TWO separate manual copy/paste AI handoffs (a grounded research call + an
+  // assessment call), same as scoring/bucketing. Absent entirely → render
+  // nothing (no guessed zeros); a present-but-null field prints "not
   // recorded" rather than a misleading 0, since 0 is itself a real, meaningful
   // value here (e.g. "0 cohorts failed").
   if (t.compensation) {
@@ -7279,9 +7273,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     }
     // A generation failure commonly happens before any document markup exists
-    // (for example, a provider quota error during company research). Render the
-    // lifecycle first so FULL reports name the exact attempted job/task/stage
-    // instead of reducing that case to the provider's app-global last error.
+    // (for example, a cancelled or failed manual-AI handoff during company
+    // research). Render the lifecycle first so FULL reports name the exact
+    // attempted job/task/stage instead of reducing that case to the app-global
+    // last error.
     if (a.status) {
       const outcome = {
         running: 'in progress', completed: 'completed', failed: '⚠️ failed', cancelled: 'cancelled',
@@ -7586,20 +7581,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const state = `${item.readable ? 'readable' : 'NOT readable'} · ${item.bytes ?? 0} bytes${item.mtimeMs ? ` · mtime ${new Date(item.mtimeMs).toISOString()}` : ''}${item.sha256 ? ` · sha256 ${item.sha256}` : ''}${item.matchesSource != null ? ` · source bytes ${item.matchesSource ? 'exact' : 'MISMATCH'}` : ''}${item.pdfParsed != null ? ` · PDF parse ${item.pdfParsed ? `valid (${item.pageCount ?? '?'}p${item.firstPagePoints ? `, ${item.firstPagePoints}pt` : ''})` : 'INVALID'}` : ''}${item.htmlStructureValid != null ? ` · HTML workspace ${item.htmlStructureValid ? `valid (Sync config ${item.syncConfigValid ? 'valid' : 'INVALID'})` : 'INVALID'}` : ''}`;
         lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${historyReportValue(item.error, '', 300)}` : ''}`);
       }
-    }
-  }
-
-  // ── Model resolution (§8) ───────────────────────────────────────────────────
-  // Kept to a line or two on purpose. The skip list is the whole point: a model
-  // that silently failed the capability gate and fell to next-newest looks
-  // IDENTICAL to "no new generation happened" unless it's named here.
-  if (modelRes) {
-    const r = modelRes.resolved || {};
-    const age = modelRes.fetchedAt ? formatAge(modelRes.fetchedAt) : 'never resolved this run — pinned floor in use';
-    lines.push(`\n### Model Resolution (Claude family tokens)`);
-    lines.push(`- OPUS \`${r.OPUS || '?'}\` · SONNET \`${r.SONNET || '?'}\` · HAIKU \`${r.HAIKU || '?'}\` · source: ${modelRes.source || 'floor'} · resolved ${age} · epoch ${modelRes.epoch ?? 0}`);
-    if (Array.isArray(modelRes.skipped) && modelRes.skipped.length > 0) {
-      lines.push(`  - ⚠️ Skipped: ${modelRes.skipped.map(s => `\`${s.id}\` (${s.family}: ${s.reason})`).join('; ')}`);
     }
   }
 

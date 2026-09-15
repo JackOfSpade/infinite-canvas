@@ -135,23 +135,14 @@ export function visitCanvasNodes(nodes, fn) {
 }
 
 // Renders the model that actually served an AI stage (recorded per stage via the
-// LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model is weak
-// only when the task preferred a non-lite model (or older telemetry did not
-// record the preference). Lightweight tasks legitimately prefer Lite.
-//
-// `fallback` (optional, `{ attempts, reason, counts, preferredModel }` from
-// gemini.js) names WHY earlier models were skipped — `rate-limit`/quota (external: wait or upgrade
-// tier), `truncation` (our token cap is too low: raise it in llm.js), or `server`
-// (overload). Without it, "weak fallback" collapses three causes with opposite
-// fixes into one ambiguous flag, and the reason otherwise lives only in the
-// scrolling log buffer. A non-lite model that still fell back is noted lightly
-// (e.g. pro→flash on quota is a milder degradation, but still "not as expected").
-//
-// A MIXED chain (e.g. two models 429'd but a third truncated) is the trap: `reason`
-// is only the DOMINANT cause, so a sole "rate-limit" hides a truncation whose fix
-// (raise our cap) is the opposite of quota's (wait/upgrade). gemini.js already
-// records the full per-cause `counts`, so when more than one cause appears we
-// render the breakdown ("rate-limit×2 + truncation×1") instead of just the winner.
+// LLM layer's `meta` out-param — always the literal string 'non-api-ai' on the
+// manual-handoff transport, since there is exactly one transport and no model
+// selection). `fallback` (optional, `{ attempts, reason, counts, preferredModel }`)
+// is a holdover from the retired provider-cascade era: nothing populates it
+// anymore, so the "weak fallback"/"fell back" branches below are permanently
+// dormant. Kept rather than deleted because several bug-report call sites still
+// pass a `fallback` argument through this shape; ripping it out here without
+// touching every caller would just move the dead field, not remove it.
 export const modelTag = (model, fallback) => {
   if (!model) return '';
   const preferredModel = fallback?.preferredModel || '';

@@ -1,13 +1,15 @@
 /**
- * In-memory human handoff for job-domain AI work.
+ * In-memory human handoff — the app's ONLY AI transport.
  *
- * Job prompts are deliberately sent only to the WebContents that started the
- * IPC request. The renderer copies that material into the user's chosen chat
- * application and invokes `submit-non-api-ai-response` with the pasted reply.
- * Active promises remain process-local, but renderer-created workflow ids let
- * us checkpoint accepted responses and the current draft. After restart the
- * owning renderer re-invokes its workflow: accepted steps replay immediately
- * and the first unfinished step is shown with its draft restored.
+ * Every AI call, for every task, is routed here: the app shows the user a
+ * prompt, they paste it into their own chat application, and paste the reply
+ * back. Prompts are deliberately sent only to the WebContents that started
+ * the IPC request. The renderer copies that material into the user's chosen
+ * chat application and invokes `submit-non-api-ai-response` with the pasted
+ * reply. Active promises remain process-local, but renderer-created workflow
+ * ids let us checkpoint accepted responses and the current draft. After
+ * restart the owning renderer re-invokes its workflow: accepted steps replay
+ * immediately and the first unfinished step is shown with its draft restored.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -21,25 +23,7 @@ import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 
 const { app, ipcMain, shell } = electronPkg;
 
-// This is a deliberately explicit allowlist. A new job task must be added here
-// before llm.js can route it to the copy/paste handoff, making the no-job-AI-API
-// rule visible and auditable instead of depending on a name-prefix convention.
 export const NON_API_AI_TRANSPORT = 'non-api-ai';
-
-export const NON_API_JOB_TASKS = new Set([
-  'career-file-extract',
-  'resume-parse',
-  'job-query-generation',
-  'job-scoring',
-  'job-taxonomy-plan',
-  'job-taxonomy-classify',
-  'job-compensation-research',
-  'job-compensation-assessment',
-  'job-preference-interpretation',
-  'job-preference-evaluation',
-  'job-preference-research',
-  'job-preference-research-assessment',
-]);
 
 const pendingRequests = new Map();
 const DURABLE_HANDOFF_VERSION = 1;
@@ -261,10 +245,6 @@ class NonApiAiStepBackError extends Error {
 
 export function isNonApiAiStepBackError(error) {
   return error?.code === NON_API_AI_STEP_BACK_CODE;
-}
-
-export function isNonApiJobTask(task) {
-  return NON_API_JOB_TASKS.has(task);
 }
 
 function createHandoffLifecycle({ requestId, runId, sender, nodeId, channel, task, batch, batchTotal, itemCount, attemptKind, rootBatchSize, materializedPrompt }) {

@@ -47,7 +47,6 @@ const ACTIVE_SEARCH_STATES = new Set([
   'searching',
   'evaluating-preferences',
   'scoring',
-  'scoring-batch',
 ]);
 const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set([
   'resume-saved-scrape',
@@ -132,16 +131,6 @@ function isSavedScrapeManualAiResume(resume) {
     || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode);
 }
 
-function isExactBoardLegacyBatchRecovery(sourceData, recoveryOwner, orchestratorNodeId, boardRunId) {
-  return sourceData?.hubState === 'scoring-batch'
-    && typeof sourceData?.pendingBatch?.batchId === 'string'
-    && !!sourceData.pendingBatch.batchId
-    && !!orchestratorNodeId
-    && !!boardRunId
-    && recoveryOwner?.orchestratorNodeId === orchestratorNodeId
-    && recoveryOwner?.boardRunId === boardRunId;
-}
-
 function captureJobSearchRollback(sourceId, sourceData, nodes, edges) {
   const allNodes = Array.isArray(nodes) ? nodes : [];
   const allEdges = Array.isArray(edges) ? edges : [];
@@ -192,7 +181,6 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   orchestratorNodeId = null,
   boardRunId = null,
   recoveryOwner = null,
-  legacyBatchRecovery = false,
 } = {}) {
   const sourceData = node?.data || {};
   const hubState = sourceData.hubState || 'empty';
@@ -222,13 +210,6 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
     && recoveryOwner
     && recoveryOwner.orchestratorNodeId === orchestratorNodeId
     && recoveryOwner.boardRunId === boardRunId;
-  const exactBoardLegacyBatchRecovery = legacyBatchRecovery
-    && isExactBoardLegacyBatchRecovery(
-      sourceData,
-      recoveryOwner,
-      orchestratorNodeId,
-      boardRunId,
-    );
   if (sourceData.manualAiResume?.retirementPending && !exactBoardTerminalRetirement) {
     return {
       ready: false,
@@ -236,7 +217,7 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
       statusLabel: 'Cleanup pending',
     };
   }
-  if (ACTIVE_SEARCH_STATES.has(hubState) && !exactBoardLegacyBatchRecovery) {
+  if (ACTIVE_SEARCH_STATES.has(hubState)) {
     return { ready: false, readinessReason: 'This module is already processing.', statusLabel: 'Busy' };
   }
   if (recoveryOwner && (
@@ -256,9 +237,6 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
   }
   if (sourceData.terminalFinalizationRecovery?.kind === 'terminal-finalization') {
     return { ready: true, readinessReason: '', statusLabel: 'Finish saved search' };
-  }
-  if (exactBoardLegacyBatchRecovery) {
-    return { ready: true, readinessReason: '', statusLabel: 'Resume saved scoring' };
   }
   // A saved scoring replay owns its listings/profile/location snapshot and
   // does not refetch platforms. Let the Board reacquire this exact handoff even
@@ -815,8 +793,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             manualAiResumeTask: n.data?.manualAiResume?.task || '',
             manualAiRecoveryMode: n.data?.manualAiResume?.recoveryMode || '',
             manualAiRetirementPending: n.data?.manualAiResume?.retirementPending === true,
-            pendingBatchId: n.data?.pendingBatch?.batchId || '',
-            pendingBatchJobRunId: n.data?.pendingBatch?.jobRunId || '',
             // Use the same malformed-receipt-safe predicate as readiness.
             // A run id is an ownership detail, not an input to selector state.
             hasCancellationPendingManualAiCleanup: hasCancellationPendingManualAiCleanup(n.data),
@@ -4012,8 +3988,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // A Board can wait behind another transaction for minutes. Re-evaluate
         // the complete live admission contract at the moment this child would
         // start; the click-time verdict is no longer authoritative. In
-        // particular, never wipe a sources-ready/scoring-batch recovery left by
-        // the Board that ran ahead of us.
+        // particular, never wipe a sources-ready recovery left by the Board
+        // that ran ahead of us.
         let turnSourceNode = sourceNode;
         let childManualAiResume = turnSourceNode.data?.manualAiResume || null;
         let turnNodes = getNodes();
@@ -4028,12 +4004,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           orchestratorNodeId: id,
           boardRunId,
           recoveryOwner,
-          // A merely queued/fresh Board reserves its selected set, but it must
-          // not adopt a legacy batch that predates this transaction. Only the
-          // durable plan whose interrupted active child was this Search may
-          // replay that sidecar inside the Board-owned lane.
-          legacyBatchRecovery: !!iterationPlan
-            && iterationPlan.activeSourceId === sourceId,
         });
         // This check is repeated at the actual queue turn. The click-time
         // inspection above may now be stale, and a resumed Board has no
@@ -4068,8 +4038,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           orchestratorNodeId: id,
           boardRunId,
           recoveryOwner,
-          legacyBatchRecovery: !!iterationPlan
-            && iterationPlan.activeSourceId === sourceId,
         });
         if (
           hasActivePlatformVerification(verifyingPlatformsRef.current)
@@ -5047,11 +5015,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         && manualHandoffMatchesPausedGeneration
         && sourceRecoveryOwner?.orchestratorNodeId === id
         && sourceRecoveryOwner?.boardRunId === plan.boardRunId
-      ) || isExactBoardLegacyBatchRecovery(
-        sourceData,
-        sourceRecoveryOwner,
-        id,
-        plan.boardRunId,
       ) || (
         sourceData.terminalFinalizationRecovery?.runId === expectedRunId
         && sourceRecoveryOwner?.orchestratorNodeId === id
@@ -5128,20 +5091,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         || (edge.target === id && edge.source === activeSourceId)
       ));
       const sourceData = source?.data || {};
-      const sourceRecoveryOwner = sourceData.manualAiResume?.runId
-        ? findJobSearchBoardRecoveryOwner(
-            activeSourceId,
-            sourceData.manualAiResume.runId,
-            getNodes(),
-            getEdges(),
-          )
-        : findJobSearchBoardActiveRecoveryOwner(activeSourceId, getNodes(), getEdges());
-      const exactBoardLegacyBatchRecovery = isExactBoardLegacyBatchRecovery(
-        sourceData,
-        sourceRecoveryOwner,
-        id,
-        plan.boardRunId,
-      );
 
       const pausedContinuation = exactPausedSourceContinuation(
         plan,
@@ -5165,7 +5114,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         // Re-enter the registered child executor below with this exact durable
         // descriptor. The parent Board reacquires the queue lease and keeps
         // orchestration ownership across the restart.
-      } else if (ACTIVE_SEARCH_STATES.has(sourceData.hubState) && !exactBoardLegacyBatchRecovery) {
+      } else if (ACTIVE_SEARCH_STATES.has(sourceData.hubState)) {
         return;
       } else {
         const baseline = plan.baselineSourceRuns?.[activeSourceId] || {};

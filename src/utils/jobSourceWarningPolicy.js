@@ -139,7 +139,6 @@ export function isJobSourceResolveBusyHubState(hubState) {
     'interpreting-preferences',
     'searching',
     'scoring',
-    'scoring-batch',
     'evaluating-preferences',
   ].includes(hubState);
 }

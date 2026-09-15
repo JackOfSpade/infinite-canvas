@@ -54,7 +54,6 @@ import { useRenderStorm } from '../hooks/useRenderStorm';
  * data.pricing: { recommended_price, quick_sell_price, max_profit_price, justification, market_summary }
  * data.comps: { sold: [], active: [] }
  * data.errorMessage: string | null — surfaced inline via HubErrorBanner above the body
- * data.isRateLimit: boolean
  */
 function isOversizedImageError(message) {
   return /image file too large/i.test(String(message || ''));
@@ -429,7 +428,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             imagePaths: validPaths,
             inputLocked: true,
             errorMessage: null,
-            isRateLimit: false,
           });
         },
         onQueueUpdate: ({ position }) => {
@@ -444,7 +442,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             imagePaths: validPaths,
             inputLocked: true,
             errorMessage: null,
-            isRateLimit: false,
           });
         },
       });
@@ -455,7 +452,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
       if (!result.success) {
         const err = new Error(result.error);
-        if (result.isRateLimit) err.isRateLimit = true;
         throw err;
       }
 
@@ -476,7 +472,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       const updates = {
         hubState: 'empty',
         errorMessage: message,
-        isRateLimit: !!error?.isRateLimit,
       };
       if (isOversizedImageError(message)) {
         updates.imagePaths = null;
@@ -515,18 +510,12 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     }
   }, [data.imagePaths, hubState, data.errorMessage, startAnalysis]);
 
-  // React to settings changes. We log them for bug report telemetry but do NOT
-  // auto-clear the error or revert the state without explicit user action.
-  useEffect(() => {
-    if (!window.electronAPI?.onSettingsChanged) return;
-    const cleanup = window.electronAPI.onSettingsChanged((payload) => {
-      if (!payload?.changedSections?.includes('ai')) return;
-      if (data.errorMessage) {
-        EventLogger.log(`[SellHub][${id}] Settings changed with active error; keeping error banner open for explicit user action`);
-      }
-    });
-    return () => cleanup?.();
-  }, [id, data.errorMessage]);
+  // A settings-changed listener used to live here, logging (but not acting
+  // on) changes to the 'ai' section for bug-report telemetry. The 'ai'
+  // settings section was deleted along with all live LLM HTTP API support —
+  // no event can ever carry it any more — and 'ai' was the ONLY section this
+  // listener handled, so the whole effect (not just the branch) is now dead
+  // code and was removed rather than left as a listener with nothing to do.
 
   // ── Comp-source cards (ephemeral, one per PRICE_COMP_SOURCE) ──────────────
   // Per-source progress shown as real canvas nodes connected by edges —
@@ -759,12 +748,15 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         }
       }
       // Platform fit is assessed in a SECOND background AI call after pricing.
-      // If we render the marketplace list before it lands, every platform shows
-      // as "good" and then unfit ones collapse behind the toggle a few seconds
-      // later — a jarring "all good, then filtered" flicker. `platformFitPending`
-      // lets the priced UI hold the marketplace list in a "selecting…" state
-      // until the verdicts arrive. Only set it when we'll actually run the
-      // assessment — otherwise the list would spin forever.
+      // This used to resolve in a few seconds, so the priced UI held the
+      // marketplace list in a "selecting…" state (`platformFitPending`) rather
+      // than flash every platform as "good" and then collapse unfit ones a
+      // moment later. That call now goes through the human copy/paste AI
+      // handoff and can take minutes — holding the whole marketplace picker
+      // hostage to it would leave the user unable to spawn a listing card
+      // while they go paste a reply. Never gate the list on it; platforms
+      // render immediately (missing/pending fit data already falls back to
+      // "good" below) and reshuffle in place once a verdict lands.
       const willAssessFit = !!(window.electronAPI?.assessPlatformFit && data.product);
       updateGlobal(currentId, {
         hubState: 'priced',
@@ -778,7 +770,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         bundlePricing: isBundle ? bundlePricing : null,
         scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
         platformFit: null,
-        platformFitPending: willAssessFit,
+        platformFitPending: false,
         errorMessage: null,
       });
       // Attached marketplace cards survive a price recheck. Refresh only their
@@ -844,7 +836,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
-        isRateLimit: !!err?.isRateLimit,
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
@@ -862,7 +853,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             hubState: 'queued',
             queuedModuleRun: { label: 'Pricing resolved comps', position },
             errorMessage: null,
-            isRateLimit: false,
           });
         },
         onQueueUpdate: ({ position }) => {
@@ -1037,7 +1027,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         updateGlobal(currentId, {
           hubState: 'draft',
           errorMessage: `Price check needs login on: ${missingLogins.join(', ')}. Log in (Settings → Accounts) and re-run.`,
-          isRateLimit: false,
           pendingItems: null,
           scrapeWarnings: [],
           platformFit: null,
@@ -1060,7 +1049,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             hubState: 'queued',
             queuedModuleRun: { label: 'Researching market prices', position },
             errorMessage: null,
-            isRateLimit: false,
           });
         },
         onQueueUpdate: ({ position }) => {
@@ -1085,7 +1073,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             hubState: 'researching',
             queuedModuleRun: null,
             errorMessage: null,
-            isRateLimit: false,
             pendingItems: null,
             platformFit: null,
             platformFitPending: false,
@@ -1110,7 +1097,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         updateGlobal(currentId, {
           hubState: 'draft',
           errorMessage: `Price check needs login on: ${missing.join(', ')}. Log in (Settings → Accounts) and re-run.`,
-          isRateLimit: false, pendingItems: null, scrapeWarnings: [],
+          pendingItems: null, scrapeWarnings: [],
           platformFit: null, platformFitPending: false,
         });
         addToast({
@@ -1180,7 +1167,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
-        isRateLimit: !!err?.isRateLimit,
       });
       addToast({ title: 'Scrape Error', description: err?.message || String(err), type: 'error' });
     } finally {
@@ -1240,7 +1226,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             if (cancelled() || isNodeDeletedAbort(err)) return;
             EventLogger.error(`[SellHub][${id}] Auto-fire synthesis after skip failed:`, err);
             hubStateRef.current = 'draft';
-            updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err), isRateLimit: !!err?.isRateLimit });
+            updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err) });
             addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
           } finally {
             processingPriceRef.current = false;
@@ -1382,7 +1368,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           if (cancelled() || isNodeDeletedAbort(err)) return;
           EventLogger.error(`[SellHub][${id}] Auto-fire synthesis after resolve failed:`, err);
           hubStateRef.current = 'draft';
-          updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err), isRateLimit: !!err?.isRateLimit });
+          updateGlobal(id, { hubState: 'draft', errorMessage: err?.message || String(err) });
           addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
         } finally {
           processingPriceRef.current = false;
@@ -1695,7 +1681,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       hubState: revertTo,
       queuedModuleRun: null,
       errorMessage: hadImages ? 'Analysis canceled.' : null,
-      isRateLimit: false,
       pendingItems: null,
       bundlePricing: null,
     };
@@ -1739,7 +1724,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[SellHub][${id}] User clicked Dismiss Error`);
-    const updates = { errorMessage: null, isRateLimit: false };
+    const updates = { errorMessage: null };
     if (hubState === 'empty' && !data.product) {
       updates.imagePaths = null;
       updates.inputLocked = false;
@@ -1754,7 +1739,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const handleRetryFailed = useCallback(() => {
     if (data.locked) return;
     EventLogger.log(`[SellHub][${id}] User clicked Try Again on error banner`);
-    updateGlobal(id, { errorMessage: null, isRateLimit: false });
+    updateGlobal(id, { errorMessage: null });
     if (data.product) {
       handleConfirmDraft();
     } else if (data.imagePaths?.length > 0) {
@@ -1804,7 +1789,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       platformFit: null,
       platformFitPending: false,
       errorMessage: null,
-      isRateLimit: false,
       extraItems: nextExtraItems,
     });
   }, [
@@ -1825,7 +1809,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const banner = data.errorMessage ? (
     <HubErrorBanner
       errorMessage={data.errorMessage}
-      isRateLimit={!!data.isRateLimit}
       locked={!!data.locked}
       onRetry={retryFailedAvailable ? handleRetryFailed : null}
       onDismiss={handleDismissError}

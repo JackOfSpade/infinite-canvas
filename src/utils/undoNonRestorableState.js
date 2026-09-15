@@ -27,7 +27,6 @@ const JOB_SEARCH_RUN_FIELDS = [
   'manualAiCleanupReceipts',
   'terminalFinalizationRecovery',
   'queuedModuleRun',
-  'pendingBatch',
   '_boardRollbackSourceProgressFence',
 ];
 
@@ -44,7 +43,6 @@ const ACTIVE_JOB_SEARCH_STATES = new Set([
   'searching',
   'evaluating-preferences',
   'scoring',
-  'scoring-batch',
 ]);
 
 // These are the only Job Search data fields whose previous value is safe and
@@ -72,7 +70,6 @@ function hasExternallyOwnedJobSearchState(data) {
     || (Array.isArray(data.manualAiCleanupReceipts) && data.manualAiCleanupReceipts.length > 0)
     || data.terminalFinalizationRecovery
     || data.queuedModuleRun
-    || data.pendingBatch
     || data.pendingJobs
     || data.pendingTargetRole
     || data.pendingCareerData

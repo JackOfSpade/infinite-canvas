@@ -29,10 +29,7 @@ import job_board_provider from './tests/job-board-provider.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
-import claude_cache_telemetry from './tests/claude-cache-telemetry.js';
-import claude_cache_bug_report from './tests/claude-cache-bug-report.js';
 import schema_validation from './tests/schema-validation.js';
-import claude_structured_outputs from './tests/claude-structured-outputs.js';
 import job_resume_ingestion from './tests/job-resume-ingestion.js';
 import non_api_ai from './tests/non-api-ai.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
@@ -76,10 +73,7 @@ const testGroups = [
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],
-  ['claude-cache-telemetry.js', claude_cache_telemetry],
-  ['claude-cache-bug-report.js', claude_cache_bug_report],
   ['schema-validation.js', schema_validation],
-  ['claude-structured-outputs.js', claude_structured_outputs],
   ['job-resume-ingestion.js', job_resume_ingestion],
   ['non-api-ai.js', non_api_ai],
   ['job-workflow-documentation.js', job_workflow_documentation],

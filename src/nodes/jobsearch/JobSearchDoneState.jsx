@@ -1,5 +1,5 @@
 import React, { useId } from 'react';
-import { RefreshCw, Target, Bot, LayoutGrid } from 'lucide-react';
+import { RefreshCw, Target, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
@@ -8,22 +8,10 @@ import { JobSearchLocationFields } from '../../components/JobSearchLocationField
 import { formatCompletionTimestamp } from '../../utils/completionTimestamp';
 import { hasGlassdoorCountryScopeCaveat } from '../../utils/jobCollectionScopeCaveats';
 
-// e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
-function formatModelName(model) {
-  if (!model || typeof model !== 'string') return null;
-  const stripped = model.replace(/^claude-/, '').replace(/-\d{8,}$/, '');
-  const parts = stripped.split('-');
-  if (parts.length < 2) return stripped;
-  const family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
-  const version = parts.slice(1).join('.');
-  return `${family} ${version}`;
-}
-
 export function JobSearchDoneState({
   resultCount,
   scrapedCount,
   gatheredCount,
-  queryModel = null,
   aiSkipped = false,
   collectionOnly = false,
   testMode = false,
@@ -186,14 +174,6 @@ export function JobSearchDoneState({
             )}
           </div>
         </details>
-      )}
-
-      {/* AI model used for query generation */}
-      {queryModel && (
-        <p className="flex items-center gap-1 text-white/20 text-[9px] mt-0.5">
-          <Bot size={8} className="shrink-0" />
-          {formatModelName(queryModel)}
-        </p>
       )}
 
       {/* The results cascade now lives on the Job Board Module — point the user there. */}

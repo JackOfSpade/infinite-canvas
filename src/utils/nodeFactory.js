@@ -121,21 +121,18 @@ export const NODE_FACTORIES = {
 // A duplicate never owns the original hub's IPC controller, manual-AI run, or
 // source-card children.  Preserve completed result data, but never carry a
 // nonterminal run state into the clone: it would render as busy/paused forever
-// with no operation capable of completing it. `sources-ready` and the retired
-// `scoring-batch` state are intentionally included even though they are not
-// save-sanitized processing states — their recovery controls belong to the
-// original hub and its source cards only.
+// with no operation capable of completing it. `sources-ready` is intentionally
+// included even though it is not a save-sanitized processing state — its
+// recovery controls belong to the original hub and its source cards only.
 const NONTERMINAL_JOB_HUB_STATES = new Set([
   ...TRANSIENT_PROCESSING_HUB_STATES,
   'sources-ready',
-  'scoring-batch',
 ]);
 const CLONED_JOB_HUB_RUN_KEYS = new Set([
   'queuedModuleRun',
   'pendingJobs',
   'pendingTargetRole',
   'pendingCareerData',
-  'pendingBatch',
   'activeTargetRole',
   'activeJobPreferences',
   'pendingJobPreferences',

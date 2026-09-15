@@ -168,8 +168,8 @@ export async function runApiTransportRetry(operation, {
 }
 
 /**
- * A tiny bespoke HTML stripper for snippets (no heavy external dom parser)
- * Real rendering to markdown is handled in python/gemini stages if needed.
+ * A tiny bespoke HTML stripper for snippets (no heavy external dom parser).
+ * Only a plain-text snippet is needed here; nothing downstream renders markdown.
  */
 function stripHtml(html) {
   if (!html || typeof html !== 'string') return '';

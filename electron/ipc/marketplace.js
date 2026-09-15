@@ -11,7 +11,7 @@ import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
 import { getMarketplaceWatchUrls } from './settings.js';
-import { scanSellerHubPages } from './listingStatusCheck.js';
+import { prepareHubPages, scanPreparedHubPages } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/authWindows.js';
 import { shouldUseNativeRead, readHubUrlsViaNativeChrome } from './browser/nativeChromeReader.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
@@ -1739,6 +1739,19 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
   // the user configured in Settings — ONCE per platform, and surface anything
   // across all their listings that needs action. The renderer only sends
   // platforms that have BOTH a listing on this canvas AND a configured watch URL.
+  //
+  // Every AI call is now a human copy/paste handoff (see nonApiAi.js), so this
+  // runs in TWO PASSES rather than one scrape-then-scan loop per platform:
+  //   1. The existing browser-automation loop below runs UNCHANGED — scrape
+  //      every platform's hub pages, resolve session gates and transport-level
+  //      outcomes (prepareHubPages), fully unattended.
+  //   2. Once every platform has been scraped, issue every remaining
+  //      platform's AI handoff together (mirrors jobs.js's scoring batches:
+  //      "every top-level batch is independent, issue all manual prompts
+  //      before awaiting any response so people can run them in parallel").
+  // Without this split the run would interleave scrape A → human pastes →
+  // scrape B → human pastes → … across up to 8 platforms, forcing the user to
+  // babysit an entire browser-automation run one paste at a time.
   handleSafe('check-marketplace-status', async (event, { platformIds, nodeId, runId } = {}, signal) => {
     const ids = [...new Set(Array.isArray(platformIds) ? platformIds.filter(Boolean) : [])];
     if (ids.length === 0) return { results: {} };
@@ -1750,36 +1763,60 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     if (ahead > 0) {
       logger.info(`[MarketplaceStatus][${nodeId}] queued behind ${ahead} in-flight status check(s)`);
     }
-    return withStatusCheckLock(async () => {
-      const results = {};
-      const recordResult = (platformId, result) => {
-        const completedResult = {
-          ...result,
-          lastChecked: new Date().toISOString(),
-          _statusUpdate: {
-            epoch: marketplaceStatusProcessEpoch,
-            sequence: ++marketplaceStatusResultSequence,
-          },
-        };
-        results[platformId] = completedResult;
-        if (!event.sender.isDestroyed()) {
-          try {
-            event.sender.send('marketplace-status-progress', {
-              nodeId,
-              runId: runId || null,
-              platformId,
-              result: completedResult,
-              completed: Object.keys(results).length,
-              total: ids.length,
-            });
-          } catch (error) {
-            // Progress delivery is best-effort; the invoke response still
-            // returns every result and must not lose later platforms because a
-            // renderer navigated away or closed between isDestroyed() and send().
-            logger.warn(`[MarketplaceStatus][${nodeId}] Could not emit ${platformId} progress:`, error?.message || String(error));
-          }
-        }
+
+    // results/recordResult/pendingScans are shared by BOTH passes, so they
+    // live outside the lock callback below — pass 2 (the AI handoff, see its
+    // comment further down) runs AFTER the lock has been released and still
+    // needs to append into the same `results` map and emit through the same
+    // progress channel that pass 1 used.
+    const results = {};
+    const recordResult = (platformId, result) => {
+      const completedResult = {
+        ...result,
+        lastChecked: new Date().toISOString(),
+        _statusUpdate: {
+          epoch: marketplaceStatusProcessEpoch,
+          sequence: ++marketplaceStatusResultSequence,
+        },
       };
+      results[platformId] = completedResult;
+      if (!event.sender.isDestroyed()) {
+        try {
+          event.sender.send('marketplace-status-progress', {
+            nodeId,
+            runId: runId || null,
+            platformId,
+            result: completedResult,
+            completed: Object.keys(results).length,
+            total: ids.length,
+          });
+        } catch (error) {
+          // Progress delivery is best-effort; the invoke response still
+          // returns every result and must not lose later platforms because a
+          // renderer navigated away or closed between isDestroyed() and send().
+          logger.warn(`[MarketplaceStatus][${nodeId}] Could not emit ${platformId} progress:`, error?.message || String(error));
+        }
+      }
+    };
+    // Platforms whose hub pages are scraped but still need their AI handoff —
+    // collected during pass 1 below and drained in one batch AFTER the lock
+    // is released (pass 2), instead of awaiting each platform's handoff
+    // in-line with its scrape.
+    const pendingScans = [];
+
+    // PASS 1 — the browser/fetch work only — is the ONLY part serialized by
+    // statusCheckLock. The lock exists purely to cap request-burst concurrency
+    // against the seller's single residential IP (see statusCheckLock.js's
+    // header, which explicitly promises each queued check settles on its own
+    // bounded fetch timeouts and "cannot wedge here the way an indefinite
+    // captcha-wait scrape could"). Pass 2 below makes NO network requests — it
+    // only builds a prompt and waits on an unbounded human copy/paste, which
+    // can take minutes or forever now that every AI call is a manual handoff.
+    // Holding the lock across that wait would violate the lock's documented
+    // invariant and block every OTHER hub's Check-All / per-card recheck
+    // behind one unanswered dialog. So: acquire, run pass 1, release, THEN
+    // run pass 2 lock-free.
+    await withStatusCheckLock(async () => {
       // Process CDP-readable platforms first, then the native-read ones. Native
       // reads must close the headless stealth browser to take the shared Chrome
       // profile (one Chrome per userDataDir); grouping them last means the
@@ -1848,8 +1885,8 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         if (useNative) {
           // CDP-walled platform: read the hub pages through a non-CDP native
           // Chrome (the only thing that gets past Cloudflare/anti-bot here), then
-          // feed the pre-fetched HTML into the SAME scanSellerHubPages analysis
-          // via no-op fetchers — reusing all the LLM scan / read-state / status
+          // feed the pre-fetched HTML into the SAME prepareHubPages analysis via
+          // no-op fetchers — reusing all the read-state / transport-outcome
           // logic. See browser/nativeChromeReader.js.
           logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s) via native (non-CDP) Chrome`);
           const nativeResults = await readHubUrlsViaNativeChrome(watchUrls, { platformId, signal });
@@ -1862,9 +1899,10 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           urlSpecs = watchUrls.map((url) => ({
             url,
             urlLabel: 'hub',
-            // Lock only this browser reader, not scanSellerHubPages' later LLM
-            // analysis. Native reads own their own lock above, so never wrap
-            // that branch here or the FIFO would reject nested acquisition.
+            // Lock only this browser reader, not the later LLM analysis (pass 2,
+            // after this whole loop). Native reads own their own lock above, so
+            // never wrap that branch here or the FIFO would reject nested
+            // acquisition.
             fetcher: (u, sig) => withSharedProfileLock(
               () => fetchHtmlAuthed(u, { signal: sig }),
               sig,
@@ -1874,9 +1912,19 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
         }
         try {
-          const scan = await scanSellerHubPages({ urlSpecs, platformId, signal });
-          logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
-          recordResult(platformId, scan);
+          // Scrape + resolve transport-level outcomes only — no LLM call yet.
+          const prepared = await prepareHubPages({ urlSpecs, platformId, signal });
+          if (prepared.llmInputs.length === 0) {
+            // Every hub page already resolved to a terminal outcome (auth wall,
+            // fetch error, empty) — there is nothing to hand off to an AI, so
+            // finalize immediately instead of queuing a no-op pass-2 entry.
+            const scan = await scanPreparedHubPages({ ...prepared, signal });
+            logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
+            recordResult(platformId, scan);
+          } else {
+            logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: scraped ${prepared.llmInputs.length} hub page(s), queuing AI handoff`);
+            pendingScans.push({ platformId, prepared });
+          }
         } catch (error) {
           if (signal?.aborted) break;
           const message = error?.message || String(error);
@@ -1890,7 +1938,39 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           });
         }
       }
-      return { results };
     }, signal);
+    // ── statusCheckLock released above; pass 2 runs lock-free from here ──────
+
+    // Pass 2: every platform has now been scraped (or failed/gated out during
+    // pass 1). Issue every remaining platform's manual AI handoff together —
+    // each is dispatched before any of them is awaited, so a human sees every
+    // prompt at once and can work through them in any order — instead of
+    // awaiting one platform's paste before the next platform's prompt even
+    // appears. Each platform's outcome is isolated with its own try/catch, so
+    // one failed/aborted handoff cannot affect another platform's result.
+    if (pendingScans.length > 0 && !signal?.aborted) {
+      await Promise.all(pendingScans.map(async ({ platformId, prepared }) => {
+        try {
+          const scan = await scanPreparedHubPages({ ...prepared, signal });
+          logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
+          recordResult(platformId, scan);
+        } catch (error) {
+          // An aborted run must not report ANY of the still-pending platforms —
+          // mirrors pass 1's `if (signal?.aborted) break` (no recordResult for
+          // work that never got to finish).
+          if (signal?.aborted || error?.name === 'AbortError') return;
+          const message = error?.message || String(error);
+          logger.error(`[MarketplaceStatus][${nodeId}] ${platformId} failed:`, message);
+          recordResult(platformId, {
+            status: 'error',
+            message: `Could not complete the ${platformId} hub scan: ${message}`,
+            summary: '',
+            attention: [],
+            sources: [],
+          });
+        }
+      }));
+    }
+    return { results };
   });
 }

@@ -401,7 +401,7 @@ export function restoreJobWorkflowSnapshots(liveNodes, snapshotNodes, workflowNo
   const snapshotById = new Map(snapshots.map(node => [node.id, node]));
   const transientSearchStates = new Set([
     'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
-    'evaluating-preferences', 'scoring', 'scoring-batch',
+    'evaluating-preferences', 'scoring',
   ]);
   const stableLiveSearchIds = new Set((Array.isArray(liveNodes) ? liveNodes : [])
     .filter(node => node?.type === 'jobhub'
@@ -463,14 +463,7 @@ export function collectDeletedJobRunDiscards(nodes, canvasFilePath) {
     for (const node of items || []) {
       if (node?.type === 'jobhub') {
         const nodeId = node.id || null;
-        // `pendingBatch.jobRunId` owns only the scoring-batch lifecycle. Outside
-        // that state it can be a stale persisted remnant, while `jobRunId` is the
-        // current search/checkpoint owner stamped before the pre-score await.
-        // Prefer the token whose state actually owns the hub so a malformed or
-        // interrupted prior batch cannot make deletion spare the current run.
-        const runId = node.data?.hubState === 'scoring-batch'
-          ? (node.data?.pendingBatch?.jobRunId || node.data?.jobRunId || null)
-          : (node.data?.jobRunId || node.data?.pendingBatch?.jobRunId || null);
+        const runId = node.data?.jobRunId || null;
         const key = `${nodeId || ''}\u0000${runId || ''}`;
         if (nodeId && runId && !seen.has(key)) {
           seen.add(key);
@@ -527,9 +520,7 @@ export function collectDeletedJobAnalysisDiscards(nodes, canvasFilePath, cleared
     for (const node of items || []) {
       if (node?.type === 'jobhub') {
         const nodeId = typeof node.id === 'string' && node.id ? node.id : null;
-        const rawRunId = node.data?.hubState === 'scoring-batch'
-          ? (node.data?.pendingBatch?.jobRunId || node.data?.jobRunId || null)
-          : (node.data?.jobRunId || node.data?.pendingBatch?.jobRunId || null);
+        const rawRunId = node.data?.jobRunId || null;
         // A malformed persisted run token must not turn an otherwise safe
         // boundary clear into an invalid IPC request. Null still deletes
         // pre-boundary artifacts by exact hub/canvas ownership; a valid token

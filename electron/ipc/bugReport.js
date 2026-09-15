@@ -5,23 +5,19 @@ import path from 'path';
 import os from 'os';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
-import { getAISettings, resolveServiceAccountPath } from './settings.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
 import { getManualScraperTelemetry } from './browser/manualScraper.js';
 import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
-import { getGeminiTelemetry } from './gemini.js';
-import { getClaudeCacheTelemetry } from './claudeCacheTelemetry.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
 import { getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { getSharedProfileLockSnapshot } from './sharedProfileLock.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
-import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
-import { getNonApiAiHandoffLifecycle, isNonApiJobTask, NON_API_JOB_TASKS } from './nonApiAi.js';
+import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
@@ -656,161 +652,25 @@ function getNewestRendererMtimes() {
 }
 
 /**
- * Captures the AI configuration relevant to "why did nothing happen when I
- * clicked X" reports. NEVER includes the raw key strings — only whether they
- * are present and (for the active key) a short prefix for sanity-checking
- * that the user pasted the right format.
+ * Captures how AI tasks route now that every call is a human copy/paste
+ * handoff (nonApiAi.js `requestNonApiAi`). There is exactly one transport —
+ * no provider, key, model, or endpoint selection exists anymore — so this is
+ * a routing FACT (which task ids the app knows about and that they all share
+ * the one transport), not a claim about whether any specific handoff in this
+ * run succeeded. The actual pass/fail evidence for a specific handoff lives
+ * in the Non-API AI Handoff Lifecycle section below.
  */
 function buildAIConfigSnapshot() {
-  let ai = {};
-  try { ai = getAISettings() || {}; } catch { /* settings store may not be ready */ }
-
-  const geminiKey = ai.geminiApiKey;
-  const claudeKey = ai.anthropicApiKey;
-  const provider = ai.provider || 'gemini';
-  const activeKey = provider === 'claude' ? claudeKey : geminiKey;
-  const keyPrefix = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
-
-  // resolveServiceAccountPath checks the user-configured path first, then
-  // falls back to process.cwd()/service-account.json. Returns null if neither
-  // is readable — which is the exact "I added a path but nothing happened"
-  // failure mode that needs to be visible in the report.
-  let resolvedSAPath = null;
-  try { resolvedSAPath = resolveServiceAccountPath(); } catch { /* ignore */ }
-
-  // Gemini works with either a UI key OR a resolvable service-account.json;
-  // Claude needs the UI key.
-  const effectivelyConfigured = provider === 'claude'
-    ? !!claudeKey
-    : (!!geminiKey || !!resolvedSAPath);
-
-  // For Gemini, the runtime picks AI Studio when a key is set, Vertex when
-  // a service-account is resolvable, and has no usable credential otherwise. Surfacing the
-  // effective endpoint (not just "which keys are set") means a future
-  // "billing depleted on Vertex" vs "rate-limited on AI Studio" report is
-  // immediately disambiguated.
-  let activeEndpoint;
-  if (provider === 'claude') {
-    activeEndpoint = claudeKey ? 'Anthropic API' : '(no key)';
-  } else if (geminiKey) {
-    activeEndpoint = 'Gemini API (AI Studio — generativelanguage.googleapis.com)';
-  } else if (resolvedSAPath) {
-    activeEndpoint = 'Vertex AI (aiplatform.googleapis.com via service-account)';
-  } else {
-    activeEndpoint = '(no credential — AI calls fail until a key is added in Settings)';
-  }
-
-  const telemetry = getGeminiTelemetry();
-
-  // API-backed features follow the selected provider. Report only live API
-  // task groups: Application Generate is a Local AI handoff, and its retired
-  // remote task ids must not masquerade as selectable API routes here.
-  let taskRouting = null;
-  try { taskRouting = taskModelRoutingSnapshot(ai); } catch { /* keep the rest of the report */ }
-
-  // Job-domain tasks NEVER follow `provider` above — providerForTask() (llm.js)
-  // short-circuits every task in NON_API_JOB_TASKS to the manual copy/paste
-  // handoff before it ever looks at ai.provider. A reader diagnosing a job-run
-  // report who only sees "Active provider: gemini" has no way to know the job
-  // pipeline's AI calls never touched Gemini at all — this is a routing FACT
-  // (which task ids are hard-wired to the handoff), not a claim about what
-  // happened in any specific run.
-  const nonApiJobTaskIds = [...NON_API_JOB_TASKS].sort();
-
+  let knownTaskIds = [];
+  try { knownTaskIds = [...getKnownTaskIds()].sort(); } catch { /* keep the rest of the report */ }
+  let routing = null;
+  try { routing = taskModelRoutingSnapshot(); } catch { /* keep the rest of the report */ }
   return {
-    provider,
-    modelSelection: provider === 'gemini'
-        ? 'auto per-task preference + Gemini capability-ladder fallbacks (pro→flash→lite)'
-        : 'auto within the user-picked per-group Claude family (see llm.js TASK_GROUPS / Settings → AI)',
-    // Present regardless of the active provider (a no-op display when
-    // provider === 'gemini') — these picks persist independently, so the
-    // report should never leave the reader guessing what Claude WOULD serve.
-    claudeGroupRouting: taskRouting?.groups || '(unresolved)',
-    hasGeminiKey: !!geminiKey,
-    hasAnthropicKey: !!claudeKey,
-    activeKeyPrefix: keyPrefix,
-    configuredSAPath: ai.serviceAccountPath || '(unset)',
-    resolvedSAPath: resolvedSAPath || '(none)',
-    serviceAccountUsable: !!resolvedSAPath,
-    activeEndpoint,
-    effectivelyConfigured,
-    nonApiJobTaskCount: nonApiJobTaskIds.length,
-    nonApiJobTaskIds,
-    geminiLastAttemptedModel: telemetry.lastAttemptedModel,
-    geminiLastSuccessfulModel: telemetry.lastSuccessfulModel,
-    geminiLastAttemptedError: telemetry.lastAttemptedError,
-    geminiCompatibleModels: telemetry.compatibleModels,
-    geminiWarnings: telemetry.warnings,
+    transport: routing?.transport || 'non-api-ai',
+    knownTaskIds,
+    knownTaskCount: knownTaskIds.length,
   };
 }
-
-function cacheTelemetryCount(value) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0;
-}
-
-function formatCacheTelemetryCount(value) {
-  return cacheTelemetryCount(value).toLocaleString('en-US');
-}
-
-function cacheTelemetryTaskLabel(value) {
-  return String(value || 'unknown')
-    .replace(/[|`\r\n]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 80) || 'unknown';
-}
-
-function hasClaudeCacheTelemetryData(telemetry) {
-  if (!telemetry || typeof telemetry !== 'object') return false;
-  const countFields = [
-    'requested', 'hits', 'writes', 'cacheReadInputTokens',
-    'cacheWriteInputTokens', 'uncachedInputTokens',
-  ];
-  return countFields.some(field => cacheTelemetryCount(telemetry[field]) > 0)
-    || !!telemetry.lastEvent
-    || (telemetry.tasks && typeof telemetry.tasks === 'object'
-      && Object.keys(telemetry.tasks).length > 0);
-}
-
-/**
- * Render the in-process Anthropic cache counters separately from the general AI
- * configuration. The counters are deliberately session-only: they are useful
- * for comparing the requests that this running app actually sent, but should
- * never be read as Anthropic Console's workspace-wide/billing accounting.
- */
-export function buildClaudePromptCacheTelemetryMarkdown(telemetry, { provider } = {}) {
-  const hasData = hasClaudeCacheTelemetryData(telemetry);
-  if (provider !== 'claude' && !hasData) return '';
-
-  const requests = cacheTelemetryCount(telemetry?.requested);
-  const hits = cacheTelemetryCount(telemetry?.hits);
-  const writes = cacheTelemetryCount(telemetry?.writes);
-  const readTokens = cacheTelemetryCount(telemetry?.cacheReadInputTokens);
-  const writeTokens = cacheTelemetryCount(telemetry?.cacheWriteInputTokens);
-  const uncachedTokens = cacheTelemetryCount(telemetry?.uncachedInputTokens);
-  const hitRate = requests > 0 ? `${((hits / requests) * 100).toFixed(1)}%` : 'n/a';
-  const tasks = telemetry?.tasks && typeof telemetry.tasks === 'object'
-    ? telemetry.tasks
-    : {};
-  const taskRows = Object.entries(tasks)
-    .map(([task, taskTelemetry]) => {
-      const taskRequested = cacheTelemetryCount(taskTelemetry?.requested);
-      const taskHits = cacheTelemetryCount(taskTelemetry?.hits);
-      const taskWrites = cacheTelemetryCount(taskTelemetry?.writes);
-      const taskReadTokens = cacheTelemetryCount(taskTelemetry?.cacheReadInputTokens);
-      const taskWriteTokens = cacheTelemetryCount(taskTelemetry?.cacheWriteInputTokens);
-      return `| \`${cacheTelemetryTaskLabel(task)}\` | ${taskRequested} | ${taskHits} | ${taskWrites} | ${taskReadTokens} | ${taskWriteTokens} |`;
-    })
-    .sort()
-    .join('\n');
-  const taskTable = taskRows
-    ? `\n### By task\n| Task | Cache-marked | Hits | Writes | Cache-read input tok | Cache-write input tok |\n|---|---:|---:|---:|---:|---:|\n${taskRows}\n`
-    : '';
-
-  return `\n## Claude Prompt Cache Telemetry\n> Session-retained counters for this Electron run only: they survive Recent Logs\n> rollover but reset when the app restarts. They are diagnostic telemetry, not\n> Anthropic Console billing or workspace-wide totals.\n- Cache-marked requests: ${formatCacheTelemetryCount(requests)}\n- Cache hits: ${formatCacheTelemetryCount(hits)} (${hitRate} of cache-marked requests)\n- Cache writes: ${formatCacheTelemetryCount(writes)}\n- Input tokens: ${formatCacheTelemetryCount(readTokens)} cache-read · ${formatCacheTelemetryCount(writeTokens)} cache-write · ${formatCacheTelemetryCount(uncachedTokens)} uncached\n${taskTable}`;
-}
-
 
 /**
  * Renders the live tuning state of the scrape pipeline — the answer to "why did
@@ -2094,93 +1954,12 @@ function buildRecentMainProcessLogLines() {
   return mainProcessLogLines;
 }
 
-function buildTokenBudgetsMarkdown() {
-  const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
-  // The persisted budget store never prunes renamed/removed task keys. Split
-  // current live API task ids from those ghosts; Local AI application handoff
-  // work has no API token-budget entry.
-  const knownTaskIds = (() => { try { return getKnownTaskIds(); } catch { return null; } })();
-  const staleBudgetTasks = knownTaskIds
-    ? Object.keys(tokenBudgets).filter(t => !knownTaskIds.has(t)).sort()
-    : [];
-  // Only surface tasks that have actually truncated — clean tasks are noise for
-  // almost every bug report. A footer line summarises how many are healthy so
-  // the section doesn't mislead ("only 2 tasks?" when there are really 9).
-  const tokenBudgetLines = [];
-  let tokenBudgetCleanCount = 0;
-  for (const [task, s] of Object.entries(tokenBudgets).sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (knownTaskIds && !knownTaskIds.has(task)) continue; // stale ghost — footnoted below
-    if (s.truncatedAt <= 0) { tokenBudgetCleanCount++; continue; }
-    // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
-    const nextCapFloor = Math.round(s.truncatedAt * 1.2);
-    const seedNote = s.formulaSeedAtTruncation != null ? `formula seed: ${s.formulaSeedAtTruncation}` : '';
-    const manualTask = isNonApiJobTask(task);
-    const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
-    const healNote = stuckAtHardCap
-      ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
-      : `next cap ≥${nextCapFloor} — cap since raised, self-heals`;
-    const detail = manualTask
-      ? `${seedNote ? `${seedNote}; ` : ''}historical provider telemetry only — current manual copy/paste guidance uses the bounded task seed, not this learned floor`
-      : (seedNote ? `${seedNote}, ${healNote}` : healNote);
-    tokenBudgetLines.push(
-      `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
-      ` · ⚠️ truncated at cap ${s.truncatedAt} (${detail})`,
-    );
-  }
-  if (tokenBudgetCleanCount > 0) tokenBudgetLines.push(`- *(${tokenBudgetCleanCount} task(s) within budget — not shown)*`);
-  if (staleBudgetTasks.length > 0) tokenBudgetLines.push(`- *(${staleBudgetTasks.length} stale/removed task key(s) in the persisted budget store, ignored: ${staleBudgetTasks.join(', ')})*`);
-  const tokenBudgetMarkdown = tokenBudgetLines.length
-    ? `
-### Learned Token Budgets
-> Only tasks that have truncated are shown — ⚠️ means a call once hit its output
-> cap and was cut off. These records are CUMULATIVE across all runs (and both
-> providers), not just this one; live API caps auto-raise so they self-heal. What the
-> truncation CAUSED depends on the provider for that call: on the Gemini path the
-> cascade steps down to a weaker fallback model; on the paid Claude path there is
-> NO model fallback — the caller retries smaller on the SAME model (job-scoring
-> splits the batch), worst case placeholder-scoring one job. ⛔ AT hard cap = stuck.
-> Job-domain Non-API handoffs deliberately ignore this historical provider telemetry:
-> their copied max-output guidance comes from the current bounded task formula.
-${tokenBudgetLines.join('\n')}`
-    : '';
-  return tokenBudgetMarkdown;
-}
-
-function buildAIConfigurationMarkdown(tokenBudgetMarkdown) {
-  let aiConfigMarkdown = '';
+function buildAIConfigurationMarkdown() {
   const aiConfig = buildAIConfigSnapshot();
-  aiConfigMarkdown = `
+  const aiConfigMarkdown = `
 ## AI Configuration
-- Active provider: \`${aiConfig.provider}\`
-- **Active endpoint**: \`${aiConfig.activeEndpoint}\`
-- Model selection: \`${aiConfig.modelSelection}\`
-- Gemini API key set: ${aiConfig.hasGeminiKey ? '✅' : '❌'}
-- Anthropic API key set: ${aiConfig.hasAnthropicKey ? '✅' : '❌'}
-- Active key prefix: \`${aiConfig.activeKeyPrefix}\`
-- service-account.json configured path: \`${aiConfig.configuredSAPath}\`
-- service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
-- service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
-- **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fail until a key is added in Settings'}
-- ⚠️ **Job-domain tasks bypass this provider entirely**: ${aiConfig.nonApiJobTaskCount} task id(s) (\`${(aiConfig.nonApiJobTaskIds || []).join('`, `')}\`) are hard-routed to the non-API manual copy/paste handoff (\`providerForTask()\` in llm.js short-circuits them before consulting \`Active provider\` above) — everything above this line describes routing for non-job AI calls only.
-
-### Claude Model Routing (live API task groups → resolved model)
-> Which model serves each task GROUP on the Claude provider (llm.js
-> TASK_GROUPS) — shown regardless of the active provider above, since these
-> Settings picks persist independently. Application Generate uses Local AI and
-> is intentionally excluded from this API-routing table.
-${typeof aiConfig.claudeGroupRouting === 'string'
-  ? `- ${aiConfig.claudeGroupRouting}`
-  : Object.entries(aiConfig.claudeGroupRouting).map(([group, r]) => `- **${group}**: \`${r.family}\` → \`${r.model}\``).join('\n')}
-${aiConfig.provider === 'gemini' ? `
-### Gemini Telemetry
-- Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
-- Last successful model: \`${aiConfig.geminiLastSuccessfulModel}\`
-- Last attempted error: \`${aiConfig.geminiLastAttemptedError}\`
-- Compatible fallback catalog (availability varies by credential/project): ${(aiConfig.geminiCompatibleModels || []).map((model) => `\`${model}\``).join(', ') || '(none)'}
-${(aiConfig.geminiWarnings || []).length > 0
-    ? `- Model warnings:\n${aiConfig.geminiWarnings.map((warning) => `  - \`${warning.model}\` (${warning.type}): ${warning.message}`).join('\n')}`
-    : '- Model warnings: *(none)*'}
-` : ''}${tokenBudgetMarkdown}
+- Every AI task in this app is a human copy/paste handoff — transport \`${aiConfig.transport}\`. There is no live API call, key, provider, or model selection to report; the actual pass/fail evidence for a specific handoff is in the Non-API AI Handoff Lifecycle section below.
+- Known task ids (${aiConfig.knownTaskCount}): ${aiConfig.knownTaskIds.length ? aiConfig.knownTaskIds.map(id => `\`${id}\``).join(', ') : '(unresolved)'}
 `;
   return aiConfigMarkdown;
 }
@@ -2457,39 +2236,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
 
   // ── AI configuration snapshot ─────────────────────────────────────────────
-  // Surfaces missing keys / wrong provider — the most common cause of
-  // "I clicked the AI button and nothing happened" reports.
-  // Learned token budgets — observed output (visible+thinking) tokens per task,
-  // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
-  // the 24576 hard cap means a task is truncating and the cap has grown to match.
-  const tokenBudgetMarkdown = buildTokenBudgetsMarkdown();
-
-  // aiConfig pulls live provider/telemetry state (getGeminiTelemetry et al.) and
-  // is rendered unconditionally on every report — unlike almost every other
-  // section here, it was never guarded, so a throw anywhere in that chain took
-  // down the entire report instead of just this section.
+  // Every AI task is a manual copy/paste handoff now (nonApiAi.js) — this
+  // section states that routing fact. It is rendered unconditionally on every
+  // report — unlike almost every other section here, it was never guarded, so
+  // a throw anywhere in that chain took down the entire report instead of
+  // just this section.
   let aiConfigMarkdown = '';
-  try { aiConfigMarkdown = buildAIConfigurationMarkdown(tokenBudgetMarkdown); }
+  try { aiConfigMarkdown = buildAIConfigurationMarkdown(); }
   catch (err) { aiConfigMarkdown = diagnosticRenderFailureMarkdown('AI Configuration', err); }
-
-  // Cache counters live in their own small section so they remain visible even
-  // when the general AI configuration snapshot has an unrelated render error.
-  let claudeCacheTelemetryMarkdown = '';
-  try {
-    const provider = getAISettings()?.provider || 'gemini';
-    claudeCacheTelemetryMarkdown = buildClaudePromptCacheTelemetryMarkdown(
-      getClaudeCacheTelemetry(), { provider },
-    );
-  } catch (err) {
-    // Unlike a missing/empty telemetry record, a getter failure needs to be
-    // explicit when Claude is selected; otherwise a cache diagnosis would look
-    // like a trustworthy zero-activity result.
-    try {
-      if ((getAISettings()?.provider || 'gemini') === 'claude') {
-        claudeCacheTelemetryMarkdown = diagnosticRenderFailureMarkdown('Claude Prompt Cache Telemetry', err);
-      }
-    } catch { /* keep the rest of the report available */ }
-  }
 
   let jobsConfigMarkdown = '';
   if (hasJobNodes) try {
@@ -2810,7 +2564,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${claudeCacheTelemetryMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

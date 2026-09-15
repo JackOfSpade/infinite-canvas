@@ -1,7 +1,7 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
-import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery, selectResolvedDescriptionRecoveryCandidates } from '../test-dependencies.js';
+import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery } from '../test-dependencies.js';
 import { buildResolvedDescriptionWarning, filterJobsByDescriptionEvidence } from '../test-dependencies.js';
 import { generateMarkdown } from '../test-dependencies.js';
 import {
@@ -291,12 +291,12 @@ export default [
       const fullyRevealedProviderList = [...complete, ...deferred].map(job => ({
         ...job, snippet: '', descriptionDeferredReason: undefined,
       }));
-      const initialTargets = selectResolvedDescriptionRecoveryCandidates(
+      const initialTargets = partitionResolvedDescriptionRecoveryCandidates(
         [...complete, ...deferred], 'google', initialMountedSlice,
-      );
-      const fullTargets = selectResolvedDescriptionRecoveryCandidates(
+      ).candidates;
+      const fullTargets = partitionResolvedDescriptionRecoveryCandidates(
         [...complete, ...deferred], 'google', fullyRevealedProviderList,
-      );
+      ).candidates;
       const partialPartition = partitionResolvedDescriptionRecoveryCandidates(
         [...complete, ...deferred], 'google', [...complete, ...deferred.slice(0, 82)].map(job => ({
           ...job, snippet: '', descriptionDeferredReason: undefined,
@@ -788,11 +788,11 @@ export default [
         'google',
         [mergedResolvedRow],
       );
-      const remainingCandidates = selectResolvedDescriptionRecoveryCandidates(
+      const remainingCandidates = partitionResolvedDescriptionRecoveryCandidates(
         recovered.recoveryJobs,
         'google',
         [{ ...recoveredCard, snippet: '' }, { ...unavailableCard, snippet: '' }],
-      );
+      ).candidates;
       const mixedObservation = {
         // The unavailable identity stayed absent, while another card was opened
         // and recovered. That independent success must not reset the unavailable
@@ -2146,6 +2146,60 @@ export default [
         && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
       'migration advances the schema and is a no-op for an already-current workspace');
       return { schema: CURRENT_SCHEMA_VERSION, restored: 2 };
+    },
+  },
+  {
+    name: 'migrateRetiredBatchScoringState (v7): a hub saved mid-batch heals into a re-runnable terminal state',
+    run: () => {
+      // Batch scoring died with the live-API transport. A canvas saved while a
+      // batch was in flight carries a hubState the current JobSearchNode has no
+      // render branch for, so without this migration it reloads as a hub with
+      // no status and no way forward.
+      const withResults = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'scoring-batch', pendingBatch: { id: 'msgbatch_1', jobRunId: 'run-1' }, scoredJobs: [{ title: 'Scored role' }] } };
+      const withoutResults = { id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'scoring-batch', pendingBatch: { id: 'msgbatch_2' }, scoredJobs: [] } };
+      // pendingBatch is dropped wherever it appears — a hub can carry the marker
+      // while sitting in an ordinary state, and nothing reads the field now.
+      const strayMarker = { id: 'h3', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', pendingBatch: { id: 'msgbatch_3' }, scoredJobs: [{ title: 'Kept role' }] } };
+      const untouched = { id: 'h4', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'scoring', scoredJobs: [] } };
+      // A hub whose top-level jobRunId already survived (set on some other
+      // branch) alongside a DIFFERENT token buried in the retired pendingBatch —
+      // the existing, more-current top-level value must win, never the stale one.
+      const withExistingRunId = { id: 'h5', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'scoring-batch', jobRunId: 'existing-run', pendingBatch: { id: 'msgbatch_5', jobRunId: 'stale-run' }, scoredJobs: [] } };
+      const nested = { id: 'group', type: 'group', position: { x: 0, y: 0 }, data: { canvasData: { nodes: [
+        { id: 'inner', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'scoring-batch', pendingBatch: { id: 'msgbatch_4' }, scoredJobs: [{ title: 'Nested role' }] } },
+      ], edges: [], drawings: [] } } };
+
+      const direct = migrateRetiredBatchScoringState([withResults, withoutResults, strayMarker, untouched, withExistingRunId]);
+      const healed = direct.find(n => n.id === 'h1');
+      assert(healed.data.hubState === 'done' && !('pendingBatch' in healed.data),
+        'v7 keeps scored results by healing to done and drops the batch marker');
+      // pendingBatch.jobRunId was the ONLY place this hub's run token lived
+      // (top-level jobRunId is only set on a specific branch) — canvasInteractions.js
+      // reads node.data?.jobRunId to clean up backend run state on hub deletion,
+      // so dropping the whole pendingBatch object without backfilling would leak it.
+      assert(healed.data.jobRunId === 'run-1',
+        'v7 backfills data.jobRunId from pendingBatch.jobRunId when none exists yet');
+      assert(direct.find(n => n.id === 'h2').data.hubState === 'empty',
+        'v7 heals a result-less mid-batch hub to empty rather than inventing a done state');
+      assert(!('pendingBatch' in direct.find(n => n.id === 'h3').data)
+        && direct.find(n => n.id === 'h3').data.hubState === 'done',
+        'v7 strips a stray pendingBatch without disturbing an already-terminal hubState');
+      assert(direct.find(n => n.id === 'h4') === untouched,
+        'v7 leaves a hub that never carried batch state untouched, by reference');
+      assert(direct.find(n => n.id === 'h5').data.jobRunId === 'existing-run',
+        'v7 never overwrites an existing data.jobRunId with a different pendingBatch.jobRunId');
+
+      const viaRunner = runNodeMigrations([nested], 6);
+      assert(viaRunner[0].data.canvasData.nodes[0].data.hubState === 'done',
+        'v7 runner applies the healing recursively to group sub-canvases');
+      // Idempotency is the real safety net: an unversioned legacy file runs
+      // every migration, so a second pass must not re-heal an already-healed hub.
+      assert(migrateRetiredBatchScoringState(direct) === direct,
+        'v7 is idempotent — a second pass is a same-ref no-op');
+      assert(CURRENT_SCHEMA_VERSION >= 7
+        && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
+        'migration advances the schema and is a no-op for an already-current workspace');
+      return { schema: CURRENT_SCHEMA_VERSION, healed: 3 };
     },
   },
   {
@@ -4933,7 +4987,6 @@ export default [
         ['lastDroppedPathsRef.current = null', 'the previous files\' paths would let Re-run silently re-parse the cleared career files'],
         ['buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId })', 'the persisted recovery watermark and exact-run tie-breaker would not fence a late stale snapshot'],
         ['nextJobAnalysisClearWatermark(priorClearAt)', 'a second clear in the same millisecond could retain the first run token and misclassify the second run'],
-        ['discardJobBatch', 'an abandoned batch sidecar would keep billing and could report results onto a cleared hub'],
         ['discardJobRun', 'the staged run sidecar would linger and re-offer a resume for career files that are gone'],
         ['discardJobAnalysisSnapshot', 'the hub-scoped saved scrape would remain resumable after this hub cleared its career files'],
         ['setSavedAnalysisMeta(null)', 'the stale saved-scrape affordance could remain visible until the asynchronous sidecar cleanup returns'],
@@ -4949,14 +5002,13 @@ export default [
       }
 
       assert(clear.indexOf('const runId =') >= 0 && clear.indexOf('const runId =') < clear.indexOf('updateGlobal('),
-        'the run token must be captured before updateGlobal nulls pendingBatch/jobRunId, otherwise the recovery sidecars are orphaned on disk forever');
+        'the run token must be captured before updateGlobal nulls jobRunId, otherwise the recovery sidecars are orphaned on disk forever');
       assert(clear.includes('discardJobAnalysisSnapshot({ canvasFilePath, nodeId: id, runId: jobAnalysisClearedRunId, clearedAt: jobAnalysisClearedAt })'),
         'clearing career files must send the captured normalized run token, clear watermark, and exact canvas/hub ownership so a late same-run snapshot cannot resurrect');
       assert(clear.includes('Promise.allSettled(cleanupPromises.map(entry => entry.promise))')
         && clear.includes('Career Files Cleared with a Warning')
         && clear.includes("Promise.reject(new Error('Saved job analysis cleanup is unavailable'))")
-        && clear.includes("Promise.reject(new Error('Job run cleanup is unavailable'))")
-        && clear.includes("Promise.reject(new Error('Job batch cleanup is unavailable'))"),
+        && clear.includes("Promise.reject(new Error('Job run cleanup is unavailable'))"),
       'clear UI state may update immediately, but all sidecar cleanup outcomes — including an HMR-stale missing preload API — must settle before reporting a clean success');
 
       const clearUpdateStart = clear.indexOf('updateGlobal(id, {');
@@ -5185,7 +5237,7 @@ export default [
         && reset.includes('buildJobHubCareerClearPatch({')
         && reset.includes('...retainedCareerData')
         && reset.includes('initialDropAcceptedRef.current = resetHasReusableCareerProfile')
-        && reset.includes('const resetRunId = resetData.pendingBatch?.jobRunId || jobRunIdRef.current || resetData.jobRunId || null')
+        && reset.includes('const resetRunId = jobRunIdRef.current || resetData.jobRunId || null')
         && reset.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: resetRunId })'),
       'cancel clears partial buffers, retains parsed careers, and unlocks an initial cancellation with no reusable profile');
       // The presence checks above hold for either arm of the ternary; pin the
@@ -5223,14 +5275,12 @@ export default [
 
       assert(!source.includes('const cancelBatchScoring = useCallback')
         && !source.includes('Economy scoring')
-        && source.includes("hubState === 'scoring-batch'"),
-      'new searches expose no batch-scoring controls while old submitted batches retain a narrow finalizer');
+        && !source.includes("hubState === 'scoring-batch'"),
+      'batch scoring (the async Batch API opt-in) is retired entirely; no hub state or control for it may remain');
       const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(jobsSource.includes('async function deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId = null } = {})')
-        && jobsSource.includes('current?.batchId !== expectedBatchId')
-        && jobsSource.includes('const removed = await deleteJobBatchSidecar(canvasFilePath, nodeId, { expectedBatchId: sidecar.batchId });')
-        && jobsSource.includes('if (!removed) {'),
-      'a late batch poll must neither delete nor return results from a replacement batch sidecar');
+      assert(!jobsSource.includes('deleteJobBatchSidecar')
+        && !jobsSource.includes('expectedBatchId'),
+      'the Batch API sidecar/finalizer machinery must not linger now that there is no async batch transport to reconcile');
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes("reason.message === 'Node deleted'")
         && jobsSource.includes("phase: 'aborted'")
@@ -5642,41 +5692,6 @@ export default [
       assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
       assert(jobScoringBatchSize() >= 5 && jobScoringBatchSize() <= 15, 'Job date and collection-limit helpers: scoring batch out of bounds');
       return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), defaultPages: JOB_COLLECTION_LIMITS_DEFAULT.pagesPerPlatform };
-    },
-  },
-{
-    name: 'resultCaps: jobScoringBatchSize scales with the serving model',
-    run: () => {
-      const claude = jobScoringBatchSize('claude-sonnet-4-6');
-      const gemini = jobScoringBatchSize('gemini-3.5-flash');
-      const missing = jobScoringBatchSize();
-      assert(gemini === 15, `gemini Flash stays at the calibrated 15 (got ${gemini})`);
-      assert(missing === 15, `missing model → conservative default 15 (got ${missing})`);
-      assert(claude === 15, `adaptive-thinking Claude stays at the bounded 15-job ceiling (got ${claude})`);
-      assert(claude === gemini, 'all live scoring lanes use the same bounded batch size');
-      // Bounds hold for every known scoring-capable model id, and the size never
-      // exceeds what the output-token cap can honor (so a batch can't truncate).
-      const PER_JOB_FLOOR = 300, CAP = 24576, BASE = 2500, SAFETY = 0.8;
-      const outBudgetMax = Math.floor((CAP * SAFETY - BASE) / PER_JOB_FLOOR);
-      for (const m of ['claude-opus-4-8', 'claude-haiku-4-5-20251001', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']) {
-        const n = jobScoringBatchSize(m);
-        assert(n >= 5 && n <= 15, `${m} batch ${n} within [5,15]`);
-        assert(n <= outBudgetMax, `${m} batch ${n} fits the output-token budget (≤${outBudgetMax})`);
-      }
-      // Source contracts cover the cross-module safety seam: atomic LLM callers
-      // retain their default retry, while chunkable scoring reaches its own split
-      // fallback with a cleared, six-minute attempt deadline and live heartbeat.
-      const llmSource = fs.readFileSync(path.resolve('electron/ipc/llm.js'), 'utf8');
-      const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(llmSource.includes('retryOnTruncation && !retriedForCap')
-        && llmSource.includes('retryOnTruncation: opts.retryOnTruncation !== false'),
-      'LLM truncation retry remains backward-compatible and can be disabled by a chunkable caller');
-      assert(jobsSource.includes('retryOnTruncation: false')
-        && jobsSource.includes('const SCORING_ATTEMPT_TIMEOUT_MS = 6 * 60 * 1000')
-        && jobsSource.includes('clearTimeout(timer)')
-        && jobsSource.includes('SCORING_HEARTBEAT_MS'),
-      'job scoring disables duplicate truncation retries and owns a cleared bounded-attempt heartbeat');
-      return { claude, gemini, missing };
     },
   },
 {

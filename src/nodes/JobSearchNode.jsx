@@ -104,7 +104,7 @@ const STATE_LABELS = {
 };
 
 const PROCESSING_STATES = ['queued', 'parsing', 'interpreting-preferences', 'querying', 'searching', 'evaluating-preferences', 'scoring'];
-const BOARD_BUSY_SEARCH_STATES = new Set([...PROCESSING_STATES, 'scoring-batch']);
+const BOARD_BUSY_SEARCH_STATES = new Set(PROCESSING_STATES);
 const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set(['resume-saved-scrape', 'append-scored-jobs']);
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
 
@@ -474,7 +474,6 @@ function boardRunReadiness(node, {
   boardRunId = null,
   recoveryOwner = null,
   terminalFinalizationRecovery = false,
-  legacyBatchRecovery = false,
   pausedScoringContinuation = false,
   interruptedRecovery = false,
 } = {}) {
@@ -544,27 +543,17 @@ function boardRunReadiness(node, {
       error: 'Resolve or skip its blocked sources before starting another scan.',
     });
   }
-  if (processing || (BOARD_BUSY_SEARCH_STATES.has(hubState) && !(
-    legacyBatchRecovery
-    && hubState === 'scoring-batch'
-    && !!liveData.pendingBatch?.batchId
-  ))) {
+  if (processing || BOARD_BUSY_SEARCH_STATES.has(hubState)) {
     return searchRunOutcome('busy', {
       runId: liveData.jobRunId || null,
       resultDisposition: liveData.resultDisposition || null,
-      error: hubState === 'scoring-batch'
-        ? 'This Job Search module is finishing a previous scoring run.'
-        : 'This Job Search module is already running.',
+      error: 'This Job Search module is already running.',
     });
   }
   // Retrying a terminal receipt/sidecar cleanup neither queries a platform nor
   // reads career inputs. Once ordinary ownership/busy checks pass, do not let a
   // later settings edit block this exact-token housekeeping transaction.
   if (terminalFinalizationRecovery) return null;
-  // The Board already owns the outer job-search lease for this exact recovered
-  // child. Legacy batch retirement replays its durable local snapshot and does
-  // not need current platform or career-input readiness.
-  if (legacyBatchRecovery && hubState === 'scoring-batch' && liveData.pendingBatch?.batchId) return null;
   if (platformsVerifying) {
     return searchRunOutcome('not-ready', {
       error: 'Its selected platform connections are still being checked.',
@@ -837,9 +826,8 @@ function boardRunRollbackPatch(previousData, nodeId) {
     manualAiResume: null,
     // A Board-managed run can be cancelled while one of these fields names
     // the abandoned run. Previous completed results are safe to restore, but
-    // no paused/batch/manual continuation may survive the rollback.
+    // no paused/manual continuation may survive the rollback.
     pendingJobs: null,
-    pendingBatch: null,
     pendingTargetRole: null,
     pendingCareerData: null,
     pendingJobPreferences: null,
@@ -855,7 +843,6 @@ function boardRunRollbackPatch(previousData, nodeId) {
       gatheredCount: 0,
       resultDisposition: null,
       errorMessage: null,
-      isRateLimit: false,
     }),
   };
 }
@@ -865,10 +852,7 @@ function boardRunRollbackPatch(previousData, nodeId) {
  * Phase 2: Per-source independent status tracking + source filtering.
  *
  * data.hubState: 'empty' | 'parsing' | 'querying' | 'searching' | 'scoring' |
- *                'scoring-batch' | 'sources-ready' | 'done'
- *                'scoring-batch' is a legacy-only recovery state for a Batch API
- *                request submitted by an older version. New searches always use
- *                immediate scoring.
+ *                'sources-ready' | 'done'
  *                'sources-ready' = paused after search because one or more
  *                sources hit block-severity warnings (captcha, login wall).
  *                The user must resolve or skip them before scoring runs.
@@ -1206,7 +1190,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         error: 'The Job Search result changed while terminal cleanup was settling.',
       });
     }
-    updateGlobal(id, { errorMessage: null, isRateLimit: false });
+    updateGlobal(id, { errorMessage: null });
     return searchRunOutcome('completed', { runId, resultDisposition: expectedDisposition });
   }, [canvasFilePath, completeJobRun, getNode, id, updateGlobal]);
   const [savedAnalysisMeta, setSavedAnalysisMeta] = useState(null);
@@ -1695,7 +1679,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return {
         manualAiResume: nextMarker,
         manualAiCleanupReceipts: nextReceipts.length > 0 ? nextReceipts : null,
-        ...(clearsCleanupError ? { errorMessage: null, isRateLimit: false } : {}),
+        ...(clearsCleanupError ? { errorMessage: null } : {}),
         ...(surfacesPrimaryFailure ? {
           errorMessage: primaryFailure.reason?.message || 'Saved manual-AI cleanup did not finish.',
         } : {}),
@@ -1821,7 +1805,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     });
     if (result?.success === false) {
       const error = new Error(result.error || 'Failed to evaluate Job Preferences');
-      if (result.isRateLimit) error.isRateLimit = true;
       throw error;
     }
     return normalizePreferenceEvaluation(result, fallbackJobs);
@@ -2473,22 +2456,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }, 1000);
   }, [id, data.scrapeWarnings, triggerUSAJobsBackgroundSearch]);
 
-  // React to settings changes. We log them for bug report telemetry but do NOT
-  // auto-clear the error or revert the state without explicit user action.
+  // React to settings changes (jobs section only — the 'ai' settings section
+  // was deleted along with all live LLM HTTP API support, so no event can
+  // ever carry it any more; the branch that used to log-only on 'ai' changes
+  // was removed as unreachable).
   useEffect(() => {
     if (!window.electronAPI?.onSettingsChanged) return;
     const cleanup = window.electronAPI.onSettingsChanged((payload) => {
-      if (payload?.changedSections?.includes('ai')) {
-        if (data.errorMessage) {
-          EventLogger.log(`[JobSearch][${id}] Settings changed with active error; keeping error banner open for explicit user action`);
-        }
-      }
       if (payload?.changedSections?.includes('jobs')) {
         handleJobsSettingsChange();
       }
     });
     return () => cleanup?.();
-  }, [id, data.errorMessage, handleJobsSettingsChange]);
+  }, [handleJobsSettingsChange]);
 
   // A credentials change may arrive while a recovered Board owns this Search.
   // The intent is a latch, not a one-shot attempt: when that durable owner
@@ -2984,7 +2964,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scoreRangeMin,
       scoreRangeMax,
       pendingJobs: null,
-      pendingBatch: null,
       pendingCareerData: null,
       pendingTargetRole: null,
       pendingJobPreferences: null,
@@ -3021,12 +3000,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
     // Step 4: Scoring
     setScoringProgress(null); // clear any prior run's counter; backend re-paints "0 / M"
-    // Preserve non-gating collection facts while a legacy/deferred scorer owns
-    // the run.  Most current scorers settle in this call and pass the value on
-    // to finishScoringAndSpawn below, but an older persisted batch returns
-    // early and is finalized later by pollBatchOnce.  Without retaining the
-    // normalized value here, that recovery path silently dropped a completed
-    // Glassdoor nation-scope disclosure.
+    // Preserve non-gating collection facts across the scoring transition —
+    // without retaining the normalized value here, a completed Glassdoor
+    // nation-scope disclosure could be silently dropped before it reaches
+    // finishScoringAndSpawn below.
     updateGlobal(currentId, {
       hubState: 'scoring',
       jobCount: jobs.length,
@@ -3074,36 +3051,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     });
     if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunId });
     if (!scoreResult.success) {
-      const err = new Error(scoreResult.error || 'Failed to score jobs');
-      if (scoreResult.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
-
-    // Only old app versions could submit a batch. New calls never ask for one;
-    // retain this defensive recovery branch so an in-flight legacy request is
-    // not discarded if a backend returns its already-persisted state.
-    if (scoreResult.batchPending) {
-      if (!completeRun) {
-        // A saved-result re-analysis owns no job-run sidecar to poll. Keeping
-        // the previous done state is safer than stranding it in a legacy batch
-        // recovery state that cannot atomically replace those scores.
-        throw new Error('Saved-job re-analysis returned an unsupported deferred scoring task. Your existing hiring-fit results were kept.');
-      }
-      updateGlobal(currentId, {
-        hubState: 'scoring-batch',
-        jobCount: jobs.length,
-        pendingBatch: {
-          batchId: scoreResult.batchId,
-          startedAt: Date.now(),
-          count: scoreResult.batchCount,
-          selectedForScoring: scoreResult.selectedForScoring,
-          jobRunId,
-        },
-      });
-      return searchRunOutcome('deferred', {
-        runId: jobRunId,
-        error: 'This search is waiting for a legacy scoring batch to finish.',
-      });
+      throw new Error(scoreResult.error || 'Failed to score jobs');
     }
 
     if (resultMode === 'append') {
@@ -3157,7 +3105,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       cancelled,
       completeRun,
     });
-    if (outcome?.status !== 'cancelled' && outcome?.status !== 'deferred') {
+    if (outcome?.status !== 'cancelled') {
       await completeManualAiRun(effectiveManualAiRunId);
     }
     return outcome || searchRunOutcome('failed', {
@@ -3165,276 +3113,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       error: 'The scoring pipeline ended without a terminal result.',
     });
   }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, appendJobsToDoneCanvas, completeManualAiRun, data.locationSnapshot, data.searchLocation, data.preferredLocation, data.canonicalLocation, data.remoteResidences, data.careerData, data.collectionScopeCaveats]);
-
-  // ── Legacy Batch-API recovery ─────────────────────────────────────────────
-  // A prior app version may have left an API batch sidecar. The main process
-  // retires it locally without polling the provider, then this path restarts
-  // from the saved analysis snapshot through the normal Non-API AI handoff.
-  const batchCompletingRef = useRef(false);
-  const pollBatchOnce = useCallback(async ({
-    queueManagedExternally = false,
-    parentCancelled = null,
-    orchestratorNodeId = null,
-    boardRunId = null,
-    manualAiRunId: requestedManualAiRunId = null,
-  } = {}) => {
-    if (batchCompletingRef.current) return searchRunOutcome('busy');
-    if (isJobWorkflowDeletionPending(id)) return searchRunOutcome('cancelled');
-    if (!canvasFilePath || !window.electronAPI?.pollJobBatch) {
-      return searchRunOutcome('not-ready', { error: 'Legacy scoring recovery is unavailable.' });
-    }
-    const admissionData = getNode(id)?.data || null;
-    const admissionBatchId = admissionData?.pendingBatch?.batchId || null;
-    if (admissionData?.hubState !== 'scoring-batch' || !admissionBatchId) {
-      return searchRunOutcome('not-found');
-    }
-    if (queueManagedExternally) {
-      const boardPlan = getNode(orchestratorNodeId)?.data?.boardScanResume;
-      if (
-        !orchestratorNodeId
-        || !boardRunId
-        || boardPlan?.version !== 1
-        || boardPlan.boardRunId !== boardRunId
-        || (
-          boardPlan.activeSourceId !== id
-          && !(Array.isArray(boardPlan.activeSourceIds) && boardPlan.activeSourceIds.includes(id))
-        )
-      ) {
-        return searchRunOutcome('not-ready', {
-          runId: admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
-          error: 'The owning Job Board legacy scoring recovery plan no longer matches this Search.',
-        });
-      }
-    }
-    // A durable Board plan predating this attempt owns the Search. Yield without
-    // touching the legacy sidecar; the reactive owner key retries this recovery
-    // if that Board transaction retires without consuming the batch.
-    if (
-      !queueManagedExternally
-      && findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
-      && !findJobSearchBoardPausedContinuationOwner(
-        id,
-        admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
-        getNodes(),
-        getEdges(),
-      )
-    ) {
-      EventLogger.log(`[JobSearch][${id}] Legacy batch continuation deferred to its durable Job Board owner.`);
-      return searchRunOutcome('paused', {
-        runId: admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
-      });
-    }
-    batchCompletingRef.current = true;
-    // Capture cancellation epoch at start, like every other pipeline entry
-    // point in this file — without it, a Reset that lands while this poll's
-    // pollJobBatch/finishScoringAndSpawn is in flight can still apply the
-    // abandoned run's results, silently reviving a hub the user just
-    // discarded (the server-side discardJobBatch fired on reset only stops
-    // the NEXT poll, not this in-flight one).
-    const locallyCancelled = epoch.start();
-    const cancelled = () => locallyCancelled()
-      || (typeof parentCancelled === 'function' && parentCancelled());
-    let lease = null;
-    try {
-      // Polling retires the legacy sidecar before the renderer can replay its
-      // saved snapshot. Own the continuation lane before that first mutation so
-      // a Job Board cannot inspect `scoring-batch`, skip this Search, and release
-      // its transaction in the poll -> queue gap.
-      if (!queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun({
-        nodeId: id,
-        kind: 'jobsearch',
-        lane: 'job-search',
-        priority: 'continuation',
-        label: 'Resume saved job scoring',
-        onQueued: ({ position }) => {
-          updateGlobal(id, { queuedModuleRun: { label: 'Resuming saved job scoring', position } });
-        },
-        onQueueUpdate: ({ position }) => {
-          updateGlobal(id, { queuedModuleRun: { label: 'Resuming saved job scoring', position } });
-        },
-        onStart: () => {
-          if (cancelled() || isJobWorkflowDeletionPending(id)) throw new Error('Node deleted');
-          updateGlobal(id, { queuedModuleRun: null });
-        },
-      });
-      if (cancelled()) return searchRunOutcome('cancelled');
-
-      // The effect can wait behind another complete transaction. Bind this
-      // continuation to the exact still-live batch and refuse before poll if a
-      // reset/replacement or an active Board child now owns the Search.
-      const turnData = getNode(id)?.data || null;
-      const activeBoardControl = boardRunControlRef.current;
-      const exactExternalControl = queueManagedExternally
-        && activeBoardControl?.orchestratorNodeId === orchestratorNodeId
-        && activeBoardControl?.boardRunId === boardRunId;
-      const liveRecoveryOwner = findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
-      const exactExternalOwner = queueManagedExternally
-        && liveRecoveryOwner?.orchestratorNodeId === orchestratorNodeId
-        && liveRecoveryOwner?.boardRunId === boardRunId;
-      if (
-        !turnData
-        || isJobWorkflowDeletionPending(id)
-        || turnData.hubState !== 'scoring-batch'
-        || turnData.pendingBatch?.batchId !== admissionBatchId
-        || processingRunsRef.current.active
-        || (!!activeBoardControl && !exactExternalControl)
-        || (!!liveRecoveryOwner && !exactExternalOwner)
-      ) {
-        EventLogger.log(`[JobSearch][${id}] Legacy batch continuation changed while queued; poll skipped.`);
-        return searchRunOutcome('superseded', {
-          runId: turnData?.pendingBatch?.jobRunId || turnData?.jobRunId || null,
-        });
-      }
-
-      let res;
-      try {
-        res = await window.electronAPI.pollJobBatch({ canvasFilePath, nodeId: id });
-      } catch (e) {
-        EventLogger.log(`[JobSearch][${id}] batch poll failed: ${e?.message || e}`);
-        return searchRunOutcome('recovery-inspection-failed', {
-          runId: turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-          error: e,
-        });
-      }
-      if (cancelled()) return searchRunOutcome('cancelled');
-      if (res?.retired) {
-        const manualAiRunId = requestedManualAiRunId || createManualAiRunId(id);
-        try {
-        const recovered = await window.electronAPI.getLastJobAnalysisSnapshot?.({ canvasFilePath, nodeId: id });
-        if (cancelled()) return searchRunOutcome('cancelled');
-        const snapshot = recovered?.success === false ? null : recovered?.snapshot;
-        const sourceHubId = snapshot?.sourceHubId || snapshot?.nodeId || null;
-        if (!snapshot || !Array.isArray(snapshot.jobs) || snapshot.jobs.length === 0 || !snapshot.profile
-          || (sourceHubId && sourceHubId !== id)) {
-          throw new Error('A previous API scoring run was retired, but its matching saved job-analysis snapshot is unavailable. Your existing results were left unchanged; run the search again to score these jobs with Non-API AI.');
-        }
-        return await runScoringAndSpawn({
-          profile: snapshot.profile,
-          careerData: typeof snapshot.careerData === 'string' ? snapshot.careerData : turnData.careerData,
-          jobs: snapshot.jobs,
-          gatheredCount: snapshot.sourceGatheredCount
-            ?? snapshot.searchFunnel?.relevanceKept
-            ?? snapshot.searchFunnel?.raw
-            ?? snapshot.gatheredJobCount
-            ?? snapshot.jobs.length,
-          scrapeWarnings: turnData.scrapeWarnings || [],
-          activeTargetRole: String(snapshot.targetRole || res.targetRole || turnData.targetRole || '').trim(),
-          originalPos: getNode(id)?.position || { x: 0, y: 0 },
-          jobRunId: snapshot.runId || turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-          cancelled,
-          locationSnapshot: snapshot.locationSnapshot || null,
-          manualAiRunId,
-        });
-        } catch (error) {
-          if (!cancelled()) {
-            EventLogger.error(`[JobSearch][${id}] Batch poll failed — raising error banner: ${error?.message || String(error)}`);
-            updateGlobal(id, {
-              pendingBatch: null,
-              hubState: 'done',
-              resultDisposition: 'incomplete',
-              errorMessage: error?.message || String(error),
-            });
-          }
-          return searchRunOutcome(cancelled() ? 'cancelled' : 'failed', {
-            runId: turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-            resultDisposition: cancelled() ? null : 'incomplete',
-            error,
-          });
-        }
-      }
-      if (!res?.found) {
-      // This hub's batch entry is gone (completed/discarded). If we're still parked
-      // in 'scoring-batch' it vanished without delivering — flip to a recoverable
-      // terminal rather than spin forever (the poll effect tears down on null).
-      const liveData = getNode(id)?.data || null;
-      if (
-        liveData?.hubState !== 'scoring-batch'
-        || liveData.pendingBatch?.batchId !== admissionBatchId
-      ) return searchRunOutcome('superseded');
-      const terminalRunId = liveData.pendingBatch?.jobRunId || liveData.jobRunId || null;
-      const live = liveData.hubState;
-      const completion = live === 'scoring-batch' && terminalRunId
-        ? await completeJobRun(terminalRunId, 'failed', 'incomplete', canvasFilePath, 0, moduleFingerprint([]), cancelled)
-        : null;
-      if (cancelled()) return searchRunOutcome('cancelled', { runId: terminalRunId });
-      const finalizationError = terminalFinalizationError(terminalRunId, canvasFilePath, completion);
-      updateGlobal(id, live === 'scoring-batch'
-        ? {
-            pendingBatch: null, pendingJobs: null, hubState: 'done',
-            scoredJobs: [], finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
-            scrapedCount: 0, gatheredCount: 0, scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
-            resultDisposition: 'incomplete',
-            errorMessage: finalizationError,
-          }
-        : { pendingBatch: null });
-        return searchRunOutcome(finalizationError ? 'recovery-finalization-failed' : 'failed', {
-          runId: terminalRunId,
-          resultDisposition: 'incomplete',
-          error: finalizationError || 'The legacy scoring sidecar is no longer available.',
-        });
-      }
-      // Defense-in-depth: never apply a batch that belongs to a different hub. The
-    // per-nodeId sidecar keying already scopes the read; this also guards a legacy
-    // single-entry sidecar whose nodeId isn't this hub.
-      if (res.nodeId && res.nodeId !== id) {
-        return searchRunOutcome('recovery-inspection-failed', {
-          runId: turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-          error: 'The legacy scoring sidecar belongs to a different Job Search module.',
-        });
-      }
-      if (res.done && Array.isArray(res.scoredJobs)) {
-        return await finishScoringAndSpawn({
-          scoredJobs: res.scoredJobs,
-          profile: turnData.resumeProfile,
-          gatheredCount: res.gatheredCount,
-          scrapedCount: res.selectedForScoring ?? res.scoredJobs.length,
-          scrapeWarnings: turnData.scrapeWarnings || [],
-          // A deferred batch resumes after the normal search result has left
-          // the renderer. Carry the trusted node field through this terminal
-          // bridge so its non-gating Glassdoor scope disclosure survives.
-          collectionScopeCaveats: turnData.collectionScopeCaveats,
-          activeTargetRole: (res.targetRole || turnData.targetRole || '').trim(),
-          originalPos: getNode(id)?.position || { x: 0, y: 0 },
-          testMode: false,
-          jobRunId: turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-          cancelled,
-        });
-      }
-      return searchRunOutcome('recovery-inspection-failed', {
-        runId: turnData.pendingBatch?.jobRunId || turnData.jobRunId || null,
-        error: 'The legacy scoring sidecar returned an unsupported state.',
-      });
-    } catch (error) {
-      if (!cancelled() && !isNodeDeletedAbort(error)) {
-        EventLogger.log(`[JobSearch][${id}] legacy batch continuation stopped: ${error?.message || error}`);
-      }
-      return searchRunOutcome(cancelled() || isNodeDeletedAbort(error) ? 'cancelled' : 'failed', {
-        runId: admissionData.pendingBatch?.jobRunId || admissionData.jobRunId || null,
-        error,
-      });
-    } finally {
-      batchCompletingRef.current = false;
-      if (!cancelled() && getNode(id)) {
-        updateGlobal(id, (node) => (
-          node?.data?.queuedModuleRun?.label === 'Resuming saved job scoring'
-            ? { queuedModuleRun: null }
-            : null
-        ));
-      }
-      if (lease) await waitForRendererCommitFrame();
-      lease?.release();
-    }
-  }, [id, canvasFilePath, updateGlobal, finishScoringAndSpawn, runScoringAndSpawn, getNode, getNodes, getEdges, epoch, completeJobRun, moduleRunQueue]);
-
-  useEffect(() => {
-    if (
-      hubState !== 'scoring-batch'
-      || !data.pendingBatch?.batchId
-      || activeBoardRecoveryOwnerKey
-    ) return undefined;
-    pollBatchOnce(); // retire/recover immediately; no provider polling loop
-    return undefined;
-  }, [activeBoardRecoveryOwnerKey, data.pendingBatch?.batchId, deletionLifecycleRevision, hubState, pollBatchOnce]);
 
   /**
    * Shared post-search disposition for the search + resume paths: pause in
@@ -3675,7 +3353,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scrapeWarnings: warnings,
         collectionScopeCaveats: normalizeCollectionScopeCaveats(collectionScopeCaveats),
         pendingJobs: null,
-        pendingBatch: null,
         jobRunId,
         rerunOutcome: 'no-new-results',
         rerunNotice: null,
@@ -3775,7 +3452,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const locationProblem = locationValidationMessage(runLocationSnapshot.searchLocation);
     if (!hasRequiredLocations(runLocationSnapshot.searchLocation)) {
       EventLogger.log(`[JobSearch][${id}] Run refused — error banner raised: ${locationProblem}`);
-      updateGlobal(id, { errorMessage: locationProblem, isRateLimit: false, rerunOutcome: null, rerunNotice: null });
+      updateGlobal(id, { errorMessage: locationProblem, rerunOutcome: null, rerunNotice: null });
       addToast({ title: 'Complete job locations', description: locationProblem, type: 'error' });
       return searchRunOutcome('not-ready', { error: locationProblem });
     }
@@ -4071,7 +3748,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       updateGlobal(currentId, {
         errorMessage: null,
-        isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
         reanalysisNotice: null,
@@ -4108,7 +3784,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
         if (!parseResult.success) {
           const err = new Error(parseResult.error || 'Failed to parse career files');
-          if (parseResult.isRateLimit) err.isRateLimit = true;
           throw err;
         }
         profile = parseResult.profile;
@@ -4153,7 +3828,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
         if (interpretationResult?.success === false) {
           const err = new Error(interpretationResult.error || 'Failed to understand Job Preferences');
-          if (interpretationResult.isRateLimit) err.isRateLimit = true;
           throw err;
         }
         jobPreferencesInterpretation = interpretationResult?.preferencePlan
@@ -4209,7 +3883,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
         if (!locationResult.success) {
           const err = new Error(locationResult.error || 'Failed to resolve search location');
-          if (locationResult.isRateLimit) err.isRateLimit = true;
           throw err;
         }
         queriesResult = {
@@ -4232,7 +3905,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
         if (!queriesResult.success) {
           const err = new Error(queriesResult.error || 'Failed to generate queries');
-          if (queriesResult.isRateLimit) err.isRateLimit = true;
           throw err;
         }
       }
@@ -4323,9 +3995,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // caught generically by handleSafe) must not fall through to foundJobs=[] —
       // that reads identically to a genuine zero-result search and the error is lost.
       if (!searchResult.success) {
-        throw Object.assign(new Error(searchResult.error || 'Job search failed'), {
-          isRateLimit: !!searchResult.isRateLimit,
-        });
+        throw new Error(searchResult.error || 'Job search failed');
       }
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       // Reconcile the backend's stale final list with source actions that
@@ -4441,7 +4111,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
-          pendingJobs: null, pendingBatch: null, scrapeWarnings: finalWarnings,
+          pendingJobs: null, scrapeWarnings: finalWarnings,
           collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           resultDisposition: 'preference-filtered',
           errorMessage: finalizationError,
@@ -4520,7 +4190,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scrapeWarnings: finalWarnings,
           collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           pendingJobs: null,
-          pendingBatch: null,
           jobRunId: searchResult.runId || null,
           testModeNote: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled`,
           rerunOutcome: null,
@@ -4617,7 +4286,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: hubHasResults ? 'done' : 'empty',
         resultDisposition: hubHasResults ? 'incomplete' : null,
         errorMessage: error?.message || String(error),
-        isRateLimit: !!error?.isRateLimit,
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -4932,7 +4600,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: pausedGatheredCount,
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
-        pendingBatch: null,
         pendingTargetRole: null,
         pendingJobPreferences: null,
         pendingJobPreferencePlan: null,
@@ -5083,7 +4750,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       activeManualAiRunIdRef.current = manualAiRunId;
       updateGlobal(currentId, {
         errorMessage: null,
-        isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
         reanalysisNotice: null,
@@ -5162,7 +4828,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
-          pendingJobs: null, pendingBatch: null, pendingCareerData: null,
+          pendingJobs: null, pendingCareerData: null,
           pendingTargetRole: null, pendingJobPreferences: null,
           pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
           resultDisposition: 'preference-filtered',
@@ -5212,7 +4878,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'sources-ready',
         errorMessage: error?.message || String(error),
-        isRateLimit: !!error?.isRateLimit,
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -5606,7 +5271,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (cancelled()) return;
         if (interpretationResult?.success === false) {
           const err = new Error(interpretationResult.error || 'Failed to restore Job Preferences for this resumed search');
-          if (interpretationResult.isRateLimit) err.isRateLimit = true;
           throw err;
         }
         jobPreferencesInterpretation = interpretationResult?.preferencePlan
@@ -5682,9 +5346,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('recovery-inspection-failed', exactRecoveryFailure);
       }
       if (!searchResult?.success) {
-        throw Object.assign(new Error(searchResult?.error || 'Job search failed'), {
-          isRateLimit: !!searchResult?.isRateLimit,
-        });
+        throw new Error(searchResult?.error || 'Job search failed');
       }
       const foundJobs = Array.isArray(searchResult.jobs) ? searchResult.jobs : [];
       // A crash-resume receives the same response shape as a fresh search.
@@ -5748,7 +5410,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
-          pendingJobs: null, pendingBatch: null, scrapeWarnings: finalWarnings,
+          pendingJobs: null, scrapeWarnings: finalWarnings,
           collectionScopeCaveats: normalizeCollectionScopeCaveats(finalCollectionScopeCaveats),
           resultDisposition: 'preference-filtered',
           errorMessage: terminalFinalizationError(searchResult?.runId, cfp, completion),
@@ -5813,7 +5475,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: hubHasResults ? 'done' : 'empty',
         resultDisposition: hubHasResults ? 'incomplete' : null,
         errorMessage: error?.message || String(error),
-        isRateLimit: !!error?.isRateLimit,
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -6635,7 +6296,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queuedModuleRun: null,
         manualAiResume: null,
         errorMessage: null,
-        isRateLimit: false,
         ...reanalysisRestore.patch,
       });
       reanalysisRestoreRef.current = null;
@@ -6653,15 +6313,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // reusable profile, the empty state still exposes an explicit Re-run Search
     // action backed by that profile.
     lastDroppedPathsRef.current = null;
-    // Cancel + clean up any pending async batch scoring (best-effort).
-    const resetRunId = resetData.pendingBatch?.jobRunId || jobRunIdRef.current || resetData.jobRunId || null;
-    if (resetData.pendingBatch?.batchId) {
-      window.electronAPI?.discardJobBatch?.({
-        canvasFilePath,
-        nodeId: id,
-        batchId: resetData.pendingBatch.batchId,
-      }).catch(() => {});
-    }
+    const resetRunId = jobRunIdRef.current || resetData.jobRunId || null;
     // If search-jobs already returned, the renderer owns the run token and can
     // discard its recovery sidecars directly. If Reset landed during the scrape,
     // the main-process abort path performs the same token-scoped cleanup because
@@ -6694,8 +6346,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     sourceWarningOverridesDuringSearchRef.current.clear();
     hubStateRef.current = 'empty';
     updateGlobal(id, {
-      hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, testModeNote: null, pendingBatch: null,
-      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
+      hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null,      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
       manualAiResume: null,
       terminalFinalizationRecovery: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
@@ -6923,7 +6574,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (failedReceipt && canSurfaceFailure) {
         updateGlobal(id, {
           errorMessage: failedReceipt.cleanupError,
-          isRateLimit: false,
         });
       }
       return;
@@ -6945,7 +6595,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (canSurfaceLiveFailure) {
         updateGlobal(id, {
           errorMessage: error?.message || 'An older saved manual-AI handoff still needs cleanup.',
-          isRateLimit: false,
         });
       }
     });
@@ -7270,7 +6919,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const boardCleanupIntentPersisted = await persistChildCancellationCleanup({
           sourceId: id,
           runId: persistedCleanup?.runId || null,
-          batchId: persistedCleanup?.batchId || null,
           manualAiRunId: cancellationManualAiRunId,
           manualAiRunIds: [...cancellationManualAiRunIds],
           priorRunId: persistedPriorRunId,
@@ -7323,7 +6971,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             beforeRetirement: acknowledgedIds => persistChildCancellationCleanup({
               sourceId: id,
               runId: recoveredRunId,
-              batchId: persistedCleanup?.batchId || null,
               manualAiRunId: cancellationManualAiRunId,
               manualAiRunIds: acknowledgedIds,
               priorRunId: persistedPriorRunId,
@@ -7338,7 +6985,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           await persistChildCancellationCleanup({
             sourceId: id,
             runId: recoveredRunId,
-            batchId: persistedCleanup?.batchId || null,
             manualAiRunId: null,
             manualAiRunIds: [],
             priorRunId: persistedPriorRunId,
@@ -7379,23 +7025,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           await persistChildCancellationCleanup({
             sourceId: id,
             runId: recoveredRunId,
-            batchId: persistedCleanup?.batchId || null,
             manualAiRunId: cancellationManualAiRunId,
             manualAiRunIds: [...cancellationManualAiRunIds],
             priorRunId: persistedPriorRunId,
             ownsExistingRecoveryRun: persistedCleanup?.ownsExistingRecoveryRun === true,
             runCleanupAuthorized,
           });
-        }
-        if (persistedCleanup?.batchId && !terminalFinalizationRecovery) {
-          const batchCleanup = await window.electronAPI?.discardJobBatch?.({
-            canvasFilePath,
-            nodeId: id,
-            batchId: persistedCleanup.batchId,
-          });
-          if (batchCleanup?.ok !== true) {
-            throw new Error('The interrupted legacy scoring batch could not be removed.');
-          }
         }
         if (recoveredRunId && runCleanupAuthorized && !terminalFinalizationRecovery) {
           const [runCleanup, analysisCleanup] = await Promise.all([
@@ -7551,21 +7186,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const live = getNode(id)?.data || {};
     const priorRunId = control.priorRunId || null;
     const liveRunId = live.jobRunId || null;
-    const pendingBatchRunId = live.pendingBatch?.jobRunId || null;
     const activeRunId = control.cancelledRunId
       || (jobRunIdRef.current && (
         jobRunIdRef.current !== priorRunId || control.ownsExistingRecoveryRun
       ) ? jobRunIdRef.current : null)
-      || (liveRunId !== priorRunId ? liveRunId : null)
-      || (pendingBatchRunId !== priorRunId ? pendingBatchRunId : null);
+      || (liveRunId !== priorRunId ? liveRunId : null);
     const runCleanupAuthorized = !!activeRunId && (
       control.ownsExistingRecoveryRun === true || activeRunId !== priorRunId
     );
-    const priorBatchId = control.previousData?.pendingBatch?.batchId || null;
-    const activeBatchId = live.pendingBatch?.batchId
-      && live.pendingBatch.batchId !== priorBatchId
-      ? live.pendingBatch.batchId
-      : null;
     control.cancelledRunId = activeRunId || null;
 
     EventLogger.log(
@@ -7580,7 +7208,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       await persistChildCancellationCleanup({
         sourceId: id,
         runId: control.cancelledRunId || activeRunId || null,
-        batchId: activeBatchId || null,
         manualAiRunId: control.manualAiRunId || [...controlManualAiRunIds][0] || null,
         manualAiRunIds: [...controlManualAiRunIds],
         priorRunId,
@@ -7614,7 +7241,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           beforeRetirement: acknowledgedIds => persistChildCancellationCleanup({
             sourceId: id,
             runId: control.cancelledRunId || activeRunId || null,
-            batchId: activeBatchId || null,
             manualAiRunId: primaryManualAiRunId,
             manualAiRunIds: acknowledgedIds,
             priorRunId,
@@ -7626,7 +7252,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         await persistChildCancellationCleanup({
           sourceId: id,
           runId: control.cancelledRunId || activeRunId || null,
-          batchId: activeBatchId || null,
           manualAiRunId: null,
           manualAiRunIds: [],
           priorRunId,
@@ -7654,7 +7279,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         await persistChildCancellationCleanup({
           sourceId: id,
           runId: info.runId,
-          batchId: activeBatchId || null,
           manualAiRunId: primaryManualAiRunId,
           manualAiRunIds: [...controlManualAiRunIds],
           priorRunId,
@@ -7714,16 +7338,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // run ledger and its analysis/prompt snapshot. The Search result is valid;
       // only its idempotent completion transaction remains retryable.
       if (control.terminalFinalizationRecovery) return;
-      if (activeBatchId) {
-        const batchCleanup = await window.electronAPI?.discardJobBatch?.({
-          canvasFilePath,
-          nodeId: id,
-          batchId: activeBatchId,
-        });
-        if (batchCleanup?.ok !== true) {
-          throw new Error('The interrupted legacy scoring batch could not be removed.');
-        }
-      }
       const cleanupRunId = control.cancelledRunId || null;
       if (cleanupRunId && (
         control.runCleanupAuthorized === true
@@ -7845,10 +7459,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       && liveNode?.data?.manualAiResume?.runId === manualAiResume.runId
       ? liveNode.data.manualAiResume
       : manualAiResume;
-    const exactLegacyBatchRecovery = recoverInterruptedJobRun
-      && liveNode?.data?.hubState === 'scoring-batch'
-      && typeof liveNode.data.pendingBatch?.batchId === 'string'
-      && !!liveNode.data.pendingBatch.batchId;
     const exactInterruptedRecovery = typeof interruptedRecoveryRunId === 'string'
       && !!interruptedRecoveryRunId;
     const recoveryOwner = manualAiResume?.runId
@@ -7878,7 +7488,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || !!requestedManualRetirementRecovery
       || !!effectiveManualAiResume?.retirementPending
       || isSavedScrapeManualAiResume(effectiveManualAiResume)
-      || exactLegacyBatchRecovery
       || exactInterruptedRecovery
       || exactPausedScoringContinuation;
     if (!ownsExactDoneRecovery && ordinaryDoneAdmission.kind === 'reuse-terminal') {
@@ -7903,7 +7512,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       boardRunId,
       recoveryOwner,
       terminalFinalizationRecovery: !!effectiveFinalizationRecovery || !!requestedManualRetirementRecovery,
-      legacyBatchRecovery: exactLegacyBatchRecovery,
       pausedScoringContinuation: exactPausedScoringContinuation,
       interruptedRecovery: exactInterruptedRecovery,
     });
@@ -8031,7 +7639,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               error: getNode(id)?.data?.errorMessage || 'The saved manual-AI handoff cleanup did not finish.',
             });
           } else {
-            updateGlobal(id, { errorMessage: null, isRateLimit: false });
+            updateGlobal(id, { errorMessage: null });
           }
         }
       } else if (effectiveManualAiResume?.retirementPending) {
@@ -8058,7 +7666,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             error: terminalData.errorMessage || 'The saved manual-AI handoff cleanup did not finish.',
           });
         } else {
-          updateGlobal(id, { errorMessage: null, isRateLimit: false });
+          updateGlobal(id, { errorMessage: null });
           outcome = searchRunOutcome('completed', {
             runId: terminalData.jobRunId || null,
             resultDisposition: terminalData.resultDisposition || null,
@@ -8072,21 +7680,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         outcome = searchRunOutcome('completed', {
           runId: requestedManualRetirementRecovery.runId,
           resultDisposition: requestedManualRetirementRecovery.resultDisposition,
-        });
-      } else if (exactLegacyBatchRecovery) {
-        // The parent Board already owns the global job-search lane. Retire and
-        // replay this exact legacy sidecar inside that lease; acquiring a child
-        // lease here would deadlock against the Board that is awaiting us.
-        control.ownsExistingRecoveryRun = true;
-        control.cancelledRunId = liveNode.data.pendingBatch?.jobRunId
-          || liveNode.data.jobRunId
-          || null;
-        outcome = await pollBatchOnce({
-          queueManagedExternally: true,
-          parentCancelled: cancelled,
-          orchestratorNodeId,
-          boardRunId,
-          manualAiRunId,
         });
       } else if (exactPausedScoringContinuation) {
         control.ownsExistingRecoveryRun = true;
@@ -8300,7 +7893,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } finally {
       if (boardRunControlRef.current === control) boardRunControlRef.current = null;
     }
-  }, [cancelBoardRun, canvasFilePath, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, pollBatchOnce, retryTerminalFinalization, updateGlobal]);
+  }, [cancelBoardRun, canvasFilePath, completeManualAiRun, data, epoch, getEdges, getNode, getNodes, handleRerun, id, retryTerminalFinalization, updateGlobal]);
 
   useEffect(() => {
     cancelBoardRunRef.current = cancelBoardRun;
@@ -8493,7 +8086,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       activeManualAiRunIdRef.current = manualAiRunId;
       updateGlobal(currentId, {
         errorMessage: null,
-        isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -8605,12 +8197,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       if (cancelled()) return;
       if (!scoreResult.success) {
-        const err = new Error(scoreResult.error || 'Failed to re-analyze hiring fit');
-        if (scoreResult.isRateLimit) err.isRateLimit = true;
-        throw err;
-      }
-      if (scoreResult.batchPending) {
-        throw new Error('Saved-job re-analysis returned an unsupported deferred scoring task. Your existing hiring-fit results were kept.');
+        throw new Error(scoreResult.error || 'Failed to re-analyze hiring fit');
       }
 
       await finishScoringAndSpawn({
@@ -8679,7 +8266,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // make a valid Board input look incomplete and route Retry into a
         // destructive fresh search.
         errorMessage: null,
-        isRateLimit: false,
         reanalysisNotice: error?.message || String(error),
       });
       addToast({
@@ -8766,8 +8352,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     moduleRunQueue.cancelQueuedRunsForNode(id);
     window.electronAPI?.cancelNodeTask?.(id, 'career-files-cleared');
 
-    // Capture sidecar tokens BEFORE the updateGlobal below nulls them.
-    const batchId = liveData.pendingBatch?.batchId || null;
     // A freshly mounted, otherwise-empty hub has no persisted `jobRunId`, but
     // `peekJobRun` may already have found its OWN unfinished manifest. Treat
     // that offer as a final fallback so Clear career files also deletes the
@@ -8776,7 +8360,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const ownedResumeOfferRunId = resumeOffer?.nodeId === id
       ? (resumeOffer.runId || null)
       : null;
-    const runId = liveData.pendingBatch?.jobRunId || jobRunIdRef.current || liveData.jobRunId || ownedResumeOfferRunId || null;
+    const runId = jobRunIdRef.current || liveData.jobRunId || ownedResumeOfferRunId || null;
     const priorClearAt = normalizeJobAnalysisClearWatermark(liveData.jobAnalysisClearedAt);
     // Date.now() is millisecond-granular. Advance beyond a prior clear even
     // when two explicit clears land in one millisecond, so each persisted run
@@ -8787,16 +8371,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     careerClearWatermarkRef.current = jobAnalysisClearedAt;
     const jobAnalysisClearedRunId = normalizeJobAnalysisClearRunId(runId);
     const cleanupPromises = [];
-    if (batchId) {
-      if (window.electronAPI?.discardJobBatch) {
-        cleanupPromises.push({
-          kind: 'batch',
-          promise: Promise.resolve().then(() => window.electronAPI.discardJobBatch({ canvasFilePath, nodeId: id, batchId })),
-        });
-      } else {
-        cleanupPromises.push({ kind: 'batch', promise: Promise.reject(new Error('Job batch cleanup is unavailable')) });
-      }
-    }
     if (runId) {
       if (window.electronAPI?.discardJobRun) {
         cleanupPromises.push({
@@ -8831,13 +8405,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     sourceWarningOverridesDuringSearchRef.current.clear();
     jobRunIdRef.current = null;
     hubStateRef.current = 'empty';
-    batchCompletingRef.current = false;
     // Hide recovery affordances synchronously, before any async sidecar delete
     // settles or a stale metadata fetch gets a chance to paint one.
     setSavedAnalysisMeta(null);
     updateGlobal(id, {
-      hubState: 'empty', queuedModuleRun: null, errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, reanalysisNotice: null, testModeNote: null, pendingBatch: null,
-      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
+      hubState: 'empty', queuedModuleRun: null, errorMessage: null, rerunOutcome: null, rerunNotice: null, reanalysisNotice: null, testModeNote: null,      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
@@ -9077,7 +8649,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         EventLogger.error(`[JobSearch][${id}] Saved scrape inspection failed:`, error);
         if (!queueManagedByBoard) {
           const message = error?.message || String(error);
-          updateGlobal(currentId, { errorMessage: message, isRateLimit: false });
+          updateGlobal(currentId, { errorMessage: message });
           addToast({
             title: 'Saved Scrape Check Failed',
             description: 'The saved run was kept. Try Resume again when local storage is available.',
@@ -9094,7 +8666,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const message = res.error || 'The saved scrape could not be inspected.';
         EventLogger.error(`[JobSearch][${id}] Saved scrape inspection failed: ${message}`);
         if (!queueManagedByBoard) {
-          updateGlobal(currentId, { errorMessage: message, isRateLimit: false });
+          updateGlobal(currentId, { errorMessage: message });
           addToast({
             title: 'Saved Scrape Check Failed',
             description: 'The saved run was kept. Try Resume again when local storage is available.',
@@ -9200,13 +8772,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (jobPreferencesInterpretation?.targetRoleConflict) {
         const message = jobPreferencesInterpretation.targetRoleConflictReason
           || 'This saved search’s Target role conflicts with its Job Preferences. Edit one of them, then start a fresh search.';
-        updateGlobal(currentId, { hubState: 'done', errorMessage: message, isRateLimit: false });
+        updateGlobal(currentId, { hubState: 'done', errorMessage: message });
         addToast({ title: 'Job Preferences Conflict', description: message, type: 'error' });
         return searchRunOutcome('failed', { error: message });
       }
       updateGlobal(currentId, {
         errorMessage: null,
-        isRateLimit: false,
         rerunOutcome: null,
         rerunNotice: null,
         testModeNote: null,
@@ -9315,8 +8886,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               preferenceFilteredCount: preferenceResult.filteredCount,
               preferenceEvaluation: preferenceResult.evaluation,
               preferenceCandidatePool: preferenceResult.candidatePool,
-              pendingJobs: null, pendingBatch: null,
-              resultDisposition: 'preference-filtered',
+              pendingJobs: null,              resultDisposition: 'preference-filtered',
               errorMessage: terminalFinalizationError(completeSnapshotRun ? snapshot.runId : null, canvasFilePath, completion),
             });
           }
@@ -9402,7 +8972,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           hubState: hubHasResults ? 'done' : 'empty',
           resultDisposition: hubHasResults ? 'incomplete' : null,
           errorMessage: error?.message || String(error),
-          isRateLimit: !!error?.isRateLimit,
           rerunOutcome: null,
           rerunNotice: null,
         });
@@ -9615,7 +9184,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
-    updateGlobal(id, { errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, testModeNote: null });
+    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null });
     // Cleanup orphaned platform cards if this hub never produced results (the
     // results cascade lives on a Job Board Module now, so "has results" = stored
     // scoredJobs rather than on-canvas job cards).
@@ -9649,7 +9218,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }))).catch((error) => {
         updateGlobal(id, {
           errorMessage: error?.message || 'An older saved manual-AI handoff still needs cleanup.',
-          isRateLimit: false,
         });
       });
       return;
@@ -9731,14 +9299,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 canvasFilePath,
                 null,
               ),
-              isRateLimit: false,
             });
           }
         } catch (error) {
           if (!cancelled() && !isNodeDeletedAbort(error) && getNode(id)) {
             updateGlobal(id, {
               errorMessage: error?.message || 'The job search could not finish its durable cleanup.',
-              isRateLimit: false,
             });
           }
         } finally {
@@ -9760,7 +9326,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
     if (deferDirectSearchToBoard('Error retry')) return;
     EventLogger.log(`[JobSearch][${id}] User clicked Try Again on error banner`);
-    updateGlobal(id, { errorMessage: null, isRateLimit: false, rerunOutcome: null, rerunNotice: null, testModeNote: null });
+    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null });
     handleRerun({ frameSourceCards: false });
   }, [addToast, canvasFilePath, data.locked, deferDirectSearchToBoard, epoch, getEdges, getNode, getNodes, id, moduleRunQueue, retryTerminalFinalization, settleManualAiRetirement, updateGlobal, handleRerun]);
 
@@ -9905,7 +9471,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             canvasFilePath,
             null,
           )}
-          isRateLimit={!!data.isRateLimit}
           locked={errorControlsLocked}
           onRetry={boardRecoveryOwnsActions ? null : handleRetryFailed}
           onDismiss={data.terminalFinalizationRecovery ? null : handleDismissError}
@@ -10092,22 +9657,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             chromeLaunchInfo={chromeLaunchInfo}
             queuedRun={data.queuedModuleRun || null}
           />
-        )}
-
-        {/* Recovery-only: an older version may have submitted a batch before
-            batch scoring was removed. Poll it quietly so paid work is not
-            stranded, but new modules have no way to enter this state. */}
-        {hubState === 'scoring-batch' && (
-          <>
-            {banner}
-            <div className="flex flex-col items-center py-6 px-4 gap-2 text-center" onPointerDown={(e) => e.stopPropagation()}>
-              <Briefcase size={24} className="text-blue-400/50 animate-pulse" />
-              <p className="text-white/70 text-sm font-medium">Finishing a previous scoring run</p>
-              <p className="text-white/35 text-[10px] leading-relaxed">
-                This search was started by an earlier app version. Its results will appear when the already-submitted work completes.
-              </p>
-            </div>
-          </>
         )}
 
         {/* Paused on blocked sources — show the resolve/skip decision UI.

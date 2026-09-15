@@ -1,11 +1,17 @@
 /**
  * Build the prompt parts for one job-scoring request.
  *
- * Anthropic charges a cache write premium that cannot pay back in a normal
- * one-batch run. The scoring rubric and candidate evidence are still prompt
- * content in that case: merge them into the request body instead of dropping
- * them. Multi-batch runs keep the prefix separate so each later request can
- * reuse Anthropic's ephemeral cache.
+ * Every job-scoring call is a human copy/paste handoff now (nonApiAi.js) —
+ * there is no provider-side cache left to earn back with a separate prefix.
+ * What splitting the prefix out still buys, on a multi-batch run, is for the
+ * HUMAN doing the pasting: materializeNonApiPrompt (nonApiAi.js) and
+ * manualRequestConfig (llm.js) both keep `cachedPrefix` as its own section
+ * and note in the handoff settings that it repeats verbatim, so the rubric
+ * and candidate evidence read as the identical, recognizable boilerplate
+ * across every batch's dialog instead of silently re-flowing into a
+ * differently-merged prompt each time. A single-batch run has no repetition
+ * to keep consistent, so it merges the prefix into one paste instead of
+ * splitting a one-shot prompt for no reason.
  */
 export function buildJobScoringRequestParts(prompt, cachedPrefix, topLevelBatchCount) {
   const hasPrefix = typeof cachedPrefix === 'string' && cachedPrefix.length > 0;

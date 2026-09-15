@@ -60,7 +60,7 @@ const STEPS = [
   {
     id: 'ai-powered',
     title: 'AI Does the Heavy Lifting',
-    subtitle: 'Powered by Claude',
+    subtitle: 'Powered by your AI chat',
     content: (
       <div className="flex flex-col items-center gap-3">
         <div className="grid grid-cols-2 gap-3 w-full max-w-xs">

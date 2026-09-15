@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, JOB_TAXONOMY_CLASSIFY_SCHEMA, MODEL_FLOOR, assert, applyBugReportCode, assertRetainedResumeRoleIdentity, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, buildResumeRoleEvidenceRevisionPrompt, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
@@ -28,7 +28,7 @@ import { sanitizeLastRunReceipt } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
-import { buildResumeUnderfillRevisionPrompt, fixedPageTypeAreaHeight, formatUnderfilledTypeAreaUtilization, pageTextMeasurementExpression, resumeLinesPerPage, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
+import { fixedPageTypeAreaHeight, formatUnderfilledTypeAreaUtilization, pageTextMeasurementExpression, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
@@ -4158,26 +4158,6 @@ export default [
     },
   },
 {
-    name: 'Résumé length revision permits structural cuts after compact overflow',
-    run: () => {
-      const prompt = buildResumeLengthRevisionPrompt({
-        mainHtml: '<main class="page"><section class="section"><ul><li>Weak one</li><li>Strong two</li></ul></section></main>',
-        pageCount: 2, targetPageCount: 1, compactApplied: true,
-      });
-      assert(prompt.includes('cut at least 12 line(s)')
-        && prompt.includes('Measured revision 1')
-        && prompt.includes('There is no fixed revision limit')
-        && prompt.includes('byte-for-byte unchanged')
-        && prompt.includes('as the diminishing-returns signal')
-        && prompt.includes('explicitly supersedes the initial-draft bullet count')
-        && prompt.includes('reduce every role to 1-2 strongest bullets')
-        && prompt.includes('MUST contain fewer content blocks')
-        && !prompt.includes('Keep the exact same markup structure'),
-      'the fit revision must not forbid the bullet removals/merges it needs to reach the target');
-      return { minimumLinesToCut: 12, structuralCutsAllowed: true };
-    },
-  },
-{
     name: 'Résumé retained roles always carry factual bullet evidence',
     run: () => {
       const summaryOnly = `<main class="page"><article class="role"><div class="role-header"><span class="title">Software Engineer</span><span class="company">FliteX</span></div><div class="role-meta"><p class="role-summary">Built shortest-path tooling and FAA data-sync automation.</p></div></article><article class="role"><span class="title">Data Engineer</span><span class="company">Horizon</span><ul class="highlights"><li>Built Python ETL pipelines.</li></ul></article></main>`;
@@ -4200,17 +4180,7 @@ export default [
       const headerOnly = `<main class="page"><article class="role"><span class="title">Intern</span><span class="company">No Evidence Inc.</span></article></main>`;
       assert(retainedResumeRolesWithoutBullets(headerOnly).length === 1,
         'a header-only role must remain detectable for the hard validation gate');
-      let removalRejected = false;
-      try { assertRetainedResumeRoleIdentity(summaryOnly, headerOnly); } catch { removalRejected = true; }
-      assert(removalRejected,
-        'a revision cannot satisfy the bullet rule by removing a documented role');
-
-      const prompt = buildResumeRoleEvidenceRevisionPrompt({ mainHtml: summaryOnly });
-      assert(prompt.includes('Never copy a raw role-summary or career-data note verbatim')
-        && prompt.includes('For every invalid role, write one concise, polished employer-facing bullet supported by that data')
-        && prompt.includes('Do NOT remove, merge, rename, or otherwise omit any role'),
-      'the repair editor must polish career notes with source-backed prose while retaining every role');
-      return { detected: missing.length, rejected: true, structuralGuarded: true, removalRejected: true, repairPrompted: true };
+      return { detected: missing.length, rejected: true, structuralGuarded: true };
     },
   },
 {
@@ -4229,92 +4199,6 @@ export default [
       return { letterCompact: true, a4Compact: true, onlyChildSpan: true };
   },
 },
-{
-    name: 'Résumé line-capacity table stays derived from the design-system tokens',
-    run: () => {
-      // jobApplication.js's RESUME_LINES_PER_PAGE is a COPY of token-derived
-      // values, and the design system's own build/token-sync-test.js guards
-      // only the copies inside that folder — it cannot reach electron/ipc/.
-      // This is that guard, from the host side.
-      const css = fs.readFileSync(path.join(process.cwd(), 'Job Application Design System', 'colors_and_type.css'), 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        // Strip statement at-rules BEFORE block matching. Without this the
-        // first `selector { … }` the flat regex captures is the whole
-        // `@charset …; @import url("…"); :root` run, and the `:root` test
-        // below then passes only because that Google Fonts URL happens to
-        // contain no `[`. One bracketed font param upstream and this throws.
-        .replace(/@(?:charset|import)[^;]*;/g, '');
-      // Every `selector { … }` pair, in SOURCE ORDER. Order is load-bearing:
-      // the A4 and compact blocks have equal specificity, so whichever is
-      // declared later wins on the margins they both set.
-      const blocks = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-        .map(match => ({ selector: match[1].replace(/\s+/g, ' ').trim(), body: match[2] }));
-      const TOKENS = ['--page-h', '--margin-top', '--margin-bot', '--fs-body', '--lh-body'];
-      const toPt = (value) => {
-        const match = /^\s*(-?[\d.]+)\s*(pt|in|mm)\s*$/.exec(String(value));
-        assert(!!match, `design-system page/type lengths must stay absolute pt/in/mm — got ${value}`);
-        return Number(match[1]) * { pt: 1, in: 72, mm: 72 / 25.4 }[match[2]];
-      };
-      const capacity = (scopes) => {
-        const resolved = {};
-        for (const block of blocks) {
-          const isBase = /:root$/.test(block.selector) && !block.selector.includes('[');
-          const applies = isBase
-            ? scopes.includes(':root')
-            : scopes.some(scope => scope !== ':root' && block.selector.includes(scope));
-          if (!applies) continue;
-          for (const token of TOKENS) {
-            const hits = [...block.body.matchAll(new RegExp(`(?:^|;)\\s*${token}\\s*:\\s*([^;]+)`, 'g'))];
-            if (hits.length) resolved[token] = hits[hits.length - 1][1].trim();
-          }
-        }
-        for (const token of TOKENS) assert(resolved[token] != null, `${token} must resolve for ${scopes.join(' + ')}`);
-        const typeArea = toPt(resolved['--page-h']) - toPt(resolved['--margin-top']) - toPt(resolved['--margin-bot']);
-        return { typeArea, lines: typeArea / (toPt(resolved['--fs-body']) * Number(resolved['--lh-body'])) };
-      };
-
-      const A4 = 'data-page="a4"';
-      const COMPACT = 'data-density="compact"';
-      assert(blocks.findIndex(block => block.selector.includes(COMPACT)) > blocks.findIndex(block => block.selector.includes(A4)),
-        'the compact block must stay declared after the A4 block — the A4 + compact margins depend on that source order');
-
-      const table = [
-        [[':root'], 'data-print="dual-pdf"', 688.32, 46.31],
-        [[':root', COMPACT], `data-print="dual-pdf" ${COMPACT}`, 705.60, 53.61],
-        [[':root', A4], `data-print="dual-pdf" ${A4}`, 739.84, 49.78],
-        [[':root', A4, COMPACT], `data-print="dual-pdf" ${A4} ${COMPACT}`, 755.49, 57.40],
-      ];
-      for (const [scopes, variantAttrs, typeAreaPt, linesPerPage] of table) {
-        const derived = capacity(scopes);
-        assert(Math.abs(derived.typeArea - typeAreaPt) < 0.01,
-          `${scopes.join(' + ')} type area must be ${typeAreaPt}pt — tokens give ${derived.typeArea.toFixed(2)}pt`);
-        assert(Math.abs(derived.lines - linesPerPage) < 0.01,
-          `${scopes.join(' + ')} must hold ${linesPerPage} lines — tokens give ${derived.lines.toFixed(2)}`);
-        assert(Math.abs(resumeLinesPerPage(variantAttrs) - derived.lines) < 0.01,
-          `resumeLinesPerPage('${variantAttrs}') must match the token-derived ${derived.lines.toFixed(2)}`);
-      }
-      // An unrecognised or absent variant must land on the SMALLEST of the four
-      // so a caller that never threaded the attrs under-asks for cuts instead
-      // of over-cutting a résumé that was never that far over.
-      assert(resumeLinesPerPage('') === resumeLinesPerPage('data-print="ink-only" data-mono')
-        && Math.abs(resumeLinesPerPage('') - Math.min(...table.map(([scopes]) => capacity(scopes).lines))) < 1e-9,
-      'an unrecognised variant must fall back to the Letter/default floor');
-
-      // The magnitude the prompt actually asks for has to move with the variant.
-      const cutLines = (extra) => Number(/cut at least (\d+) line/.exec(buildResumeLengthRevisionPrompt({
-        mainHtml: '<main class="page"></main>', pageCount: 3, targetPageCount: 1, ...extra,
-      }))?.[1]);
-      assert(cutLines({ compactApplied: false, variantAttrs: 'data-print="dual-pdf"' }) === 93
-        && cutLines({ compactApplied: true, variantAttrs: `data-print="dual-pdf" ${A4} ${COMPACT}` }) === 115,
-      'a two-page overflow must ask for more lines on a compact A4 page than on a default Letter page');
-      assert(cutLines({ compactApplied: false, job: { company: 'Acme', location: 'Toronto, Canada' } }) === 100,
-        'a caller that passes only the job record must still get A4 capacity via applicationVariantAttrsForJob');
-      assert(cutLines({ compactApplied: false }) === 93,
-        'a caller with neither variant attrs nor a job must get the Letter/default floor');
-
-      return { letter: 46.31, letterCompact: 53.61, a4: 49.78, a4Compact: 57.40 };
-    },
-  },
 {
     name: 'Résumé inline annotations preserve the owning bullet typography',
     run: () => {
@@ -6375,7 +6259,6 @@ export default [
         && resumeScoringPath.includes('Failed to save paused empty-run analysis snapshot')
         && resumeScoringPath.includes("rerunOutcome: 'no-new-results'")
         && resumeScoringPath.includes('rerunNotice: null')
-        && resumeScoringPath.includes('pendingBatch: null')
         && resumeScoringPath.includes('pendingJobsRef.current = null')
         && resumeScoringPath.includes("hubStateRef.current = 'done'"),
       'zero-pending resumed scoring replaces the current-run snapshot and reaches the same cleared 0-new-jobs terminal state as a direct empty search');
@@ -7364,7 +7247,7 @@ export default [
       const failedAttemptFinal = reconcileJobSourceWarnings([zipBlocked], new Map());
       assert(failedAttemptFinal.length === 1 && failedAttemptFinal[0] === zipBlocked,
         'a failed resolved:false attempt has no override and cannot suppress the backend final warning');
-      assert(['queued', 'parsing', 'querying', 'interpreting-preferences', 'searching', 'scoring', 'scoring-batch', 'evaluating-preferences']
+      assert(['queued', 'parsing', 'querying', 'interpreting-preferences', 'searching', 'scoring', 'evaluating-preferences']
         .every(isJobSourceResolveBusyHubState)
         && !isJobSourceResolveBusyHubState('sources-ready'),
       'Solve stays disabled through every gathering/checkpointing state and re-enables only once the source checkpoint is ready');
@@ -7575,7 +7458,7 @@ export default [
         && search.includes('completeRun: completeSnapshotRun'),
       'saved-scrape scoring completes only its matching staged search run and never clears a tokenless re-analysis snapshot');
       const normalScoreStart = search.indexOf('const runScoringAndSpawn = useCallback');
-      const normalScoreEnd = search.indexOf('// ── Legacy Batch-API recovery', normalScoreStart);
+      const normalScoreEnd = search.indexOf('const handlePostSearchResult = useCallback', normalScoreStart);
       const normalScorePath = search.slice(normalScoreStart, normalScoreEnd);
       const linkedInRebuildStart = jobsBackend.indexOf('const persistRecoveryPool = async');
       const linkedInRebuildEnd = jobsBackend.indexOf('if (needEnrich.length > 0)', linkedInRebuildStart);
@@ -7715,80 +7598,6 @@ export default [
     },
   },
 {
-    name: 'anthropicRequest: buildCachedUserContent splits the cached prefix into an ephemeral block',
-    run: () => {
-      const arr = [{ type: 'image' }];
-      assert(buildCachedUserContent('hi', null) === 'hi', 'no prefix → string passthrough');
-      assert(buildCachedUserContent(arr, null) === arr, 'no prefix → array passthrough (same ref)');
-      const s = buildCachedUserContent('JOBS', 'PROFILE');
-      assert(Array.isArray(s) && s.length === 2, 'string + prefix → 2 blocks');
-      assert(s[0].type === 'text' && s[0].text === 'PROFILE' && s[0].cache_control?.type === 'ephemeral', 'prefix block is ephemeral-cached');
-      assert(s[1].type === 'text' && s[1].text === 'JOBS', 'second block is the dynamic content');
-      const a = buildCachedUserContent([{ type: 'image' }, { type: 'text', text: 'p' }], 'PFX');
-      assert(a.length === 3 && a[0].cache_control?.type === 'ephemeral' && a[1].type === 'image', 'array + prefix → prefix prepended to media blocks');
-      return { ok: true };
-    },
-  },
-{
-    name: 'anthropicRequest: buildAnthropicMessageParams builds the identical live/batch request shape',
-    run: () => {
-      const base = { model: 'claude-sonnet-4-6', maxTokens: 8000, cachedPrefix: 'PROFILE' };
-      const schema = { type: 'object', properties: {} };
-      // responseSchema → native Structured Outputs format, no JSON prefill.
-      const p1 = buildAnthropicMessageParams('JOBS', { ...base, responseSchema: schema });
-      assert(p1.model === 'claude-sonnet-4-6' && p1.max_tokens === 8000, 'carries model + max_tokens');
-      assert(p1.thinking?.type === 'adaptive', 'modern Claude requests explicitly enable adaptive thinking');
-      assert(p1.output_config?.effort === 'medium', 'modern Claude requests explicitly use medium effort');
-      assert(p1.output_config?.format?.type === 'json_schema'
-        && p1.output_config.format.schema.additionalProperties === false,
-      'responseSchema → native transformed JSON-schema output format');
-      assert(!p1.tools && !p1.tool_choice, 'responseSchema does not create a fake submit_response tool');
-      assert(p1.messages.length === 1, 'structured-output mode adds no assistant prefill');
-      assert(p1.messages[0].content[0].cache_control?.type === 'ephemeral', 'cached prefix carried into params');
-      const count = buildAnthropicTokenCountParams('JOBS', { ...base, responseSchema: schema });
-      const { max_tokens: _maxTokens, ...liveWithoutOutputCap } = p1;
-      assert(JSON.stringify(count) === JSON.stringify(liveWithoutOutputCap),
-        'token-count params are derived from the live request shape and differ only by max_tokens (including output format)');
-      const taxonomySchema = JOB_TAXONOMY_CLASSIFY_SCHEMA;
-      const taxonomy = buildAnthropicMessageParams('JOBS', {
-        ...base, responseSchema: taxonomySchema,
-      });
-      const taxonomyRole = taxonomy.output_config?.format?.schema?.properties?.roleByIndex;
-      const productionSizedSchema = JOB_TAXONOMY_CLASSIFY_SCHEMA;
-      assert(taxonomy.output_config?.format?.type === 'json_schema'
-        && taxonomy.output_config.format.schema.additionalProperties === false
-        && taxonomyRole?.type === 'array'
-        && taxonomyRole?.items?.type === 'integer'
-        && JSON.stringify(productionSizedSchema) === JSON.stringify(taxonomySchema),
-      'Job Board classification uses one fixed JSON output grammar independent of total job count');
-      assert(!('minimum' in taxonomyRole.items)
-        && taxonomyRole.items.description.includes('minimum'),
-      'Anthropic SDK transforms unsupported numeric constraints into output-schema guidance');
-      const taxonomyCount = buildAnthropicTokenCountParams('JOBS', {
-        ...base, responseSchema: taxonomySchema,
-      });
-      const { max_tokens: _taxonomyMax, ...taxonomyLiveWithoutCap } = taxonomy;
-      assert(JSON.stringify(taxonomyCount) === JSON.stringify(taxonomyLiveWithoutCap),
-        'structured token-count and live requests use the identical transformed output schema');
-      // A plain (prose) request must not acquire a JSON prefill or output
-      // grammar. Structured public LLM entry points reject missing schemas;
-      // this lower-level builder also serves grounded prose.
-      const p2 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
-      assert(!p2.tools && !p2.tool_choice && p2.messages.length === 1 && p2.messages[0].role === 'user',
-        'plain prose has a single user message and no JSON envelope');
-      // Plain request construction is stable across repeated calls.
-      const p3 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
-      assert(!p3.tools && !p3.tool_choice && p3.messages.length === 1, 'plain → single user message, no envelope');
-      const haiku = getClaudeDefaultReasoningConfig(MODEL_FLOOR.HAIKU);
-      assert(haiku.thinking?.type === 'enabled' && haiku.thinking.budget_tokens === CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET,
-        'Haiku receives explicit manual thinking at the shared medium-equivalent budget');
-      assert(!haiku.outputConfig, 'Haiku omits unsupported output_config.effort');
-      assert(claudeReasoningMaxTokens(MODEL_FLOOR.HAIKU, 512) === CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET + 1024,
-        'manual-thinking models reserve room for both the medium reasoning budget and a visible answer');
-      return { ok: true };
-  },
-},
-{
     name: 'Job taxonomy indexed-role contract normalizes legacy arrays and diagnoses malformed objects without retaining labels',
     run: () => {
       const complete = { 0: 'Platform Architecture', 1: 'Data Engineering', 2: 'Platform Architecture' };
@@ -7906,36 +7715,6 @@ export default [
       assert(getStatsSignature(base) !== getStatsSignature(added),
         'adding a jobcard must change the signature');
       return { ok: true };
-    },
-  },
-{
-    name: 'Batch scoring reconciliation',
-    run: () => {
-      const batches = [
-        [{ url: 'a', title: 'A' }, { url: 'b', title: 'B' }], // b0 — both scored
-        [{ url: 'c', title: 'C' }],                            // b1 — whole request failed
-        [{ url: 'd', title: 'D' }, { url: 'e', title: 'E' }], // b2 — index 1 missing
-      ];
-      const results = {
-        b0: { scores: [
-          { index: 0, matchScore: 90, reasoning: 'great', careerDirection: 'X' },
-          { index: 1, matchScore: 40, reasoning: 'meh', careerDirection: 'Y' },
-        ] },
-        b1: null, // errored/expired batch request
-        b2: { scores: [{ index: 0, matchScore: 70, reasoning: 'ok', careerDirection: 'Z' }] },
-      };
-      const { scoredJobs, placeholderCount, failedBatches } = reconcileBatchScores(batches, results, { fallbackScore: 50 });
-      assert(scoredJobs.length === 5, `Batch reconcile: expected 5 scored, got ${scoredJobs.length}`);
-      assert(failedBatches === 1, `Batch reconcile: expected 1 failed batch, got ${failedBatches}`);
-      assert(placeholderCount === 2, `Batch reconcile: expected 2 placeholders, got ${placeholderCount}`);
-      assert(scoredJobs[0].matchScore === 90 && scoredJobs[0].url === 'a', 'Batch reconcile: results sorted desc by score');
-      const cJob = scoredJobs.find(j => j.url === 'c');
-      assert(cJob.matchScore === 50 && cJob.reasoning === 'AI format error', 'Batch reconcile: failed-batch job → AI format error placeholder');
-      const eJob = scoredJobs.find(j => j.url === 'e');
-      assert(eJob.matchScore === 50 && eJob.reasoning === 'Unable to score', 'Batch reconcile: missing-index job → Unable to score placeholder');
-      const bJob = scoredJobs.find(j => j.url === 'b');
-      assert(bJob.matchScore === 40 && bJob.careerDirection === 'Y', 'Batch reconcile: matched score fields spread onto the job');
-      return { scored: scoredJobs.length, placeholderCount, failedBatches };
     },
   },
 {
@@ -10954,31 +10733,26 @@ export default [
     },
   },
 {
-    name: 'Application: decideFitStep — the render → page-count → fit loop\'s pure decision function',
+    name: 'Application: résumé fit measurement — underfill/overflow utilities behind the (now Local-AI-owned) fit loop',
     run: () => {
-      // Fits already → ship, no compact ever applied pre-emptively (SKILL.md:
-      // "do not apply pre-emptively").
-      const fits = decideFitStep({ pageCount: 1, target: 1, compactTried: false });
-      assert(fits.action === 'ship', 'fits target → ship');
-      const underTarget = decideFitStep({ pageCount: 1, target: 2, compactTried: false });
-      assert(underTarget.action === 'ship', 'under target → ship (never pads to fill the target)');
+      // decideFitStep (the old pure render → page-count → fit decision function)
+      // and its buildResumeUnderfillRevisionPrompt/buildResumeLengthRevisionPrompt/
+      // buildResumeRoleEvidenceRevisionPrompt companions were removed as dead code
+      // — the fit loop now lives entirely in the Local AI handoff routine. The
+      // underfill/overflow MEASUREMENT utilities those functions consumed are
+      // still live and still worth a direct unit test.
       const underfilledLayout = { contentHeightPx: 620, typeAreaHeightPx: 720 };
-      const underfilled = decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: underfilledLayout });
-      assert(underfilled.action === 'enrich' && resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: underfilledLayout })
+      assert(resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: underfilledLayout })
         && Math.round(resumeTypeAreaUtilization(underfilledLayout) * 100) === 86,
-      'a materially underfilled one-page résumé requests evidence-led enrichment instead of shipping unused space');
+      'a materially underfilled one-page résumé is detected below the utilization minimum');
       const justUnderfilledLayout = { contentHeightPx: 895.641, typeAreaHeightPx: 1000 };
-      const justUnderfilled = decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: justUnderfilledLayout });
-      assert(justUnderfilled.action === 'enrich'
+      assert(resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: justUnderfilledLayout })
         && formatUnderfilledTypeAreaUtilization(0.57) === '57%'
         && formatUnderfilledTypeAreaUtilization(resumeTypeAreaUtilization(justUnderfilledLayout)) === '89.56%'
-        && formatUnderfilledTypeAreaUtilization(0.899999) === '89.99%'
-        && justUnderfilled.reason.includes('89.56%')
-        && justUnderfilled.reason.includes('below the 90% minimum')
-        && !justUnderfilled.reason.includes('uses 90%'),
+        && formatUnderfilledTypeAreaUtilization(0.899999) === '89.99%',
       'a raw utilization below the 90% minimum is displayed below that threshold rather than rounded up to equality');
-      const twoPageLayout = decideFitStep({ pageCount: 1, target: 2, compactTried: false, layout: underfilledLayout });
-      assert(twoPageLayout.action === 'ship', 'the utilization check never pads a multi-page target');
+      assert(!resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 2, layout: underfilledLayout }),
+        'the utilization check never flags a multi-page target as underfilled');
 
       // Overflow magnitude must survive measurement. A clamp at 1 made every
       // overflowing résumé report exactly 100%, erasing the only size signal
@@ -10988,8 +10762,7 @@ export default [
       assert(resumeTypeAreaUtilization(overflowingLayout) > 1
         && Math.round(resumeTypeAreaUtilization(overflowingLayout) * 100) === 135
         && !resumeIsMateriallyUnderfilled({ pageCount: 2, targetPageCount: 1, layout: overflowingLayout })
-        && !resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: overflowingLayout })
-        && decideFitStep({ pageCount: 1, target: 1, compactTried: false, layout: overflowingLayout }).action === 'ship',
+        && !resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: overflowingLayout }),
       'type-area utilization reports overflow magnitude unclamped, and a value above 1 never reads as underfilled');
 
       // A screen-preview page grows when its text overflows; the measurable
@@ -11015,26 +10788,6 @@ export default [
         && !pageMeasurement.includes('`'),
       'the injected page-text probe is free of the template-literal delimiter that broke layout measurement');
 
-      // Over target, nothing tried yet → the FREE lever first, never straight to an LLM call.
-      const first = decideFitStep({ pageCount: 2, target: 1, compactTried: false });
-      assert(first.action === 'compact', 'over target, compact not yet tried → compact (free, no LLM)');
-
-      // Page count cannot tell whether a 2-page/1-page-target result is a
-      // one-line or almost-full-page overflow, but 3 pages against a 1-page
-      // target is conclusively large. That case must not waste a compact pass.
-      const clearlyLarge = decideFitStep({ pageCount: 3, target: 1, compactTried: false });
-      assert(clearlyLarge.action === 'revise', 'more than one full page beyond target → revise content before compact');
-
-      const compactAfterLargeRevision = decideFitStep({ pageCount: 3, target: 1, compactTried: false, revisionAttempts: 1 });
-      assert(compactAfterLargeRevision.action === 'compact', 'after the first large-overflow revision, try the free compact render before spending a second AI call');
-
-      // Over target, compact already tried → the one paid revision call.
-      const second = decideFitStep({ pageCount: 2, target: 1, compactTried: true });
-      assert(second.action === 'revise', 'still over after compact → revise (one LLM call)');
-
-      const continuedAfterMany = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionAttempts: 10_000 });
-      assert(continuedAfterMany.action === 'revise', 'an attempt count never terminates the convergence loop');
-
       const convergence = createApplicationConvergenceTracker('draft-a');
       assert(convergence.assess('draft-b').accept && convergence.assess('draft-c').accept,
         'the shared convergence tracker accepts every novel candidate without a fixed limit');
@@ -11045,32 +10798,7 @@ export default [
       assert(cycling.assess('draft-b').accept && !cycling.assess('draft-a').accept,
         'returning a previously measured version stops a non-improving cycle');
 
-      // A page count measured against fallback typefaces (fonts didn't load)
-      // must never drive a fit decision — could compact a résumé that already
-      // fits, or worse, spend an LLM call cutting real content over a phantom
-      // overflow. Ships regardless of how far "over" the fallback count looks,
-      // and regardless of what's already been tried.
-      const noFonts = decideFitStep({ pageCount: 5, target: 1, compactTried: false, fontsLoaded: false });
-      assert(noFonts.action === 'ship', 'fonts not loaded → ship without acting on a page count that isn\'t trustworthy');
-      // fontsLoaded defaults to true (the common case) when the caller omits it.
-      const defaultsTrue = decideFitStep({ pageCount: 2, target: 1, compactTried: false });
-      assert(defaultsTrue.action === 'compact', 'fontsLoaded omitted defaults to true — normal fit logic still runs');
-
-      // Every decision carries a human-readable reason (bug-report / log line).
-      assert(typeof first.reason === 'string' && first.reason.length > 0, 'decision carries a non-empty reason');
-      const underfillPrompt = buildResumeUnderfillRevisionPrompt({
-        mainHtml: '<main class="page">Evidence</main>', contentUtilization: 0.86, targetPageCount: 1,
-        job: { title: 'Backend Engineer', company: 'Acme' }, revisionAttempt: 1,
-      });
-      assert(underfillPrompt.includes('86%') && underfillPrompt.includes('strongest omitted evidence')
-        && underfillPrompt.includes('not permission to add generic filler') && underfillPrompt.includes('byte-for-byte unchanged'),
-      'underfill revision guidance prioritizes supported evidence and permits a truthful diminishing-returns stop');
-      const boundaryUnderfillPrompt = buildResumeUnderfillRevisionPrompt({
-        mainHtml: '<main class="page">Evidence</main>', contentUtilization: 0.895641, targetPageCount: 1,
-      });
-      assert(boundaryUnderfillPrompt.includes('89.56%') && !boundaryUnderfillPrompt.includes('90% of the app-measured type area'),
-        'underfill prompts retain a below-threshold measurement instead of rounding it to the acceptance boundary');
-      return { ok: true, underfill: underfilled.action };
+      return { ok: true };
     },
   },
 {
@@ -12775,10 +12503,10 @@ export default [
         'the recursive deletion helper is the one caller whose cancel really is a deletion');
       // Same class as the safeApiFetch defect: classify a cancellation from the
       // signal, never from the error prose — the sentinel says "Node deleted".
-      const geminiSource = fs.readFileSync(path.resolve('electron/ipc/gemini.js'), 'utf8');
-      assert(geminiSource.includes("(genConfig.signal?.aborted || err?.name === 'AbortError')")
-        && geminiSource.includes("? 'aborted'"),
-        'a cancelled Gemini call is classified as aborted rather than as a provider failure');
+      const nonApiAiSource = fs.readFileSync(path.resolve('electron/ipc/nonApiAi.js'), 'utf8');
+      assert(nonApiAiSource.includes('if (signal?.aborted) throw signal.reason || new Error')
+        && nonApiAiSource.includes("record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));"),
+        'a cancelled manual-handoff AI request is classified from the abort signal itself, not from parsed error prose');
       assert(jobsSource.includes('jobsTelemetry.searchIntent = {')
         && jobsSource.includes('jobsTelemetry.searchIntent = null;'),
         'the search intent is stamped at launch and cleared for a fresh run');

@@ -17,12 +17,10 @@ import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, schedulePlatformVerification, verifyAllPlatforms } from './ipc/accounts.js';
 import { closeAllPages } from './ipc/browserPool.js';
 import { closeAllAuthWindows, closeStealthBrowser } from './ipc/stealthBrowser.js';
-import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
-import { registerLlmHandlers } from './ipc/llm.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import fs from 'fs';
 import os from 'node:os';
@@ -986,9 +984,9 @@ if (!gotTheLock) {
         }
         
         // Block sensitive system roots, config, and credential-store files
-        // (shared with the AI-attachment read gate in claude.js/gemini.js —
-        // see isSensitivePath's doc comment for why this is a blocklist, not
-        // an allowlist).
+        // (shared with the AI-attachment read gate in nonApiAi.js — see
+        // isSensitivePath's doc comment for why this is a blocklist, not an
+        // allowlist).
         if (isSensitivePath(targetPath)) {
           logger.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
           return new Response('Access Denied', { status: 403 });
@@ -1174,12 +1172,10 @@ if (!gotTheLock) {
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerMarketplaceHandlers();
     registerAccountsHandlers();
-    registerGeminiHandlers();
     registerBugReportHandlers();
     registerNetworkHandlers();
     registerSettingsHandlers();
     registerNonApiAiHandlers();
-    registerLlmHandlers();
 
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by Claude design and replaced

@@ -290,6 +290,53 @@ export function migrateInterruptedJobHubResults(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Retire the Claude Batch API "economy scoring" state (v7).
+ *
+ * Batch scoring was removed along with all live LLM HTTP API support — every
+ * AI call is now a human copy/paste handoff, and nothing can submit a batch or
+ * poll/reconcile one any more. A hub saved mid-batch persisted
+ * `hubState: 'scoring-batch'` plus a `pendingBatch` marker; today's
+ * JobSearchNode has no render branch for either, so on reload such a hub would
+ * show no status label and no way forward. Heal it into the same terminal
+ * shape the pre-v6 interrupted-run sanitizer above already produces: `done`
+ * when it kept its scored results, `empty` otherwise — both are states the hub
+ * renders normally and lets the user re-run from. `pendingBatch` is dropped
+ * everywhere it appears, independent of hubState, since no code reads it any
+ * more.
+ *
+ * Before dropping it, backfill `data.jobRunId` from `pendingBatch.jobRunId`
+ * when the top level doesn't already have one. Top-level `jobRunId` was only
+ * ever set on a specific branch, so for a hub saved mid-batch the retired
+ * `pendingBatch` object was sometimes the ONLY place the run token survived —
+ * and canvasInteractions.js's collectDeletedJobRunDiscards/
+ * collectDeletedJobAnalysisDiscards read `node.data?.jobRunId` to clean up
+ * backend run state when the hub is later deleted. Losing the token here
+ * would leak that backend state. Never overwrite an existing top-level
+ * jobRunId — it is the more current value when both are present.
+ */
+export function migrateRetiredBatchScoringState(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    const d = n?.data;
+    if (!d || typeof d !== 'object') return n;
+    const hasPendingBatch = Object.prototype.hasOwnProperty.call(d, 'pendingBatch');
+    const isScoringBatch = d.hubState === 'scoring-batch';
+    if (!hasPendingBatch && !isScoringBatch) return n;
+    changed = true;
+    const { pendingBatch: _retired, ...rest } = d;
+    // Backfill only when absent — an existing jobRunId is never clobbered.
+    if (!rest.jobRunId && _retired?.jobRunId) rest.jobRunId = _retired.jobRunId;
+    if (isScoringBatch) {
+      const hasResults = Array.isArray(rest.scoredJobs) && rest.scoredJobs.length > 0;
+      rest.hubState = hasResults ? 'done' : 'empty';
+    }
+    return { ...n, data: rest };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -319,6 +366,7 @@ const MIGRATIONS = [
   { version: 4, name: 'jobhub-page-ceiling→all',  migrate: migrateJobHubPageCeiling,   selfRecursive: false },
   { version: 5, name: 'jobhub-stranded-input-lock', migrate: migrateStaleJobHubInputLock, selfRecursive: false },
   { version: 6, name: 'jobhub-interrupted-results→done', migrate: migrateInterruptedJobHubResults, selfRecursive: false },
+  { version: 7, name: 'jobhub-retired-batch-scoring',    migrate: migrateRetiredBatchScoringState, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

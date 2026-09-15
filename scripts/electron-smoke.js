@@ -1104,33 +1104,36 @@ try {
   const settingsPanel = page.locator('.onboarding-panel').filter({
     has: page.getByRole('heading', { name: 'Settings', exact: true }),
   });
-  const claudeKey = settingsPanel.getByPlaceholder('sk-ant-api...');
-  const claudeOnlyLabels = ['Judgment', 'Extraction', 'Light'];
-
-  assert.equal(await settingsPanel.getByRole('button', { name: 'Local AI', exact: true }).count(), 0, 'Settings must not expose Local AI as a provider');
-  assert.equal(await settingsPanel.getByText('Local AI Handoff', { exact: true }).count(), 0, 'Settings must not expose a Local AI mode panel');
-  assert.equal(await settingsPanel.getByText('Generation', { exact: true }).count(), 0, 'Settings must not expose a dead Claude Generation model control');
-
-  // A Gemini-first install must not expose controls that have no effect on its
-  // capability ladder. Do not click availability: this only verifies render
-  // state and must not issue live provider probes during the smoke test.
-  assert.equal(await claudeKey.count(), 0, 'Gemini settings should hide the Anthropic API key');
-  for (const label of claudeOnlyLabels) {
-    assert.equal(await settingsPanel.getByText(label, { exact: true }).count(), 0, `Gemini settings should hide Claude ${label} controls`);
+  // Every AI call is a human copy/paste handoff now — there is no provider to
+  // pick, no API key to store, and no model family to configure. Settings must
+  // therefore expose NO AI-provider surface at all. This asserts the ABSENCE of
+  // the whole removed section, so a partially-reinstated control (a stray key
+  // field, a leftover family dropdown) fails here rather than shipping a
+  // setting that silently governs nothing.
+  const removedAIControls = [
+    'Gemini API', 'Claude API', 'Local AI', 'Check availability', 'Browse…',
+  ];
+  for (const name of removedAIControls) {
+    assert.equal(
+      await settingsPanel.getByRole('button', { name, exact: true }).count(), 0,
+      `Settings must not expose the removed AI control "${name}"`,
+    );
   }
-
-  await settingsPanel.getByRole('button', { name: 'Claude API', exact: true }).click();
-  await claudeKey.waitFor();
-  for (const label of claudeOnlyLabels) {
-    await settingsPanel.getByText(label, { exact: true }).waitFor();
+  const removedAILabels = [
+    'AI Models & APIs', 'Judgment', 'Extraction', 'Light', 'Generation',
+    'Local AI Handoff', 'Service Account', 'Gemini API Key', 'Anthropic API Key',
+  ];
+  for (const label of removedAILabels) {
+    assert.equal(
+      await settingsPanel.getByText(label, { exact: true }).count(), 0,
+      `Settings must not expose the removed AI control "${label}"`,
+    );
   }
-  assert.equal(await settingsPanel.getByRole('button', { name: 'Check availability', exact: true }).count(), 1, 'Claude settings should show its availability control');
+  assert.equal(
+    await settingsPanel.getByPlaceholder('sk-ant-api...').count(), 0,
+    'Settings must not expose an Anthropic API key field',
+  );
 
-  await settingsPanel.getByRole('button', { name: 'Gemini API', exact: true }).click();
-  await claudeKey.waitFor({ state: 'detached' });
-  for (const label of claudeOnlyLabels) {
-    await settingsPanel.getByText(label, { exact: true }).waitFor({ state: 'detached' });
-  }
   await page.keyboard.press('Escape');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ state: 'hidden' });
 
