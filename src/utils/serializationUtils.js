@@ -337,6 +337,176 @@ export function migrateRetiredBatchScoringState(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Fold a saved `targetRole` into the search brief (v8).
+ *
+ * Phase B merges the Job Search module's two free-text inputs into one: the
+ * standalone "Target role" box is deleted outright, and the "Job
+ * Preferences" textarea — renamed "Search Brief" — becomes the SOLE input
+ * the AI reads to decide which roles to search. An old canvas can still
+ * carry `data.targetRole` from before the merge. Simply dropping it on load
+ * would silently stop searching the role the user had explicitly pinned, so
+ * instead it is folded INTO the brief as a clearly-labelled "Target role:"
+ * line. That phrasing matters, not just the value: the brief interpreter
+ * (and the post-search pinned-title gate downstream) reads an explicitly
+ * named title from the brief the same way it would read one the user typed
+ * directly, so the migrated search keeps searching exactly that role rather
+ * than treating it as loose direction the AI might reinterpret. Any existing
+ * brief text is preserved beneath it, on its own paragraph — never replaced.
+ */
+export function migrateMergedTargetRoleIntoBrief(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    const d = n?.data;
+    if (!d || typeof d !== 'object') return n;
+    const role = typeof d.targetRole === 'string' ? d.targetRole.trim() : '';
+    // Shape-gated: no targetRole (or a blank one, e.g. from an empty draft
+    // that was never cleared) — nothing to fold, return by reference. This
+    // also makes the migration idempotent: after the first pass deletes
+    // `targetRole`, a second pass sees none and no-ops on every node.
+    if (!role) return n;
+    changed = true;
+    const { targetRole: _retired, ...rest } = d;
+    const existingBrief = typeof rest.jobPreferences === 'string' ? rest.jobPreferences.trim() : '';
+    rest.jobPreferences = existingBrief
+      ? `Target role: ${role}\n\n${existingBrief}`
+      : `Target role: ${role}`;
+    return { ...n, data: rest };
+  });
+  return changed ? out : nodes;
+}
+
+/**
+ * Strip the retired two-mode `titleSource` discriminator from every persisted
+ * copy of a Job Search hub's preference plan, and invalidate a role lock
+ * created under the old 'brief' mode (v9).
+ *
+ * Phase C deletes the two-mode design entirely: the AI always determines the
+ * roles now, even when the brief names explicit titles (it keeps them
+ * verbatim within its own list and expands around them — see
+ * jobPreferences.js / aiSchemas.js). `titleSource` ('brief' vs 'generated')
+ * no longer means anything and must not linger on a saved plan. It can be
+ * present on several independent copies of the same plan object depending on
+ * the hub's saved hubState — see getJobSearchTransientKeysForSave
+ * (persistenceTransientState.js) for which copies survive a save in which
+ * state, and evaluationEnvelope (jobPreferences.js) for the nested copy
+ * carried inside `preferenceEvaluation.preferencePlan` — this strips it from
+ * every one of them.
+ *
+ * A hub that already LOCKED (`data.resolvedRolesMeta` present — the sentinel
+ * `hasResolvedRoleLock` in JobSearchNode.jsx checks) needs more than a field
+ * strip when the lock's own plan (`data.searchBriefPlan`, the exact object
+ * frozen alongside `resolvedRoles`/`resolvedRolesMeta` at lock time) carried
+ * `titleSource === 'brief'`. Under the old 'brief' mode `data.resolvedRoles`
+ * is the user's raw verbatim titles — the AI never got to expand or
+ * interpret them, because 'brief' skipped that step entirely. Under the
+ * single mode there is no more "skip the AI" path, so that lock is no longer
+ * a valid answer to "what should this hub search" and must be cleared to
+ * force one real re-resolution. `settingsFrozen` (JobSearchNode.jsx) derives
+ * entirely from `resolvedRolesMeta`, so clearing it also unfreezes the hub's
+ * settings — there is no separate persisted freeze flag to touch. A
+ * 'generated' lock is left intact: the AI already determined those roles
+ * under a process that still exists unchanged, so the lock stays valid.
+ *
+ * Shape-gated: a node with no titleSource anywhere and no 'brief' lock
+ * returns by reference. Idempotent: once titleSource is stripped and a
+ * 'brief' lock cleared, a second pass finds nothing left to match.
+ */
+export function migrateJobHubTitleSourceSingleMode(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+
+  const hasTitleSource = (plan) => (
+    !!plan && typeof plan === 'object' && Object.hasOwn(plan, 'titleSource')
+  );
+  const stripTitleSource = (plan) => {
+    if (!hasTitleSource(plan)) return plan;
+    const { titleSource: _retired, ...rest } = plan;
+    return rest;
+  };
+  // Every slot that can independently carry a persisted copy of the plan.
+  const PLAN_KEYS = [
+    'jobPreferencePlan',
+    'jobPreferencesInterpretation',
+    'searchBriefPlan',
+    'pendingJobPreferencePlan',
+    'pendingJobPreferencesInterpretation',
+  ];
+
+  const out = nodes.map(n => {
+    const d = n?.data;
+    if (!d || typeof d !== 'object') return n;
+
+    const anyTitleSource = PLAN_KEYS.some(key => hasTitleSource(d[key]))
+      || hasTitleSource(d.preferenceEvaluation?.preferencePlan);
+    // The lock's own plan is searchBriefPlan; fall back to the interpreted/
+    // raw plan slots in case of an older or partial shape that never wrote it.
+    const lockPlanWasBrief = (
+      d.searchBriefPlan?.titleSource
+      ?? d.jobPreferencesInterpretation?.titleSource
+      ?? d.jobPreferencePlan?.titleSource
+    ) === 'brief';
+    const hasLock = !!(d.resolvedRolesMeta && typeof d.resolvedRolesMeta === 'object');
+    const invalidateLock = hasLock && lockPlanWasBrief;
+
+    if (!anyTitleSource && !invalidateLock) return n;
+    changed = true;
+
+    const rest = { ...d };
+    for (const key of PLAN_KEYS) {
+      if (Object.hasOwn(rest, key)) rest[key] = stripTitleSource(rest[key]);
+    }
+    if (hasTitleSource(rest.preferenceEvaluation?.preferencePlan)) {
+      rest.preferenceEvaluation = {
+        ...rest.preferenceEvaluation,
+        preferencePlan: stripTitleSource(rest.preferenceEvaluation.preferencePlan),
+      };
+    }
+    if (invalidateLock) {
+      // Clear the lock AND everything DERIVED from it, the way the two
+      // legitimate unlock paths do (handleClearCareerFiles via
+      // buildJobHubCareerClearPatch in hubDropEligibility.js, and
+      // JobSearchNode.jsx's resetHandler). Clearing only the lock fields makes
+      // this migration a no-op in practice:
+      //
+      //  - `queries`/`queryCacheKey` are the QUERY BUNDLE built from the old
+      //    narrow titles, and buildQueryCacheKey is keyed on the raw brief text
+      //    + résumé fingerprint + location — none of which this migration
+      //    changes. So the re-resolution would run, lock a correctly expanded
+      //    role list, display it, and then the run would reuse the stale
+      //    cached bundle and scrape the OLD titles anyway. That is precisely
+      //    the outcome the migration exists to prevent.
+      //  - `searchBriefPlan` seeds `jobPreferencesInterpretation` BEFORE the
+      //    lock is consulted (JobSearchNode.jsx ~3943), and leaves
+      //    SearchBriefAdvisories rendering advisories from a dead resolution.
+      //  - the `pending*` plan mirrors are read UNCONDITIONALLY (no lock check)
+      //    when a hub paused in `sources-ready` is resumed via Solve/Skip, and
+      //    those fields deliberately survive a save in that state — so a paused
+      //    canvas would finish its run against the stale un-expanded plan.
+      //
+      // Career data itself is deliberately NOT cleared: the user should not
+      // have to re-import résumé files because the role-resolution rules
+      // changed. Past run RESULTS (preferenceEvaluation, scoredJobs) are also
+      // left intact — they are history, and the titleSource strip above
+      // already cleans the plan copy nested inside them.
+      delete rest.searchBriefPlan;
+      delete rest.resolvedRoles;
+      delete rest.resolvedRolesMeta;
+      delete rest.queries;
+      delete rest.queryCacheKey;
+      delete rest.queryModel;
+      delete rest.queryCount;
+      delete rest.jobPreferencePlan;
+      delete rest.jobPreferencesInterpretation;
+      delete rest.pendingJobPreferencePlan;
+      delete rest.pendingJobPreferencesInterpretation;
+    }
+    return { ...n, data: rest };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -367,6 +537,8 @@ const MIGRATIONS = [
   { version: 5, name: 'jobhub-stranded-input-lock', migrate: migrateStaleJobHubInputLock, selfRecursive: false },
   { version: 6, name: 'jobhub-interrupted-results→done', migrate: migrateInterruptedJobHubResults, selfRecursive: false },
   { version: 7, name: 'jobhub-retired-batch-scoring',    migrate: migrateRetiredBatchScoringState, selfRecursive: false },
+  { version: 8, name: 'targetRole→search-brief',         migrate: migrateMergedTargetRoleIntoBrief, selfRecursive: false },
+  { version: 9, name: 'jobhub-titlesource→single-mode',  migrate: migrateJobHubTitleSourceSingleMode, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

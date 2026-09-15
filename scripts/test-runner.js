@@ -39,6 +39,7 @@ import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
 import packaging_integrity from './tests/packaging-integrity.js';
 import solve_ipc_failure from './tests/solve-ipc-failure.js';
 import nested_canvas_absorption from './tests/nested-canvas-absorption.js';
+import job_role_lock_regressions from './tests/job-role-lock-regressions.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -83,6 +84,7 @@ const testGroups = [
   ['packaging-integrity.js', packaging_integrity],
   ['solve-ipc-failure.js', solve_ipc_failure],
   ['nested-canvas-absorption.js', nested_canvas_absorption],
+  ['job-role-lock-regressions.js', job_role_lock_regressions],
 ];
 
 function validateTestRegistry(groups) {

@@ -1,4 +1,4 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateLegacyJobHubResults, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery } from '../test-dependencies.js';
@@ -2200,6 +2200,249 @@ export default [
         && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
         'migration advances the schema and is a no-op for an already-current workspace');
       return { schema: CURRENT_SCHEMA_VERSION, healed: 3 };
+    },
+  },
+  {
+    name: 'migrateMergedTargetRoleIntoBrief (v8): a saved targetRole folds into the search brief',
+    run: () => {
+      // Phase B deleted the standalone "Target role" box — the "Job Preferences"
+      // textarea (renamed "Search Brief") is now the only input. A canvas saved
+      // before the merge can still carry data.targetRole; this migration folds
+      // it into the brief as a named title line rather than dropping it.
+      const roleAndBrief = { id: 'h1', type: 'jobhub', position: { x: 0, y: 0 }, data: { targetRole: 'Staff Engineer', jobPreferences: 'Prefer remote-friendly teams.' } };
+      const roleOnly = { id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { targetRole: 'Product Manager', jobPreferences: '' } };
+      // Blank/whitespace-only targetRole is treated as absent — nothing to fold.
+      const blankRole = { id: 'h3', type: 'jobhub', position: { x: 0, y: 0 }, data: { targetRole: '   ', jobPreferences: 'Looking at fintech.' } };
+      const noRole = { id: 'h4', type: 'jobhub', position: { x: 0, y: 0 }, data: { jobPreferences: 'A big company.' } };
+      const nested = { id: 'group', type: 'group', position: { x: 0, y: 0 }, data: { canvasData: { nodes: [
+        { id: 'inner', type: 'jobhub', position: { x: 0, y: 0 }, data: { targetRole: 'Data Scientist', jobPreferences: '' } },
+      ], edges: [], drawings: [] } } };
+
+      const direct = migrateMergedTargetRoleIntoBrief([roleAndBrief, roleOnly, blankRole, noRole]);
+
+      const healed1 = direct.find(n => n.id === 'h1');
+      assert(!('targetRole' in healed1.data), 'v8 deletes data.targetRole once folded in');
+      assert(healed1.data.jobPreferences === 'Target role: Staff Engineer\n\nPrefer remote-friendly teams.',
+        'v8 prepends a named title line above the existing brief, never replacing it');
+
+      const healed2 = direct.find(n => n.id === 'h2');
+      assert(healed2.data.jobPreferences === 'Target role: Product Manager',
+        'v8 with an empty brief produces just the title line, no dangling separator');
+
+      assert(direct.find(n => n.id === 'h3') === blankRole,
+        'v8 treats a whitespace-only targetRole as absent and returns the node by reference');
+      assert(direct.find(n => n.id === 'h4') === noRole,
+        'v8 leaves a node with no targetRole untouched, by reference');
+
+      const viaRunner = runNodeMigrations([nested], 7);
+      assert(viaRunner[0].data.canvasData.nodes[0].data.jobPreferences === 'Target role: Data Scientist',
+        'v8 runner applies the fold recursively into group sub-canvases');
+
+      // Idempotency is the real safety net: an unversioned legacy file runs
+      // every migration in order, so a second pass (targetRole now gone) must
+      // not re-fold or duplicate the title line.
+      assert(migrateMergedTargetRoleIntoBrief(direct) === direct,
+        'v8 is idempotent — a second pass is a same-ref no-op');
+      assert(CURRENT_SCHEMA_VERSION >= 8
+        && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
+        'migration advances the schema and is a no-op for an already-current workspace');
+      return { schema: CURRENT_SCHEMA_VERSION, healed: 3 };
+    },
+  },
+  {
+    name: 'migrateJobHubTitleSourceSingleMode (v9): retired titleSource strips, a brief-mode lock invalidates',
+    run: () => {
+      // Phase C deleted the two-mode design — the AI always determines the
+      // roles now, so the 'brief' vs 'generated' titleSource discriminator no
+      // longer means anything and must not linger on a saved plan. A hub that
+      // already locked (data.resolvedRolesMeta present) under the old 'brief'
+      // mode has resolvedRoles that are the user's raw verbatim titles the AI
+      // never got to expand, so that lock must be invalidated — all three
+      // fields (searchBriefPlan, resolvedRoles, resolvedRolesMeta) are the
+      // same three fields the two legitimate unlock paths clear, atomically.
+      // A 'generated' lock is still a valid answer and survives untouched.
+      const briefLock = {
+        id: 'h1', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          resolvedRoles: ['Software Engineer'],
+          resolvedRolesMeta: { resolvedAt: '2026-09-01T00:00:00.000Z', source: 'search-brief' },
+          searchBriefPlan: { titleSource: 'brief', roles: ['Software Engineer'] },
+          jobPreferences: 'Software Engineer roles only.',
+        },
+      };
+      const generatedLock = {
+        id: 'h2', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          resolvedRoles: ['Product Manager', 'Senior PM'],
+          resolvedRolesMeta: { resolvedAt: '2026-09-02T00:00:00.000Z', source: 'ai-generated' },
+          searchBriefPlan: { titleSource: 'generated', roles: ['Product Manager', 'Senior PM'] },
+        },
+      };
+      const allPlanSlots = {
+        id: 'h3', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          jobPreferencePlan: { titleSource: 'generated', roles: ['Engineer'] },
+          jobPreferencesInterpretation: { titleSource: 'generated', roles: ['Engineer'] },
+          searchBriefPlan: { titleSource: 'generated', roles: ['Engineer'] },
+          pendingJobPreferencePlan: { titleSource: 'brief', roles: ['Pending Engineer'] },
+          pendingJobPreferencesInterpretation: { titleSource: 'brief', roles: ['Pending Engineer'] },
+          preferenceEvaluation: { verdict: 'ok', preferencePlan: { titleSource: 'generated', roles: ['Engineer'] } },
+        },
+      };
+      const untouched = { id: 'h4', type: 'jobhub', position: { x: 0, y: 0 }, data: { jobPreferences: 'Nothing to migrate here.' } };
+      // A lock with no titleSource anywhere has nothing to invalidate — this
+      // is the shape a canvas saved under the single-mode design produces.
+      const lockNoTitleSource = {
+        id: 'h5', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          resolvedRoles: ['Data Analyst'],
+          resolvedRolesMeta: { resolvedAt: '2026-09-03T00:00:00.000Z', source: 'ai-generated' },
+          searchBriefPlan: { roles: ['Data Analyst'] },
+        },
+      };
+      const nested = { id: 'group', type: 'group', position: { x: 0, y: 0 }, data: { canvasData: { nodes: [
+        { id: 'inner', type: 'jobhub', position: { x: 0, y: 0 }, data: { jobPreferencePlan: { titleSource: 'generated', roles: ['Analyst'] } } },
+      ], edges: [], drawings: [] } } };
+
+      const direct = migrateJobHubTitleSourceSingleMode([briefLock, generatedLock, allPlanSlots, untouched, lockNoTitleSource]);
+
+      const healedBrief = direct.find(n => n.id === 'h1');
+      assert(!('searchBriefPlan' in healedBrief.data), 'v9: a brief-mode lock deletes searchBriefPlan atomically with the lock');
+      assert(!('resolvedRoles' in healedBrief.data), 'v9: a brief-mode lock deletes resolvedRoles atomically with searchBriefPlan');
+      assert(!('resolvedRolesMeta' in healedBrief.data), 'v9: a brief-mode lock deletes resolvedRolesMeta atomically with searchBriefPlan');
+      assert(healedBrief.data.jobPreferences === 'Software Engineer roles only.', 'v9: unrelated fields on a brief-mode hub survive the clear');
+
+      const healedGenerated = direct.find(n => n.id === 'h2');
+      assert(healedGenerated.data.resolvedRoles.length === 2 && healedGenerated.data.resolvedRoles[0] === 'Product Manager',
+        "v9: a generated-mode lock's resolvedRoles survive intact");
+      assert(healedGenerated.data.resolvedRolesMeta === generatedLock.data.resolvedRolesMeta,
+        'v9: a generated-mode lock keeps resolvedRolesMeta untouched, by reference');
+      assert(!('titleSource' in healedGenerated.data.searchBriefPlan),
+        "v9: titleSource is still stripped from a generated lock's own plan even though the lock survives");
+      assert(healedGenerated.data.searchBriefPlan.roles.length === 2,
+        'v9: stripping titleSource leaves the rest of the plan object intact');
+
+      const healedAll = direct.find(n => n.id === 'h3');
+      for (const key of ['jobPreferencePlan', 'jobPreferencesInterpretation', 'searchBriefPlan', 'pendingJobPreferencePlan', 'pendingJobPreferencesInterpretation']) {
+        assert(!('titleSource' in healedAll.data[key]), `v9: titleSource stripped from data.${key}`);
+      }
+      assert(!('titleSource' in healedAll.data.preferenceEvaluation.preferencePlan),
+        'v9: titleSource stripped from the nested preferenceEvaluation.preferencePlan copy too');
+      assert(healedAll.data.preferenceEvaluation.verdict === 'ok',
+        'v9: sibling fields on preferenceEvaluation survive the nested strip');
+
+      assert(direct.find(n => n.id === 'h4') === untouched,
+        'v9: a node with no titleSource anywhere and no lock is returned by reference, unchanged');
+
+      const healedLockNoTitleSource = direct.find(n => n.id === 'h5');
+      assert(healedLockNoTitleSource === lockNoTitleSource,
+        'v9: a lock with no titleSource anywhere has nothing to invalidate — returned by reference, lock intact');
+      assert(healedLockNoTitleSource.data.resolvedRoles[0] === 'Data Analyst', 'v9: the surviving lock keeps its resolved roles');
+
+      // Idempotency is the real safety net: an unversioned legacy file runs
+      // every migration in order, so a second pass (titleSource already gone,
+      // brief lock already cleared) must not re-strip or re-invalidate anything.
+      assert(migrateJobHubTitleSourceSingleMode(direct) === direct,
+        'v9 is idempotent — a second pass over already-migrated nodes is a same-ref no-op');
+
+      const viaRunner = runNodeMigrations([nested], 8);
+      const innerHealed = viaRunner[0].data.canvasData.nodes[0];
+      assert(!('titleSource' in innerHealed.data.jobPreferencePlan),
+        'v9 runner applies the strip recursively into group sub-canvases');
+
+      assert(CURRENT_SCHEMA_VERSION >= 9
+        && runNodeMigrations(viaRunner, CURRENT_SCHEMA_VERSION) === viaRunner,
+        'migration advances the schema and is a no-op for an already-current workspace');
+      return { schema: CURRENT_SCHEMA_VERSION, healed: 4 };
+    },
+  },
+  {
+    // ADVERSARIAL-REVIEW FIX (v9 invalidation was incomplete): the original
+    // v9 migration cleared only the three lock fields (searchBriefPlan,
+    // resolvedRoles, resolvedRolesMeta) when invalidating a stale 'brief'
+    // lock. That silently discarded the whole POINT of the migration: the
+    // forced re-resolution it triggers would run, produce a correctly
+    // expanded role list, and lock it -- but the run itself reads its query
+    // bundle from `queries`/`queryCacheKey`, which is keyed only on the raw
+    // brief text + résumé fingerprint + location (none of which this
+    // migration changes), so it would silently reuse the STALE cached bundle
+    // and scrape the OLD narrow titles anyway. The `pending*` plan mirrors
+    // are read unconditionally (no lock check) when a hub paused in
+    // 'sources-ready' is resumed via Solve/Skip, reproducing the same bug for
+    // a paused canvas. The fix deletes all eight of these alongside the
+    // original three. Career data and past run RESULTS (preferenceEvaluation,
+    // scoredJobs) are deliberately NOT cleared -- they are history, not a
+    // stale cache -- in either the invalidated ('brief') or untouched
+    // ('generated') case.
+    name: 'migrateJobHubTitleSourceSingleMode (v9) FIX: invalidating a stale brief-mode lock also clears the stale cached query bundle and pending/interpreted plan mirrors, not just the three lock fields',
+    run: () => {
+      const staleQueryFields = {
+        queries: ['software engineer'],
+        queryCacheKey: 'stale-cache-key',
+        queryModel: 'non-api-ai',
+        queryCount: 1,
+        jobPreferencePlan: { titleSource: 'brief', roles: ['Software Engineer'] },
+        jobPreferencesInterpretation: { titleSource: 'brief', roles: ['Software Engineer'] },
+        pendingJobPreferencePlan: { titleSource: 'brief', roles: ['Software Engineer'] },
+        pendingJobPreferencesInterpretation: { titleSource: 'brief', roles: ['Software Engineer'] },
+      };
+      const briefLock = {
+        id: 'h1', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          resolvedRoles: ['Software Engineer'],
+          resolvedRolesMeta: { resolvedAt: '2026-09-01T00:00:00.000Z', source: 'search-brief' },
+          searchBriefPlan: { titleSource: 'brief', roles: ['Software Engineer'] },
+          jobPreferences: 'Software Engineer roles only.',
+          preferenceEvaluation: { verdict: 'ok', preferencePlan: { titleSource: 'brief', roles: ['Software Engineer'] } },
+          scoredJobs: [{ title: 'Software Engineer', company: 'Acme' }],
+          ...staleQueryFields,
+        },
+      };
+      const generatedLock = {
+        id: 'h2', type: 'jobhub', position: { x: 0, y: 0 },
+        data: {
+          resolvedRoles: ['Product Manager', 'Senior PM'],
+          resolvedRolesMeta: { resolvedAt: '2026-09-02T00:00:00.000Z', source: 'ai-generated' },
+          searchBriefPlan: { titleSource: 'generated', roles: ['Product Manager', 'Senior PM'] },
+          preferenceEvaluation: { verdict: 'ok', preferencePlan: { titleSource: 'generated', roles: ['Product Manager'] } },
+          scoredJobs: [{ title: 'Product Manager', company: 'Acme' }],
+          queries: ['product manager'],
+          queryCacheKey: 'valid-cache-key',
+          queryModel: 'non-api-ai',
+          queryCount: 1,
+          jobPreferencePlan: { titleSource: 'generated', roles: ['Product Manager'] },
+          jobPreferencesInterpretation: { titleSource: 'generated', roles: ['Product Manager'] },
+          pendingJobPreferencePlan: { titleSource: 'generated', roles: ['Product Manager'] },
+          pendingJobPreferencesInterpretation: { titleSource: 'generated', roles: ['Product Manager'] },
+        },
+      };
+
+      const healed = migrateJobHubTitleSourceSingleMode([briefLock, generatedLock]);
+
+      const healedBrief = healed.find(n => n.id === 'h1');
+      for (const key of Object.keys(staleQueryFields)) {
+        assert(!(key in healedBrief.data),
+          `FIX: an invalidated brief-mode lock must also delete data.${key} -- otherwise the forced re-resolution's own new role list is silently discarded in favor of the stale cached query bundle / pending plan mirror`);
+      }
+      assert(!('searchBriefPlan' in healedBrief.data) && !('resolvedRoles' in healedBrief.data) && !('resolvedRolesMeta' in healedBrief.data),
+        'FIX: the original three lock fields must still be cleared too');
+      assert(healedBrief.data.jobPreferences === 'Software Engineer roles only.',
+        'FIX: the raw brief text itself must survive the clear -- it is what the forced re-resolution reads');
+      assert(healedBrief.data.preferenceEvaluation?.verdict === 'ok'
+        && JSON.stringify(healedBrief.data.scoredJobs) === JSON.stringify([{ title: 'Software Engineer', company: 'Acme' }]),
+        'FIX: past run RESULTS (preferenceEvaluation, scoredJobs) are history and must not be cleared by a lock invalidation');
+
+      // A valid 'generated' lock is untouched by the brief-only invalidation
+      // path -- its own cached query bundle survives because nothing forces
+      // a re-resolution.
+      const healedGenerated = healed.find(n => n.id === 'h2');
+      for (const key of [...Object.keys(staleQueryFields), 'resolvedRoles', 'resolvedRolesMeta', 'searchBriefPlan', 'scoredJobs', 'preferenceEvaluation']) {
+        assert(key in healedGenerated.data, `FIX: a valid 'generated' lock must not have data.${key} deleted by the brief-only invalidation path`);
+      }
+      assert(healedGenerated.data.queryCacheKey === 'valid-cache-key',
+        "FIX: a generated-mode lock's own cached query bundle survives untouched -- its lock is still valid, nothing forces a re-resolution");
+
+      return { staleBundleCleared: true, resultsPreserved: true, generatedLockUntouched: true };
     },
   },
   {

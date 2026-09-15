@@ -658,9 +658,16 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
-          // Rows recovered by a native-challenge resume go through the same
-          // pinned-role title gate as the main search (jobTitleMatch.js), or a
-          // solved source would be the one way off-role jobs reach the board.
+          // Legacy snapshot/display data only — the deterministic post-search
+          // title gate this used to feed (jobTitleMatch.js) is gone. Role
+          // screening now happens once per run via screenJobRolesByTitle
+          // inside the search-jobs handler, at the old gate's funnel
+          // position, plus a backstop inside evaluate-job-preferences that
+          // screens only rows still missing a `roleScreen` stamp. That
+          // backstop is how THIS card's resolve-job-source/resume-job-source
+          // rows actually get screened, since those handlers deliberately
+          // skip screening themselves — one AI call per source would be far
+          // too expensive.
           targetRole: (
             hubData.pendingTargetRole
             ?? hubData.activeTargetRole
@@ -680,8 +687,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
-          // Same gate as the main search — a captcha Solve re-extracts rows
-          // in-page, so without this the solved source could ship off-role jobs.
+          // Legacy snapshot/display data only — see the resumeJobSource
+          // branch above; the gate this used to feed is gone.
           targetRole: (
             hubData.pendingTargetRole
             ?? hubData.activeTargetRole

@@ -42,6 +42,8 @@ const KNOWN_TASKS = new Set([
   'job-preference-evaluation',
   'job-preference-research',
   'job-preference-research-assessment',
+  'job-role-audit',
+  'job-role-screen',
   // The fallback bucket resolveTask() lands on for an unmapped/absent task.
   // It is a real member here so that passing task:'default' explicitly is not
   // itself reported as "unmapped"; getKnownTaskIds() filters it back out
@@ -140,6 +142,33 @@ const TASK_MAX_TOKENS = {
   'job-preference-evaluation': ({ itemCount = 10 } = {}) => Math.min(12288, 2048 + itemCount * 800),
   'job-preference-research': 4096,
   'job-preference-research-assessment': 2048,
+  // Pass-2 role-resolution audit (JOB_ROLE_AUDIT_SCHEMA, jobPreferences.js's
+  // resolveSearchRoles). Visible JSON is small — up to 20 final titles plus
+  // up to 20 added/removed titles (worst case ~40 short title strings) and
+  // three short prose fields (addedReason/removedReason/rationale, a few
+  // hundred chars each) — well under job-preference-interpretation's full
+  // plan (up to 24+24 preference items plus this same title list). Matched
+  // to that task's cap anyway rather than shaved down: this call runs ONCE
+  // per hub (the result is locked and reused verbatim forever after), a
+  // reasoning-heavy model auditing two separate checks (coverage/compliance)
+  // can spend materially more thinking tokens than the visible JSON implies,
+  // and there is no cap-raise retry on this transport — a truncated paste on
+  // the one call that matters most is the worst place to be stingy.
+  'job-role-audit': 4096,
+  // The ONLY high-row-count task here: ROLE_SCREEN_BATCH_SIZE is 200, where
+  // every other batched task runs 10-40 rows. It emits one tiny row per job —
+  // `{"index":199,"outcome":"mismatch","reason":"registered nurse role"}` is
+  // about 20 tokens, and 'match'/'unclear' rows carry an empty reason and cost
+  // ~13 — but 200 of them still far exceed the flat 'default' 2048 this task
+  // silently fell through to before it was registered here. That truncates the
+  // paste, and this transport has NO cap-raise retry, so the whole screen
+  // becomes a failed handoff the user has to notice and redo by hand — which
+  // would invert the entire point of screening on titles (see
+  // screenJobRolesByTitle in jobPreferences.js: the batch is large precisely
+  // so one handoff covers the pool). Provisioned at roughly double the
+  // all-mismatch worst case; 200 rows → 10624.
+  'job-role-screen':           ({ itemCount = 0 } = {}) =>
+    Math.min(16384, 1024 + Math.max(0, itemCount) * 48),
   'default':                   2048,
 };
 

@@ -152,9 +152,25 @@ function captureJobSearchRollback(sourceId, sourceData, nodes, edges) {
 }
 
 // Human label for a connected Job Search Module, from its search params.
+// Phase B removed the standalone Target role box — the Search Brief (still
+// `jobPreferences` on the wire) now carries whatever role signal exists.
+// Prefer `resolvedRoles` — the DURABLE, once-locked title list (see ROLE
+// LOCKING in JobSearchNode.jsx) — over `pinnedTitles`, which is a PER-RUN
+// field reset to [] at the start of every run and only repopulated once that
+// run reaches query construction. Reading pinnedTitles alone made a Board's
+// label for a connected Search module go blank before the first run and
+// after every reload; resolvedRoles survives both because it is written once
+// and persisted. Fall back to pinnedTitles only for a hub that has never
+// locked (fresh hub mid-run) or an unmigrated/legacy canvas that predates
+// resolvedRoles entirely. `d?.targetRole` itself is legacy-only (an
+// unmigrated canvas may still carry it) and is deliberately not read here —
+// reading it would show a stale role no run has actually pinned on.
 function moduleLabel(d) {
   const loc = String(d?.preferredLocation || d?.canonicalLocation || '').trim();
-  const role = String(d?.targetRole || '').trim();
+  const resolvedRoles = Array.isArray(d?.resolvedRoles) ? d.resolvedRoles : [];
+  const pinnedTitles = Array.isArray(d?.pinnedTitles) ? d.pinnedTitles : [];
+  const titles = resolvedRoles.length > 0 ? resolvedRoles : pinnedTitles;
+  const role = typeof titles[0] === 'string' ? titles[0].trim() : '';
   return [role, loc].filter(Boolean).join(' · ') || 'Job Search';
 }
 

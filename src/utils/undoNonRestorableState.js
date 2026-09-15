@@ -62,6 +62,27 @@ const JOB_SEARCH_UNDOABLE_SETTING_FIELDS = [
   'locked',
 ];
 
+// FIX 11: once the two-pass role resolver has locked a Search Brief hub,
+// JobSearchNode.jsx freezes all seven Search Brief settings (search brief,
+// location, remote residences, look-back window, collection limits,
+// platforms) — but 'locked' here is a DIFFERENT, unrelated field: the
+// generic canvas-wide "Lock Node" toggle (see useCanvasContextMenu.js),
+// which stays ordinarily undo-restorable regardless of role-lock state.
+const JOB_SEARCH_FROZEN_SETTING_FIELDS = new Set(
+  JOB_SEARCH_UNDOABLE_SETTING_FIELDS.filter(field => field !== 'locked'),
+);
+
+// Mirrors JobSearchNode.jsx's hasResolvedRoleLock exactly (resolvedRolesMeta
+// truthy is the one sentinel that is true iff a resolution ran, even for a
+// legitimate zero-title lock — see that function's header comment). Kept as
+// a local duplicate rather than an import: this is a shared, provider-
+// agnostic undo utility, and importing the multi-thousand-line node
+// component here would be a needless, fragile coupling for a two-line check.
+function hasResolvedRoleLock(source) {
+  return !!(source && typeof source === 'object'
+    && source.resolvedRolesMeta && typeof source.resolvedRolesMeta === 'object');
+}
+
 function hasExternallyOwnedJobSearchState(data) {
   if (!data || typeof data !== 'object') return false;
   return ACTIVE_JOB_SEARCH_STATES.has(data.hubState)
@@ -197,7 +218,19 @@ function mergeNonRestorableData(nodes, byId) {
       // just visibly processing states, but a retired `sources-ready` snapshot
       // whose pending tuple must never be resurrected after Solve/Skip.
       const mergedData = { ...liveData.completeData };
+      // FIX 11: make the settings freeze atomic with the role lock. Once
+      // resolvedRoles/searchBriefPlan/resolvedRolesMeta are locked, those
+      // three fields are already excluded from this allow-list (never
+      // undo-restorable), but the seven settings they were DERIVED FROM
+      // were still being overlaid from the pre-lock undo snapshot on every
+      // pass through here. That desynced the visible settings (reverted)
+      // from the durable lock (unchanged) while the UI stayed frozen and
+      // gave the user no way to reconcile the two. Skip the overlay for the
+      // frozen subset once locked; 'locked' itself (the unrelated canvas
+      // Lock Node toggle) stays undo-restorable either way.
+      const roleLockEngaged = hasResolvedRoleLock(liveData.completeData);
       for (const field of JOB_SEARCH_UNDOABLE_SETTING_FIELDS) {
+        if (roleLockEngaged && JOB_SEARCH_FROZEN_SETTING_FIELDS.has(field)) continue;
         delete mergedData[field];
         if (Object.prototype.hasOwnProperty.call(node.data || {}, field)) {
           mergedData[field] = node.data[field];

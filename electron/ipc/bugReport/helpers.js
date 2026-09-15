@@ -86,7 +86,14 @@ export function redactReportEventHistoryLine(value) {
     // line rather than exposing the suffix after its first embedded quote.
     .replace(/(\b(?:for\s+query|search\s+query)\s*:\s*)"[^\r\n]*"/gi, '$1"[redacted query]"')
     .replace(/(\bsearching\s+exactly\s*)"[^\r\n]*"/gi, '$1"[redacted target role]"')
-    .replace(/(\bshow\s+more\s+in\s+role\s*)"[^\r\n]*"/gi, '$1"[redacted role]"');
+    .replace(/(\bshow\s+more\s+in\s+role\s*)"[^\r\n]*"/gi, '$1"[redacted role]"')
+    // FIX 10: JobSearchNode's Search-Brief-driven title resolution logs
+    // "...skipping query generation and searching them directly: <titles>"
+    // with the resolved titles UNQUOTED and comma-joined, running to end of
+    // line (see the EventLogger.log call in src/nodes/JobSearchNode.jsx).
+    // Unlike the two prose forms above, there is no closing quote to anchor
+    // on, so this clause must consume the rest of the line after the colon.
+    .replace(/(\bskipping\s+query\s+generation\s+and\s+searching\s+them\s+directly\s*:\s*)[^\r\n]*/gi, '$1[redacted titles]');
 
   // Key/value forms cover JobCard's q=/htidocid= diagnostics and compatible
   // future event producers. Known metadata-only values (for example the

@@ -421,6 +421,11 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     relevanceDropped: receiptNumber(receipt.funnel.relevanceDropped),
     deduped: receiptNumber(receipt.funnel.deduped),
     ageDropped: receiptNumber(receipt.funnel.ageDropped),
+    // Rows the AI role screen rejected (screenJobRolesByTitle, replacing the
+    // old deterministic pinned-title gate — see jobs.js's reconcileSearchFunnel
+    // and the search-jobs call site for the full rationale). Still sits
+    // between age and history in this funnel because that is exactly where
+    // the screen runs; 0 on a run with no resolved titles to screen against.
     roleDropped: receiptNumber(receipt.funnel.roleDropped),
     historyDropped: receiptNumber(receipt.funnel.historyDropped),
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
@@ -731,10 +736,19 @@ export function sanitizeJobPreferencePlan(value) {
     softPreferences: sanitizeManifestPreferenceRows(value.softPreferences, false),
     strictRequirements: sanitizeManifestPreferenceRows(value.strictRequirements, true),
     warnings: manifestTextList(value.warnings, { maxItems: 10, maxItemLength: 500 }),
-    targetRoleConflict: value.targetRoleConflict === true,
-    targetRoleConflictReason: value.targetRoleConflict === true
-      ? manifestText(value.targetRoleConflictReason, 1000)
-      : '',
+    // FIX 9: `titles` must survive the manifest round-trip. This is the
+    // AI-determined role list generate-job-queries's ladder rung 2 (see
+    // jobs.js) uses to reproduce the exact same board queries on a resumed
+    // run — omitting it here (as this function previously did) silently fell
+    // a resume through to ladder rung 3's exploratory profile-driven query
+    // generation instead, which is not the same search. Bounds mirror
+    // normalizeJobPreferencePlan's (<=20 items, <=180 chars/item) so a
+    // recovered manifest can never carry a larger titles list than a
+    // freshly-interpreted plan could produce.
+    // `titleSource` (brief vs. generated) is gone: the two-mode design was
+    // removed — the AI always determines the roles now — so there is no
+    // longer a "which mode produced these titles" distinction to persist.
+    titles: manifestTextList(value.titles, { maxItems: 20, maxItemLength: 180 }),
   };
   const meaningful = plan.summary
     || plan.direction.summary
@@ -744,7 +758,11 @@ export function sanitizeJobPreferencePlan(value) {
     || plan.softPreferences.length > 0
     || plan.strictRequirements.length > 0
     || plan.warnings.length > 0
-    || plan.targetRoleConflict;
+    // FIX 9 (cont.): a plan can now be "meaningful" on titles alone — without
+    // this, an interpretation that produced titles but no summary/direction/
+    // preference text would fail the meaningful check and get discarded as
+    // null, silently reproducing the exact bug this fix closes.
+    || plan.titles.length > 0;
   return meaningful ? plan : null;
 }
 

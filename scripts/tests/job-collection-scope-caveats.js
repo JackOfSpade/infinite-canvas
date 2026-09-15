@@ -167,6 +167,101 @@ export default [
     },
   },
   {
+    name: 'SearchBriefAdvisories: settingConflicts and warnings render in both JobSearchNode.jsx and JobSearchDoneState.jsx, and NOTHING when both are empty',
+    run: () => {
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
+
+      // Isolate the component's own definition (not its call sites) so the
+      // empty-case and both-fields assertions below are anchored to the
+      // actual implementation, not a substring that happens to appear
+      // elsewhere in the file.
+      const componentStart = done.indexOf('export function SearchBriefAdvisories');
+      const componentEnd = done.indexOf('export function JobSearchDoneState', componentStart);
+      assert(componentStart >= 0 && componentEnd > componentStart,
+        'SearchBriefAdvisories must be defined (and be followed by JobSearchDoneState) in JobSearchDoneState.jsx');
+      const component = done.slice(componentStart, componentEnd);
+
+      // The likely bug this test guards against: an always-visible empty
+      // container (e.g. a wrapping <div> with no early return) that shows a
+      // blank amber/neutral box on every ordinary brief with no advisories.
+      // Assert the explicit early-return-null guard exists, keyed on BOTH
+      // fields being empty — not just one of them.
+      assert(component.includes('if (settingConflicts.length === 0 && warnings.length === 0) return null;'),
+        'SearchBriefAdvisories must return null (render nothing) when both settingConflicts and warnings are empty, not an empty container');
+
+      // Both fields must actually be read and mapped, not just one of the
+      // two the task calls out (a common half-finished-feature bug).
+      assert(component.includes('searchBriefPlan?.settingConflicts') && component.includes('settingConflicts.map('),
+        'the component must read and render settingConflicts entries');
+      assert(component.includes('searchBriefPlan?.warnings') && component.includes('warnings.map('),
+        'the component must read and render warnings entries');
+
+      // Both render states wire the prop through: JobSearchNode.jsx renders
+      // the component directly in its own pre-run/draft state (where a
+      // settingConflict is still actionable, before settings freeze), and
+      // separately hands searchBriefPlan to JobSearchDoneState, which
+      // renders its OWN internal <SearchBriefAdvisories> for the completed
+      // state. Both usages must exist — this is a shared component, not two
+      // independent copies that could silently drift.
+      assert(search.includes('<SearchBriefAdvisories searchBriefPlan={data.searchBriefPlan || null} />'),
+        'JobSearchNode.jsx must render SearchBriefAdvisories directly in its own draft/empty state');
+      assert(search.includes('searchBriefPlan={data.searchBriefPlan || null}')
+        && search.includes('<JobSearchDoneState'),
+      'JobSearchNode.jsx must pass searchBriefPlan through to JobSearchDoneState');
+      assert(done.includes('<SearchBriefAdvisories searchBriefPlan={searchBriefPlan} />'),
+        'JobSearchDoneState.jsx must render SearchBriefAdvisories internally using the prop it received');
+
+      return { componentFound: true, bothFieldsWired: true, bothCallSitesWired: true };
+    },
+  },
+  {
+    name: 'SearchBriefAdvisories is structurally distinct from HubErrorBanner: read-only status, never routed through the error/alert path',
+    run: () => {
+      const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const errorBanner = readFileSync(new URL('../../src/components/HubErrorBanner.jsx', import.meta.url), 'utf8');
+
+      // HubErrorBanner is the red "alert" affordance with retry/dismiss
+      // controls for a FAILED run. Confirm that's still what it is, so the
+      // contrast below is meaningful rather than assuming stale knowledge.
+      assert(errorBanner.includes('role="alert"') && errorBanner.includes('bg-red-500/10') && errorBanner.includes('border-red-500/30'),
+        'HubErrorBanner must remain the red role="alert" failure affordance this test contrasts against');
+
+      const componentStart = done.indexOf('export function SearchBriefAdvisories');
+      const componentEnd = done.indexOf('export function JobSearchDoneState', componentStart);
+      const component = done.slice(componentStart, componentEnd);
+
+      // The advisory is informational ("you may have meant something else"),
+      // never an alert ("your run failed") — it must not borrow the error
+      // path's semantics (role, color) or its retry/dismiss affordances,
+      // since it never gates, cancels, or retries a search.
+      assert(!component.includes('role="alert"'),
+        'SearchBriefAdvisories must not use role="alert" — that is HubErrorBanner\'s failure semantics, not an advisory\'s');
+      assert(!component.includes('bg-red') && !component.includes('border-red'),
+        'SearchBriefAdvisories must not use HubErrorBanner\'s red failure styling');
+      assert(!component.includes('onRetry') && !component.includes('onDismiss') && !component.includes('errorMessage'),
+        'SearchBriefAdvisories must not accept error-path props (onRetry/onDismiss/errorMessage) — it is read-only display with no gating');
+      assert((component.match(/role="status"/g) || []).length >= 1,
+        'SearchBriefAdvisories must use the neutral role="status", not role="alert"');
+
+      // JobSearchNode.jsx's `banner` block is exactly the HubErrorBanner /
+      // queued-run / test-mode-note conditional group. SearchBriefAdvisories
+      // must render OUTSIDE it (in the settings form, not the error strip) —
+      // proving it is never gated behind, or rendered as part of, the error
+      // path.
+      const bannerStart = search.indexOf('const banner = (');
+      const bannerEnd = search.indexOf('return (\n    <HubContainer', bannerStart);
+      assert(bannerStart >= 0 && bannerEnd > bannerStart,
+        'JobSearchNode.jsx must still define the banner block this test isolates');
+      const banner = search.slice(bannerStart, bannerEnd);
+      assert(!banner.includes('SearchBriefAdvisories'),
+        'SearchBriefAdvisories must never be rendered inside the HubErrorBanner/queued-run banner block');
+
+      return { distinctFromErrorBanner: true, outsideBannerBlock: true };
+    },
+  },
+  {
     name: 'Event logger: Chromium ResizeObserver delivery warnings remain captured as layout warnings',
     run: () => {
       const completed = classifyLayoutWarning('ResizeObserver loop completed with undelivered notifications');

@@ -121,4 +121,41 @@ export default [
       return { condition: normalized.condition };
     },
   },
+  {
+    // Every query here is broadcast to up to 9 job boards, so an uncapped
+    // array response would fan a malformed response out arbitrarily wide —
+    // see the maxItems rationale on JOB_QUERY_GENERATION_SCHEMA itself. This
+    // test proves both the STATIC declaration (a per-key assert, not one
+    // blanket check spanning all four — a regression that recaps only one
+    // array must still fail) and the BEHAVIORAL enforcement (a 21-item
+    // response on each key independently trips validateResponseSchema),
+    // since a maxItems property that is declared but never actually
+    // enforced by the validator would be a silent no-op.
+    name: 'JOB_QUERY_GENERATION_SCHEMA: all four query arrays cap at maxItems 20 as a malformed-response tripwire, and validateResponseSchema actually enforces it',
+    run: () => {
+      const schema = responseSchemas.JOB_QUERY_GENERATION_SCHEMA;
+      const arrayKeys = ['titleQueries', 'suggestedRoleQueries', 'skillsOnlyQueries', 'targetRoleQueries'];
+      for (const key of arrayKeys) {
+        assert(schema.properties[key]?.type === 'array' && schema.properties[key]?.maxItems === 20,
+          `JOB_QUERY_GENERATION_SCHEMA.${key} must declare { type: 'array', maxItems: 20 }`);
+      }
+      const validLocation = { city: '', stateCode: '', region: '', country: '', isRemote: false, display: '' };
+      const baseValid = {
+        titleQueries: [], suggestedRoleQueries: [], skillsOnlyQueries: [], targetRoleQueries: [],
+        canonicalLocation: validLocation,
+      };
+      assert(validateResponseSchema(baseValid, schema).length === 0,
+        'four empty query arrays plus a resolved location remain valid against the live schema');
+      for (const key of arrayKeys) {
+        const twentyItems = { ...baseValid, [key]: Array.from({ length: 20 }, (_, i) => `query ${i}`) };
+        assert(validateResponseSchema(twentyItems, schema).length === 0,
+          `${key} at exactly the cap (20 items) must still validate — the cap is a tripwire, not a stricter target`);
+        const twentyOneItems = { ...baseValid, [key]: Array.from({ length: 21 }, (_, i) => `query ${i}`) };
+        const errors = validateResponseSchema(twentyOneItems, schema);
+        assert(errors.some((e) => e.path === `$.${key}` && e.message === 'must contain at most 20 items'),
+          `${key} exceeding 20 items must fail validation as a malformed-response tripwire, and only ${key}`);
+      }
+      return { arrayKeys };
+    },
+  },
 ];

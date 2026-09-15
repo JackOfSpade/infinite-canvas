@@ -28,9 +28,10 @@ import { descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecovery
 import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { isTerminalSourceStatus } from '../utils/sourceProgress';
+import { detectQueryOperators } from '../utils/jobTitleMatch';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
-import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
+import { JobSearchDoneState, SearchBriefAdvisories } from './jobsearch/JobSearchDoneState';
 import { JobSearchSourcesReadyState } from './jobsearch/JobSearchSourcesReadyState';
 import { HubErrorBanner } from '../components/HubErrorBanner';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
@@ -53,8 +54,7 @@ import {
   normalizeStructuredLocation,
   writeLastRemoteResidences,
 } from '../utils/jobSearchLocations';
-import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
-import { detectQueryOperators } from '../utils/jobTitleMatch';
+import { buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
 import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, isJobSearchBoardPausedContinuationBlocked, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
@@ -208,6 +208,11 @@ function reanalysisInputFingerprint(data) {
       : [],
     resumeProfile: source.resumeProfile || null,
     careerData: source.careerData || '',
+    // targetRole: legacy-only (the standalone box is gone; nothing writes this
+    // anymore). Kept here so an unmigrated canvas that still carries one
+    // continues to invalidate the fingerprint the same way it always did.
+    // jobPreferences is the Search Brief field — the box's rename is
+    // label-only, so this is already folding the brief.
     targetRole: source.targetRole || '',
     jobPreferences: source.jobPreferences || '',
     locationSnapshot: source.locationSnapshot || null,
@@ -220,13 +225,63 @@ function reanalysisInputFingerprint(data) {
   });
 }
 
-function buildQueryCacheKey({ resumeFingerprint, targetRole, jobPreferences, preferredLocation }) {
+// --- Title derivation: one AI-determined list, one consumer ---------------
+//
+// `preferencePlan.titles` is the AI's role determination for this brief (see
+// jobPreferences.js): if the free-text brief itself names job titles, the AI
+// keeps them verbatim inside this list and expands around them (adjacent/
+// related titles worth searching too); if the brief names no titles at all,
+// the AI works out suitable titles from the brief plus the career profile.
+// Either way there is exactly one resolved list, and it drives exactly one
+// thing — the search QUERIES. There is no deterministic post-search title
+// filter anymore (the old two-mode 'brief'-verbatim-gate/'generated'-gate-off
+// split, and jobs.js's applyPinnedTitleGate, are both gone). Role relevance
+// is now judged per-listing by the AI role screen that runs inside the
+// preference evaluation batch call (main process — see
+// electron/ipc/jobPreferences.js). That screen fails OPEN, deliberately
+// UNLIKE its siblings in the same call: a strict preference item fails CLOSED
+// (an `unverified` outcome drops the job, because an unproven hard
+// requirement is not a satisfied one), whereas an `unclear` role verdict
+// KEEPS the job. The asymmetry is the whole point — the gate this replaced
+// was removed for over-dropping, so the thing replacing it must never
+// discard a listing merely because the model could not tell.
+// A legacy `targetRole` (unmigrated canvas, no AI-plan concept — the
+// standalone Target role box that used to feed
+// search-jobs/search-jobs-single-source/resolve-job-source/resume-job-source
+// directly, see JobSourceCardNode.jsx) still wins outright, reproducing the
+// old single-role search exactly.
+function deriveSearchTitles(targetRole, preferencePlan) {
+  const role = String(targetRole || '').trim();
+  if (role) return [role];
+  return Array.isArray(preferencePlan?.titles)
+    ? preferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
+    : [];
+}
+
+// FIX 2 (defence-in-depth): `resolvedRoles.length > 0` used to be the lock-
+// existence sentinel everywhere in this module. A resolution that
+// legitimately yields ZERO titles (a valid outcome — see resolveSearchRoles)
+// still WRITES `resolvedRoles: []`, which that sentinel cannot distinguish
+// from "this hub has never locked". Every future scan then re-pays the
+// expensive two-pass interpretation handoff (a human copy/paste with no
+// timeout) FOREVER, and settingsFrozen never engages. `resolvedRolesMeta` is
+// written IFF a resolution actually ran (see freshRoleLockPatch below), so it
+// is the one sentinel that is true exactly when the lock exists, empty result
+// or not. Every lock-existence check in this module must go through this
+// helper instead of re-deriving `resolvedRoles.length > 0` inline.
+function hasResolvedRoleLock(source) {
+  return !!(source && typeof source === 'object'
+    && source.resolvedRolesMeta && typeof source.resolvedRolesMeta === 'object');
+}
+
+function buildQueryCacheKey({ resumeFingerprint, jobPreferences, preferredLocation }) {
   return JSON.stringify({
-    // v5: remote salary-comparison residences do not influence generated
-    // search queries or whether a cached query bundle can be safely reused.
-    strategyVersion: 5,
+    // v6: the standalone Target role box is gone — the brief (jobPreferences)
+    // now carries whatever role signal exists, resolved through a different
+    // code path (AI title interpretation instead of a literal typed role), so
+    // a v5 cache entry must not be reused even for byte-identical brief text.
+    strategyVersion: 6,
     resumeFingerprint: String(resumeFingerprint || ''),
-    targetRole: String(targetRole || '').trim(),
     jobPreferences: String(jobPreferences || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
   });
@@ -334,6 +389,68 @@ function mergePreferenceEvaluations(existing, incoming) {
       strictConflicts: numericTotal('strictConflicts'), strictUnverified: numericTotal('strictUnverified'),
     },
   };
+}
+
+// FIX 4: extract the role titles a saved-scrape snapshot was actually
+// searched under. See the call site (the getLastJobAnalysisSnapshot effect)
+// for why this reads the full snapshot's `jobPreferencePlan.titles` rather
+// than the curated `meta.targetRole` the recovery panel used to render.
+function savedAnalysisRoleTitles(snapshot) {
+  return Array.isArray(snapshot?.jobPreferencePlan?.titles)
+    ? snapshot.jobPreferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
+    : [];
+}
+
+// FIX 5: detectQueryOperators (jobTitleMatch.js) flags Boolean/operator
+// syntax (leading "-", NOT/AND/OR, "field:", quotes) that a job board will
+// not honor as an operator — measured behaviour is that boards ignore it,
+// zero out results entirely, or (ZipRecruiter, negation) invert the intent.
+// It was deleted from the UI with the standalone Target role box and is
+// referenced by no other application code, but the risk it guards against is
+// now LARGER: queries are built from the RESOLVED titles unconditionally
+// (deriveSearchTitles), so a title the user typed with quotes or a leading
+// minus — kept verbatim inside the AI's resolved list — goes to every job
+// board VERBATIM, with no other chokepoint that would ever catch it. This
+// is advisory only — never blocks, cancels, or retries a search, exactly like
+// SearchBriefAdvisories below, whose amber/role="status" visual contract this
+// deliberately mirrors so the two read as one family. Kept as a SEPARATE
+// plain function rather than folded into SearchBriefAdvisories itself:
+// SearchBriefAdvisories lives in JobSearchDoneState.jsx (out of this file's
+// edit scope) and only accepts a `searchBriefPlan` plan object, with no slot
+// for a client-side detector's output — this is called as a plain expression
+// (`{titleOperatorAdvisory(...)}`, not a JSX `<Tag/>`) immediately next to
+// every SearchBriefAdvisories call site in this file's render tree.
+// DELIBERATELY lowercase, not a capitalized `<TitleOperatorAdvisory/>` JSX
+// component: this file's single default export is one enormous component
+// (JobSearchNode), and React Compiler's eslint plugin analyzes every
+// capitalized top-level function that returns JSX as an independent
+// component to auto-memoize. A second such component in this file made that
+// analysis bail out on JobSearchNode itself — confirmed by reverting this
+// exact rename during development, which took the file from 12
+// react-compiler errors to 0 — silently reverting every one of its manual
+// memoizations and turning latent (harmless-when-compiled) ref-during-render
+// patterns into real errors. A lowercase plain function returning a React
+// element is invisible to that heuristic and sidesteps the whole class of
+// failure.
+function titleOperatorAdvisory(titles) {
+  const hits = new Set();
+  for (const title of (Array.isArray(titles) ? titles : [])) {
+    for (const hit of detectQueryOperators(title)) hits.add(hit);
+  }
+  if (hits.size === 0) return null;
+  return (
+    <div
+      className="w-full rounded-md border border-amber-400/25 bg-amber-400/5 px-2 py-1.5 text-[9px] leading-snug text-amber-100/80"
+      role="status"
+    >
+      <p className="font-medium text-amber-200/85 mb-1">Title may not search as typed</p>
+      <p>
+        Boolean/operator syntax ({[...hits].join(', ')}) in a resolved title is sent to job boards
+        as literal words, not honored as a search operator — measured behavior is boards ignore it,
+        return zero rows, or invert the intent.
+      </p>
+    </div>
+  );
 }
 
 function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
@@ -874,7 +991,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const canvasFilePath = nav?.currentFile || null;
   const moduleRunQueue = useModuleRunQueue();
   const jobSearchCoordinator = useJobSearchCoordinator();
-  const targetRoleHelpId = useId();
   const jobPreferencesHelpId = useId();
   const processingRunsRef = useRef(createRunOwnershipGuard());
   // Exact ownership record for the one Board-invoked top-level search this hub
@@ -2086,10 +2202,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Prefer the query-gen-normalized location (typo-safe) over the raw input
         // — USAJobs LocationName is an exact-ish match and won't tolerate "denvr".
         preferredLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        // A pinned role gates this background refresh exactly as it gates the main
-        // search, or USAJobs would be the one source able to ship off-role rows.
-        // This late source belongs to the completed search generation. The
-        // editable controls may already describe the *next* run.
+        // `targetRole` is legacy-only data — an unmigrated canvas's
+        // standalone Target role box — sent for back-compat so USAJobs still
+        // searches exactly that one string. This late source belongs to the
+        // completed search generation, so this reads the frozen refreshData
+        // snapshot, never the live/editable hub value (which may already
+        // describe the *next* run). There is no post-search title gate
+        // anymore (see deriveSearchTitles above and the removed
+        // applyPinnedTitleGate in jobs.js) — role relevance for this source's
+        // rows is judged the same way as every other source's: the AI role
+        // screen inside per-listing preference evaluation.
         targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? '').trim(),
         jobPreferences: refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '',
         preferencePlan: refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null,
@@ -2497,27 +2619,26 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     updateGlobal(id, { maxAgeDays: n });
   }, [id, updateGlobal]);
 
-  // Optional target/pivot role. When set, it is the one literal scrape query;
-  // variation generation is skipped. Scoring/display remain unchanged.
-  // Persisted so it survives saves and re-runs.
-  // Role / location are edited through LOCAL draft state, not bound straight to
+  // Phase B merged the old standalone Target role box into this one Search
+  // Brief field — the AI now determines the roles to search from whatever is
+  // written here (explicit titles, a general direction, or nothing about
+  // roles at all). The data/IPC field name stays `jobPreferences`; only the
+  // user-facing label changed, so nothing downstream that keys off this field
+  // name needed to change.
+  // Location is edited through LOCAL draft state, not bound straight to
   // data.* . React Flow feeds node data via an external store (useSyncExternalStore);
   // re-renders from an external store bypass React's controlled-input caret
-  // restoration, so a value={data.targetRole} input jumps the caret to the end on
-  // every mid-text edit (backspace/insert). Mirroring locally keeps the value update
-  // inside React's own event flow (caret preserved); onChange writes through to the
-  // store, and the render-time reconcile picks up EXTERNAL store changes (canvas load
-  // / reset) — React's "adjust state when a prop changes" pattern (no effect, so it
-  // doesn't trip react-hooks/set-state-in-effect).
-  const storeRole = data.targetRole || '';
+  // restoration, so a value={data.jobPreferences} textarea jumps the caret to the
+  // end on every mid-text edit (backspace/insert). Mirroring locally keeps the value
+  // update inside React's own event flow (caret preserved); onChange writes through
+  // to the store, and the render-time reconcile picks up EXTERNAL store changes
+  // (canvas load / reset) — React's "adjust state when a prop changes" pattern (no
+  // effect, so it doesn't trip react-hooks/set-state-in-effect).
   const storeJobPreferences = data.jobPreferences || '';
   const storeSearchLocation = getSearchLocation(data);
   const storeSearchLocationKey = JSON.stringify(storeSearchLocation);
   const storeRemoteResidences = normalizeRemoteResidences(data.remoteResidences);
   const storeRemoteResidencesKey = JSON.stringify(storeRemoteResidences);
-  const [targetRole, setRoleDraft] = useState(storeRole);
-  const [lastStoreRole, setLastStoreRole] = useState(storeRole);
-  if (storeRole !== lastStoreRole) { setLastStoreRole(storeRole); setRoleDraft(storeRole); }
   const [jobPreferences, setJobPreferencesDraft] = useState(storeJobPreferences);
   const [lastStoreJobPreferences, setLastStoreJobPreferences] = useState(storeJobPreferences);
   if (storeJobPreferences !== lastStoreJobPreferences) {
@@ -2536,20 +2657,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     setLastStoreRemoteResidences(storeRemoteResidencesKey);
     setRemoteResidencesDraft(storeRemoteResidences);
   }
-  // Non-blocking advisory only — the typed text is always sent through
-  // unchanged. Boolean syntax is unsafe to broadcast: measured across the seven
-  // boards, negation is ignored (and count-INCREASING) on Glassdoor, LinkedIn
-  // and ZipRecruiter, destructive on Google and USAJobs, and on ZipRecruiter it
-  // inverts intent — "Controller NOT carpenter NOT superintendent" returned five
-  // results, every one of them a carpenter or superintendent. None of that is
-  // visible in the run report, so the warning has to happen at the input.
-  const roleOperators = detectQueryOperators(targetRole);
-
-  const setTargetRole = useCallback((val) => {
-    const v = typeof val === 'string' ? val : '';
-    setRoleDraft(v);                                  // synchronous local update → caret preserved
-    updateGlobal(id, { targetRole: v });              // write through to the persisted store
-  }, [id, updateGlobal]);
   const setJobPreferences = useCallback((val) => {
     const v = typeof val === 'string' ? val.slice(0, 4000) : '';
     setJobPreferencesDraft(v);
@@ -3719,6 +3826,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingJobPreferencePlan: null,
         pendingJobPreferencesInterpretation: null,
         activeTargetRole: null,
+        // Cleared alongside activeTargetRole — this run's own Step 2 (query
+        // construction) recomputes and re-freezes the real value via
+        // deriveSearchTitles before anything reads it. Without this, a
+        // pending Solve racing the very start of a fresh run could otherwise
+        // read the PRIOR run's title list for one tick.
+        pinnedTitles: [],
         scrapeWarnings: [],
         jobRunId: null,
         // A previous collection-only/Test Mode completion is terminal, but its
@@ -3809,50 +3922,88 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const activeTargetRole = String(laneTurnData.targetRole || '').trim();
       // Freeze the raw preference text and the AI's interpretation for this
       // run. A user may edit the textarea while scraping; that edit applies to
-      // their next run, never halfway through this one.
+      // their next run, never halfway through this one. (In practice a locked
+      // hub's brief is read-only anyway — see ROLE LOCKING below — but an
+      // unmigrated/unlocked hub can still be mid-edit at click time.)
       const activeJobPreferences = String(laneTurnData.jobPreferences || '').trim();
-      let jobPreferencesInterpretation = null;
-      const interpretPreferences = window.electronAPI?.interpretJobPreferences;
-      if (activeJobPreferences && interpretPreferences) {
+      // ROLE LOCKING: resolveSearchRoles' two-pass resolution is the single
+      // most expensive — and most important — AI work this module does, so it
+      // must happen EXACTLY ONCE per hub, ever, and every later scan reuses
+      // its output verbatim (no re-interpretation, no re-audit, no variance
+      // between runs). `laneTurnData.resolvedRoles` is that durable lock:
+      // once non-empty it wins outright and this run spends zero
+      // interpretation calls. Only a hub that has never locked (fresh, or
+      // just had its career data cleared — see handleClearCareerFiles/
+      // resetHandler, the only two places allowed to blank these fields) pays
+      // for the resolver, which may itself spend a second handoff (the
+      // coverage/compliance audit) when the brief left titles for the AI to
+      // determine — see jobPreferences.js's resolveSearchRoles for why
+      // spending it here, once, amortized over every future re-scan, is the
+      // right trade.
+      let jobPreferencesInterpretation = laneTurnData.searchBriefPlan ?? null;
+      // FIX 2: keyed on resolvedRolesMeta (see hasResolvedRoleLock), not
+      // resolvedRoles.length — a legitimate zero-title resolution must still
+      // count as locked, or this hub re-pays the resolver on every future run.
+      const hasLockedRoles = hasResolvedRoleLock(laneTurnData);
+      // Only set when THIS run performs the one-time resolution — merged into
+      // the freeze update below so a reused lock leaves these fields alone.
+      let freshRoleLockPatch = null;
+      if (!hasLockedRoles && activeJobPreferences && window.electronAPI?.resolveSearchRoles) {
         updateGlobal(currentId, { hubState: 'interpreting-preferences' });
-        const interpretationResult = await window.electronAPI?.interpretJobPreferences({
+        const resolveResult = await window.electronAPI.resolveSearchRoles({
+          jobPreferences: activeJobPreferences,
           profile,
           careerData: activeCareerData,
           nodeId: currentId,
           manualAiRunId: effectiveManualAiRunId,
-          targetRole: activeTargetRole,
-          jobPreferences: activeJobPreferences,
-          searchLocation: runLocationSnapshot.searchLocation,
-          remoteResidences: runLocationSnapshot.remoteResidences,
         });
         if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
-        if (interpretationResult?.success === false) {
-          const err = new Error(interpretationResult.error || 'Failed to understand Job Preferences');
+        if (resolveResult?.success === false) {
+          const err = new Error(resolveResult.error || 'Failed to understand Job Preferences');
           throw err;
         }
-        jobPreferencesInterpretation = interpretationResult?.preferencePlan
-          ?? interpretationResult?.jobPreferencePlan
-          ?? interpretationResult?.jobPreferencesInterpretation
-          ?? interpretationResult?.interpretation
-          ?? null;
-        if (jobPreferencesInterpretation?.targetRoleConflict) {
-          throw new Error(
-            jobPreferencesInterpretation.targetRoleConflictReason
-              || 'Your Target role conflicts with your Job Preferences. Edit one of them, then run the search again.',
-          );
-        }
+        jobPreferencesInterpretation = resolveResult?.plan || null;
+        const lockedTitles = Array.isArray(jobPreferencesInterpretation?.titles)
+          ? jobPreferencesInterpretation.titles.filter(t => typeof t === 'string' && t.trim())
+          : [];
+        freshRoleLockPatch = {
+          searchBriefPlan: jobPreferencesInterpretation,
+          resolvedRoles: lockedTitles,
+          resolvedRolesMeta: {
+            derivedAt: new Date().toISOString(),
+            // Diagnostic evidence only — null when the brief itself was
+            // empty (pass 1's own aiSkipped short-circuit, so pass 2 never
+            // ran; see resolveSearchRoles in jobPreferences.js). Persisted
+            // because it can never be re-derived once locked: pass 2 never
+            // runs again for this hub.
+            roleAudit: resolveResult?.roleAudit || null,
+          },
+        };
       }
+      // See deriveSearchTitles above: a legacy target role (unmigrated
+      // canvas only) wins outright; otherwise this is the locked plan's
+      // AI-determined `titles`, unconditionally — there is no separate gate
+      // list anymore, so this one derivation feeds both the search queries
+      // and (via `pinnedTitles` below) display. `activeSearchTitles` is also
+      // what's persisted as `data.pinnedTitles` — JobBoardNode's moduleLabel
+      // falls back to it (display/label purposes only) for a hub that hasn't
+      // locked resolvedRoles yet. Frozen here alongside
+      // activeTargetRole/activeJobPreferences and persisted so every later
+      // reader of this run (the USAJobs background refresh, a paused-source
+      // Solve/Resume) sees the same list this run started with.
+      const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);
       updateGlobal(currentId, {
         hubState: 'querying',
         activeTargetRole,
         activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
         jobPreferencesInterpretation,
+        pinnedTitles: activeSearchTitles,
+        ...(freshRoleLockPatch || {}),
       });
       const activePreferredLocation = locationToLegacyText(runLocationSnapshot.searchLocation);
       const queryCacheKey = buildQueryCacheKey({
         resumeFingerprint,
-        targetRole: activeTargetRole,
         jobPreferences: activeJobPreferences,
         preferredLocation: activePreferredLocation,
       });
@@ -3893,6 +4044,36 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           canonicalCountry: locationResult.canonicalCountry || '',
         };
         EventLogger.log(`[JobSearch][${currentId}] Target role set — skipping query variation generation and searching exactly "${activeTargetRole}"`);
+      } else if (activeSearchTitles.length > 0) {
+        // No target role, but Job Preferences interpretation already produced
+        // `titles` — either copied verbatim from the brief or worked out by
+        // the AI from the brief + career profile (deriveSearchTitles doesn't
+        // care which; both are searched the same way). Build the bundle
+        // locally instead of paying for a second model call
+        // (generateJobQueries): this removes one human copy/paste handoff
+        // per brief-driven run, since every AI call in this app is a manual
+        // paste-back with no timeout. Still resolve the location exactly as
+        // the target-role branch above does — that is a separate,
+        // location-only operation.
+        const locationResult = await window.electronAPI.resolveJobSearchLocation({
+          profile,
+          nodeId: currentId,
+          manualAiRunId: effectiveManualAiRunId,
+          preferredLocation: activePreferredLocation,
+        });
+        if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
+        if (!locationResult.success) {
+          const err = new Error(locationResult.error || 'Failed to resolve search location');
+          throw err;
+        }
+        queriesResult = {
+          success: true,
+          queries: buildPinnedTitleQueryBundle(activeSearchTitles),
+          queryModel: null,
+          canonicalLocation: locationResult.canonicalLocation,
+          canonicalCountry: locationResult.canonicalCountry || '',
+        };
+        EventLogger.log(`[JobSearch][${currentId}] Job Preferences produced ${activeSearchTitles.length} title(s) — skipping query generation and searching them directly: ${activeSearchTitles.join(', ')}`);
       } else {
         queriesResult = await window.electronAPI.generateJobQueries({
           profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
@@ -3958,9 +4139,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // job title as role relevance, or a Denver cinematographer pulls in
         // every Denver SWE/sales posting at Datadog et al.
         profileLocations: profile?.locations || [],
-        // Enforced main-process side against every source's gathered rows: when a
-        // role is pinned, a job is kept only if its TITLE contains every word the
-        // user typed (see src/utils/jobTitleMatch.js).
+        // There is no deterministic post-search title gate anymore —
+        // jobs.js's old applyPinnedTitleGate is gone, and this call no
+        // longer sends a `pinnedTitles` parameter. Role relevance for every
+        // source's gathered rows, gated or not before, is now judged the
+        // same way: the AI role screen inside per-listing preference
+        // evaluation (main process, fails open). `targetRole` is still sent,
+        // but for back-compat/display only — it is legacy-only
+        // data.targetRole from an unmigrated canvas, never written by the
+        // current UI, and no longer used to filter anything here.
         targetRole: activeTargetRole,
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
@@ -4769,12 +4956,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ?? continuationData.jobPreferencePlan
         ?? continuationData.jobPreferencesInterpretation
         ?? null;
-      if (jobPreferencesInterpretation?.targetRoleConflict) {
-        throw new Error(
-          jobPreferencesInterpretation.targetRoleConflictReason
-            || 'Your Target role conflicts with your Job Preferences. Edit one of them, then re-run the search.',
-        );
-      }
       const locationSnapshot = continuationData.locationSnapshot || {
         searchLocation: getSearchLocation(continuationData),
         remoteResidences: normalizeRemoteResidences(continuationData.remoteResidences),
@@ -5252,34 +5433,44 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       // A malformed/future plan is sanitized to null on manifest read. The raw
-      // user preference text is still durable, so re-interpret it rather than
-      // treating it as an empty plan and accidentally admitting every staged
-      // job. This is the sole recovery fallback; normal resumes reuse their
-      // original frozen plan without a second model call.
-      if (activeJobPreferences && !jobPreferencesInterpretation && window.electronAPI?.interpretJobPreferences) {
-        updateGlobal(currentId, { hubState: 'interpreting-preferences' });
-        const interpretationResult = await window.electronAPI.interpretJobPreferences({
-          profile,
-          careerData: liveData.careerData,
-          nodeId: currentId,
-          manualAiRunId,
-          targetRole: activeTargetRole,
-          jobPreferences: activeJobPreferences,
-          searchLocation: liveData.locationSnapshot?.searchLocation || null,
-          remoteResidences: liveData.locationSnapshot?.remoteResidences || null,
-        });
-        if (cancelled()) return;
-        if (interpretationResult?.success === false) {
-          const err = new Error(interpretationResult.error || 'Failed to restore Job Preferences for this resumed search');
-          throw err;
+      // user preference text is still durable, so recover a plan rather than
+      // treating it as empty and accidentally admitting every staged job.
+      // ROLE LOCKING: the hub's own durable lock (liveData.searchBriefPlan,
+      // gated on hasResolvedRoleLock(liveData) — FIX 2: resolvedRolesMeta, not
+      // resolvedRoles.length, so a legitimate zero-title lock still counts)
+      // is authoritative AND free — prefer it over a fresh model call. It
+      // will match this run's own manifest plan in the normal case (the
+      // brief is frozen read-only once locked, so nothing can have diverged),
+      // and it is the only option that costs zero interpretation calls,
+      // exactly like every other post-lock reuse in this module. Only a hub
+      // that somehow never locked (a legacy manifest from before role
+      // locking shipped) falls through to re-interpreting the raw text — the
+      // sole remaining recovery fallback.
+      if (activeJobPreferences && !jobPreferencesInterpretation) {
+        if (hasResolvedRoleLock(liveData) && liveData.searchBriefPlan) {
+          jobPreferencesInterpretation = liveData.searchBriefPlan;
+        } else if (window.electronAPI?.interpretJobPreferences) {
+          updateGlobal(currentId, { hubState: 'interpreting-preferences' });
+          const interpretationResult = await window.electronAPI.interpretJobPreferences({
+            profile,
+            careerData: liveData.careerData,
+            nodeId: currentId,
+            manualAiRunId,
+            targetRole: activeTargetRole,
+            jobPreferences: activeJobPreferences,
+            searchLocation: liveData.locationSnapshot?.searchLocation || null,
+            remoteResidences: liveData.locationSnapshot?.remoteResidences || null,
+          });
+          if (cancelled()) return;
+          if (interpretationResult?.success === false) {
+            const err = new Error(interpretationResult.error || 'Failed to restore Job Preferences for this resumed search');
+            throw err;
+          }
+          jobPreferencesInterpretation = interpretationResult?.preferencePlan
+            ?? interpretationResult?.jobPreferencePlan
+            ?? interpretationResult?.jobPreferencesInterpretation
+            ?? null;
         }
-        jobPreferencesInterpretation = interpretationResult?.preferencePlan
-          ?? interpretationResult?.jobPreferencePlan
-          ?? interpretationResult?.jobPreferencesInterpretation
-          ?? null;
-      }
-      if (jobPreferencesInterpretation?.targetRoleConflict) {
-        throw new Error('This resumed search’s Target role conflicts with its Job Preferences. Start a fresh search after editing one of them.');
       }
       updateGlobal(currentId, {
         hubState: 'searching',
@@ -5301,13 +5492,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferredLocation: liveData.canonicalLocation || liveData.preferredLocation || '',
         rawLocation: liveData.preferredLocation || '',
         profileLocations: profile?.locations || [],
-        // A crash-resumed run must apply the same pinned-role gate as the run it
-        // is continuing, or recovery would re-admit rows the original rejected.
-        // The role THIS RUN was gathered under, from its manifest — never the
-        // hub's current value. Editing the target role after a crash must not
-        // retroactively re-filter rows collected under the old one, and a run
-        // started with no role must stay ungated. A manifest written before this
-        // field existed reports null, which correctly means "do not gate".
+        // There is no post-search title gate to apply anymore — recovery
+        // just needs to keep scraping the same manifest-frozen bundle
+        // (`queries` above). `targetRole` is still sent from the manifest —
+        // the role THIS RUN was gathered under, never the hub's current
+        // value, so editing the target role after a crash can't retroactively
+        // relabel rows collected under the old one — but it is display/
+        // snapshot data only now, not a filter.
         targetRole: offer.targetRole || '',
         jobPreferences: activeJobPreferences,
         preferencePlan: jobPreferencesInterpretation,
@@ -6339,6 +6530,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       jobAnalysisClearedAt: resetData.jobAnalysisClearedAt ?? null,
       jobAnalysisClearedRunId: resetData.jobAnalysisClearedRunId ?? null,
     });
+    // ROLE LOCKING: the lock is a career-data-scoped decision, so it clears
+    // exactly when the career profile it was derived from also clears here
+    // (the same condition guarding retainedCareerData above) — never on a
+    // mere mid-run Cancel that keeps the profile, which must keep reusing its
+    // locked roles for zero cost, per the "only career-data clear/hub reset
+    // unlocks" rule.
+    const roleLockClearPatch = resetHasReusableCareerProfile
+      ? {}
+      : { searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null };
     initialDropAcceptedRef.current = resetHasReusableCareerProfile;
     pendingJobsRef.current = null;
     gatheredCountRef.current = 0;
@@ -6354,6 +6554,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       preferenceMatchedCount: null, preferenceFilteredCount: null,
       preferenceEvaluation: null, preferenceCandidatePool: null,
       activeTargetRole: null, activeJobPreferences: null, jobPreferencePlan: null, jobPreferencesInterpretation: null,
+      pinnedTitles: null,
       pendingJobs: null, pendingTargetRole: null,
       pendingJobPreferences: null, pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
       pendingCareerData: null,
@@ -6365,6 +6566,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       locationSnapshot: null,
       _boardRollbackSourceProgressFence: null,
       ...retainedCareerData,
+      ...roleLockClearPatch,
     });
     jobRunIdRef.current = null;
     cancelCleanSourceCardDismiss();
@@ -8100,8 +8302,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       };
       const activeTargetRole = (runData.targetRole || '').trim();
       const activeJobPreferences = String(runData.jobPreferences || '').trim();
-      let jobPreferencesInterpretation = null;
-      if (activeJobPreferences && window.electronAPI?.interpretJobPreferences) {
+      // ROLE LOCKING: re-evaluating saved jobs is still a "scan" of this hub's
+      // locked brief, so it must cost zero interpretation calls once locked —
+      // reuse the durable plan exactly like a fresh search run does. Only a
+      // hub that never locked (legacy canvas, brief written but never run
+      // under role locking) falls back to a fresh single-pass interpretation.
+      // FIX 2: hasResolvedRoleLock (resolvedRolesMeta), not resolvedRoles.length
+      // — a legitimate zero-title lock must still skip re-interpretation.
+      let jobPreferencesInterpretation = (
+        hasResolvedRoleLock(runData) && runData.searchBriefPlan
+      ) ? runData.searchBriefPlan : null;
+      if (activeJobPreferences && !jobPreferencesInterpretation && window.electronAPI?.interpretJobPreferences) {
         updateGlobal(currentId, { hubState: 'interpreting-preferences' });
         const interpretationResult = await window.electronAPI.interpretJobPreferences({
           profile: runData.resumeProfile,
@@ -8120,12 +8331,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ?? interpretationResult?.jobPreferencesInterpretation
           ?? interpretationResult?.interpretation
           ?? null;
-        if (jobPreferencesInterpretation?.targetRoleConflict) {
-          throw new Error(
-            jobPreferencesInterpretation.targetRoleConflictReason
-              || 'Your Target role conflicts with your Job Preferences. Edit one of them, then re-evaluate.',
-          );
-        }
       }
       updateGlobal(currentId, {
         activeJobPreferences,
@@ -8414,6 +8619,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
       activeTargetRole: null,
+      pinnedTitles: null,
+      // ROLE LOCKING: Clear career files is the canonical unlock — the whole
+      // reason the brief is safe to freeze read-only (see the Search Brief
+      // render in both states) is that clearing career data is the one
+      // guaranteed way back to an editable brief. Must ship in the SAME
+      // update as the career-data wipe above, never separately.
+      searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null,
       pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
       collectionScopeCaveats: [],
       ...buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
@@ -8449,6 +8661,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const cleanupRetirementPending = hasPendingManualAiRetirement(data);
   const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;
   const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;
+  // SETTINGS LOCKING: PERMANENT freeze of every user-configurable setting
+  // (Search Brief, location, remote residences, look-back window, jobs/pages
+  // depth, and enabled platforms) once roles have been resolved — distinct
+  // from controlsLocked/errorControlsLocked above (those mean "busy right
+  // now": a queued run, a hub lock, cleanup pending — and clear on their
+  // own). settingsFrozen only ever clears via Clear career files or a
+  // career-data-wiping Reset (see roleLockClearPatch / handleClearCareerFiles)
+  // — never on a timer, a completed run, or an unlock toggle. Do NOT merge
+  // these two concepts: a future "busy OR frozen" collapse would silently
+  // let a transient unlock (e.g. a queued run finishing) re-open settings
+  // that must stay fixed until a full reset, breaking re-scan reproducibility.
+  const resolvedRoles = Array.isArray(data.resolvedRoles) ? data.resolvedRoles : [];
+  // FIX 2: hasResolvedRoleLock (resolvedRolesMeta), not resolvedRoles.length —
+  // a legitimate zero-title resolution still locked this hub and must freeze
+  // settings, or a hub whose brief genuinely resolves to no titles would leave
+  // every setting editable forever and re-run the resolver on every scan.
+  const settingsFrozen = hasResolvedRoleLock(data);
 
   // Compute running total from per-source progress
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
@@ -8479,7 +8708,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           res.snapshot?.profile &&
           isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)
         ) {
-          setSavedAnalysisMeta(res.meta);
+          // FIX 4: `meta.targetRole` (electron/ipc/jobs.js's curated subset of
+          // buildJobAnalysisSnapshot) is legacy-only and always '' under the
+          // current Search Brief UI. `res.snapshot.jobPreferencePlan.titles`
+          // (normalizeJobPreferencePlan's shape, electron/ipc/jobPreferences.js)
+          // is what the main process actually persists for "what roles did
+          // this saved scrape search" — `meta` itself omits jobPreferencePlan,
+          // so read it off the full snapshot here and fold it into the local
+          // state this panel renders from.
+          setSavedAnalysisMeta({ ...res.meta, resolvedRoleTitles: savedAnalysisRoleTitles(res.snapshot) });
         } else {
           setSavedAnalysisMeta(null);
         }
@@ -8769,13 +9006,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ?? snapshot.snapshotContext?.jobPreferencePlan
         ?? snapshot.snapshotContext?.preferencePlan
         ?? null;
-      if (jobPreferencesInterpretation?.targetRoleConflict) {
-        const message = jobPreferencesInterpretation.targetRoleConflictReason
-          || 'This saved search’s Target role conflicts with its Job Preferences. Edit one of them, then start a fresh search.';
-        updateGlobal(currentId, { hubState: 'done', errorMessage: message });
-        addToast({ title: 'Job Preferences Conflict', description: message, type: 'error' });
-        return searchRunOutcome('failed', { error: message });
-      }
       updateGlobal(currentId, {
         errorMessage: null,
         rerunOutcome: null,
@@ -9354,6 +9584,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     && (hubState === 'empty' || hubState === 'done')
   );
   const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;
+  // FIX 4: prefer the resolved Search Brief titles (folded into meta by the
+  // getLastJobAnalysisSnapshot effect above — see savedAnalysisRoleTitles);
+  // fall back to the legacy meta.targetRole only for a snapshot saved before
+  // the Search Brief replaced the standalone Target role box.
+  const savedAnalysisRoleLabel = Array.isArray(savedAnalysisMeta?.resolvedRoleTitles)
+    && savedAnalysisMeta.resolvedRoleTitles.length > 0
+    ? savedAnalysisMeta.resolvedRoleTitles.join(', ')
+    : String(savedAnalysisMeta?.targetRole || '').trim();
   const savedAnalysisPanel = shouldShowSavedAnalysisPanel ? (
     <div className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-2 text-left">
       <div className="text-[9px] uppercase tracking-[0.14em] text-white/25">Saved Scrape</div>
@@ -9362,8 +9600,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {savedSourceGatheredCount !== savedScoreReadyCount ? ` • ${savedScoreReadyCount} score-ready` : ''}
         {savedAnalysisMeta.selectedJobCount ? ` • ${savedAnalysisMeta.selectedJobCount} selected for AI` : ''}
       </div>
-      {!!savedAnalysisMeta.targetRole && (
-        <div className="text-[9px] text-white/35">{savedAnalysisMeta.targetRole}</div>
+      {!!savedAnalysisRoleLabel && (
+        <div className="text-[9px] text-white/35">{savedAnalysisRoleLabel}</div>
       )}
       <div className="text-[9px] text-white/30">
         {savedAnalysisMeta.createdAt ? new Date(savedAnalysisMeta.createdAt).toLocaleString() : 'Saved locally'}
@@ -9565,47 +9803,58 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 <label className="flex flex-col gap-1">
-                  <span>Target role <span className="text-white/25">(optional)</span></span>
-                  <input
-                    type="text"
-                    data-native-undo="true"
-                    value={targetRole}
-                    onChange={(e) => setTargetRole(e.target.value)}
-                    placeholder="E.g. Product Manager"
-                    aria-describedby={targetRoleHelpId}
-                    disabled={controlsLocked}
-                    className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25 disabled:cursor-not-allowed disabled:opacity-50"
-                  />
-                  <span id={targetRoleHelpId} className="text-[9px] leading-snug text-white/25">Leave blank to generate best-fit search variations. Set a role to search that exact role once.</span>
-                </label>
-                {roleOperators.length > 0 && (
-                  <p className="text-amber-300/70 text-[9px] leading-snug px-0.5" role="status">
-                    {roleOperators.join(', ')} {roleOperators.length > 1 ? 'are' : 'is'} sent as ordinary words, not search operators — job boards either ignore them or return the opposite of what you meant. Type the role in plain words.
-                  </p>
-                )}
-                <label className="flex flex-col gap-1">
-                  <span>Job Preferences <span className="text-white/25">(optional)</span></span>
+                  <span>Search Brief <span className="text-white/25">(optional)</span></span>
                   <textarea
                     data-native-undo="true"
                     value={jobPreferences}
                     onChange={(e) => setJobPreferences(e.target.value)}
                     rows={3}
                     maxLength={4000}
-                    placeholder="E.g. Help me pivot away from web development; large established companies only."
+                    placeholder="E.g. Senior Product Manager roles — or: help me pivot away from web development; large established companies only."
                     aria-describedby={jobPreferencesHelpId}
-                    disabled={controlsLocked}
+                    // settingsFrozen is PERMANENT (roles locked on the first run,
+                    // taking every setting below with them) — distinct from
+                    // controlsLocked's transient "busy right now". Reusing the
+                    // same disabled styling here is deliberate: it reads as
+                    // intentionally locked, not merely temporarily busy.
+                    disabled={controlsLocked || settingsFrozen}
                     className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25 leading-snug disabled:cursor-not-allowed disabled:opacity-50"
                   />
+                  {/* One explanation for the whole frozen settings group, not a
+                      per-control repeat: every setting below shares the same
+                      lock and the same unlock path. */}
                   <span id={jobPreferencesHelpId} className="text-[9px] leading-snug text-white/25">
-                    Tell AI what to prioritize, avoid, or independently verify. “Must,” “only,” and “no” are strict.
+                    {settingsFrozen
+                      ? 'All settings — brief, location, look-back window, search depth, and platforms — locked after your first search, so every re-scan is reproducible. Clear career data to unlock them and start over.'
+                      : 'AI determines which roles to search from what you write here — explicit titles, a general direction, or nothing about roles at all. Tell it what to prioritize, avoid, or independently verify; “must,” “only,” and “no” are strict. Location, look-back window, search depth, and platforms are set by the controls below, not by this text.'}
                   </span>
+                  {/* Trusting one AI decision for every future scan deserves to
+                      be visible, not just implied by the disabled textarea. */}
+                  {settingsFrozen && (
+                    <p className="text-[9px] leading-snug text-emerald-300/55">
+                      Locked roles: {resolvedRoles.join(', ')}
+                    </p>
+                  )}
+                  {/* Most useful HERE, before the first run: a Reset that
+                      retains a reusable career profile lands back in this
+                      draft/empty state while keeping the locked plan (see
+                      roleLockClearPatch), so a settingConflict caught now is
+                      still fixable by clearing career files — after the
+                      first run every setting it would point at is frozen. */}
+                  <SearchBriefAdvisories searchBriefPlan={data.searchBriefPlan || null} />
+                  {/* FIX 5: see titleOperatorAdvisory's header comment — the
+                      resolved titles are what actually gets sent to job
+                      boards verbatim, so this checks THEM, not the raw brief
+                      text (which the AI may have transformed away from any
+                      literal operator syntax it happened to contain). */}
+                  {titleOperatorAdvisory(resolvedRoles)}
                 </label>
                 <JobSearchLocationFields
                   searchLocation={searchLocation}
                   setSearchLocation={setSearchLocation}
                   remoteResidences={remoteResidences}
                   setRemoteResidence={setRemoteResidence}
-                  disabled={controlsLocked}
+                  disabled={controlsLocked || settingsFrozen}
                 />
                 <label className="flex items-center justify-center gap-1.5">
                   <span>Look back</span>
@@ -9617,7 +9866,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     value={maxAgeDays}
                     onChange={(e) => setMaxAgeDays(e.target.value)}
                     aria-label="Maximum posting age in days"
-                    disabled={controlsLocked}
+                    disabled={controlsLocked || settingsFrozen}
                     className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 disabled:cursor-not-allowed disabled:opacity-50"
                   />
                   <span>days</span>
@@ -9626,6 +9875,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   <JobCollectionLimitsControl
                     collectionLimits={collectionLimits}
                     setCollectionLimits={setCollectionLimits}
+                    disabled={settingsFrozen}
                   />
                 )}
                 {!controlsLocked && (
@@ -9635,6 +9885,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     collectionLimits={collectionLimits}
                     availableSourceIds={ACTIVE_JOB_SOURCES}
                     searchLocation={searchLocation}
+                    disabled={settingsFrozen}
                   />
                 )}
                 {savedAnalysisPanel}
@@ -9722,10 +9973,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               setSearchLocation={setSearchLocation}
               remoteResidences={remoteResidences}
               setRemoteResidence={setRemoteResidence}
-              targetRole={targetRole}
-              setTargetRole={setTargetRole}
               jobPreferences={jobPreferences}
               setJobPreferences={setJobPreferences}
+              resolvedRoles={resolvedRoles}
+              // FIX 2: pass the lock sentinel itself, not just the displayed
+              // list — see hasResolvedRoleLock above. Omitting this prop
+              // silently reverts the done-state UI to "never locked" even
+              // though the durable lock (and this component's own settings)
+              // are frozen, letting the user edit controls a re-scan ignores.
+              resolvedRolesMeta={data.resolvedRolesMeta || null}
+              searchBriefPlan={data.searchBriefPlan || null}
               preferenceMatchedCount={data.preferenceMatchedCount}
               preferenceFilteredCount={data.preferenceFilteredCount}
               jobPreferencePlan={data.jobPreferencePlan || null}
@@ -9737,6 +9994,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               resultDisposition={data.resultDisposition || null}
               lastCompletedRunAt={data.lastCompletedRunAt || null}
             />
+            {/* FIX 5: sibling to (never nested inside) JobSearchDoneState,
+                which renders its own SearchBriefAdvisories internally —
+                this file cannot add a slot to that child component, see
+                titleOperatorAdvisory's header comment. */}
+            <div className="w-full px-3" onPointerDown={(e) => e.stopPropagation()}>
+              {titleOperatorAdvisory(resolvedRoles)}
+            </div>
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>
                 {savedAnalysisPanel}

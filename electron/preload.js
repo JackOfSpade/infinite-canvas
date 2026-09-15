@@ -124,6 +124,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Jobs Module ─────────────────────────────────────────────────────────
   generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),
   interpretJobPreferences: (args) => ipcRenderer.invoke('interpret-job-preferences', args),
+  // ROLE LOCKING: one-time two-pass role resolution (jobPreferences.js's
+  // resolveSearchRoles). Returns { success, plan, roleAudit, model } — the
+  // renderer locks `plan` (and persists `roleAudit` as diagnostic evidence)
+  // on the hub node and never calls this again until career data is cleared.
+  resolveSearchRoles: (args) => ipcRenderer.invoke('resolve-search-roles', args),
   evaluateJobPreferences: (args) => ipcRenderer.invoke('evaluate-job-preferences', args),
   resolveJobSearchLocation: (args) => ipcRenderer.invoke('resolve-job-search-location', args),
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),

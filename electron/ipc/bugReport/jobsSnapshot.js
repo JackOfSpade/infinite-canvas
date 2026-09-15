@@ -2003,9 +2003,32 @@ export function buildJobCompletionAssessment(
   // it is never a silent adjustment that could hide a real shortfall.
   const preferences = telemetry?.preferences || null;
   const preferenceFiltered = nonnegativeCount(preferences?.filtered);
+  // The BACKSTOP role screen (see the evaluate-job-preferences handler in
+  // jobs.js) removes rows in the same gap, but EARLIER than the preference
+  // evaluation and for a different reason: rows appended after the run's bulk
+  // screen (the USAJobs background refresh, Solve/Resume) are title-screened
+  // here before they can reach the scorer. They are counted in `expected`
+  // (they were admitted by search/recovery) and never reach `preferences
+  // .filtered` (they were dropped before the evaluation ran), so omitting
+  // them from this subtraction reports a shortfall that is fully explained —
+  // the exact false INDETERMINATE the preference subtraction above exists to
+  // prevent. Subtracted as its OWN term, never folded into preference-filtered:
+  // "removed by Job Preferences" and "removed by the role screen" are
+  // different findings and a report must not assert one for the other.
+  const roleScreenBackstopDropped = nonnegativeCount(preferences?.roleScreenBackstopDropped);
+  // Rows appended AFTER this run's search funnel was reconciled — a USAJobs
+  // background refresh, a Solve, a Resume. They raise the scorer input without
+  // ever appearing in `search/recovery`, so on a run that received any, the
+  // comparison below can be off by exactly this many and still be healthy.
+  // Only the Solve/Resume paths register a recovery merge that `expected`
+  // picks up; the background refresh registers none, and cannot be made to
+  // without claiming a captcha-resolve pass that never happened. So the number
+  // is STATED rather than quietly folded into the arithmetic — an adjustment
+  // this code cannot justify is worse than a discrepancy it can name.
+  const roleScreenLateArrivals = nonnegativeCount(preferences?.roleScreenBackstopLateArrivals);
   const expectedAfterPreferences = expected == null
     ? null
-    : Math.max(0, expected - (preferenceFiltered || 0));
+    : Math.max(0, expected - (preferenceFiltered || 0) - (roleScreenBackstopDropped || 0));
   const scoring = telemetry?.scoring || null;
   const scoreInput = nonnegativeCount(scoring?.selectedForScoring ?? scoring?.input);
   const scored = nonnegativeCount(scoring?.scored);
@@ -2496,8 +2519,15 @@ export function buildJobCompletionAssessment(
   }
   if (!completedWithoutScoring) {
     if (expectedAfterPreferences != null && scoreInput != null && expectedAfterPreferences !== scoreInput) {
-      gaps.push(preferenceFiltered
-        ? `search/recovery ${expected} − ${preferenceFiltered} preference-filtered = ${expectedAfterPreferences} ≠ scoring input ${scoreInput}`
+      const subtractionTerms = [
+        preferenceFiltered ? `${preferenceFiltered} preference-filtered` : '',
+        roleScreenBackstopDropped ? `${roleScreenBackstopDropped} role-screened` : '',
+      ].filter(Boolean).join(' − ');
+      const lateNote = roleScreenLateArrivals
+        ? ` — ${roleScreenLateArrivals} row(s) arrived after this funnel was reconciled (background refresh / Solve / Resume) and are not counted in search/recovery`
+        : '';
+      gaps.push(subtractionTerms
+        ? `search/recovery ${expected} − ${subtractionTerms} = ${expectedAfterPreferences} ≠ scoring input ${scoreInput}${lateNote}`
         : `search/recovery ${expected} ≠ scoring input ${scoreInput}`);
     }
     if (scoreInput != null && scored != null && scoreInput !== scored) gaps.push(`scored ${scored}/${scoreInput}`);
@@ -2668,7 +2698,7 @@ export function buildJobCompletionAssessment(
             ? '; the per-hub records that remain attributable are listed in Job Search Pipeline'
             : '; no hub held an independently attributable record either, so no per-hub records are listed'}.`
           : '- Search + recovery: not retained in this process.'
-    : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''}${preferenceFiltered ? ` − ${preferenceFiltered} removed by Job Preferences` : ''} = ${expectedAfterPreferences} expected scoring input.`;
+    : `- Search + recovery: ${searchKept} initial score-ready${recovered > 0 ? ` + ${recovered} recovered` : recovered < 0 ? ` − ${Math.abs(recovered)} removed by recovery` : ''}${preferenceFiltered ? ` − ${preferenceFiltered} removed by Job Preferences` : ''}${roleScreenBackstopDropped ? ` − ${roleScreenBackstopDropped} removed by the backstop role screen` : ''} = ${expectedAfterPreferences} expected scoring input.`;
   const scoringLine = completedZeroResult
     ? '- Scoring: not required — zero score-ready jobs.'
     : completedPreferenceFiltered
@@ -4533,27 +4563,30 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const evidenceStage = descriptionDeferred > 0
       ? ` → evidence-deferred: ${descriptionDeferred}${finalDedupStage} → **scoring-eligible: ${s.kept}**`
       : `${finalDedupStage} → **new: ${s.kept}**`;
-    // The pinned-target-role gate sits between the age and history stages. It is
-    // usually the LARGEST drop in a role-pinned run, so omitting it left the
-    // funnel with an unexplained hole between "age-dropped" and "history-dropped".
+    // The AI role screen sits between the age and history stages, where the
+    // deterministic title gate it replaced used to sit. It is usually the
+    // LARGEST drop in a run with resolved roles, so omitting it left the funnel
+    // with an unexplained hole between "age-dropped" and "history-dropped".
     const roleStage = Number(s.roleDropped) > 0
-      ? ` → role-gate-dropped: ${s.roleDropped}`
+      ? ` → role-screen-dropped: ${s.roleDropped}`
       : '';
     lines.push(
       `- Found (raw): ${s.raw}${relevanceStage} → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped}${roleStage} → ` +
       `history-dropped: ${s.historyDropped}${evidenceStage}`,
     );
     if (Number(s.roleDropped) > 0) {
-      const tokens = Array.isArray(s.roleTokens) ? s.roleTokens.join(' + ') : '';
       const bySource = s.roleDroppedBySource && typeof s.roleDroppedBySource === 'object'
         ? Object.entries(s.roleDroppedBySource).map(([id, n]) => `${id} ${n}`).join(', ')
         : '';
-      lines.push(`- Target-role gate${tokens ? ` [every title had to contain: ${tokens}]` : ''}: dropped ${s.roleDropped}${bySource ? ` (${bySource})` : ''}`);
+      lines.push(`- AI role screen: dropped ${s.roleDropped}${bySource ? ` (${bySource})` : ''}`);
       const samples = Array.isArray(s.roleDroppedSamples) ? s.roleDroppedSamples.slice(0, 6) : [];
       if (samples.length > 0) {
-        // Verbatim rejected titles, so the rule's effect is checkable rather than
-        // asserted. Nothing here explains WHY a board returned them.
-        lines.push(`  - Rejected titles (sample): ${samples.map(x => `\`${historyReportValue(x?.title, '', 60)}\` (${x?.source || '?'})`).join(', ')}`);
+        // Verbatim rejected titles PLUS the model's own stated reason, so a
+        // drop is checkable rather than asserted. There is no rule text to
+        // print here — the screen is a per-listing judgement, not a token
+        // filter — so the reason IS the evidence. Nothing here explains why a
+        // board returned the row in the first place.
+        lines.push(`  - Rejected titles (sample): ${samples.map(x => `\`${historyReportValue(x?.title, '', 60)}\` (${x?.source || '?'}${x?.reason ? ` — ${historyReportValue(x.reason, '', 60)}` : ''})`).join(', ')}`);
       }
     }
     if (postCompletionRecoveryAttempts > 0) {
@@ -4562,7 +4595,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push(s.relevanceDropped > 0
       ? '- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_'
       : Number(s.roleDropped) > 0
-        ? '- _(dedup / age / role-gate / history drops are by-design — not jobs we failed to analyze; the role gate is the pinned target role, not a relevance heuristic)_'
+        ? '- _(dedup / age / role-screen / history drops are by-design — not jobs we failed to analyze. The role screen is an AI judgement of whether each title is one of the resolved roles or a genuine equivalent; it keeps anything it cannot tell, so a drop here means the model positively called it a different kind of job.)_'
         : '- _(dedup / age / history drops are by-design — not jobs we failed to analyze; provider-returned rows are not locally title-filtered)_');
     if (finalDedupDropped > 0) {
       lines.push('- _(The final-enrichment dedup removes only high-confidence same-listing copies after full descriptions become available.)_');

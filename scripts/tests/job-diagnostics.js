@@ -7434,12 +7434,18 @@ export default [
       const parseStart = search.indexOf('const parseResult = await window.electronAPI.parseCareerData');
       const queryStart = search.indexOf('// Step 2: Query construction', parseStart);
       const freshCareerWindow = search.slice(parseStart, queryStart);
-      const interpretationStart = search.indexOf('window.electronAPI?.interpretJobPreferences', queryStart);
-      const interpretationEnd = search.indexOf('if (cancelled()) return;', interpretationStart);
+      // ROLE LOCKING replaced the per-run interpretJobPreferences call in this
+      // window with resolveSearchRoles (the one-time, lock-establishing
+      // resolver) — see the ROLE LOCKING comment above Step 2 in
+      // JobSearchNode.jsx. The underlying guarantee this assertion protects
+      // (fresh parsed career data, not stale React state) still applies to
+      // that call.
+      const interpretationStart = search.indexOf('window.electronAPI.resolveSearchRoles', queryStart);
+      const interpretationEnd = search.indexOf("if (cancelled()) return searchRunOutcome('cancelled'", interpretationStart);
       const interpretation = search.slice(interpretationStart, interpretationEnd);
       assert(freshCareerWindow.includes("activeCareerData = parseResult.careerData || ''")
         && interpretation.includes('careerData: activeCareerData'),
-      'a fresh career-file parse must pass its newly extracted career data to Job Preferences interpretation instead of waiting for React state to commit');
+      'a fresh career-file parse must pass its newly extracted career data to Job Role resolution instead of waiting for React state to commit');
       assert(search.includes('const careerData = snapshot?.careerData || laneTurnData.careerData || \'\';')
         && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
@@ -7754,7 +7760,7 @@ export default [
     },
   },
 {
-    name: 'Job search funnel: the pinned-target-role gate is an accounted stage, not an unexplained loss',
+    name: 'Job search funnel: the AI role screen is an accounted stage, not an unexplained loss, and the report names the mechanism that actually produced its drops',
     run: () => {
       // A pinned role rejects every title missing one of its words. That drop
       // happens between the age and history stages, so the reconciler must
@@ -7773,6 +7779,24 @@ export default [
       assert(gated.reconciled && gated.expectedKept === 70 && gated.unexplainedDelta === 0,
         `a 300-row role-gate drop must be explained, got ${JSON.stringify(gated)}`);
       assert(gated.roleDropped === 300, 'roleDropped is surfaced for the report line');
+
+      // The stage still exists, but the MECHANISM behind it changed: a
+      // deterministic word-match gate became a semantic AI screen. A report
+      // that still described the old mechanism would send a reader hunting for
+      // a pinned exact-match string that no longer exists as an input, and
+      // would explicitly tell them NOT to suspect the LLM call that is now the
+      // only source of these drops.
+      const snapSrc = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+      assert(!snapSrc.includes('the role gate is the pinned target role, not a relevance heuristic'),
+        'the report must not still claim these drops come from a pinned target role -- that mechanism is deleted');
+      assert(!snapSrc.includes('every title had to contain'),
+        'the report must not still print a token rule -- a semantic screen has no token set');
+      assert(snapSrc.includes('- AI role screen: dropped ') && snapSrc.includes('role-screen-dropped'),
+        'the funnel stage and its detail line must name the AI role screen that actually produced the drops');
+      assert(snapSrc.includes('it keeps anything it cannot tell'),
+        'the report must state the screen fails OPEN, so a drop means the model positively judged the row a different kind of job');
+      assert(snapSrc.includes('x?.reason'),
+        "each sampled drop must carry the model's own stated reason -- with no rule text to print, the reason IS the evidence");
 
       // The same run WITHOUT the stage registered is exactly the false alarm
       // this guards against.
@@ -12200,8 +12224,19 @@ export default [
       // Job Preferences legitimately remove rows between admission and scoring.
       assert(snap.includes('const expectedAfterPreferences = expected == null'),
         'preference-filtered rows are subtracted before comparing against the scorer input');
-      assert(snap.includes('preference-filtered = ${expectedAfterPreferences} ≠ scoring input'),
+      assert(snap.includes('= ${expectedAfterPreferences} ≠ scoring input ${scoreInput}'),
         'the subtraction is stated in the gap text rather than applied silently');
+      // Two DIFFERENT stages remove rows in the gap between admission and the
+      // scorer: strict Job Preferences, and the backstop AI role screen that
+      // catches rows appended after the run's bulk screen (USAJobs background
+      // refresh, Solve/Resume). Both must be subtracted or the reconciler
+      // reports a shortfall that is in fact fully explained -- and each must be
+      // named separately, because a report that blamed role-screen drops on
+      // "Job Preferences" would assert a cause that never happened.
+      assert(snap.includes('preference-filtered') && snap.includes('role-screened'),
+        'each subtracted stage is named as its own term in the gap text');
+      assert(snap.includes('- (preferenceFiltered || 0) - (roleScreenBackstopDropped || 0)'),
+        'the backstop role screen is subtracted alongside preference-filtered rows, not omitted');
       // The board-displayed seen-history write is the run's last stage.
       assert(snap.includes('const historyWriteFailed = !!historyWrite?.error;')
         && snap.includes('- Seen-history write:'),

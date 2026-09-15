@@ -1,8 +1,15 @@
-import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobRunProfileFingerprint, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
 // above stays untouched while other sessions edit it.
 import { buildJobCompletionAssessment, buildJobRecoverySnapshot, buildJobsPipelineSnapshot } from '../test-dependencies.js';
+// CURRENT_SCHEMA_VERSION: its own line for the same reason as the bug-report
+// import above — this is only for the v8-migration registration guard below.
+import { CURRENT_SCHEMA_VERSION } from '../test-dependencies.js';
+// ROLE LOCKING (two-pass role resolution + task registration): own line for
+// the same reason as the imports above — these are new to this file and the
+// shared bundle import at the top stays untouched.
+import { getKnownTaskIds, resolveSearchRoles, taskMaxTokensFor } from '../test-dependencies.js';
 import { registerJobsHandlers } from '../../electron/ipc/jobs.js';
 
 export default [
@@ -164,7 +171,7 @@ export default [
         summary: '',
         direction: { summary: '', roleDirections: [], avoidDirections: ['Pivot away from web development'], explorationEnabled: true },
         softPreferences: [], strictRequirements: [], warnings: [],
-        targetRoleConflict: false, targetRoleConflictReason: '',
+        titles: [],
       };
       let rejected = false;
       try { validateJobPreferencePlanSubmission(directionOnly); } catch { rejected = true; }
@@ -238,7 +245,7 @@ export default [
           jobPreferences: 'Free lunch is required.',
           preferencePlan: {
             version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-            softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+            softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], titles: [],
           },
           callRaw: async () => groundedResearch,
           callText: async (_prompt, options) => {
@@ -343,7 +350,7 @@ export default [
         version: 1, summary: '',
         direction: { summary: '', roleDirections: [], avoidDirections: ['No web development roles'], explorationEnabled: false },
         softPreferences: [], strictRequirements: [{ id: 'no-web', criterion: 'No web development roles', category: 'role' }],
-        warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+        warnings: [], titles: [],
       };
       const tasks = [];
       const direct = await evaluateJobPreferences({
@@ -391,25 +398,27 @@ export default [
       } catch { duplicateIdRejected = true; }
       assert(duplicateIdRejected, 'preference ids must be unique across soft and strict items before evaluation maps model rows by id');
 
-      const conflictPlan = { ...interpretedPlan, targetRoleConflict: true, targetRoleConflictReason: 'The target role is explicitly avoided.' };
-      let repairedConflict = null;
-      try {
-        await evaluateJobPreferences({
-          jobs: [{ title: 'Web Developer' }], jobPreferences: raw, targetRole: 'Web Developer',
-          preferencePlan: { ...interpretedPlan, direction: 'not an object' },
-          callRaw: () => { throw new Error('must stop before research'); },
-          callText: async (_prompt, options) => options.task === 'job-preference-interpretation'
-            ? conflictPlan
-            : (() => { throw new Error('must stop before listing evaluation'); })(),
-        });
-      } catch (error) { repairedConflict = error; }
-      assert(repairedConflict?.code === 'JOB_PREFERENCE_TARGET_ROLE_CONFLICT',
-        'a target-role conflict found while repairing a plan must stop direct evaluation before listing work');
+      // Phase B deleted targetRoleConflict outright: with the standalone
+      // Target role box gone there is nothing left for a plan to contradict,
+      // so evaluateJobPreferences no longer throws JOB_PREFERENCE_TARGET_ROLE_CONFLICT
+      // even when a repaired plan carries the (now-inert) field. Prove the
+      // repair path completes normally instead of throwing.
+      const inertConflictPlan = { ...interpretedPlan, targetRoleConflict: true, targetRoleConflictReason: 'stale field from an old model response' };
+      const repairedNoLongerConflicts = await evaluateJobPreferences({
+        jobs: [{ title: 'Web Developer' }], jobPreferences: raw, targetRole: 'Web Developer',
+        preferencePlan: { ...interpretedPlan, direction: 'not an object' },
+        callRaw: () => { throw new Error('role requirement uses listing evidence'); },
+        callText: async (_prompt, options) => options.task === 'job-preference-interpretation'
+          ? inertConflictPlan
+          : { assessments: [{ index: 0, matches: [{ preferenceId: 'no-web', outcome: 'conflicts', evidence: 'Role title', evidenceQuote: 'Web Developer' }] }] },
+      });
+      assert(repairedNoLongerConflicts.filteredJobs.length === 1,
+        'a repaired plan carrying a stale targetRoleConflict field must evaluate normally, not throw a retired conflict error');
 
       const softItems = Array.from({ length: 12 }, (_, index) => ({ id: `soft-${index}`, criterion: `Role signal ${index}`, category: 'role' }));
       const softOrder = await evaluateJobPreferences({
         jobs: [{ title: 'Role A' }, { title: 'Role B' }], jobPreferences: 'soft ranking',
-        preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: softItems, strictRequirements: [], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+        preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: softItems, strictRequirements: [], warnings: [], titles: [] },
         callRaw: () => { throw new Error('soft ranking must not research'); },
         callText: async () => ({ assessments: [
           { index: 0, matches: softItems.map((item, index) => ({ preferenceId: item.id, outcome: index === 0 ? 'confirmed' : 'conflicts', evidence: 'Role A', evidenceQuote: 'Role A' })) },
@@ -424,7 +433,7 @@ export default [
       try {
         await evaluateJobPreferences({
           jobs: [{ title: 'Program Manager', company: 'Example', snippet: 'Programs' }], jobPreferences: 'Lunch must be provided.',
-          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], titles: [] },
           signal: controller.signal,
           callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
             ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Missing' }] }] }
@@ -442,7 +451,7 @@ export default [
       try {
         await evaluateJobPreferences({
           jobs: [{ title: 'Program Manager', company: 'Late Abort Co' }], jobPreferences: 'Lunch must be provided.',
-          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '' },
+          preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], titles: [] },
           signal: lateController.signal,
           callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
             ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Missing' }] }] }
@@ -459,7 +468,7 @@ export default [
       const secondController = new AbortController();
       const companyPlan = {
         version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-        softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+        softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], titles: [],
       };
       let rawCalls = 0;
       let markFirstResearchStarted;
@@ -516,8 +525,7 @@ export default [
           softPreferences: [],
           strictRequirements: [{ id: 'lunch', criterion: 'Free lunch is a listed company perk', category: 'perk' }],
           warnings: [],
-          targetRoleConflict: false,
-          targetRoleConflictReason: '',
+          titles: [],
         },
         callText: async (_prompt, options) => {
           if (options.task === 'job-preference-evaluation') {
@@ -543,7 +551,7 @@ export default [
           version: 1, summary: '',
           direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
           softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch is a listed company perk', category: 'perk' }],
-          warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+          warnings: [], titles: [],
         },
         callRaw: async () => 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nThe office is downtown.',
         callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
@@ -574,6 +582,11 @@ export default [
         softPreferences: [{ id: 'p1', criterion: 'Prefer established companies', category: 'company-size', raw: { unsafe: true } }],
         strictRequirements: [{ id: 'r1', criterion: 'Free lunch must be a listed perk', category: 'benefits', explanation: 'do not persist' }],
         warnings: ['Company-level evidence may need web research.'],
+        // targetRoleConflict/targetRoleConflictReason: a Phase-A-era manifest
+        // (or a stale in-flight model response) can still carry these retired
+        // fields. sanitizeJobPreferencePlan must drop them silently, exactly
+        // like it already drops any other unrecognized model payload below —
+        // there is no longer a concept for them to represent.
         targetRoleConflict: true,
         targetRoleConflictReason: 'The exact target role conflicts with your request to avoid web development.',
         arbitraryModelPayload: { prompt: 'do not persist' },
@@ -591,23 +604,84 @@ export default [
         assert(inputs.jobPreferencePlan?.version === 1
           && inputs.jobPreferencePlan?.direction?.explorationEnabled === true
           && inputs.jobPreferencePlan?.strictRequirements?.[0]?.criterion === 'Free lunch must be a listed perk'
-          && inputs.jobPreferencePlan?.targetRoleConflict === true
-          && inputs.jobPreferencePlan?.targetRoleConflictReason === 'The exact target role conflicts with your request to avoid web development.'
+          && !('targetRoleConflict' in inputs.jobPreferencePlan)
+          && !('targetRoleConflictReason' in inputs.jobPreferencePlan)
           && !('arbitraryModelPayload' in inputs.jobPreferencePlan)
           && !('privateModelTrace' in inputs.jobPreferencePlan.direction)
           && !('raw' in inputs.jobPreferencePlan.softPreferences[0]),
-        `recovery must preserve the usable plan but strip unrelated model payload, got ${JSON.stringify(inputs.jobPreferencePlan)}`);
+        `recovery must preserve the usable plan but strip unrelated/retired model payload (including the retired targetRoleConflict fields), got ${JSON.stringify(inputs.jobPreferencePlan)}`);
         assert(sanitizeJobPreferencePlan({ summary: 7, direction: 'invalid' }) === null,
           'an invalid preference plan must become null so recovery safely re-interprets it');
-        const conflictOnly = sanitizeJobPreferencePlan({
+        // A plan that carries ONLY the retired conflict fields (nothing else
+        // meaningful) must now sanitize to null, not survive as "meaningful" —
+        // targetRoleConflict was deleted from the `meaningful` predicate
+        // alongside the field itself, since Phase B leaves nothing for it to
+        // flag a conflict against.
+        const conflictOnlyPlan = sanitizeJobPreferencePlan({
           targetRoleConflict: true,
           targetRoleConflictReason: 'Avoid this exact role.',
         });
-        assert(conflictOnly?.targetRoleConflict === true && conflictOnly.targetRoleConflictReason === 'Avoid this exact role.',
-          'a conflict-only persisted plan must not be erased as an otherwise-empty plan');
+        assert(conflictOnlyPlan === null,
+          'a plan carrying only the retired targetRoleConflict fields must sanitize to null, not be kept as meaningful');
         assert(sanitizeJobPreferences(`  ${'a'.repeat(5000)}  `).length === 4000,
           'manifest persistence must cap bypassed Job Preferences input at the backend-safe length');
         return { strictRequirements: inputs.jobPreferencePlan.strictRequirements.length, recovered: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'sanitizeJobPreferencePlan: the resume manifest round-trip preserves titles and never carries the deleted titleSource field',
+    run: async () => {
+      // FIX 9's own guarantee (see jobRunStaging.js's inline comment on
+      // `titles` above): the AI-determined role list must survive a manifest
+      // round-trip so a resumed run reproduces generate-job-queries' ladder
+      // rung 2 exactly, instead of silently falling through to rung 3's
+      // exploratory query generation. SINGLE MODE additionally deleted
+      // `titleSource` outright — there is no more "which mode produced these
+      // titles" distinction to persist, so a sanitized plan must never carry
+      // that key at all, even when a stale in-flight model response (or an
+      // old Phase-A-era manifest) still supplies one.
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-preferences-titles-roundtrip-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        const titlesPlan = {
+          version: 1,
+          summary: 'Search Product Manager roles.',
+          direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+          softPreferences: [], strictRequirements: [], warnings: [],
+          titles: ['Product Manager', 'Senior Product Manager'],
+          // A stale/legacy payload a pre-Phase-B manifest or in-flight model
+          // response might still carry — must be silently dropped, exactly
+          // like any other unrecognized field this function already strips.
+          titleSource: 'brief',
+        };
+        await startRun(canvasPath, {
+          runId: 'titles-roundtrip-run', startedAt: 100, nodeId: 'hub-1', sourceIds: ['indeed'],
+          jobPreferences: 'I only want Product Manager roles.',
+          jobPreferencePlan: titlesPlan,
+        });
+        const state = await readRunState(canvasPath, 101);
+        const roundTrippedPlan = state?.manifest?.inputs?.jobPreferencePlan;
+        assert(JSON.stringify(roundTrippedPlan?.titles) === JSON.stringify(['Product Manager', 'Senior Product Manager']),
+          `titles must survive the manifest round-trip verbatim, got ${JSON.stringify(roundTrippedPlan?.titles)}`);
+        assert(!('titleSource' in (roundTrippedPlan || {})),
+          `a sanitized/round-tripped plan must never carry the deleted titleSource field, got ${JSON.stringify(roundTrippedPlan)}`);
+
+        // Direct unit coverage of sanitizeJobPreferencePlan itself, independent
+        // of the manifest plumbing above: a titles-only plan (no
+        // summary/direction/preference text at all) must still be treated as
+        // meaningful — see FIX 9's `meaningful` comment — and must still drop
+        // titleSource.
+        const titlesOnly = sanitizeJobPreferencePlan({
+          version: 1, summary: '', direction: {}, softPreferences: [], strictRequirements: [], warnings: [],
+          titles: ['Data Scientist'], titleSource: 'generated',
+        });
+        assert(titlesOnly !== null && JSON.stringify(titlesOnly.titles) === JSON.stringify(['Data Scientist']) && !('titleSource' in titlesOnly),
+          `a titles-only plan must sanitize as meaningful, keep its titles, and drop titleSource, got ${JSON.stringify(titlesOnly)}`);
+
+        return { titlesRoundTripped: true, titleSourceDropped: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -621,7 +695,7 @@ export default [
         version: 1,
         summary: 'Looks meaningful but does not meet the durable contract.',
         direction: { summary: '', roleDirections: ['Avoid web development'], avoidDirections: [], explorationEnabled: false },
-        softPreferences: [], strictRequirements: [], warnings: [], targetRoleConflict: false, targetRoleConflictReason: '',
+        softPreferences: [], strictRequirements: [], warnings: [], titles: [],
       };
       const valid = {
         ...malformed,
@@ -667,7 +741,7 @@ export default [
     },
   },
   {
-    name: 'job preferences: an exact-role conflict stops before search and all-filtered completion is described as preferences',
+    name: 'job preferences: a Search-Brief-resolved title list drives query construction ahead of the generation fallback, and all-filtered completion is described as preferences',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -676,11 +750,27 @@ export default [
       const pipelineStart = search.indexOf('// Step 2: Query construction');
       const pipelineEnd = search.indexOf('// Step 3: Search', pipelineStart);
       const pipeline = search.slice(pipelineStart, pipelineEnd);
-      const conflictAt = pipeline.indexOf('jobPreferencesInterpretation?.targetRoleConflict');
-      const queriesAt = pipeline.indexOf('window.electronAPI.generateJobQueries');
-      assert(conflictAt >= 0 && (queriesAt < 0 || conflictAt < queriesAt)
-        && pipeline.includes('Your Target role conflicts with your Job Preferences'),
-      'a clear Target role / Job Preferences contradiction must stop the pipeline before queries or a scrape begin');
+      // Phase B deleted targetRoleConflict outright: with the standalone
+      // Target role box gone, two boxes can no longer contradict each other,
+      // so the old "stop the pipeline before queries" guard has nothing left
+      // to guard. Assert the retired concept and its user-facing copy stay
+      // gone, rather than re-testing a throw that no longer exists.
+      assert(!pipeline.includes('targetRoleConflict') && !search.includes('Your Target role conflicts with your Job Preferences'),
+        'the retired target-role-conflict guard and its copy must not reappear in query construction');
+      // Its replacement guarantee: a brief-resolved title-query bundle is
+      // built locally (buildPinnedTitleQueryBundle) and that branch is tried
+      // BEFORE falling through to the exploratory generateJobQueries call, so
+      // a brief that already named titles never pays for a second model call.
+      // SINGLE MODE collapsed the old query/gate split (deriveQueryTitles +
+      // deriveGatePinnedTitles) into one deriveSearchTitles — there is no more
+      // deterministic post-search gate for a "generated" plan's titles to be
+      // exempted from, so the same activeSearchTitles list feeds both query
+      // construction here and (via `pinnedTitles` in node data) display.
+      const pinnedBranchAt = pipeline.indexOf('activeSearchTitles.length > 0');
+      const generateAt = pipeline.indexOf('window.electronAPI.generateJobQueries');
+      assert(pinnedBranchAt >= 0 && generateAt >= 0 && pinnedBranchAt < generateAt
+        && pipeline.includes('buildPinnedTitleQueryBundle(activeSearchTitles)'),
+      'a Search-Brief-resolved title list must be tried before the exploratory query-generation fallback');
       assert(done.includes("resultDisposition === 'preference-filtered'")
         && done.includes("${jobsLabel(count, 'job')} matched your preferences")
         && done.includes('filtered by your preferences'),
@@ -692,9 +782,305 @@ export default [
         && resume.includes('offer.jobPreferencePlan ?? offer.preferencePlan ?? null')
         && !resume.includes('data.activeJobPreferences ?? data.jobPreferences')
         && resume.includes('Failed to restore Job Preferences for this resumed search')
-        && resume.includes('This resumed search’s Target role conflicts with its Job Preferences'),
-      'crash resume must use the manifest’s frozen preferences and safely re-interpret durable raw text only when its saved plan is unavailable');
-      return { conflictBlocked: true, allFilteredCopy: true, resumePreferencesFrozen: true };
+        // The deterministic post-search title gate (and deriveGatePinnedTitles,
+        // its gate-only title deriver) is deleted outright — resume no longer
+        // needs to recompute a pinned-title gate list at all, so this crash-
+        // resume path must NOT reference it.
+        && !resume.includes('deriveGatePinnedTitles')
+        && !resume.includes('targetRoleConflict'),
+      'crash resume must use the manifest’s frozen preferences, safely re-interpret durable raw text only when its saved plan is unavailable, and never reintroduce the retired conflict guard or gate-title deriver');
+      return { conflictGuardRemoved: true, pinnedTitlesPrecedeGeneration: true, allFilteredCopy: true, resumePreferencesFrozen: true };
+    },
+  },
+  {
+    name: 'resolveSearchRoles (ROLE LOCKING two-pass): the coverage/compliance audit ALWAYS runs for a non-empty brief, and is SKIPPED only for a genuinely empty one',
+    run: async () => {
+      // Pass-1 raw wire shape a manual-AI response must satisfy — see
+      // hasValidRawPlanShape / JOB_PREFERENCE_PLAN_SCHEMA. Kept minimal (empty
+      // direction/preferences) since only `titles` matters here. SINGLE MODE
+      // deleted titleSource entirely — there is no longer a "the user already
+      // wrote these verbatim, skip the audit" branch to distinguish; the
+      // audit's cost/skip now turns on the brief text alone (empty or not),
+      // never on where the draft's titles came from.
+      const rawPlan = (titles) => ({
+        version: 1, summary: 'Draft interpretation.',
+        direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [], titles,
+      });
+      const rawAudit = (titles) => ({
+        titles, added: [], addedReason: '', removed: [], removedReason: '',
+        rationale: 'Draft already fully satisfies coverage and compliance.',
+      });
+
+      // Case A: the brief names NO titles at all, so pass 1 invents them from
+      // career data. This is exactly the case a coverage/compliance audit
+      // always existed for — it MUST spend the audit handoff.
+      const inventedCalls = [];
+      const inventedResult = await resolveSearchRoles({
+        jobPreferences: 'Help me find something in engineering leadership.',
+        profile: {}, careerData: '',
+        callText: async (_prompt, options) => {
+          inventedCalls.push(options.task);
+          if (options.task === 'job-preference-interpretation') return rawPlan(['Engineering Manager']);
+          if (options.task === 'job-role-audit') return rawAudit(['Engineering Manager']);
+          throw new Error(`unexpected task ${options.task}`);
+        },
+      });
+      assert(JSON.stringify(inventedCalls) === JSON.stringify(['job-preference-interpretation', 'job-role-audit']),
+        `a draft with no user-named titles must spend exactly one interpretation call and one audit call, in that order, got ${JSON.stringify(inventedCalls)}`);
+      assert(inventedResult.plan.titles.length === 1 && inventedResult.plan.titles[0] === 'Engineering Manager'
+        && inventedResult.roleAudit !== null,
+        'a fully-invented draft locks the audited titles and returns the raw audit as diagnostic evidence');
+
+      // Case B (THE INVERSION): the brief itself NAMES a title verbatim
+      // ("Product Manager roles"). The old two-mode design skipped pass 2
+      // here entirely (titleSource='brief' short-circuit). SINGLE MODE runs
+      // it regardless — the model's OWN additions around a user-named title
+      // can still miss a role family or violate a stated exclusion, so
+      // coverage/compliance are worth auditing even when the draft also
+      // carried the user's own words forward verbatim.
+      const namedCalls = [];
+      const namedBriefText = 'I only want Product Manager roles.';
+      const namedResult = await resolveSearchRoles({
+        jobPreferences: namedBriefText,
+        profile: {}, careerData: '',
+        callText: async (_prompt, options) => {
+          namedCalls.push(options.task);
+          if (options.task === 'job-preference-interpretation') return rawPlan(['Product Manager']);
+          if (options.task === 'job-role-audit') return rawAudit(['Product Manager']);
+          throw new Error(`unexpected task ${options.task}`);
+        },
+      });
+      assert(JSON.stringify(namedCalls) === JSON.stringify(['job-preference-interpretation', 'job-role-audit']),
+        `a draft carrying a user-named title must STILL spend the audit handoff — SINGLE MODE has no titleSource='brief' skip anymore — got ${JSON.stringify(namedCalls)}`);
+      assert(namedResult.plan.titles.length === 1 && namedResult.plan.titles[0] === 'Product Manager'
+        && namedResult.roleAudit !== null,
+        "a user-named-title draft's plan is still the audited final list, with roleAudit populated (never null) for any non-empty brief");
+
+      // Case C: a genuinely EMPTY brief is the ONLY path that skips pass 2 —
+      // interpretJobPreferences' own aiSkipped short-circuit means there is no
+      // brief text to audit a draft against, so resolveSearchRoles must spend
+      // ZERO calls total, not merely skip the second one.
+      const emptyCalls = [];
+      const emptyResult = await resolveSearchRoles({
+        jobPreferences: '   ',
+        profile: {}, careerData: '',
+        callText: async (_prompt, options) => {
+          emptyCalls.push(options.task);
+          throw new Error(`resolveSearchRoles must not call the AI at all for a genuinely empty brief, got task '${options.task}'`);
+        },
+      });
+      assert(emptyCalls.length === 0, `a genuinely empty brief must spend zero AI calls, got ${JSON.stringify(emptyCalls)}`);
+      assert(emptyResult.plan.titles.length === 0 && emptyResult.roleAudit === null,
+        'a genuinely empty brief resolves to zero titles with roleAudit null, since pass 2 never ran');
+
+      return { inventedCallCount: inventedCalls.length, namedCallCount: namedCalls.length, emptyCallCount: emptyCalls.length };
+    },
+  },
+  {
+    name: 'resolveSearchRoles: pass-2 COMPLIANCE removal drops an excluded draft title from the locked plan, and COVERAGE addition survives into it too',
+    run: async () => {
+      const rawPlan = (titles) => ({
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [], titles,
+      });
+      const result = await resolveSearchRoles({
+        jobPreferences: 'Find me engineering leadership roles, but nothing at the staff, principal, or manager level.',
+        profile: {}, careerData: '',
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-preference-interpretation') {
+            // Pass 1's own draft violates the brief's own exclusion — exactly
+            // the failure mode pass 2's COMPLIANCE check exists to catch.
+            return rawPlan(['Staff Engineer', 'Software Engineer']);
+          }
+          if (options.task === 'job-role-audit') {
+            return {
+              titles: ['Software Engineer', 'Senior Software Engineer'],
+              added: ['Senior Software Engineer'],
+              addedReason: 'The brief implies senior individual-contributor roles beyond the entry-level draft.',
+              removed: ['Staff Engineer'],
+              removedReason: 'The brief explicitly excludes the staff level.',
+              rationale: 'Added a missing seniority tier and removed an excluded level.',
+            };
+          }
+          throw new Error(`unexpected task ${options.task}`);
+        },
+      });
+      assert(!result.plan.titles.includes('Staff Engineer'),
+        `a draft title violating an explicit brief exclusion must not survive into the locked plan, got ${JSON.stringify(result.plan.titles)}`);
+      assert(result.plan.titles.includes('Senior Software Engineer'),
+        'a coverage addition must also survive into the locked plan');
+      assert(result.roleAudit.removed.includes('Staff Engineer') && result.roleAudit.removedReason.includes('staff')
+        && result.roleAudit.added.includes('Senior Software Engineer'),
+        'the raw audit evidence (added/removed + reasons) must be preserved verbatim as persisted diagnostic evidence');
+      return { removed: result.roleAudit.removed, added: result.roleAudit.added, finalTitles: result.plan.titles };
+    },
+  },
+  {
+    name: 'llm task registration: job-role-audit (pass-2 role audit) is a KNOWN_TASKS member with its own positive TASK_MAX_TOKENS ceiling',
+    run: () => {
+      // An unregistered task silently falls back to the 'default' cap — see
+      // resolveTask's warning in llm.js. The one-time, most-important-work-in-
+      // the-module role audit must never silently truncate on that fallback.
+      assert(getKnownTaskIds().has('job-role-audit'), "'job-role-audit' must be registered in llm.js KNOWN_TASKS");
+      const cap = taskMaxTokensFor('job-role-audit');
+      assert(Number.isFinite(cap) && cap > 0, `taskMaxTokensFor('job-role-audit') must resolve a positive finite ceiling, got ${cap}`);
+      return { registered: true, cap };
+    },
+  },
+  {
+    name: 'llm task registration: job-role-screen (bulk title-only role screen) is a KNOWN_TASKS member whose ceiling SCALES with itemCount, unlike the flat cap it used to silently fall back to',
+    run: () => {
+      // Before this fix, 'job-role-screen' was missing from both KNOWN_TASKS
+      // and TASK_MAX_TOKENS in llm.js, so resolveTask() silently fell through
+      // to 'default' (a flat 2048 max_tokens) -- see resolveTask's own
+      // warning. The screen batches up to ROLE_SCREEN_BATCH_SIZE (200) rows
+      // into ONE handoff (screenJobRolesByTitle, jobPreferences.js), and this
+      // transport has no cap-raise retry: a flat 2048 cap truncates the paste
+      // on any batch beyond a handful of rows, turning the whole screen into
+      // a failed handoff the user has to notice and redo by hand.
+      assert(getKnownTaskIds().has('job-role-screen'), "'job-role-screen' must be registered in llm.js KNOWN_TASKS");
+      const bigBatchCap = taskMaxTokensFor('job-role-screen', { itemCount: 200 });
+      const smallBatchCap = taskMaxTokensFor('job-role-screen', { itemCount: 10 });
+      assert(Number.isFinite(bigBatchCap) && bigBatchCap > 2048 * 2,
+        `taskMaxTokensFor('job-role-screen', {itemCount:200}) must sit far above the flat 'default' cap this task used to silently fall back to, got ${bigBatchCap}`);
+      assert(bigBatchCap > smallBatchCap,
+        `the ceiling must SCALE with itemCount, not stay flat -- a 200-row batch must resolve a materially larger budget than a 10-row batch, got 200-row=${bigBatchCap} vs 10-row=${smallBatchCap}`);
+      return { registered: true, bigBatchCap, smallBatchCap };
+    },
+  },
+  {
+    name: 'ROLE LOCKING: a re-scan with data.resolvedRoles already populated reuses the lock and never calls resolveSearchRoles; the search title list is derived from the (locked) plan',
+    run: async () => {
+      const search = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const lockStart = search.indexOf('let jobPreferencesInterpretation = laneTurnData.searchBriefPlan ?? null;');
+      const lockEnd = search.indexOf('const activePreferredLocation = locationToLegacyText', lockStart);
+      assert(lockStart >= 0 && lockEnd > lockStart, 'the ROLE LOCKING resolution block must exist between the freeze and location resolution');
+      const lockBlock = search.slice(lockStart, lockEnd);
+      // REUSE: laneTurnData.resolvedRoles is no longer the lock-existence
+      // check on its own (FIX2 — see hasResolvedRoleLock's WHY comment: a
+      // legitimate zero-title resolution must still count as locked, which
+      // `resolvedRoles.length > 0` cannot express). hasLockedRoles is now
+      // keyed on hasResolvedRoleLock(laneTurnData) (resolvedRolesMeta
+      // presence) — a populated lock still means the `if` below never
+      // executes, so this run still spends zero interpretation calls.
+      const hasLockedAt = lockBlock.indexOf('const hasLockedRoles = hasResolvedRoleLock(laneTurnData);');
+      const guardAt = lockBlock.indexOf('if (!hasLockedRoles && activeJobPreferences && window.electronAPI?.resolveSearchRoles) {');
+      const callAt = lockBlock.indexOf('window.electronAPI.resolveSearchRoles({');
+      assert(hasLockedAt >= 0 && guardAt > hasLockedAt && callAt > guardAt,
+        'resolveSearchRoles must be called only inside a block explicitly guarded on an empty/absent lock (hasResolvedRoleLock)');
+      // The lock and its titles are written together, atomically, from the
+      // SAME resolved plan — so reusing searchBriefPlan.titles on a later run
+      // is guaranteed to equal what was persisted into resolvedRoles when the
+      // lock was first established (the two fields can never diverge).
+      assert(lockBlock.includes('resolvedRoles: lockedTitles,') && lockBlock.includes('searchBriefPlan: jobPreferencesInterpretation,'),
+        'the freshly-established lock must persist resolvedRoles and searchBriefPlan from the same resolved plan in one atomic patch');
+      // PER-RUN title list: SINGLE MODE collapsed the old query/gate split
+      // (deriveQueryTitles + deriveGatePinnedTitles, the latter titleSource-
+      // aware) into one deriveSearchTitles, since there is no more
+      // deterministic post-search gate for a query list to diverge from. It
+      // is derived from jobPreferencesInterpretation — which, on a reused
+      // lock, IS laneTurnData.searchBriefPlan (see the `let` above) — never
+      // from a fresh interpretation.
+      assert(lockBlock.includes('const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);'),
+        'activeSearchTitles must be derived from jobPreferencesInterpretation, which is the locked searchBriefPlan on a reused-lock run');
+      const deriveStart = search.indexOf('function deriveSearchTitles(targetRole, preferencePlan) {');
+      const deriveEnd = search.indexOf('\n}', deriveStart);
+      const deriveBody = search.slice(deriveStart, deriveEnd);
+      assert(deriveBody.includes('Array.isArray(preferencePlan?.titles)') && deriveBody.includes('preferencePlan.titles.filter'),
+        'deriveSearchTitles must read its titles from preferencePlan.titles — i.e. the locked plan — not any other source');
+      // A legacy targetRole (unmigrated canvas only) still wins outright,
+      // reproducing the old single-role search exactly — there is no more
+      // titleSource-aware branch gating this on the plan's origin.
+      assert(deriveBody.includes("if (role) return [role];"),
+        'deriveSearchTitles must let a legacy targetRole win outright over the locked plan’s titles');
+      // The deleted deterministic gate functions must not have resurfaced —
+      // this is the core of what this round of fixes replaced with the AI
+      // role screen (screenJobRolesByTitle, main process).
+      assert(!search.includes('function deriveQueryTitles(') && !search.includes('function deriveGatePinnedTitles('),
+        'deriveQueryTitles/deriveGatePinnedTitles must stay deleted — deriveSearchTitles is their single replacement');
+      return { guarded: true, searchTitlesFromLockedPlan: true };
+    },
+  },
+  {
+    name: 'ROLE LOCKING: clearing career data (Clear career files, or a career-data-wiping Reset) clears searchBriefPlan/resolvedRoles/resolvedRolesMeta; a profile-retaining Reset leaves the lock untouched',
+    run: async () => {
+      const search = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      // Clear career files: the canonical unlock. Must ship the lock-clearing
+      // fields in the SAME updateGlobal patch as the rest of the career wipe.
+      const clearStart = search.indexOf('const handleClearCareerFiles = useCallback((e) => {');
+      const clearEnd = search.indexOf('\n  }, [', clearStart);
+      assert(clearStart >= 0 && clearEnd > clearStart, 'handleClearCareerFiles must exist');
+      const clearBody = search.slice(clearStart, clearEnd);
+      assert(clearBody.includes('searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null,'),
+        'Clear career files must null out the full lock triple (searchBriefPlan/resolvedRoles/resolvedRolesMeta)');
+      // Reset: only a career-data-wiping reset unlocks. A reset that retains a
+      // reusable profile (a mere mid-run Cancel) must leave the lock alone —
+      // roleLockClearPatch resolves to {} in that branch, never the null triple.
+      const resetStart = search.indexOf('const resetHasReusableCareerProfile = !!(');
+      const resetEnd = search.indexOf('updateGlobal(id, {', resetStart);
+      assert(resetStart >= 0 && resetEnd > resetStart, 'the reset handler’s career-retention branch must exist');
+      const resetBody = search.slice(resetStart, resetEnd);
+      assert(resetBody.includes('const roleLockClearPatch = resetHasReusableCareerProfile')
+        && resetBody.includes('? {}')
+        && resetBody.includes(': { searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null };'),
+        'a career-data-wiping Reset must clear the same lock triple as Clear career files; a profile-retaining Reset must leave it as an empty patch');
+      assert(search.includes('...retainedCareerData,\n      ...roleLockClearPatch,'),
+        'roleLockClearPatch must actually be spread into the reset’s updateGlobal patch, not merely computed and discarded');
+      return { clearCareerUnlocks: true, profileRetainingResetPreservesLock: true };
+    },
+  },
+  {
+    name: 'SETTINGS LOCKING FREEZE: every user-configurable setting (brief, location, remote residences, look-back, depth, platforms) is read-only/disabled once resolvedRoles is populated, in both JobSearchNode.jsx (empty state) and JobSearchDoneState.jsx (done state)',
+    run: async () => {
+      const [search, done] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+      ]);
+      // Empty state: settingsFrozen is derived from data (not a prop) via
+      // hasResolvedRoleLock — FIX2: keyed on resolvedRolesMeta rather than
+      // `resolvedRoles.length > 0`, since a legitimate zero-title resolution
+      // must still freeze settings (see hasResolvedRoleLock's WHY comment) —
+      // and freezes every setting permanently, alongside — but distinct
+      // from — the transient controlsLocked busy-state.
+      assert(search.includes("const resolvedRoles = Array.isArray(data.resolvedRoles) ? data.resolvedRoles : [];")
+        && search.includes('const settingsFrozen = hasResolvedRoleLock(data);')
+        && search.includes('disabled={controlsLocked || settingsFrozen}'),
+      'JobSearchNode.jsx must derive settingsFrozen from hasResolvedRoleLock(data) and disable the Search Brief textarea once it is populated');
+      // Every other empty-state setting must also freeze, not just the brief:
+      // location/remote-residence fields, look-back days, jobs/pages depth,
+      // and platform selection all take the same disabled prop.
+      assert(search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
+        && search.includes('disabled={controlsLocked || settingsFrozen}\n                    className="w-10')
+        && search.includes('setCollectionLimits={setCollectionLimits}\n                    disabled={settingsFrozen}')
+        && search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}'),
+      'JobSearchNode.jsx must disable location, look-back, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
+      // Done state: resolvedRoles AND resolvedRolesMeta arrive as PROPS (this
+      // component does not read node data directly) and gate every setting in
+      // this render too. FIX2 (mirrored from JobSearchNode.jsx's own
+      // hasResolvedRoleLock): settingsFrozen is keyed on resolvedRolesMeta
+      // presence, not `resolvedRoles.length > 0` — a legitimate zero-title
+      // resolution must still freeze settings here too.
+      assert(done.includes('resolvedRoles = [],')
+        && done.includes('resolvedRolesMeta = null,')
+        && done.includes('const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === \'object\');')
+        && done.includes('disabled={settingsFrozen}'),
+      'JobSearchDoneState.jsx must accept resolvedRoles/resolvedRolesMeta as props and disable its own settings once resolvedRolesMeta is populated');
+      // The done state is the one most likely to tempt a pre-re-run tweak, so
+      // every non-brief setting must carry the same freeze there too.
+      assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}')
+        && done.includes('aria-label="Maximum posting age in days"\n              disabled={settingsFrozen}')
+        && done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}')
+        && done.includes('searchLocation={searchLocation}\n            disabled={settingsFrozen}'),
+      'JobSearchDoneState.jsx must disable location, look-back, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
+      // The empty-state component must actually be the one supplying both
+      // props — otherwise the done-state freeze could silently read undefined
+      // forever regardless of what got locked. resolvedRolesMeta is the real
+      // sentinel, so its wiring matters at least as much as resolvedRoles'.
+      assert(search.includes('resolvedRoles={resolvedRoles}')
+        && search.includes('resolvedRolesMeta={data.resolvedRolesMeta || null}'),
+      'JobSearchNode.jsx must pass its own resolvedRoles and data.resolvedRolesMeta through to JobSearchDoneState');
+      return { emptyStateFrozen: true, doneStateFrozen: true, propWired: true };
     },
   },
   {
@@ -707,18 +1093,20 @@ export default [
         fs.promises.readFile(path.resolve('src/components/JobSearchLocationFields.jsx'), 'utf8'),
         fs.promises.readFile(path.resolve('src/components/HubErrorBanner.jsx'), 'utf8'),
       ]);
-      assert(search.includes('Target role <span className="text-white/25">(optional)</span>')
-        && search.includes('Leave blank to generate best-fit search variations.')
-        && search.includes('aria-describedby={targetRoleHelpId}')
+      assert(search.includes('Search Brief <span className="text-white/25">(optional)</span>')
+        && search.includes('AI determines which roles to search from what you write here')
         && search.includes('aria-describedby={jobPreferencesHelpId}')
         && search.includes('const cleanupRetirementPending = hasPendingManualAiRetirement(data);')
         && search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
         && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;')
         && search.includes('disabled={controlsLocked}')
-        && search.includes('disabled={controlsLocked}\n                    className="w-10')
-        && search.includes('disabled={controlsLocked}\n                />')
+        // Look-back and location controls carry the PERMANENT settingsFrozen
+        // freeze in addition to the transient controlsLocked busy-state (see
+        // the SETTINGS LOCKING FREEZE test above for the full inventory).
+        && search.includes('disabled={controlsLocked || settingsFrozen}\n                    className="w-10')
+        && search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
         && search.includes('locked={errorControlsLocked}'),
-      'empty Job Preferences controls must name Target role, explain a blank role, describe their help, and disable every editable setting while locked, queued, or finishing cancellation cleanup without hiding the cleanup retry action');
+      'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, or finishing cancellation cleanup without hiding the cleanup retry action');
       assert(locations.includes('disabled = false')
         && locations.includes('disabled={disabled}'),
       'structured location inputs must honor the parent locked state rather than remaining editable');
@@ -726,17 +1114,188 @@ export default [
         && done.includes("jobsLabel(count, 'job')")
         && done.includes("jobsLabel(count, 'new job', 'new jobs')")
         && done.includes('ready to score')
-        && done.includes('aria-describedby={targetRoleHelpId}'),
-      'completed result labels must pluralize every job count and retain labeled Target role guidance before a re-run');
+        && done.includes('aria-describedby={preferencesHelpId}'),
+      'completed result labels must pluralize every job count and retain labeled Search Brief guidance before a re-run');
       assert(processing.includes('aria-label="Copy the Chrome launch command"')
         && processing.includes('role="status" aria-live="polite"')
         && processing.includes('aria-label="Cancel and reset job search"')
         && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
       'processing controls must be keyboard-operable and communicate changing work to assistive technology');
+      // NAMING LOCK (inverted for Phase B): the merged box's visible name is
+      // now Search Brief, not Job Preferences — assert the actual label
+      // markup in BOTH input components reads "Search Brief" and that
+      // neither the old "Target role" label nor the old "Job Preferences"
+      // label survives. Scoped to the literal label markup (not a blanket
+      // scan of the whole file) because "Job Preferences" legitimately
+      // remains elsewhere as the feature/concept name — in hub-state status
+      // copy, EventLogger lines, and error messages — none of which this
+      // task renamed; only the box's own label changed.
+      const searchBriefLabel = '<span>Search Brief <span className="text-white/25">(optional)</span></span>';
+      const targetRoleLabel = '<span>Target role <span className="text-white/25">(optional)</span></span>';
+      const jobPreferencesLabel = '<span>Job Preferences <span className="text-white/25">(optional)</span></span>';
       assert(errorBanner.includes('role="alert"') && errorBanner.includes('aria-label="Dismiss error"')
-        && !/AI Preferences|AI preferences|Job Brief|job brief/.test(`${search}\n${done}`),
-      'errors must announce themselves and the visible feature name must remain Job Preferences');
+        && search.includes(searchBriefLabel) && done.includes(searchBriefLabel)
+        && !search.includes(targetRoleLabel) && !done.includes(targetRoleLabel)
+        && !search.includes(jobPreferencesLabel) && !done.includes(jobPreferencesLabel),
+      'errors must announce themselves, and the merged input box must be visibly named Search Brief in both input components, with neither the old Target role label nor the old Job Preferences label surviving');
       return { labels: true, locked: true, counts: true, status: true };
+    },
+  },
+  {
+    // Per-control, not blanket: the SETTINGS LOCKING FREEZE test above already
+    // asserts every control with combined `&&` expressions, but a combined
+    // assertion still passes if the STRING for one control silently drops
+    // out as long as the others remain — the boolean result of `a && b && c`
+    // only tells you SOMETHING failed, not which `disabled` prop went
+    // missing. This test asserts each of the 7 inventoried settings with its
+    // OWN assert() call (one control missing its freeze fails exactly one
+    // assertion, identifying itself by message) across both render states.
+    // Settings 2/3 (location + remote residences) and 5/6 (jobs/platform +
+    // pages/search) share ONE component instance each — that component
+    // takes a single `disabled` prop, so one assertion legitimately covers
+    // two inventory settings; this is the component's own shape, not a test
+    // shortcut, and the comment on each assertion says so explicitly.
+    name: 'SETTINGS FREEZE per-control: each of the 7 inventoried settings is individually asserted disabled under settingsFrozen, in both JobSearchNode.jsx and JobSearchDoneState.jsx',
+    run: async () => {
+      const [search, done] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+      ]);
+
+      // JobSearchNode.jsx (empty/draft render) — settingsFrozen combines with
+      // the transient controlsLocked on every control this component itself
+      // renders (JobCollectionLimitsControl/JobPlatformSelectionControl are
+      // hidden outright, not merely disabled, while controlsLocked — see the
+      // `!controlsLocked &&` guards below — so their own disabled prop only
+      // ever needs settingsFrozen).
+      assert(search.includes('placeholder="E.g. Senior Product Manager roles — or: help me pivot away from web development; large established companies only."\n                    aria-describedby={jobPreferencesHelpId}'
+        + '\n                    // settingsFrozen is PERMANENT (roles locked on the first run,\n                    // taking every setting below with them) — distinct from\n                    // controlsLocked\'s transient "busy right now". Reusing the\n                    // same disabled styling here is deliberate: it reads as\n                    // intentionally locked, not merely temporarily busy.\n                    disabled={controlsLocked || settingsFrozen}'),
+      '[setting 1/7 — Search Brief] JobSearchNode.jsx textarea must disable on controlsLocked || settingsFrozen');
+      assert(search.includes('remoteResidences={remoteResidences}\n                  setRemoteResidence={setRemoteResidence}\n                  disabled={controlsLocked || settingsFrozen}'),
+      '[settings 2+3/7 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchNode.jsx must disable it on controlsLocked || settingsFrozen');
+      assert(search.includes('aria-label="Maximum posting age in days"\n                    disabled={controlsLocked || settingsFrozen}'),
+      '[setting 4/7 — Look back days] JobSearchNode.jsx number input must disable on controlsLocked || settingsFrozen');
+      assert(search.includes('setCollectionLimits={setCollectionLimits}\n                    disabled={settingsFrozen}'),
+      '[settings 5+6/7 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchNode.jsx must disable it on settingsFrozen');
+      assert(search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}\n                  />\n                )}'),
+      '[setting 7/7 — Job platforms] JobSearchNode.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
+
+      // JobSearchDoneState.jsx (the re-run screen) — locked/busy is handled
+      // by hiding this whole settings block (`{!locked && (...)}`); within
+      // it, settingsFrozen alone gates every control, since a queued/busy
+      // hub never reaches this render at all.
+      assert(done.includes('// a locked brief reads as intentional rather than a stray bug.\n              disabled={settingsFrozen}'),
+      '[setting 1/7 — Search Brief] JobSearchDoneState.jsx textarea must disable on settingsFrozen');
+      assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}'),
+      '[settings 2+3/7 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
+      assert(done.includes('aria-label="Maximum posting age in days"\n              disabled={settingsFrozen}'),
+      '[setting 4/7 — Look back days] JobSearchDoneState.jsx number input must disable on settingsFrozen');
+      assert(done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}'),
+      '[settings 5+6/7 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
+      assert(done.includes('searchLocation={searchLocation}\n            disabled={settingsFrozen}\n          />\n        </div>\n      )}'),
+      '[setting 7/7 — Job platforms] JobSearchDoneState.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
+
+      return { perControlAsserted: 10 };
+    },
+  },
+  {
+    // The freeze must be PERMANENT (survives a queued run finishing, a hub
+    // unlocking, cleanup completing) until a full reset — so settingsFrozen
+    // must never be folded into controlsLocked/errorControlsLocked, whose
+    // whole purpose is to clear on their own. Asserting the exact
+    // right-hand-side EXPRESSION text (not just that both names appear
+    // somewhere in the file) catches a future refactor like
+    // `const settingsFrozen = hasResolvedRoleLock(data) || controlsLocked;`
+    // or `const controlsLocked = ... || settingsFrozen;`, either of which
+    // would silently let a transient unlock reopen permanently-frozen
+    // settings, or permanently lock the transient controls.
+    name: 'SETTINGS FREEZE is a separate expression from the transient lock: settingsFrozen derives only from hasResolvedRoleLock(data); controlsLocked/errorControlsLocked derive only from data.locked/queuedModuleRun/cleanup, in both directions',
+    run: async () => {
+      const [search, done] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+      ]);
+      // JobSearchNode.jsx: the three lock/freeze definitions, verbatim. None
+      // of the three right-hand sides mentions either of the other two names.
+      assert(search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;'),
+      'controlsLocked must derive only from data.locked / data.queuedModuleRun / cleanupRetirementPending — not settingsFrozen or resolvedRoles');
+      assert(search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;'),
+      'errorControlsLocked must derive only from data.locked / data.queuedModuleRun — not settingsFrozen, resolvedRoles, or cleanupRetirementPending');
+      // FIX2: settingsFrozen is keyed on hasResolvedRoleLock(data) — i.e.
+      // resolvedRolesMeta presence — not `resolvedRoles.length > 0` (which
+      // cannot distinguish "never locked" from "locked with zero titles").
+      assert(search.includes('const settingsFrozen = hasResolvedRoleLock(data);'),
+      'settingsFrozen must derive only from hasResolvedRoleLock(data) — not controlsLocked, errorControlsLocked, data.locked, or data.queuedModuleRun');
+      // JobSearchDoneState.jsx receives `locked` as an independent prop
+      // (the caller's controlsLocked, renamed at the boundary) and computes
+      // settingsFrozen from its OWN resolvedRolesMeta prop, never from
+      // `locked` — mirroring JobSearchNode.jsx's own hasResolvedRoleLock
+      // sentinel rather than `resolvedRoles.length > 0`.
+      assert(done.includes('const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === \'object\');'),
+      'JobSearchDoneState.jsx settingsFrozen must derive only from its resolvedRolesMeta prop — not the locked prop or resolvedRoles.length');
+      return { separateExpressions: true };
+    },
+  },
+  {
+    // The three actions that stay reachable through a permanently-frozen hub
+    // (re-run with the same locked settings, re-evaluate saved jobs against
+    // the same locked brief, or blow the whole thing away via Clear career
+    // files) must never themselves be disabled by settingsFrozen — only the
+    // SETTINGS should freeze, not the ability to act on them or escape the
+    // freeze. Each assertion below is scoped to that one button's own JSX so
+    // a stray `disabled={settingsFrozen}` landing on the wrong button is
+    // still caught even though the surrounding file also legitimately
+    // contains that exact substring elsewhere (on the settings it SHOULD
+    // gate).
+    name: 'SETTINGS FREEZE ACTIONS STAY LIVE: Re-run / Re-evaluate / Clear career files are never disabled by settingsFrozen, in either render state',
+    run: async () => {
+      const [search, done] = await Promise.all([
+        fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
+        fs.promises.readFile(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8'),
+      ]);
+      // Extracts exactly one <button>...</button> element by finding a
+      // unique anchor string inside it (verified unique in the source file)
+      // and taking everything from there to the next `</button>` close tag —
+      // robust to incidental reformatting, unlike a fixed character offset.
+      const button = (source, anchor) => {
+        const anchorIdx = source.indexOf(anchor);
+        assert(anchorIdx !== -1, `anchor not found in source: ${anchor}`);
+        const openIdx = source.lastIndexOf('<button', anchorIdx);
+        const closeIdx = source.indexOf('</button>', anchorIdx);
+        assert(openIdx !== -1 && closeIdx !== -1, `could not bound a <button>...</button> element around anchor: ${anchor}`);
+        return source.slice(openIdx, closeIdx + '</button>'.length);
+      };
+
+      // JobSearchDoneState.jsx (the re-run screen — the one that matters
+      // most, since this is where a user would actually try to re-run).
+      const doneReanalyzeButton = button(done, 'onClick={onReanalyze}');
+      assert(!doneReanalyzeButton.includes('disabled'),
+      'JobSearchDoneState.jsx Re-evaluate Saved Jobs button must carry no disabled prop at all (settingsFrozen or otherwise)');
+      const doneRerunButton = button(done, 'onClick={onRerun}');
+      assert(doneRerunButton.includes('disabled={platformsVerifying}') && !doneRerunButton.includes('settingsFrozen'),
+      'JobSearchDoneState.jsx Re-run Search button must disable only on platformsVerifying, never on settingsFrozen');
+      const doneClearButton = button(done, 'onClick={onClearCareerFiles}');
+      assert(!doneClearButton.includes('disabled'),
+      'JobSearchDoneState.jsx Clear career files button must carry no disabled prop at all (settingsFrozen or otherwise)');
+
+      // JobSearchNode.jsx (career files retained, pre-first-run empty state)
+      // — these two actions are gated on VISIBILITY (`!controlsLocked &&`
+      // wrapping the whole <button>), never on a `disabled` prop, so the
+      // relevant assertion is on the enclosing conditional, not the button
+      // element itself; the button() helper above still proves no `disabled`
+      // prop of any kind was added to the element.
+      const searchRerunButton = button(search, 'handleRerun(); }}');
+      assert(!searchRerunButton.includes('disabled'),
+      'JobSearchNode.jsx Re-run Search button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
+      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && (\n                    <button'),
+      'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
+      const searchClearButton = button(search, 'handleClearCareerFiles(e)');
+      assert(!searchClearButton.includes('disabled'),
+      'JobSearchNode.jsx Clear career files button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
+      assert(search.includes('{!controlsLocked && !activeBoardRecoveryOwnerKey && (\n                    <button'),
+      'JobSearchNode.jsx Clear career files button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
+
+      return { actionsStayLive: true };
     },
   },
   {
@@ -2282,6 +2841,49 @@ export default [
     },
   },
   {
+    name: 'search-jobs: the bulk AI role screen only sends rows lacking a roleScreen stamp, and rebuilds the kept pool preserving already-judged rows untouched',
+    run: () => {
+      // On a RESUME, `ageFiltered` is seeded from the crashed run's staged
+      // rows, which already carry a `roleScreen` stamp from the interrupted
+      // attempt. Before this fix, the handler re-sent the WHOLE ageFiltered
+      // pool to screenJobRolesByTitle on every resume, spending an extra
+      // handoff, and -- because this is a non-deterministic semantic call --
+      // could flip an already-accepted row into a drop for a reason the
+      // report never surfaces. The fix filters to `roleUnscreened` (rows
+      // lacking a stamp) before the call, and rebuilds the kept pool from the
+      // FULL `ageFiltered` list afterward so previously-screened rows pass
+      // through untouched instead of being replaced by (or re-judged into)
+      // the fresh screen's output.
+      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const stageStart = source.indexOf('const roleScreenTitles = Array.isArray(activeJobPreferencePlan?.titles)');
+      const stageEnd = source.indexOf('// Drop anything we\'ve already shown the user on a previous run.', stageStart);
+      const stage = source.slice(stageStart, stageEnd);
+      assert(stageStart >= 0 && stageEnd > stageStart, 'could not locate the search-jobs bulk role-screen stage -- has it been renamed or restructured?');
+
+      const unscreenedAt = stage.indexOf('const roleUnscreened = ageFiltered.filter(job => !job?.roleScreen);');
+      const guardAt = stage.indexOf('if (roleScreenTitles.length > 0 && roleUnscreened.length > 0) {', unscreenedAt);
+      const callAt = stage.indexOf('const roleScreen = await screenJobRolesByTitle({', guardAt);
+      const jobsArgAt = stage.indexOf('jobs: roleUnscreened,', callAt);
+      const rebuildAt = stage.indexOf('roleScreened = ageFiltered', jobsArgAt);
+      assert(unscreenedAt >= 0 && guardAt > unscreenedAt && callAt > guardAt && jobsArgAt > callAt && rebuildAt > jobsArgAt,
+        'the screen must be gated on rows lacking a roleScreen stamp (roleUnscreened), and that filtered set -- not the full ageFiltered pool -- must be what is sent to screenJobRolesByTitle');
+      // The old bug sent the full pool directly; assert that shape is gone
+      // from the call args (this must fail against the pre-fix source, where
+      // there was no roleUnscreened variable and `jobs: ageFiltered,` was
+      // passed straight through).
+      assert(!stage.includes('jobs: ageFiltered,'),
+        'the full (unfiltered) ageFiltered pool must never be passed directly as the screen\'s `jobs` argument');
+
+      const rebuildBlockEnd = stage.indexOf('roleDropped = Number(roleScreen?.counts?.dropped)', rebuildAt);
+      const rebuild = stage.slice(rebuildAt, rebuildBlockEnd);
+      assert(rebuild.includes('.filter(job => job?.roleScreen || !roleDroppedKeys.has(sourceJobKey(job)))')
+        && rebuild.includes('.map(job => (job?.roleScreen ? job : (roleStampByKey.get(sourceJobKey(job)) || job)))'),
+      'the rebuild must preserve an already-stamped row untouched (job?.roleScreen short-circuits both the filter and the map) rather than letting the fresh screen\'s drop/accept sets decide its fate a second time');
+
+      return { unscreenedFilterGates: true, rebuildPreservesStampedRows: true };
+    },
+  },
+  {
     name: 'seen history never records a preference-filtered listing',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-preference-history-'));
@@ -2368,6 +2970,323 @@ export default [
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'Phase A titles: normalizeJobPreferencePlan keeps up to 20 titles',
+    run: async () => {
+      // cleanArray's own default maxItems is 8 (see jobPreferences.js). Prove
+      // the titles field was given an EXPLICIT 20 rather than inheriting that
+      // default — the trap the task description calls out by name. 15 titles
+      // in, all 15 must survive; a default-capped normalizer would silently
+      // truncate to 8.
+      const fifteenTitles = Array.from({ length: 15 }, (_, i) => `Role Variant ${i}`);
+      const normalized = normalizeJobPreferencePlan({
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [],
+        titles: fifteenTitles,
+      });
+      assert(normalized.titles.length === 15, `all 15 titles must survive normalization (cleanArray default cap of 8 must be overridden), got ${normalized.titles.length}`);
+      assert(normalized.titles[14] === 'Role Variant 14', 'title order and content are preserved through normalization');
+
+      // Feeding the schema's own cap (20) plus one extra past it proves the
+      // explicit 20 is honored as a ceiling too, not just raised arbitrarily.
+      const twentyTwoTitles = Array.from({ length: 22 }, (_, i) => `Extra Role ${i}`);
+      const cappedAt20 = normalizeJobPreferencePlan({ ...blankJobPreferencePlan(), titles: twentyTwoTitles });
+      assert(cappedAt20.titles.length === 20, `titles must still cap at 20 (the schema's malformed-response tripwire), got ${cappedAt20.titles.length}`);
+
+      // SINGLE MODE deleted titleSource entirely — the two-mode 'brief'-
+      // verbatim-gate/'generated'-gate-off split, and with it the
+      // deterministic brief-traceability check that used to run inside
+      // validateJobPreferencePlanSubmission, are both gone. A blank plan must
+      // carry no trace of the retired field at all, not merely a default
+      // value for it.
+      assert(blankJobPreferencePlan().titles.length === 0 && !Object.hasOwn(blankJobPreferencePlan(), 'titleSource'),
+        'a blank plan carries an empty title list and no titleSource field whatsoever');
+
+      return { keptAt15: normalized.titles.length, cappedAt20: cappedAt20.titles.length };
+    },
+  },
+  {
+    name: 'settingConflicts: normalizes valid entries, caps at 6, and a malformed entry is DROPPED rather than throwing',
+    run: () => {
+      // A settingConflicts entry needs all three fields (wrote/setting/
+      // resolution) and `setting` must be one of the five literal data.*
+      // field names the UI can map straight to a control. A plan missing the
+      // key entirely (an older manifest, predating this field) must still
+      // normalize cleanly to an empty array — see blankJobPreferencePlan.
+      const blank = blankJobPreferencePlan();
+      assert(Array.isArray(blank.settingConflicts) && blank.settingConflicts.length === 0,
+        `blankJobPreferencePlan must carry an empty settingConflicts array, got ${JSON.stringify(blank.settingConflicts)}`);
+
+      const validEntry = { wrote: 'LOCATION: Toronto only', setting: 'searchLocation', resolution: 'Set Search location to Toronto instead of writing it in the brief.' };
+      const normalizedValid = normalizeJobPreferencePlan({ ...blank, settingConflicts: [validEntry] });
+      assert(normalizedValid.settingConflicts.length === 1
+        && normalizedValid.settingConflicts[0].wrote === validEntry.wrote
+        && normalizedValid.settingConflicts[0].setting === 'searchLocation'
+        && normalizedValid.settingConflicts[0].resolution === validEntry.resolution,
+      `a well-formed entry must normalize through unchanged, got ${JSON.stringify(normalizedValid.settingConflicts)}`);
+
+      // Cap at 6: normalizeSettingConflicts slices the raw input to the first
+      // 6 entries before validating, so 8 distinct valid entries must yield
+      // exactly the first 6, in order — never 7 or 8, and never silently
+      // reordered.
+      const eightEntries = Array.from({ length: 8 }, (_, i) => ({
+        wrote: `brief text ${i}`, setting: 'searchLocation', resolution: `resolution ${i}`,
+      }));
+      const cappedAt6 = normalizeJobPreferencePlan({ ...blank, settingConflicts: eightEntries });
+      assert(cappedAt6.settingConflicts.length === 6
+        && cappedAt6.settingConflicts[0].wrote === 'brief text 0'
+        && cappedAt6.settingConflicts[5].wrote === 'brief text 5',
+      `settingConflicts must cap at 6 and keep the first 6 in order, got ${JSON.stringify(cappedAt6.settingConflicts.map(c => c.wrote))}`);
+
+      // A malformed entry (unrecognized `setting` enum value, or a missing
+      // required field) must be DROPPED, not thrown: settingConflicts is
+      // pure advisory and an advisory must never block a search. Assert this
+      // explicitly by mixing one bad entry into an otherwise-valid batch and
+      // confirming (a) no exception is thrown and (b) only the good entries
+      // survive.
+      const mixedBatch = [
+        { wrote: 'good one', setting: 'maxAgeDays', resolution: 'Use the Look back control instead.' },
+        { wrote: 'bad setting enum', setting: 'notARealSetting', resolution: 'This should be dropped.' },
+        { wrote: '', setting: 'searchLocation', resolution: 'Missing wrote text, should be dropped.' },
+        { wrote: 'missing resolution', setting: 'enabledSourceIds', resolution: '' },
+        { setting: 'collectionLimits', resolution: 'Entirely missing wrote key, should be dropped.' },
+        { wrote: 'good two', setting: 'remoteResidences', resolution: 'Use Remote salary residences instead.' },
+      ];
+      let mixedThrew = false;
+      let mixedResult = null;
+      try {
+        mixedResult = normalizeJobPreferencePlan({ ...blank, settingConflicts: mixedBatch });
+      } catch { mixedThrew = true; }
+      assert(!mixedThrew, 'a malformed settingConflicts entry must never throw out of normalization — an advisory must never block a search');
+      assert(mixedResult.settingConflicts.length === 2
+        && mixedResult.settingConflicts.every(c => c.wrote === 'good one' || c.wrote === 'good two'),
+      `only the well-formed entries must survive, the malformed ones silently dropped, got ${JSON.stringify(mixedResult.settingConflicts)}`);
+
+      // Entirely absent settingConflicts key (a plan built before this field
+      // existed) must normalize to [] rather than reject the whole plan.
+      const legacyPlan = { ...blank };
+      delete legacyPlan.settingConflicts;
+      const legacyNormalized = normalizeJobPreferencePlan(legacyPlan);
+      assert(Array.isArray(legacyNormalized.settingConflicts) && legacyNormalized.settingConflicts.length === 0,
+        'a plan predating settingConflicts must normalize the missing key to an empty array');
+
+      return { validKept: 1, cappedAt6: cappedAt6.settingConflicts.length, malformedDropped: mixedBatch.length - mixedResult.settingConflicts.length };
+    },
+  },
+  {
+    name: 'settingConflicts: a plan with a valid settingConflicts array passes validateJobPreferencePlanSubmission, but a non-array value at the top level fails closed',
+    run: () => {
+      // hasValidRawPlanShape is deliberately asymmetric for this field (see
+      // its own comment in jobPreferences.js): an individual malformed ENTRY
+      // is silently dropped by normalization (proved above), but the
+      // top-level `settingConflicts` VALUE itself, when present, must still
+      // be an array — a non-array here signals a genuinely malformed wire
+      // payload (not just one bad advisory item) and must reject the whole
+      // plan, the same as a malformed `titles` or `warnings` value would.
+      const base = {
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [],
+        titles: [],
+      };
+      const validPlan = {
+        ...base,
+        settingConflicts: [{ wrote: 'REMOTE: must pay Bay Area rate', setting: 'remoteResidences', resolution: 'Set Remote salary residences instead of writing it in the brief.' }],
+      };
+      const validated = validateJobPreferencePlanSubmission(validPlan);
+      assert(validated.settingConflicts.length === 1 && validated.settingConflicts[0].setting === 'remoteResidences',
+        `a plan with a valid settingConflicts array must pass validation and survive intact, got ${JSON.stringify(validated.settingConflicts)}`);
+
+      let nonArrayRejected = false;
+      try {
+        validateJobPreferencePlanSubmission({ ...base, settingConflicts: 'not an array' });
+      } catch { nonArrayRejected = true; }
+      assert(nonArrayRejected, 'a settingConflicts value that is present but not an array must fail hasValidRawPlanShape and reject the whole plan, not silently coerce to []');
+
+      // A plan simply missing the key altogether (not malformed, just absent
+      // — the older-manifest case) must still validate successfully.
+      const missingKeyPlan = { ...base };
+      const missingKeyValidated = validateJobPreferencePlanSubmission(missingKeyPlan);
+      assert(Array.isArray(missingKeyValidated.settingConflicts) && missingKeyValidated.settingConflicts.length === 0,
+        'a plan missing settingConflicts altogether must still validate, normalizing to an empty array');
+
+      return { validPassed: true, nonArrayRejected, missingKeyPassed: true };
+    },
+  },
+  {
+    name: 'generate-job-queries ladder: a brief-resolved title list searches those titles directly, with no exploratory model call',
+    run: async () => {
+      registerJobsHandlers();
+      const generateJobQueries = ipcMain.__getInvokeHandler('generate-job-queries');
+      const sender = {
+        id: 66_010,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+        send: () => {},
+      };
+      // 'Toronto, ON' resolves its country code deterministically inside
+      // resolveJobSearchLocation without a model call (a recognized Canadian
+      // subdivision), so this test never depends on the manual-AI handoff.
+      // generate-job-queries takes no injectable callText/callRaw of its own
+      // (it calls the real nonApiAi module directly) — every plan below is
+      // therefore built to be independently VALID so the handler's own
+      // isValidJobPreferencePlanSubmission check never falls through to a
+      // real interpretation/exploration call, rather than relying on a mock
+      // that would throw if reached.
+
+      // RUNG 2: no legacy targetRole, but the Job Preferences plan already
+      // resolved `titles`. A duplicate-by-case entry proves the ladder's own
+      // flattenJobSearchQueries dedup pass actually ran, not just a raw
+      // pass-through. (No blank entry here: hasValidRawPlanShape requires
+      // every submitted title to be a non-empty bounded string, so a validly-
+      // shaped plan reaching this rung can never contain one — blank-stripping
+      // is jobPreferences.js's normalizeJobPreferencePlan/cleanArray job, at
+      // the interpretation boundary, not this handler's.)
+      const titlesPlan = {
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [],
+        titles: ['Software Engineer', '  software engineer  ', 'Data Scientist'],
+      };
+      const rung2 = await generateJobQueries({ sender }, {
+        profile: {}, careerData: '', targetRole: '', preferredLocation: 'Toronto, ON',
+        jobPreferences: '', preferencePlan: titlesPlan,
+      }, undefined);
+      assert(rung2.success === true, `rung 2 must succeed, got ${JSON.stringify(rung2)}`);
+      assert(rung2.queryModel === null, 'a brief-resolved title list must not spend a model call generating query variations');
+      assert(JSON.stringify(rung2.queries.targetRoleQueries) === JSON.stringify(['Software Engineer', 'Data Scientist']),
+        `titles must be searched verbatim (case-insensitive deduped, blanks dropped), got ${JSON.stringify(rung2.queries)}`);
+      assert(rung2.queries.titleQueries.length === 0 && rung2.queries.suggestedRoleQueries.length === 0 && rung2.queries.skillsOnlyQueries.length === 0,
+        'a titles-driven bundle carries no exploratory query groups');
+      // A recognized-subdivision location (e.g. "Toronto, ON") resolves its
+      // countryCode deterministically inside resolveJobSearchLocation without
+      // a model call, returning only canonicalLocation (no canonicalCountry —
+      // that field is populated only by the model-resolved branch). Asserting
+      // canonicalLocation here still proves location resolution ran for a
+      // titles-driven bundle exactly like it does for the target-role bundle.
+      assert(rung2.canonicalLocation === 'Toronto, Ontario, Canada' && rung2.canonicalCountry === '',
+        `location resolution still runs for a titles-driven bundle, got ${JSON.stringify({ canonicalLocation: rung2.canonicalLocation, canonicalCountry: rung2.canonicalCountry })}`);
+
+      // RUNG 1 still wins over rung 2 when BOTH a legacy targetRole and a
+      // titles-bearing plan are present — this is exactly the back-compat
+      // guarantee: an old renderer/manifest that only ever sent `targetRole`
+      // must keep taking the original single-exact-query path, unchanged,
+      // even now that a titles-producing plan sits right next to it.
+      const rung1 = await generateJobQueries({ sender }, {
+        profile: {}, careerData: '', targetRole: 'Product Manager', preferredLocation: 'Toronto, ON',
+        jobPreferences: '', preferencePlan: titlesPlan,
+      }, undefined);
+      assert(rung1.success === true, `rung 1 must succeed, got ${JSON.stringify(rung1)}`);
+      assert(rung1.queryModel === null, 'the legacy exact-target-role path must not spend a model call either');
+      assert(JSON.stringify(rung1.queries) === JSON.stringify(buildExactTargetRoleQueryBundle('Product Manager')),
+        `a set targetRole must still win the ladder and reproduce the exact legacy single-query bundle, got ${JSON.stringify(rung1.queries)}`);
+
+      // Back-compat: a bare legacy targetRole with NO preference plan at all
+      // (the shape every pre-Phase-A caller sent) must still work exactly as
+      // before — same bundle, no AI call.
+      const legacyOnly = await generateJobQueries({ sender }, {
+        profile: {}, careerData: '', targetRole: 'Backend Engineer', preferredLocation: 'Toronto, ON',
+      }, undefined);
+      assert(legacyOnly.success === true && legacyOnly.queryModel === null
+        && JSON.stringify(legacyOnly.queries) === JSON.stringify(buildExactTargetRoleQueryBundle('Backend Engineer')),
+      `a legacy caller supplying only targetRole (no preferencePlan/jobPreferences at all) must gate identically to pre-Phase-A behaviour, got ${JSON.stringify(legacyOnly)}`);
+
+      return { rung2NoModelCall: true, rung1PrecedesRung2: true, legacyBackCompat: true };
+    },
+  },
+  {
+    name: 'REGRESSION: generate-job-queries and buildJobAnalysisSnapshot both trust a validly-shaped plan via the one-argument isValidJobPreferencePlanSubmission, rather than nulling or re-interpreting it',
+    run: async () => {
+      // SINGLE MODE deleted the old titleSource='brief' verbatim-traceability
+      // check outright, and with it the second `briefText` argument
+      // isValidJobPreferencePlanSubmission/validateJobPreferencePlanSubmission
+      // used to take (see jobPreferences.js) — validation is plan-shape-only
+      // now. The original bug this test pinned (three electron/ipc/jobs.js
+      // call sites omitting that second argument, which made every
+      // brief-sourced plan look invalid and triggered an unwanted
+      // re-interpretation or a nulled-out persisted plan) cannot recur now
+      // that the argument itself no longer exists. What remains worth
+      // guarding: both call sites below must still TRUST a validly-shaped
+      // plan outright — never silently re-interpret or null it out.
+      registerJobsHandlers();
+      const generateJobQueries = ipcMain.__getInvokeHandler('generate-job-queries');
+      const sender = {
+        id: 66_030,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+        send: () => {},
+      };
+      const briefText = 'I am looking for a Software Engineer role at a large company.';
+      const validPlan = {
+        version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [], warnings: [],
+        titles: ['Software Engineer'],
+      };
+      // generate-job-queries has no injectable callText/callRaw of its own
+      // (see the Phase A ladder test above) — if the handler wrongly treated
+      // this plan as invalid and fell through to a real re-interpretation or
+      // exploratory call, it would reach the real (unmocked) manual-AI
+      // transport, which this test never provides an answer for. A hang/
+      // rejection there is itself part of the regression signal, on top of
+      // the explicit assertions below.
+      const result = await generateJobQueries({ sender }, {
+        profile: {}, careerData: '', targetRole: '', preferredLocation: 'Toronto, ON',
+        jobPreferences: briefText, preferencePlan: validPlan,
+      }, undefined);
+      assert(result.success === true, `a validly-shaped plan must resolve without error, got ${JSON.stringify(result)}`);
+      assert(result.queryModel === null, 'a validated title list must not spend a model call re-interpreting the brief');
+      assert(JSON.stringify(result.queries.targetRoleQueries) === JSON.stringify(['Software Engineer']),
+        `the plan's own titles must be searched verbatim, got ${JSON.stringify(result.queries)}`);
+
+      // buildJobAnalysisSnapshot's own independent isValidJobPreferencePlanSubmission
+      // check (a separate call site) must likewise trust — and durably
+      // persist — a valid plan rather than nulling it out as "interpret again".
+      const { snapshot } = buildJobAnalysisSnapshot({
+        jobs: [], profile: {}, careerData: '', jobPreferences: briefText, jobPreferencePlan: validPlan,
+      });
+      assert(snapshot.jobPreferencePlan !== null
+        && JSON.stringify(snapshot.jobPreferencePlan.titles) === JSON.stringify(['Software Engineer']),
+      `buildJobAnalysisSnapshot must persist a valid plan rather than nulling it, got ${JSON.stringify(snapshot.jobPreferencePlan)}`);
+
+      return { queryHandlerTrustsValidPlan: true, snapshotPersistsValidPlan: true };
+    },
+  },
+  {
+    name: 'REGRESSION: the v8 targetRole→search-brief migration remains registered, and v9 (jobhub-titlesource→single-mode) is now the current schema version',
+    run: async () => {
+      // Cheap guard against a future migration silently renumbering over v8
+      // or v9 (e.g. inserting a new step without bumping its own version, or
+      // reusing an existing one) rather than appending after them. MIGRATIONS
+      // itself is a module-private array (not exported), so this checks the
+      // two things that ARE exported/visible: the derived
+      // CURRENT_SCHEMA_VERSION, and — scoped to the MIGRATIONS array literal
+      // specifically, not a loose whole-file scan — that both the v8 entry
+      // (migrateMergedTargetRoleIntoBrief, untouched by the titleSource
+      // deletion) and the v9 entry (migrateJobHubTitleSourceSingleMode, the
+      // migration THIS round of changes added) are actually present there,
+      // not merely defined-but-unregistered.
+      assert(CURRENT_SCHEMA_VERSION === 9,
+        `CURRENT_SCHEMA_VERSION must be 9 after the jobhub-titlesource→single-mode migration lands, got ${CURRENT_SCHEMA_VERSION}`);
+      const source = await fs.promises.readFile(path.resolve('src/utils/serializationUtils.js'), 'utf8');
+      const migrationsStart = source.indexOf('const MIGRATIONS = [');
+      const migrationsEnd = source.indexOf('\n];', migrationsStart);
+      assert(migrationsStart >= 0 && migrationsEnd > migrationsStart, 'the MIGRATIONS array literal must exist with its documented declaration');
+      const migrationsBlock = source.slice(migrationsStart, migrationsEnd);
+      assert(migrationsBlock.includes('{ version: 8,') && migrationsBlock.includes('migrate: migrateMergedTargetRoleIntoBrief'),
+        'the v8 step must remain registered in MIGRATIONS, wired to migrateMergedTargetRoleIntoBrief, not merely exist as an unregistered function');
+      assert(migrationsBlock.includes('{ version: 9,') && migrationsBlock.includes('migrate: migrateJobHubTitleSourceSingleMode'),
+        'the v9 step must be registered in MIGRATIONS, wired to migrateJobHubTitleSourceSingleMode, not merely exist as an unregistered function');
+      // v9 must be the LAST entry — CURRENT_SCHEMA_VERSION is derived
+      // from MIGRATIONS[last].version, so a v9 entry registered anywhere
+      // other than last would silently desync the two.
+      const lastEntryAt = migrationsBlock.lastIndexOf('{ version:');
+      assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 9,'.length) === '{ version: 9,',
+        'the v9 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
+      return { schemaVersion: CURRENT_SCHEMA_VERSION, v8Registered: true, v9Registered: true };
     },
   },
 ];
