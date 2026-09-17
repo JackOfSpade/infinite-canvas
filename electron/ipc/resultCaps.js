@@ -148,3 +148,92 @@ export function jobScoringBatchSize() {
   const byOutput  = Math.floor((outputCap * BUDGET_SAFETY - JOB_BASE_TOKENS) / JOB_OUT_TOKENS_PER_JOB);
   return clamp(Math.min(byOutput, SCORING_BATCH_CEILING), MIN_SCORING_BATCH, SCORING_BATCH_CEILING);
 }
+
+// ── Job-preference listing evaluation budget ──────────────────────────────────
+// How many job listings ride in ONE preference-evaluation handoff. Every call
+// is a human copy/paste round trip, so the batch size IS the number of times
+// the user is interrupted.
+//
+// The INPUT window is emphatically NOT the bound — slimListing caps each
+// listing at 16,000 chars and the models this transport targets have very large
+// contexts. The bound is OUTPUT, and it is hard: the model must WRITE one match
+// object (outcome + evidence + a verbatim evidenceQuote) for EVERY
+// (listing x preference-plan item) pair, so response volume scales with that
+// PRODUCT, not with the listing count.
+//
+// MEASURED, from the 2026-09-16 run's 20 retained handoffs (bug report event
+// log, textLength of each pasted response): 10 listings per batch produced
+// 33,649–56,038 chars, mean 41,054. At roughly 4 chars/token for this
+// English-heavy JSON that is ~10.3k tokens typical and ~14k worst case for TEN
+// listings. That is the calibration anchor for LISTING_EVAL_TOKENS_PER_MATCH
+// below, and it is why the batch cannot simply be made large: on a 16k-output
+// model, ten listings is already close to the ceiling.
+//
+// LISTING_EVAL_TOKEN_HARD_CAP is the SERVING MODEL'S usable output ceiling, not
+// an arbitrary budget. The transport has no cap-raise retry (see llm.js), so a
+// batch sized past it does not degrade gracefully — the response is truncated
+// mid-JSON and the whole handoff has to be re-pasted. Set for a model with an
+// empirically verified 16,384-token output limit, held at 15,360 for margin.
+// RAISE THIS when the serving model changes, and the batch size follows
+// automatically.
+const LISTING_EVAL_TOKEN_HARD_CAP   = 15360;
+// Real JSON scaffolding only — `{"assessments":[{"index":N,"matches":[...]}]}`.
+// This is NOT a safety cushion (the cushion is the per-listing floor below plus
+// the 15,360-of-16,384 margin above); inflating it silently costs listings.
+const LISTING_EVAL_BASE_TOKENS      = 256;
+// Per (listing x plan item) match object. The schema bounds one match at
+// ~1,040 chars (evidence 700 + evidenceQuote 280 + keys/enum) ≈ 260 tokens
+// worst case; most rows are `unverified` with the short default evidence, so
+// this is the calibrated average.
+const LISTING_EVAL_TOKENS_PER_MATCH = 150;
+// Per-listing FLOOR, and the safety-critical constant. The per-match term alone
+// under-predicts whenever the preference plan is small, because a listing's
+// response carries per-row overhead the plan size does not explain. Derived
+// from the measurement above: 56,038 chars for 10 listings is 1,303–1,648
+// tokens per listing across the plausible 3.4–4.3 chars/token range for this
+// content, so 1,500 sits mid-range and is conservative at the ratios that
+// actually apply to English-heavy JSON.
+//
+// Sanity check against reality: (15,360 − 256) / 1,500 = 10 listings, which is
+// exactly the batch size whose 20 responses were all accepted without
+// truncation in the measured run. The formula reproduces the empirical answer
+// rather than contradicting it.
+const LISTING_EVAL_TOKENS_PER_LISTING_FLOOR = 1500;
+// A floor here must never exceed the budget: with a hard output ceiling and no
+// retry, forcing a batch the model cannot finish guarantees truncation. 2 keeps
+// a pathological plan from degenerating to one handoff per listing while
+// staying affordable at every plan size the budget admits.
+const MIN_LISTING_BATCH             = 2;
+// Upper bound on one human paste. Even with budget to spare, a single response
+// the user has to shuttle between apps should stay reviewable.
+const MAX_LISTING_BATCH             = 25;
+
+/** Tokens one listing's response is expected to need, given the plan size. */
+function listingEvalTokensPerListing(planItemCount) {
+  const items = Number.isFinite(planItemCount) ? Math.max(1, Math.floor(planItemCount)) : 1;
+  return Math.max(LISTING_EVAL_TOKENS_PER_LISTING_FLOOR, items * LISTING_EVAL_TOKENS_PER_MATCH);
+}
+
+/**
+ * Output budget to DECLARE for one preference-evaluation handoff. Takes both
+ * axes because they bind at different plan sizes — matches dominate a large
+ * plan, the per-listing floor dominates a small one — and the declared budget
+ * must match the model the batch size was derived from, or the two drift and
+ * the declaration stops being a guard. Always clamped to the serving model's
+ * output ceiling.
+ */
+export function listingEvaluationMaxTokens(matchCount = 10, listingCount = 0) {
+  const byMatches = LISTING_EVAL_BASE_TOKENS + Math.max(1, matchCount) * LISTING_EVAL_TOKENS_PER_MATCH;
+  const byListings = LISTING_EVAL_BASE_TOKENS
+    + Math.max(0, Number.isFinite(listingCount) ? Math.floor(listingCount) : 0) * LISTING_EVAL_TOKENS_PER_LISTING_FLOOR;
+  return Math.min(LISTING_EVAL_TOKEN_HARD_CAP, Math.max(byMatches, byListings));
+}
+
+export function listingEvaluationBatchSize(planItemCount) {
+  const perListing = listingEvalTokensPerListing(planItemCount);
+  const affordable = Math.floor((LISTING_EVAL_TOKEN_HARD_CAP - LISTING_EVAL_BASE_TOKENS) / perListing);
+  // MIN_LISTING_BATCH may not raise the batch above what the budget affords —
+  // that is the one direction the clamp must not go, because exceeding a hard
+  // output ceiling truncates the response instead of shrinking the answer.
+  return Math.max(1, Math.min(clamp(affordable, MIN_LISTING_BATCH, MAX_LISTING_BATCH), affordable || 1));
+}

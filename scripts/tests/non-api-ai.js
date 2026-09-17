@@ -119,6 +119,28 @@ export default [
         && dialogSource.includes('submittingRequestIds.has(activeRequestId)')
         && dialogSource.includes('actionRequestIdsRef.current.has(activeRequestId)'),
       'the handoff UI exposes every pending batch, tracks each request action independently, and binds cancellation to its captured request');
+      // Overall progress through the task. A batch number alone does not answer
+      // "how many are left" when the run is dozens of handoffs long.
+      assert(dialogSource.includes('` · ${request.itemsDone}/${request.itemsTotal} done`')
+        && dialogSource.includes('Number.isFinite(request.itemsDone) && Number.isFinite(request.itemsTotal)')
+        && transportSource.includes('itemsDone: cleanProgressCount(itemsDone),')
+        && transportSource.includes('itemsTotal: cleanProgressCount(itemsTotal),')
+        && transportSource.includes('itemsDone: record.itemsDone,'),
+      'the handoff dialog reports overall task progress, and the transport carries it through to the renderer');
+      // cleanBatchNumber floors at 1; a progress counter reads 0 on the first
+      // handoff and must not be blanked exactly when it is most reassuring.
+      assert(transportSource.includes('function cleanProgressCount(value)')
+        && transportSource.includes('number >= 0 && number <= 100_000'),
+      'the progress counter admits 0 rather than reusing the 1-based batch-number sanitizer');
+      // THE resume invariant: these are display-only. Hashing them would change
+      // the step key and make a resumed run re-ask for answers already pasted.
+      const stepKeyStart = transportSource.indexOf('function durableStepKey(');
+      const stepKeyEnd = transportSource.indexOf('async function durableStep(', stepKeyStart);
+      const stepKeyBody = transportSource.slice(stepKeyStart, stepKeyEnd);
+      assert(stepKeyStart >= 0 && stepKeyEnd > stepKeyStart
+        && !stepKeyBody.includes('itemsDone') && !stepKeyBody.includes('itemsTotal'),
+      'the durable step key must NOT hash the display-only progress counters, or a resumed run re-issues accepted handoffs');
+
       assert(dialogSource.includes('const [isExpanded, setIsExpanded] = useState(false)')
         && dialogSource.includes('Pending AI handoffs')
         && dialogSource.includes('Expand')

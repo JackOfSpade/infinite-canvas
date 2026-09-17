@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldAlert, FastForward } from 'lucide-react';
+import { ShieldAlert, FastForward, Play, Square } from 'lucide-react';
 
 /**
  * JobSearchSourcesReadyState — paused-pipeline UI rendered when the hub's
@@ -22,6 +22,11 @@ export function JobSearchSourcesReadyState({
   locked = false,
   onScoreCurrent,
   onClearCareerFiles = null,
+  solvableCount = 0,
+  solveAllRunning = false,
+  solveAllProgress = null,
+  onSolveAll = null,
+  onStopSolveAll = null,
 }) {
   // A Board-owned recovery may leave the Search visible while the Board is
   // settling its durable plan. In that state the Search handler correctly
@@ -31,6 +36,7 @@ export function JobSearchSourcesReadyState({
   const canScoreCurrent = !locked
     && jobsAvailable > 0
     && typeof onScoreCurrent === 'function';
+  const canSolveAll = !locked && solvableCount > 0 && typeof onSolveAll === 'function';
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1.5">
@@ -51,6 +57,37 @@ export function JobSearchSourcesReadyState({
 
       {resumeSummary && (
         <p className="text-white/20 text-[10px] text-center mt-1">{resumeSummary}</p>
+      )}
+
+      {solveAllRunning ? (
+        <>
+          <button
+            type="button"
+            onClick={onStopSolveAll}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="nodrag mt-3 w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-full bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/80 text-[11px] font-medium transition-colors border border-white/10"
+            title="Stop after the blocked search query currently open. Everything already recovered is kept."
+          >
+            <Square size={10} />
+            {solveAllProgress?.stopping ? 'Stopping…' : 'Stop solving'}
+          </button>
+          <p className="text-white/35 text-[10px] text-center px-2 leading-snug mt-1" role="status" aria-live="polite">
+            {solveAllProgress
+              ? `Solving ${solveAllProgress.sourceId} — source ${Math.min(solveAllProgress.index + 1, solveAllProgress.total)} of ${solveAllProgress.total}. Stay on the browser window and clear each challenge as it appears.`
+              : 'Solving blocked sources…'}
+          </p>
+        </>
+      ) : canSolveAll && (
+        <button
+          type="button"
+          onClick={onSolveAll}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-3 w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-full bg-violet-500/20 text-violet-200 hover:bg-violet-500/30 text-[11px] font-medium transition-colors border border-violet-400/25"
+          title="Work through every blocked source, and every blocked search query within each one, in sequence. A browser window opens for each; clear the challenge and it moves on by itself."
+        >
+          <Play size={11} />
+          {`Solve all blocked sources (${solvableCount})`}
+        </button>
       )}
 
       {canScoreCurrent && (

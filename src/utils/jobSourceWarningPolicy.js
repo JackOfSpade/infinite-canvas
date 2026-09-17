@@ -150,6 +150,19 @@ export function isDescriptionRecoverySourceWarning(warning) {
 }
 
 /**
+ * Is this warning produced by the DESCRIPTION-recovery domain, keyed on the
+ * code rather than the source? A Solve re-runs that domain end to end for the
+ * source, so any earlier description-phase gate it carried is stale by the time
+ * the Solve returns — `description-rate-limited` from the search phase and
+ * `description-listing-unavailable` from every Solve pass are the same recovery
+ * being reported twice, not two independent blocks. Gates from other domains (a
+ * hard block, a LinkedIn rate limit) are a different matter and must survive.
+ */
+export function isDescriptionRecoveryWarningCode(warning) {
+  return typeof warning?.code === 'string' && warning.code.startsWith('description-');
+}
+
+/**
  * A failed checkpoint write must never leave a card pointing at an older run's
  * recovery snapshot. Keep the source block visible so the person can Skip and
  * score the rows already gathered, but remove every retry affordance.

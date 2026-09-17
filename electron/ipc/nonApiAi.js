@@ -269,6 +269,11 @@ function createHandoffLifecycle({ requestId, runId, sender, nodeId, channel, tas
     // Size only, never content — enough to tell a 1-job prompt from a 15-job
     // one when the batch label itself is what is under suspicion.
     promptChars: typeof materializedPrompt === 'string' ? materializedPrompt.length : null,
+    // Size only, never content. The batch sizes in resultCaps.js are an
+    // ESTIMATE of how much output one handoff will need; this is the only way
+    // to check that estimate against the serving model's real output ceiling
+    // without retaining a single character of the answer.
+    responseChars: null,
     issuedAt,
     updatedAt: issuedAt,
     deliveries: 0,
@@ -298,6 +303,14 @@ function updateHandoffLifecycle(record, update) {
     lifecycle.deliveries += 1;
   } else if (update === 'rejected') lifecycle.rejected += 1;
   else if (update === 'accepted') lifecycle.acceptedAt = now;
+  else if (update?.accepted) {
+    lifecycle.acceptedAt = now;
+    if (Number.isFinite(update.responseChars)) {
+      // Keep the LARGEST response seen for this handoff: a re-paste after a
+      // truncated first attempt is exactly the case worth reporting.
+      lifecycle.responseChars = Math.max(lifecycle.responseChars || 0, update.responseChars);
+    }
+  }
   else if (update?.settled) {
     lifecycle.settledAt = now;
     lifecycle.outcome = update.settled;
@@ -370,6 +383,14 @@ function safeHandoffSettings(value, seen = new WeakSet()) {
 function cleanBatchNumber(value) {
   const number = Number(value);
   return Number.isInteger(number) && number >= 1 && number <= 100_000 ? number : null;
+}
+
+// Like cleanBatchNumber but admits 0: a progress counter legitimately reads
+// "0 done" on the first handoff, and cleanBatchNumber would blank it to null
+// and hide the counter for exactly the batch where it is most reassuring.
+function cleanProgressCount(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 && number <= 100_000 ? number : null;
 }
 
 function cleanAttemptKind(value) {
@@ -466,6 +487,8 @@ function publicRequest(record, validationError = record.validationError || null)
     batch: record.batch,
     batchTotal: record.batchTotal,
     itemCount: record.itemCount,
+    itemsDone: record.itemsDone,
+    itemsTotal: record.itemsTotal,
     attemptKind: record.attemptKind,
     rootBatchSize: record.rootBatchSize,
     attachments: [...record.attachmentPaths],
@@ -540,6 +563,13 @@ export async function requestNonApiAi({
   batch,
   batchTotal,
   itemCount,
+  // Overall progress across the whole task, for the dialog only: how many items
+  // were finished BEFORE this handoff, and how many there are in total.
+  // Deliberately NOT part of durableStepKey — a display counter must never
+  // invalidate an accepted step and make a resumed run re-ask for answers the
+  // person already pasted.
+  itemsDone,
+  itemsTotal,
   attemptKind,
   rootBatchSize,
   retryOnTruncation,
@@ -590,6 +620,8 @@ export async function requestNonApiAi({
     channel: typeof context.channel === 'string' ? context.channel : null,
     ...batchMeta,
     itemCount: cleanBatchNumber(itemCount),
+    itemsDone: cleanProgressCount(itemsDone),
+    itemsTotal: cleanProgressCount(itemsTotal),
     attemptKind: cleanAttemptKind(attemptKind),
     rootBatchSize: cleanBatchNumber(rootBatchSize),
     task,
@@ -708,7 +740,10 @@ export function registerNonApiAiHandlers() {
       record.validationError = null;
       record.settling = true;
       await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
-      updateHandoffLifecycle(record, 'accepted');
+      updateHandoffLifecycle(record, {
+        accepted: true,
+        responseChars: typeof args.response === 'string' ? args.response.length : null,
+      });
       settle(record, { accepted: true });
       record.resolve(value);
       return { accepted: true };

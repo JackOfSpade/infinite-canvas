@@ -8229,7 +8229,15 @@ Return a JSON object with four arrays of search query strings:
         // Single-pass enrichment. In probe mode: arms the cooldown probe on wall.
         // In production: emits a wait-or-switch warning and leaves Solve available.
         const lkPassStartedAt = Date.now();
-        const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, { preferAuthenticated: preferLinkedInAuthenticated });
+        const { jobs: enriched, loginWall, cancelled: lkCancelled = false, successCount: lkSuccess = 0, attempted: lkAttempted = linkedinKept.length, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null, usedAuthenticated: lkUsedAuthenticated = false, authenticatedFallback: lkAuthenticatedFallback = false } = await enrichLinkedInDescriptionsLocked(linkedinKept, combinedSignal, {
+          preferAuthenticated: preferLinkedInAuthenticated,
+          // Per-item beat so the card stops reading as a hang. Deliberately
+          // sends ONLY `detail`: it is the non-sticky field, so the first beat
+          // replaces the one-shot 'enriching descriptions' stamp above on its
+          // own, while `count`/`completed`/`total` stay at the values that
+          // stamp set — one denominator per source.
+          onProgress: ({ detail }) => emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', detail }),
+        });
         if (lkCancelled || combinedSignal.aborted) await throwIfSearchAborted();
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
@@ -9350,6 +9358,14 @@ Return a JSON object with four arrays of search query strings:
               itemCount: batch.length,
               batch: context.topLevelBatch,
               batchTotal: scoringBatches.length,
+              // Row progress across the WHOLE scoring pass, counted over the
+              // top-level batches only — so a defensive split or a partial
+              // recovery of the current batch reports the same position as its
+              // parent instead of double-counting rows.
+              itemsDone: scoringBatches
+                .slice(0, Math.max(0, (context.topLevelBatch || 1) - 1))
+                .reduce((total, rows) => total + rows.length, 0),
+              itemsTotal: scoringBatches.reduce((total, rows) => total + rows.length, 0),
               attemptKind: context.partialRecovery
                 ? 'partial-recovery'
                 : batch.length < (context.rootBatchSize || batch.length) ? 'split' : 'initial',
@@ -10182,7 +10198,14 @@ Return a JSON object with four arrays of search query strings:
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, { preferAuthenticated });
+          const { jobs: enriched, loginWall: walled, cancelled = false, successCount = 0, attempted = needEnrich.length, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null, usedAuthenticated = false, authenticatedFallback = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal, {
+            preferAuthenticated,
+            // Same silence, same fix, on the Solve recovery walk.
+            onProgress: ({ completed, total }) => sendProgress({
+              nodeId, sourceId: 'linkedin', status: 'searching',
+              detail: `Re-fetching descriptions… ${completed}/${total}`, warning: null,
+            }),
+          });
           if (cancelled || signal?.aborted) {
             return { resolved: false, cancelled: true, items: [], nextBlockedUrl: null };
           }
@@ -10959,6 +10982,12 @@ Return a JSON object with four arrays of search query strings:
       items,
       warning: resolveWarning,
       nextBlockedUrl,
+      // Additive, for the renderer's one-press blocked-query walk: how many
+      // queued queries are still outstanding AFTER this pass, so the card can
+      // say "query 3 of 7" and bound its own walk against a real number rather
+      // than a guess. Older renderers ignore it; no migration needed.
+      remainingBlockedCount: remaining.length,
+      attemptedBlockedUrl: url,
       // Google recovery returns the complete score-safe source subset from its
       // checkpoint, not an incremental provider page. Replacement semantics
       // keep repeated Solve attempts from inflating source/gathered counts when

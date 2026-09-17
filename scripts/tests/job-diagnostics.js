@@ -21,7 +21,7 @@ import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportP
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
-import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs } from '../test-dependencies.js';
+import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterDetailErrorShell, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs, zipRecruiterDetailErrorShellBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
 import { sanitizeLastRunReceipt } from '../test-dependencies.js';
@@ -7257,14 +7257,54 @@ export default [
         && sourceCard.includes('const hubCleanupBlocked = useStore(')
         && sourceCard.includes('const hubBoardRecoveryOwned = useStore(')
         && sourceCard.includes('const resolverActionDisabled = resolving || hubLocked || hubCleanupBlocked\n    || hubBoardRecoveryOwned || resolverBusy;')
-        && sourceCard.includes('const sourceActionDisabled = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned || resolving;')
-        && sourceCard.includes('if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) return;')
+        // Ownership and cleanup gating is factored into one predicate that BOTH
+        // the full Skip and the mid-walk Stop must clear; only the `resolving`
+        // term is relaxed for Stop, so a walk can be stopped without committing
+        // the user to every remaining blocked query.
+        && sourceCard.includes('const sourceOwnershipBlocked = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned;')
+        && sourceCard.includes('const sourceActionDisabled = sourceOwnershipBlocked || resolving;')
+        && sourceCard.includes('const canStopSolveWalk = !sourceOwnershipBlocked && resolving;')
+        // Still the first guard in handleSolve; it now also reports back to a
+        // "Solve all" driver instead of returning silently, which is what kept
+        // the driver from hanging on a locked hub.
+        && sourceCard.includes("if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) { finishSolveRequest('hub-locked'); return; }")
         && sourceCard.includes('|| hasBlockingJobSearchCleanup(hubData)')
         && sourceCard.includes('|| hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)')
         && sourceCard.includes('|| isJobWorkflowDeletionPending(data.hubId)')
-        && sourceCard.includes('disabled={sourceActionDisabled}')
+        && sourceCard.includes('disabled={sourceActionDisabled && !canStopSolveWalk}')
         && !sourceCard.includes('const sourceActionDisabled = hubLocked || hubBusy;'),
       'Solve and Skip must block for both primary and receipt-backed cancellation cleanup, including live rechecks after queue admission, while Skip remains available during an unrelated in-flight search');
+      // One Solve press walks EVERY remaining blocked query for the source.
+      // Each of these is a failure mode that a behavioural test cannot see:
+      // a stale closure re-solving query 1 forever, a restore that rewinds to
+      // the click, a mid-walk scoring start, or an unbounded loop.
+      const walkStart = sourceCard.indexOf('for (;;) {');
+      const walkEnd = sourceCard.indexOf('} // end blocked-query walk');
+      assert(walkStart > 0 && walkEnd > walkStart,
+        'the blocked-query walk loop must exist and be delimited');
+      const walk = sourceCard.slice(walkStart, walkEnd);
+      assert(walk.includes('url: pendingUrl,')
+        && walk.includes('secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,')
+        && !walk.includes('url: progress.url,'),
+      'each pass must send the CURRENT query URL, not the render-time closure — otherwise the walk re-solves query 1 forever');
+      assert(sourceCard.includes('let prevForRestore = progress ? { ...progress, jobRunId } : progress;')
+        && walk.includes('prevForRestore = rearmed;'),
+      'the restore baseline must be re-based each pass, or a late failure rewinds the card to the first query and discards the passes in between');
+      assert(walk.includes('const stalled = guidance?.stalled === true || guidance?.recommendation === \'skip\';')
+        && walk.includes('passIndex + 1 < SOLVE_WALK_MAX_PASSES')
+        && walk.includes('!stopWalkRef.current')
+        && walk.includes('resolverAlive()')
+        && walk.includes('capturedRunIsCurrent()'),
+      'the walk must stop on the backend\'s own no-progress guidance, a user Stop, a dead card, a superseded run, and a hard pass cap');
+      assert(sourceCard.includes('const SOLVE_WALK_MAX_PASSES = 24;'),
+        'the walk backstop must mirror the backend queue cap so it can never outlive its own queue');
+      assert(walk.includes('warning: result.nextBlockedUrl\n              ? (isJobSourceWarningGating(result.warning) ? result.warning : nextBlockedWarning)'),
+        'while queries remain the hub must receive a GATING warning, or it drops its pause and starts scoring mid-walk');
+      assert(sourceCard.includes("code: 'description-query-blocked',\n          severity: 'block',"),
+        'the synthetic next-blocked gate is severity block (holds the hub open mid-walk) and lives in the description- family so the hub\'s domain supersession can retire it');
+      assert(canAttemptJobSourceResolve({ code: 'description-query-blocked', severity: 'block' }),
+        'the synthetic next-blocked gate must stay solvable, or the card loses the Solve button that continues the walk');
+
       assert(sourceCard.includes("kind: 'job-source-resolve'")
         && sourceCard.includes('await acquireModuleRun({')
         && sourceCard.includes('(hubData.jobRunId || null) !== (jobRunId || null)')
@@ -9856,6 +9896,50 @@ export default [
         && canAttemptJobSourceResolve({ code: 'http-403', severity: 'block' }),
       'older persisted terminal hard-block warnings are also non-resolvable, while a real 403 challenge stays solvable');
       return { code: warning.code, canResolve: canAttemptJobSourceResolve(warning) };
+    },
+  },
+{
+    name: 'ZipRecruiter detail error shell is retried in place, bounded, and never mistaken for an unavailable listing',
+    run: () => {
+      const shellCopy = 'We encountered an error while loading this job.\n\nReload the Job';
+      assert(isZipRecruiterDetailErrorShell({
+        url: 'https://www.ziprecruiter.com/c/Acme/Job/Full-Stack-Engineer/-in-Toronto?jid=abc',
+        visibleText: shellCopy,
+      })
+        && isZipRecruiterDetailErrorShell({
+          url: 'https://ziprecruiter.com/jobs/abc',
+          visibleText: shellCopy,
+        })
+        && !isZipRecruiterDetailErrorShell({
+          url: 'https://www.indeed.com/viewjob?jk=abc',
+          visibleText: shellCopy,
+        })
+        && !isZipRecruiterDetailErrorShell({
+          url: 'https://www.ziprecruiter.com/jobs/abc',
+          visibleText: 'Senior Engineer — you will debug errors while loading data pipelines.',
+        })
+        && !isZipRecruiterDetailErrorShell({
+          url: 'not a URL',
+          visibleText: shellCopy,
+        }),
+      'only a ZipRecruiter host serving its exact error-shell copy enters the re-navigation path');
+
+      assert(zipRecruiterDetailErrorShellBackoffMs(1) === 1_500
+        && zipRecruiterDetailErrorShellBackoffMs(2) === 3_000
+        && zipRecruiterDetailErrorShellBackoffMs(99) === 6_000
+        && zipRecruiterDetailErrorShellBackoffMs(0) === 1_500,
+      'error-shell retries have a bounded exponential backoff and never spin immediately');
+
+      // Two properties a rebase can silently destroy, both invisible to a
+      // behavioural test: an inert fix (branch ordered after the drop) and an
+      // infinite loop (budget counter reset by `i--; continue;`).
+      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(scraperSource.includes('let errorShellRetryIndex = -1;')
+        && scraperSource.indexOf('let errorShellRetryIndex = -1;') < scraperSource.indexOf('for (let i = 0; i < enhanced.length; i++)'),
+      'the error-shell retry budget is declared outside the detail loop so `i--; continue;` cannot reset it');
+      assert(scraperSource.indexOf('isZipRecruiterDetailErrorShell({') < scraperSource.indexOf('if (isUnavailableDetailPage(pageInfo))'),
+      'the transient error shell is classified BEFORE the conclusively-unavailable drop, so a copy change can never discard a live listing');
+      return { retries: 2 };
     },
   },
 {

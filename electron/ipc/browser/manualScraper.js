@@ -117,6 +117,18 @@ const DETAIL_BLOCK_PROBE_CARDS = 2;
 const ZIPRECRUITER_APPCAST_RESTRICTED_RECOVERY_RETRIES = 1;
 const ZIPRECRUITER_APPCAST_RESTRICTED_BACKOFF_MS = 6_000;
 const ZIPRECRUITER_APPCAST_RESTRICTED_MAX_BACKOFF_MS = 15_000;
+// ZipRecruiter sometimes serves its own error shell ("We encountered an error
+// while loading this job." + a "Reload the Job" button) for a listing that is
+// perfectly fine on the next request. It is not a challenge, not a 404 and not
+// a throttle, so none of the existing probes classify it — the row fell through
+// to the description carriers, came back empty, and was dropped by the
+// evidence gate as if the posting had no description. Retry the navigation a
+// couple of times (which is what the page's own Reload button does) before
+// accepting the miss. Deliberately small: a listing that is genuinely broken
+// must not become a navigation loop.
+const ZIPRECRUITER_DETAIL_ERROR_SHELL_RETRIES = 2;
+const ZIPRECRUITER_DETAIL_ERROR_SHELL_BACKOFF_MS = 1_500;
+const ZIPRECRUITER_DETAIL_ERROR_SHELL_MAX_BACKOFF_MS = 6_000;
 // A source warning must stay compact enough for the renderer and diagnostics,
 // but a first-only title made repeated, independently retained description
 // misses look like a single affected listing. Keep a small title-only sample;
@@ -1444,6 +1456,37 @@ export function zipRecruiterAppcastRestrictionBackoffMs(attempt) {
   return Math.min(
     ZIPRECRUITER_APPCAST_RESTRICTED_MAX_BACKOFF_MS,
     ZIPRECRUITER_APPCAST_RESTRICTED_BACKOFF_MS * (2 ** (safeAttempt - 1)),
+  );
+}
+
+/**
+ * ZipRecruiter's own detail-page error shell. Require BOTH the host and its
+ * exact visible copy, the same false-positive-proof shape as
+ * isAppcastTemporaryRestriction: an ordinary posting that happens to discuss
+ * errors cannot trigger a re-navigation. Text + URL only so the live page probe
+ * and deterministic regression tests share one classification. `status` is
+ * carried for telemetry but deliberately NOT gated on — the shell is served
+ * with HTTP 200.
+ */
+export function isZipRecruiterDetailErrorShell({ url = '', visibleText = '' } = {}) {
+  let isZipRecruiterHost = false;
+  try {
+    const parsed = new URL(String(url || '').trim());
+    const host = parsed.hostname.toLowerCase();
+    isZipRecruiterHost = host === 'ziprecruiter.com' || host.endsWith('.ziprecruiter.com');
+  } catch {
+    return false;
+  }
+  if (!isZipRecruiterHost) return false;
+  const text = String(visibleText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return text.includes('we encountered an error while loading this job');
+}
+
+export function zipRecruiterDetailErrorShellBackoffMs(attempt) {
+  const safeAttempt = Math.max(1, Math.floor(Number(attempt) || 1));
+  return Math.min(
+    ZIPRECRUITER_DETAIL_ERROR_SHELL_MAX_BACKOFF_MS,
+    ZIPRECRUITER_DETAIL_ERROR_SHELL_BACKOFF_MS * (2 ** (safeAttempt - 1)),
   );
 }
 
@@ -2806,9 +2849,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     let lastDetailNavigationAt = 0;
     let zipRecruiter429Retries = 0;
     let zipRecruiterAppcastRestrictionRetries = 0;
+    // `i--; continue;` re-enters the loop body, so a budget counter declared
+    // INSIDE the loop is reset on every retry and can never be exhausted. Keep
+    // both outside and re-arm them when the row index actually changes.
+    let errorShellRetryIndex = -1;
+    let errorShellRetries = 0;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
+        // Per-row flag: safe to re-initialise here because a retry of the same
+        // row legitimately re-derives it.
+        let detailErrorShellSeen = false;
         let viewUrl;
         if (cfg.navUrlField) {
           viewUrl = job[cfg.navUrlField] || '';
@@ -3383,6 +3434,65 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             }
           }
 
+          // ZipRecruiter's transient error shell. This MUST sit before the
+          // unavailable check: if ZR ever adds one of the not-found strings to
+          // that shell, classifying it first would drop a live listing for good.
+          // It sits after the challenge branch so a shell carrying a
+          // late-injected Turnstile still reaches the solve path.
+          const detailErrorShell = sourceId === 'ziprecruiter'
+            && isZipRecruiterDetailErrorShell({
+              url: rawPageInfo.finalUrl || fetchPage.url(),
+              visibleText: rawPageInfo.visibleText,
+            });
+          if (detailErrorShell) {
+            if (i !== errorShellRetryIndex) {
+              errorShellRetryIndex = i;
+              errorShellRetries = 0;
+            }
+            const title = (job.title || job.url || '?').slice(0, 65);
+            const retryNumber = errorShellRetries + 1;
+            const budgetLeft = retryNumber <= ZIPRECRUITER_DETAIL_ERROR_SHELL_RETRIES;
+            const aborted = !!signal?.aborted;
+            if (budgetLeft && !aborted) {
+              // Intermediate retries go to the log only. The anomaly ring holds
+              // ~20 slots and feeds the report's affected-title sample; one row
+              // per attempt would let a shell storm flush every other source's
+              // evidence out of it.
+              errorShellRetries = retryNumber;
+              const waitMs = zipRecruiterDetailErrorShellBackoffMs(retryNumber);
+              logger.warn(`[BrowserScraper] ZipRecruiter served its "we encountered an error while loading this job" shell for "${title}"; re-navigating (attempt ${retryNumber}/${ZIPRECRUITER_DETAIL_ERROR_SHELL_RETRIES}) after ${Math.ceil(waitMs / 1000)}s`);
+              await updateOverlay(page, {
+                ...overlayBase,
+                count: baseCount + i + 1,
+                status: `Retrying a failed job page… ${i + 1}/${enhanced.length}`,
+              });
+              if (!await waitForAbortableDelay(waitMs, signal)) break;
+              i--; // retry this job — the same thing the page's Reload button does
+              continue;
+            }
+            // One terminal row per shelled row, and it must not claim retries
+            // that never ran: an abort can land before the budget is spent.
+            recordManualScraperTelemetry({
+              phase: 'desc-miss', srcName: overlayBase.srcName,
+              key: `${title} | ZipRecruiter detail error shell`,
+              reason: aborted
+                ? 'ziprecruiter-detail-error-shell-aborted'
+                : 'ziprecruiter-detail-error-shell-exhausted',
+              attempts: errorShellRetries,
+              maxAttempts: ZIPRECRUITER_DETAIL_ERROR_SHELL_RETRIES,
+              status: navigationStatus,
+              expectedUrl: viewUrl.slice(0, 240),
+              finalUrl: fetchPage.url().slice(0, 240),
+            }, { updateActive: false });
+            if (aborted) break;
+            // Budget spent. Fall through to the description carriers exactly as
+            // before and let the normal empty-description handling run; the only
+            // change is that the miss is now attributed to the shell rather than
+            // reported as "no description carrier matched".
+            detailErrorShellSeen = true;
+            logger.warn(`[BrowserScraper] ZipRecruiter detail error shell persisted for "${title}" after ${errorShellRetries} retr${errorShellRetries === 1 ? 'y' : 'ies'}; continuing without its description`);
+          }
+
           if (isUnavailableDetailPage(pageInfo)) {
             const reason = pageInfo.zipRecruiterClosedJobRedirect
               ? 'ziprecruiter-closed-job-redirect'
@@ -3689,7 +3799,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             recordManualScraperTelemetry({
               phase: 'desc-miss', srcName: overlayBase.srcName,
               key: `${(job.title || job.url || '?').slice(0, 65)} | empty JD`,
-              reason: 'all-description-carriers-empty',
+              reason: detailErrorShellSeen
+                ? 'ziprecruiter-detail-error-shell'
+                : 'all-description-carriers-empty',
+              ...(detailErrorShellSeen ? { attempts: errorShellRetries } : {}),
               status: navigationStatus,
               expectedUrl: viewUrl.slice(0, 240),
               finalUrl: fetchPage.url().slice(0, 240),

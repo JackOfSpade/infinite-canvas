@@ -158,7 +158,10 @@ export default [
         && !resolverCleanup.includes('moduleRunQueue')
         && provider.includes('cancelQueuedRunsOwnedByNode: queue.cancelQueuedRunsOwnedByNode')
         && provider.includes('}), [queue, snapshot]);')
-        && sourceCard.includes('if (!resolverAlive()) return;'),
+        // Post-lease liveness fence. It now also stamps the outcome the finally
+        // reports, so a "Solve all" driver awaiting this card cannot hang on a
+        // card that unmounted while its lease was queued.
+        && sourceCard.includes("if (!resolverAlive()) { solveOutcome = 'fenced'; return; }"),
       'a removed gating source card must cancel its exact paused Board generation without a raw hub abort, while standalone resolvers retain their queued/active cancellation boundary despite provider snapshot rerenders');
       return { sharedLane: true, queuedCancellation: true, ownedResetPreservesParentAlias: true, sameHubActiveSiblingProtected: true, sourceCardLifecycleCancellation: true, exactBoardSourceCardCancellation: true, snapshotRerenderSafe: true };
     },
@@ -221,6 +224,52 @@ export default [
       let incompleteRejected = false;
       try { validateJobPreferenceListingSubmission({ assessments: [{ index: 0, matches: [] }] }, [{ title: 'X' }], valid); } catch { incompleteRejected = true; }
       assert(incompleteRejected, 'a partial/malformed listing assessment must be rejected instead of silently filtering strict jobs');
+
+      // A response that omits whole ROWS is recoverable with one targeted
+      // follow-up; a response with a SHORT `matches` array is not, because a
+      // missing preference silently defaults to `unverified` → `filtered`.
+      let shortMatchesRejected = false;
+      try {
+        validateJobPreferenceListingSubmission(
+          { assessments: [{ index: 0, matches: [] }] },
+          [{ title: 'X' }], valid, { requireComplete: false },
+        );
+      } catch { shortMatchesRejected = true; }
+      assert(shortMatchesRejected,
+        'relaxing the row-count axis must NOT relax the per-row match-count axis — that is the axis that silently deletes jobs');
+      assert(validateJobPreferenceListingSubmission({ assessments: [] }, [{ title: 'X' }], valid, { requireComplete: false }),
+        'an omitted row is accepted by the relaxed validator so it can be re-requested on its own');
+
+      const followUpPrompts = [];
+      const partial = await evaluateJobPreferences({
+        jobs: [
+          { title: 'Frontend Developer', url: 'https://jobs.example.test/frontend', snippet: 'Frontend Developer role.' },
+          { title: 'Data Engineer', url: 'https://jobs.example.test/data', snippet: 'Data Engineer role.' },
+        ],
+        jobPreferences: 'I want to pivot away from web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        callText: async (prompt) => {
+          followUpPrompts.push(prompt);
+          // First handoff drops index 1 entirely.
+          if (followUpPrompts.length === 1) {
+            return { assessments: [
+              { index: 0, matches: [{ preferenceId: 'pivot', outcome: 'conflicts', evidence: 'Web role', evidenceQuote: 'Frontend Developer' }] },
+            ] };
+          }
+          return { assessments: [
+            { index: 0, matches: [{ preferenceId: 'pivot', outcome: 'confirmed', evidence: 'Not a web role', evidenceQuote: 'Data Engineer' }] },
+          ] };
+        },
+      });
+      assert(followUpPrompts.length === 2, `an omitted row must cost exactly one targeted follow-up handoff, got ${followUpPrompts.length}`);
+      assert(followUpPrompts[1].includes('Data Engineer') && !followUpPrompts[1].includes('Frontend Developer'),
+        'the follow-up handoff must carry only the listings the first response skipped');
+      assert(partial.candidatePool.length === 2,
+        `no job may be lost to a partially-returned batch, got ${partial.candidatePool.length}`);
+      const recovered = partial.candidatePool.find(job => job.title === 'Data Engineer')?.preferenceAssessment?.matches?.[0];
+      assert(recovered?.outcome === 'confirmed',
+        `the re-requested listing must carry its real evaluated outcome, not the default unverified, got ${JSON.stringify(recovered)}`);
 
       const groundedResearch = 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nExample Co provides free lunch to employees.';
       const validResearch = {

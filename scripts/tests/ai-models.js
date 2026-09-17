@@ -19,7 +19,7 @@
 // taskModelRoutingSnapshot()'s own single-transport contract is covered in
 // platform-utils.js ('llm: taskModelRoutingSnapshot reports the single
 // manual transport for every known task') — not duplicated here.
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, POSTED_DATE_PATTERN, assert, buildCoverLetterDocument, buildResumeDocument, cancellationError, checkPromptFits, decodeTextEscapes, dicePostedBucket, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, fetchDiceListings, filterJobsByAge, formatDiceBaseSalary, getKnownTaskIds, inspectJobTaxonomyRoleIndexes, jobScoringBatchSize, nodeCancellationError, normalizeJobTaxonomyPlan, parsePostedDate, parseSalaryToNumeric, runBoundedJobTaxonomy, safeApiFetch, taskMaxTokensFor, validateJobTaxonomyPlan } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, POSTED_DATE_PATTERN, assert, buildCoverLetterDocument, buildResumeDocument, cancellationError, checkPromptFits, decodeTextEscapes, dicePostedBucket, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, fetchDiceListings, filterJobsByAge, formatDiceBaseSalary, getKnownTaskIds, inspectJobTaxonomyRoleIndexes, jobScoringBatchSize, listingEvaluationBatchSize, listingEvaluationMaxTokens, nodeCancellationError, normalizeJobTaxonomyPlan, parsePostedDate, parseSalaryToNumeric, runBoundedJobTaxonomy, safeApiFetch, taskMaxTokensFor, validateJobTaxonomyPlan } from '../test-dependencies.js';
 
 export default [
 {
@@ -367,6 +367,59 @@ export default [
     },
   },
 {
+    name: 'resultCaps: the listing-evaluation batch can never request more output than the serving model can emit',
+    run: () => {
+      // This transport has NO cap-raise retry: a batch sized past the model's
+      // output ceiling is not degraded gracefully, it is truncated mid-JSON and
+      // the whole handoff must be re-pasted. So the declared cap and the batch
+      // size MUST come from the same constants and the batch must never exceed
+      // what the cap affords — including at plan sizes where a minimum batch
+      // would otherwise force it over.
+      const CEILING = listingEvaluationMaxTokens(Number.MAX_SAFE_INTEGER);
+      const plans = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 48, 64, 128];
+      for (const planItems of plans) {
+        const batch = listingEvaluationBatchSize(planItems);
+        assert(Number.isInteger(batch) && batch >= 1,
+          `batch size must be a positive integer for a ${planItems}-item plan, got ${batch}`);
+        assert(batch <= 25, `batch size must stay reviewable for a ${planItems}-item plan, got ${batch}`);
+        // Declare on BOTH axes, exactly as the batch was derived: matches bind
+        // a large plan, the per-listing floor binds a small one. Declaring on
+        // matches alone under-states a small-plan batch, which is precisely the
+        // drift this asserts against.
+        const declared = listingEvaluationMaxTokens(batch * planItems, batch);
+        assert(declared <= CEILING,
+          `declared output budget ${declared} exceeds the model ceiling ${CEILING} at plan ${planItems}`);
+        // The budget the batch was SIZED against must itself fit the ceiling —
+        // this is the assertion a raised MIN_LISTING_BATCH, or an inflated
+        // base-token constant, would break. Truncation has no retry on this
+        // transport, so exceeding it costs the user a whole re-paste.
+        assert(declared >= listingEvaluationMaxTokens(batch * planItems),
+          `declaring on matches alone must never exceed the two-axis budget at plan ${planItems}`);
+      }
+      // Degenerate inputs must not produce a zero/NaN batch (an infinite loop in
+      // the caller) nor an unbounded one.
+      for (const bad of [0, -5, NaN, undefined, null, 'x']) {
+        const batch = listingEvaluationBatchSize(bad);
+        assert(Number.isInteger(batch) && batch >= 1 && batch <= 25,
+          `degenerate plan size ${String(bad)} must still yield a sane batch, got ${batch}`);
+      }
+      // A bigger plan must never buy a bigger batch.
+      let previous = Infinity;
+      for (const planItems of plans) {
+        const batch = listingEvaluationBatchSize(planItems);
+        assert(batch <= previous, `batch must be monotonically non-increasing in plan size (plan ${planItems})`);
+        previous = batch;
+      }
+      // Reproduces the empirically verified answer: the measured run used 10
+      // listings per handoff and all 20 of its responses were accepted without
+      // truncation. A change that moves this number is a change to how many
+      // times the user is interrupted AND to the truncation risk, so pin it.
+      assert(listingEvaluationBatchSize(8) === 10,
+        `a typical 8-item plan must still afford the measured-safe 10 listings, got ${listingEvaluationBatchSize(8)}`);
+      return { ceiling: CEILING, atEightItemPlan: listingEvaluationBatchSize(8) };
+    },
+  },
+  {
     name: 'resultCaps: jobScoringBatchSize takes no argument and returns the clamped scoring-quality ceiling',
     run: () => {
       // jobScoringBatchSize used to take a model id (jobScoringBatchSize(model))

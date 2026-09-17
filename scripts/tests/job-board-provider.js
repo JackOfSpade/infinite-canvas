@@ -3463,6 +3463,48 @@ export default [
         && !reset.includes('moduleRunQueue.cancelQueuedRunsForNode(id)'),
       'the Search cancel button must route mounted and every durable A+B queued owner through exact Board identities, then cancel only Search-owned queued work so no uncancelled Board alias races the reset');
 
+      // "Solve all blocked sources": one press drives every blocked source in
+      // order. These pin the four ways it can go wrong invisibly — a deadlock,
+      // a hang, a silently skipped source, and a bypassed ownership guard.
+      const solveAllStart = search.indexOf('const handleSolveAllBlockedSources = useCallback(async () =>');
+      const solveAllEnd = search.indexOf('  }, [\n    activeEnabledSourceIds, addToast, data, ensureBlockedSourceCards,', solveAllStart);
+      assert(solveAllStart >= 0 && solveAllEnd > solveAllStart, 'the Solve-all driver must exist and be delimited');
+      const solveAll = search.slice(solveAllStart, solveAllEnd);
+      // Each card takes the shared 'job-search' lane for its own Solve and a
+      // lane has exactly one active holder, so a driver lease deadlocks on the
+      // first source.
+      assert(!solveAll.includes('acquireModuleRun') && !solveAll.includes('moduleRunQueue'),
+        'the Solve-all driver must hold NO moduleRunQueue lease — the cards it drives take the shared lane themselves');
+      // Same ownership re-proof as Score-current, so a stale click fails closed.
+      assert(solveAll.includes('if (isJobWorkflowDeletionPending(id)) return;')
+        && solveAll.includes("if (liveData.hubState !== 'sources-ready') return;")
+        && solveAll.includes('if (processingRunsRef.current.active || scoringContinuationAdmissionRef.current) return;')
+        && solveAll.includes('if (hasPendingManualAiRetirement(liveData)) return;')
+        && solveAll.includes('if (liveBoardRecoveryOwner && !livePausedBoardContinuationOwner) {'),
+      'Solve all must re-prove deletion, hub state, in-flight scoring and Board ownership before driving any card');
+      assert(solveAll.includes('ensureBlockedSourceCards(scrapeWarningsRef.current);')
+        && solveAll.indexOf('ensureBlockedSourceCards(scrapeWarningsRef.current);') < solveAll.indexOf('const blockedSourceIds = []'),
+      'every blocked source must have a card before the driver tries to drive it');
+      assert(solveAll.includes('canAttemptJobSourceResolve(w)'),
+        'only sources whose warning offers a real recovery action are driven — a terminal hard block has nothing to Solve');
+      // The ack is what distinguishes "no listener" from "still working": a
+      // freshly spawned card is in the node store before its effect registers.
+      assert(solveAll.includes("document.addEventListener('job-source-solve-ack', onAck);")
+        && solveAll.includes("document.addEventListener('job-source-solve-done', onDone);")
+        && solveAll.includes("if (!acked) settle('not-delivered');")
+        && solveAll.includes("if (outcome === 'not-delivered') {"),
+      'an unanswered request must resolve as not-delivered and retry once, never hang the sequence');
+      assert(solveAll.includes("while (outcome === 'busy'"),
+        'a source that reports busy must be retried, not silently treated as done — that would skip a genuinely blocked source');
+      assert(solveAll.includes("if (outcome === 'board-owned' || outcome === 'stale-run' || outcome === 'hub-locked') break;"),
+        'ownership changing mid-sequence stops the walk instead of stacking one toast per remaining source');
+      assert(sourceCard.includes("document.addEventListener('job-source-solve-request', onSolveRequest);")
+        && sourceCard.includes('solveRequestIdRef.current = detail.requestId;')
+        && sourceCard.includes('void handleSolveRef.current?.();')
+        && sourceCard.includes('if (!solveRequestId || solveDoneEmitted) return;')
+        && sourceCard.includes('finishSolveRequest(solveOutcome, solveOutcomeExtra);'),
+      'the card answers the hub through its OWN Solve (keeping every guard) and reports exactly one terminal signal per request');
+
       const manualCancelStart = search.indexOf('const onManualAiNodeCancelled = (event) =>');
       const manualCancelEnd = search.indexOf("document.addEventListener('non-api-ai-node-cancelled'", manualCancelStart);
       const manualCancel = search.slice(manualCancelStart, manualCancelEnd);
@@ -3473,9 +3515,20 @@ export default [
         && unscopedCancelGuardAt >= 0
         && genericManualResetAt > unscopedCancelGuardAt
         && manualCancel.slice(unscopedCancelGuardAt, genericManualResetAt).includes('return;')
-        && dialog.includes('const cancelledRunId = activeRequest?.runId || null;')
-        && dialog.includes('detail: { nodeId: cancelledNodeId, runId: cancelledRunId }'),
-      'manual-AI cancellation must carry and correlate the exact run id, and an unscoped legacy event must fail closed before generic Reset so it cannot erase a newer Search or Board run');
+        // Ownership is captured when the confirmation prompt OPENS, not when
+        // the cancel executes: the confirm is async and a settled event can
+        // swap the active request underneath it. The dispatched detail must
+        // still carry that exact captured identity.
+        && dialog.includes('runId: activeRequest?.runId || null,')
+        && dialog.includes('const cancelledRunId = runId || null;')
+        && dialog.includes('detail: { nodeId: cancelledNodeId, runId: cancelledRunId }')
+        // The destructive click is gated behind a confirmation, and cancelling
+        // must not leave the run eligible for the auto-resume effect — which
+        // would relaunch a full multi-source search seconds later.
+        && dialog.includes('onClick={requestCancelConfirm}')
+        && dialog.includes('title="Cancel this AI task?"')
+        && manualCancel.includes('rememberBoundedRunId(cancelledBoardManualAiRunIdsRef.current, detail.runId);'),
+      'manual-AI cancellation must be confirmed, carry and correlate the exact run id, block its own auto-resume, and fail closed on an unscoped legacy event before generic Reset so it cannot erase a newer Search or Board run');
 
       const pipelineStart = search.indexOf('const runPipeline = useCallback');
       const pipelineEnd = search.indexOf('const startProcessing = useCallback', pipelineStart);
@@ -3637,7 +3690,7 @@ export default [
       const scoreCurrentStart = search.indexOf('const handleScoreCurrentResults = useCallback');
       const scoreCurrentEnd = search.indexOf('// Keep the ref up-to-date', scoreCurrentStart);
       const scoreCurrent = search.slice(scoreCurrentStart, scoreCurrentEnd);
-      const sourceSkipStart = sourceCard.indexOf("onClick={(e) => {\n              e.stopPropagation();\n              if (\n                sourceActionDisabled");
+      const sourceSkipStart = sourceCard.indexOf("onClick={(e) => {\n              e.stopPropagation();\n              if (\n                sourceOwnershipBlocked");
       const sourceSkipEnd = sourceCard.indexOf("document.dispatchEvent(new CustomEvent('job-source-skip'", sourceSkipStart);
       const sourceSkip = sourceCard.slice(sourceSkipStart, sourceSkipEnd);
       const sourceSkipDispatchEnd = sourceCard.indexOf('}));', sourceSkipEnd) + 4;

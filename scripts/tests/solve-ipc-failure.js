@@ -1,4 +1,4 @@
-import { assert, canAttemptJobSourceResolve, isJobSourceWarningGating, isTerminalSourceStatus } from '../test-dependencies.js';
+import { assert, canAttemptJobSourceResolve, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, isTerminalSourceStatus } from '../test-dependencies.js';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage } from '../../src/utils/solveIpcFailure.js';
 import fs from 'node:fs';
 
@@ -78,7 +78,7 @@ export default [
       const compSource = fs.readFileSync(new URL('../../src/nodes/CompSourceCardNode.jsx', import.meta.url), 'utf8');
       const jobCard = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       assert(jobSource.includes('const externalOpenInFlightRef = useRef(false);')
-        && jobSource.includes('if (resolving || externalOpenInFlightRef.current) return;')
+        && jobSource.includes("if (resolving || externalOpenInFlightRef.current) { finishSolveRequest('busy'); return; }")
         && jobSource.includes('externalOpenInFlightRef.current = true;'),
       'job-source external opens have a synchronous click latch before awaiting Electron');
       assert(jobSource.includes('const solveFailure = failureError.solveIpcResult || {')
@@ -435,7 +435,7 @@ export default [
 
       const makeFailed = ({ hubRunId, warnings, writes, deletionPending = false }) => new Function(
         'id', 'isJobWorkflowDeletionPending', 'jobRunIdRef', 'EventLogger', 'scrapeWarningsRef',
-        'isJobSourceWarningGating', 'isSameJobSourceWarningEntry', 'updateGlobal',
+        'isJobSourceWarningGating', 'isSameJobSourceWarningEntry', 'isDescriptionRecoveryWarningCode', 'updateGlobal',
         `${jobSearch.slice(failedStart, failedEnd)}\nreturn onResolveFailed;`,
       )(
         'hub-1',
@@ -445,6 +445,7 @@ export default [
         { current: warnings },
         isJobSourceWarningGating,
         isSameJobSourceWarningEntry,
+        isDescriptionRecoveryWarningCode,
         (nodeId, patch) => writes.push({ nodeId, patch }),
       );
 
@@ -453,7 +454,7 @@ export default [
         'isJobSearchBoardPausedContinuationBlocked', 'getNodes', 'getEdges', 'hubStateRef',
         'sourceWarningOverridesDuringSearchRef', 'pendingJobsRef', 'mergeResolvedSourceItems',
         'gatheredCountRef', 'scrapeWarningsRef', 'updateGlobal', 'isJobSourceWarningGating',
-        'isSameJobSourceWarningEntry', 'window', 'resumeScoringRef', 'processingRunsRef',
+        'isSameJobSourceWarningEntry', 'isDescriptionRecoveryWarningCode', 'window', 'resumeScoringRef', 'processingRunsRef',
         'scheduleCleanSourceCardDismiss',
         `${jobSearch.slice(resolvedStart, resolvedEnd)}\nreturn onResolved;`,
       )(
@@ -475,6 +476,7 @@ export default [
         (nodeId, patch) => writes.push({ nodeId, patch }),
         isJobSourceWarningGating,
         isSameJobSourceWarningEntry,
+        isDescriptionRecoveryWarningCode,
         { electronAPI: { recordResolveMerge: () => {} } },
         { current: () => { resumed.push('resume-scoring'); return null; } },
         { current: { active: false } },
@@ -540,7 +542,38 @@ export default [
       assert(codesFor(cleanWrites.at(-1).patch.scrapeWarnings, 'linkedin').length === 0,
         'a clean resolve still clears every warning for its source');
       assert(cleanResumed.length === 1, 'clearing the last gate still resumes scoring');
-      return { gatesSurviveRestore: true, cleanResolveUnchanged: true };
+
+      // A Solve supersedes this source's earlier DESCRIPTION-domain gate.
+      // Without this, google/glassdoor kept the search-phase
+      // `description-rate-limited` entry forever beside the
+      // `description-listing-unavailable` every Solve returns, so the hub's
+      // retained warning count grew by one per Solve and nothing could clear
+      // the older ones. Every assertion above uses linkedin-* codes, which is
+      // why the accumulation was invisible to the suite.
+      const descBlock = { sourceId: 'google', severity: 'block', code: 'description-rate-limited' };
+      const hardBlock = { sourceId: 'google', severity: 'block', code: 'cloudflare-hard-block' };
+      const supersedeWrites = [];
+      makeResolved({ hubRunId: 'run-1', warnings: [descBlock, hardBlock], writes: supersedeWrites, resumed: [] })({
+        detail: {
+          hubId: 'hub-1', sourceId: 'google', jobRunId: 'run-1', resolved: true, items: [],
+          warning: { severity: 'block', code: 'description-listing-unavailable' },
+        },
+      });
+      assert(JSON.stringify(codesFor(supersedeWrites.at(-1).patch.scrapeWarnings, 'google'))
+        === JSON.stringify(['cloudflare-hard-block', 'description-listing-unavailable']),
+      'a Solve supersedes the source\'s earlier description-domain gate but must NOT discard a co-resident gate from another domain');
+
+      const supersedeFailedWrites = [];
+      makeFailed({ hubRunId: 'run-1', warnings: [descBlock, hardBlock], writes: supersedeFailedWrites })({
+        detail: {
+          hubId: 'hub-1', sourceId: 'google', jobRunId: 'run-1',
+          warning: { severity: 'block', code: 'description-listing-unavailable' },
+        },
+      });
+      assert(JSON.stringify(codesFor(supersedeFailedWrites[0].patch.scrapeWarnings, 'google'))
+        === JSON.stringify(['cloudflare-hard-block', 'description-listing-unavailable']),
+      'the failed-restore path supersedes the same way, so a failed Solve cannot accumulate either');
+      return { gatesSurviveRestore: true, cleanResolveUnchanged: true, descriptionDomainSuperseded: true };
     },
   },
 ];

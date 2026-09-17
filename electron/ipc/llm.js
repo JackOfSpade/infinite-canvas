@@ -1,6 +1,6 @@
 import { isSensitivePath } from '../utils/pathSafety.js';
 import path from 'path';
-import { priceSynthesisMaxTokens } from './resultCaps.js';
+import { priceSynthesisMaxTokens, listingEvaluationMaxTokens } from './resultCaps.js';
 import { NON_API_AI_TRANSPORT, requestNonApiAi } from './nonApiAi.js';
 import { logger } from '../logger.js';
 
@@ -139,7 +139,13 @@ const TASK_MAX_TOKENS = {
   'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
     Math.min(12288, 2048 + itemCount * 600),
   'job-preference-interpretation': 4096,
-  'job-preference-evaluation': ({ itemCount = 10 } = {}) => Math.min(12288, 2048 + itemCount * 800),
+  // Output volume here is listings × preference-plan items — the model writes
+  // one match object per pair — so the cap is keyed on that PRODUCT, not on the
+  // listing count. resultCaps owns the constants so this cap and the batch size
+  // that feeds it are derived from the same numbers. The itemCount fallback
+  // assumes an 8-item plan for callers that don't supply matchCount.
+  'job-preference-evaluation': ({ matchCount, itemCount = 10 } = {}) =>
+    listingEvaluationMaxTokens(Number.isFinite(matchCount) ? matchCount : itemCount * 8, itemCount),
   'job-preference-research': 4096,
   'job-preference-research-assessment': 2048,
   // Pass-2 role-resolution audit (JOB_ROLE_AUDIT_SCHEMA, jobPreferences.js's
@@ -292,6 +298,7 @@ export async function callLLMText(prompt, opts = {}) {
   const result = await requestNonApiAi({
     prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
     canStepBack: manualHandoff.canStepBack,
@@ -321,6 +328,7 @@ export async function callLLMRaw(prompt, opts = {}) {
   const result = await requestNonApiAi({
     prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'raw-text', signal,
     canStepBack: manualHandoff.canStepBack,
@@ -358,6 +366,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const result = await requestNonApiAi({
     prompt, task, responseSchema, maxOutputTokens: maxTokens, formulaSeed,
     handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator, signal,
   });
@@ -384,6 +393,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   return requestNonApiAi({
     prompt, task, responseSchema, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator, signal,
   });

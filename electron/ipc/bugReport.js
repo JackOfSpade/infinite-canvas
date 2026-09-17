@@ -23,6 +23,7 @@ import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
+import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -1336,7 +1337,59 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
 ${rows}
 ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
-  return nodeDiagMarkdown;
+  return nodeDiagMarkdown + buildJobSourceWarningReconciliationMarkdown(nodes, sourceCardsByHub);
+}
+
+/**
+ * Observation-only reconciliation of what each Job Search hub COUNTS as blocked
+ * against what its source cards actually show.
+ *
+ * A "N sources blocked, but every card is done/solved/skipped" report cannot be
+ * diagnosed without both halves side by side: the hub prints a count derived
+ * from distinct gating sourceIds in `data.scrapeWarnings`, while the cards hold
+ * their own independent copy of their warning. Previously the hub's warning list
+ * was nowhere in the report and had to be inferred by differencing the event log
+ * across hours. States observations only — it asserts no cause.
+ */
+function buildJobSourceWarningReconciliationMarkdown(nodes, sourceCardsByHub) {
+  const hubs = (nodes || []).filter(n => n?.type === 'jobhub');
+  if (hubs.length === 0) return '';
+  const lines = hubs.map((hub) => {
+    const warnings = Array.isArray(hub.data?.scrapeWarnings) ? hub.data.scrapeWarnings : [];
+    const gating = warnings.filter(isJobSourceWarningGating);
+    const distinctGating = new Set(gating.map(w => w?.sourceId).filter(Boolean));
+    const cards = sourceCardsByHub[hub.id] || [];
+    const cardRows = cards.map((card) => {
+      const d = card.data || {};
+      const p = d.persistedProgress || {};
+      return `    - card \`${d.sourceId || '?'}\` · status ${p.status || 'none'}`
+        + ` · warning ${p.warning?.code || 'none'}${p.warning?.severity ? `/${p.warning.severity}` : ''}`;
+    });
+    const warningRows = warnings.map(w => (
+      `    - warning \`${w?.sourceId || '?'}\` · ${w?.code || '?'} · ${w?.severity || '?'}`
+      + ` · gating ${isJobSourceWarningGating(w) ? 'yes' : 'no'}`
+      + ` · solvable ${canAttemptJobSourceResolve(w) ? 'yes' : 'no'}`
+    ));
+    // The number the paused-state UI actually prints.
+    return [
+      `- Hub \`${shortId(hub.id)}\` · hubState \`${hub.data?.hubState || 'unknown'}\``
+        + ` · retained warnings ${warnings.length} · gating ${gating.length}`
+        + ` · **distinct gating sources ${distinctGating.size}** (this is the number the paused UI prints)`
+        + ` · source cards on canvas ${cards.length}`,
+      ...warningRows,
+      ...cardRows,
+    ].join('\n');
+  });
+  return `
+## Job Source Warning Reconciliation
+> Observation-only. The paused Job Search UI prints the count of DISTINCT gating
+> \`sourceId\`s in the hub's \`scrapeWarnings\`; each source card separately holds its
+> own copy of its warning. A report of "N sources blocked but every card looks
+> settled" is a divergence between these two lists, so both are printed here
+> verbatim. No cause is asserted.
+
+${lines.join('\n')}
+`;
 }
 
 function buildMediaPlayerStateMarkdown(mediaState) {

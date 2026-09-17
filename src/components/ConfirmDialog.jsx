@@ -100,7 +100,7 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
           </div>
           <div className="text-center">
             <h3 className="text-white text-sm font-semibold mb-1">{title}</h3>
-            <p className="text-white/50 text-xs leading-relaxed">{message}</p>
+            <p className="text-white/50 text-xs leading-relaxed whitespace-pre-line">{message}</p>
           </div>
         </div>
 

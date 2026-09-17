@@ -105,7 +105,7 @@ export function JobSearchProcessingState({
       )}
       {hubState === 'searching' && totalSourceJobs > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1" role="status" aria-live="polite">
-          {totalSourceJobs} job{totalSourceJobs === 1 ? '' : 's'} found so far
+          {totalSourceJobs} listing{totalSourceJobs === 1 ? '' : 's'} collected so far (before de-duplication)
         </p>
       )}
       {hubState === 'scoring' && scoringProgress?.total > 0 && (

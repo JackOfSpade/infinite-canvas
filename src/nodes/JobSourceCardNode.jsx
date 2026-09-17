@@ -18,6 +18,14 @@ import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePau
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 
+// Backstop for the one-press blocked-query walk. The real stop signal is the
+// backend's own recovery guidance (it reports `stalled` / recommendation
+// 'skip' once a source stops making progress); this only bounds a source that
+// carries no guidance at all. Mirrors DESCRIPTION_RECOVERY_BLOCKED_URL_CAP —
+// the cap on how many blocked URLs the backend will ever queue for one source
+// — so the walk can never outlive its own queue.
+const SOLVE_WALK_MAX_PASSES = 24;
+
 function hasBlockingJobSearchCleanup(data) {
   return data?.manualAiResume?.retirementPending === true
     || (Array.isArray(data?.manualAiCleanupReceipts)
@@ -146,6 +154,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     }
     return next;
   }, [getNode, id, updateNodeData]);
+  // Set by Skip while a blocked-query walk is running: the walk checks it
+  // between passes and stops after the one in flight, instead of committing the
+  // user to every remaining query.
+  const stopWalkRef = useRef(false);
+  // Set by the hub's "Solve all" driver immediately before it invokes this
+  // card's Solve. handleSolve reads and clears it on entry so every exit path
+  // can report back under the id the driver is waiting on. Null for a manual
+  // click, which reports nothing.
+  const solveRequestIdRef = useRef(null);
   const [resolving, setResolving] = useState(false);
   // External listing opens do not use the long-running Solve state, but still
   // need a synchronous latch so a double-click cannot launch two OS tabs.
@@ -413,6 +430,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   useEffect(() => {
     const onClearWarnings = (event) => {
       if (event.detail?.hubId !== data.hubId) return;
+      // The user chose to proceed without resolving this source. A walk that
+      // kept opening challenge windows would directly contradict that, so end
+      // it after the pass already in flight.
+      stopWalkRef.current = true;
       setDismissed(true);
       setProgress(prev => (prev?.warning ? {
         ...prev,
@@ -427,6 +448,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     document.addEventListener('job-source-clear-warnings', onClearWarnings);
     return () => document.removeEventListener('job-source-clear-warnings', onClearWarnings);
   }, [data.hubId, setProgress]);
+
 
   // The owning Job Search Module coordinates clean-card dismissal after ALL source cards
   // have reported terminal progress. That keeps the source counts visible as a
@@ -487,15 +509,39 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   }, [data.hubId, progress?.status, progress?.warning, id, deleteElements]);
 
   const handleSolve = async () => {
+    // Claim the driver's request id (if any) before the first await, and clear
+    // it so a later manual click cannot re-use it.
+    const solveRequestId = solveRequestIdRef.current;
+    solveRequestIdRef.current = null;
+    let solveDoneEmitted = false;
+    let solveJobRunIdForEvent = null;
+    // Exactly one terminal signal per request. Six of the guarded early returns
+    // below are silent today; a driver awaiting the ordinary resolve events
+    // would simply hang on them. The latch is what makes the signal both
+    // complete and non-duplicating.
+    const finishSolveRequest = (outcome, extra = {}) => {
+      if (!solveRequestId || solveDoneEmitted) return;
+      solveDoneEmitted = true;
+      document.dispatchEvent(new CustomEvent('job-source-solve-done', {
+        detail: {
+          hubId: data.hubId,
+          sourceId: data.sourceId,
+          jobRunId: solveJobRunIdForEvent,
+          requestId: solveRequestId,
+          outcome,
+          ...extra,
+        },
+      }));
+    };
     const warningAction = progress?.warning?.action;
     const resumeState = progress?.warning?.resumeState;
     // "Open listing" is intentionally not a source resolve. A ZipRecruiter
     // job-detail URL has no ItemList for the generic resolver to extract, and
     // treating it as a captcha solve used to close a perfectly good detail
     // page with a misleading zero-result/site-changed diagnostic.
-    if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) return;
+    if (hubLocked || hubCleanupBlocked || isJobWorkflowDeletionPending(data.hubId)) { finishSolveRequest('hub-locked'); return; }
     if (warningAction === 'open-external') {
-      if (resolving || externalOpenInFlightRef.current) return;
+      if (resolving || externalOpenInFlightRef.current) { finishSolveRequest('busy'); return; }
       externalOpenInFlightRef.current = true;
       try {
         const opened = await openExternalUrl(progress?.url, {
@@ -513,12 +559,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       } finally {
         externalOpenInFlightRef.current = false;
       }
+      finishSolveRequest('opened-external');
       return;
     }
     // Do not let a source-card action race the owning hub's current search or
     // its pre-score recovery snapshot write. The button can be stale for one
     // render, so this guard is deliberately independent of its disabled state.
-    if (resolving || resolveInFlightRef.current || hubBusy) return;
+    if (resolving || resolveInFlightRef.current || hubBusy) { finishSolveRequest('busy'); return; }
     // Keep this card action pinned to the warning generation captured at the
     // click boundary. A newer hub/plan pair must not make a stale card appear
     // eligible for the Board's paused-continuation exception. Do not borrow
@@ -537,6 +584,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         description: 'This source card belongs to an older search run. Wait for the current source status.',
         type: 'info',
       });
+      finishSolveRequest('stale-run');
       return;
     }
     if (
@@ -548,11 +596,14 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         description: 'Finish or cancel the interrupted Job Board run before resolving this source.',
         type: 'info',
       });
+      finishSolveRequest('board-owned');
       return;
     }
-    if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
+    if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) { finishSolveRequest('no-target'); return; }
+    solveJobRunIdForEvent = jobRunId;
     resolveInFlightRef.current = true;
     resolveStartedRef.current = false;
+    stopWalkRef.current = false;
     const resolveLifecycle = resolveLifecycleRef.current;
     const resolverAlive = () => resolveLifecycleRef.current === resolveLifecycle;
     setResolving(true);
@@ -566,7 +617,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // Pin a proven legacy fallback onto this local action before the first
     // await. Any later card event/restore now carries the exact generation and
     // cannot require another compatibility fallback.
-    const prevForRestore = progress ? { ...progress, jobRunId } : progress;
+    // Reassigned after each successful pass of the blocked-query walk below.
+    // Every restore/failure path reads this; if it stayed pinned to the click,
+    // a failure on pass 3 would restore query 1's URL and query 1's count,
+    // silently discarding the passes in between.
+    let prevForRestore = progress ? { ...progress, jobRunId } : progress;
     setProgress(prev => prev ? {
       ...prev,
       jobRunId,
@@ -583,6 +638,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     };
     let lease = null;
     let resolveQueueCancelled = false;
+    // What the finally reports back to a "Solve all" driver. Every branch below
+    // that reaches the finally sets this; the default covers an unexpected throw.
+    let solveOutcome = 'failed';
+    let solveOutcomeExtra = {};
     try {
       lease = await acquireModuleRun({
         nodeId: data.hubId,
@@ -599,7 +658,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           resolveQueueCancelled = true;
         },
       });
-      if (!resolverAlive()) return;
+      if (!resolverAlive()) { solveOutcome = 'fenced'; return; }
       resolveStartedRef.current = true;
       // A queued resolve can outlive its source warning. Re-read both ownership
       // dimensions after the app-wide lease starts so it never targets a newer
@@ -629,6 +688,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             ? prevForRestore
             : prev
         ));
+        solveOutcome = 'fenced';
         return;
       }
       // An exact Board rollback may have fenced late progress from an abandoned
@@ -646,8 +706,21 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       document.dispatchEvent(new CustomEvent('job-source-retry-start', {
         detail: { hubId: data.hubId, sourceId: data.sourceId, jobRunId },
       }));
-      let result;
+      // Collected across every pass of the walk so the owning Search keeps the
+      // global lane until the whole paused workflow is terminal.
+      const continuationPromises = [];
+      // One Solve press walks EVERY remaining blocked query for this source.
+      // The backend hands back one `nextBlockedUrl` per call from its own
+      // durable per-source queue, so the walk is simply: keep going while it
+      // keeps handing one back. The user stands by and clears each challenge as
+      // it appears, instead of clicking Solve once per query.
+      let pendingUrl = resumeState ? null : progress.url;
+      let pendingWarning = progress?.warning || null;
+      const attemptedUrls = new Set();
+      let passIndex = 0;
       const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
+      let result;
+      for (;;) {
       if (resumeState) {
         result = await window.electronAPI.resumeJobSource?.({
           sourceId: data.sourceId,
@@ -678,7 +751,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         });
       } else {
         result = await window.electronAPI.resolveJobSource({
-          url: progress.url,
+          url: pendingUrl,
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
@@ -686,7 +759,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
-          secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+          secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,
           // Legacy snapshot/display data only — see the resumeJobSource
           // branch above; the gate this used to feed is gone.
           targetRole: (
@@ -712,6 +785,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         EventLogger.log(
           `[JobSource][${data.hubId}/${data.sourceId}] Ignored Solve result after its Board continuation was fenced`,
         );
+        solveOutcome = 'fenced';
         setProgress(prev => (
           (prev?.jobRunId || null) === (jobRunId || null)
             ? prevForRestore
@@ -721,6 +795,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         return;
       }
       if (isJobWorkflowDeletionPending(data.hubId)) {
+        solveOutcome = 'fenced';
         // A delete confirmation is still reversible. Keep the original source
         // warning actionable instead of publishing a completed Solve into a
         // hub whose deletion transaction has not committed.
@@ -758,7 +833,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // merge into pendingJobs and the warning drops in one shot. Without
       // the inline items, the original headless scrape's 0-job result
       // from this source would persist even after a successful solve.
-      const continuationPromises = [];
       if (result?.resolved) {
         const items = Array.isArray(result?.items) ? result.items : [];
         const resolvedCount = items.length;
@@ -774,11 +848,27 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         const replaceSourceItems = !!result.replaceSourceItems;
         const replaceMatchingItems = !!result.replaceMatchingItems;
         const removedItemKeys = Array.isArray(result.removedItemKeys) ? result.removedItemKeys : [];
+        // `severity` is load-bearing: 'block' is what keeps the hub paused
+        // instead of scoring mid-walk. The hub's warning identity compares
+        // code+severity only, so the evidence text below can vary per pass
+        // without breaking its dedupe.
+        //
+        // The code is deliberately in the `description-` family. This gate is
+        // renderer-synthesized (the backend never emits it, so it is not in
+        // SOURCE_RUN_RESOLVE_WARNING_CODES) and it means "another queued query
+        // for this source is still blocked" — not an HTTP 403, which is what it
+        // used to borrow. Being in that family is what lets the hub's
+        // description-domain supersession retire it when a later pass returns a
+        // real description warning, instead of leaving a stale co-resident gate
+        // holding the hub open. It is absent from canAttemptJobSourceResolve's
+        // block list, so the card keeps its Solve button.
         const nextBlockedWarning = result.nextBlockedUrl ? {
-          code: 'http-403',
+          code: 'description-query-blocked',
           severity: 'block',
-          evidence: 'An additional search query for this source was also blocked.',
-          suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
+          evidence: Number.isFinite(result.remainingBlockedCount) && result.remainingBlockedCount > 0
+            ? `${result.remainingBlockedCount} more blocked search quer${result.remainingBlockedCount === 1 ? 'y' : 'ies'} remain for this source.`
+            : 'An additional search query for this source was also blocked.',
+          suggestion: 'Solve is working through them in sequence — stay on this window and clear each challenge as it appears.',
         } : null;
         // `gatheredCount` describes listings newly collected from a source, not
         // the card's changing description-ready/pending subset. A replacement
@@ -812,11 +902,21 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
           // when the source comes back still-warned (LinkedIn re-walled / same
           // warm IP). Captcha/resume paths don't return a warning → stays null.
+          //
+          // When another blocked query REMAINS, the hub must receive a GATING
+          // warning. The backend can return `nextBlockedUrl` alongside a
+          // non-gating warning (it has an explicit severity-'info' branch), and
+          // the hub drops its pause as soon as no gating warning is left — so
+          // that combination would start scoring while queries were still
+          // queued. Prefer the backend's own warning when it already gates;
+          // otherwise substitute the synthetic block.
           detail: {
             hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, replaceMatchingItems, removedItemKeys,
             gatheredCountDelta,
             resolved: true,
-            warning: result.warning || nextBlockedWarning,
+            warning: result.nextBlockedUrl
+              ? (isJobSourceWarningGating(result.warning) ? result.warning : nextBlockedWarning)
+              : (result.warning || null),
             jobRunId,
             // The owning Search may need to continue directly into scoring.
             // It appends that promise synchronously during dispatch so this
@@ -826,10 +926,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           },
         }));
         if (result.nextBlockedUrl) {
-          // Another query for this source was also blocked. Keep the card visible
-          // and re-arm it with the next URL so the user can solve in sequence
-          // without re-running the full search.
-          setProgress(prev => {
+          // Another query for this source was also blocked. Re-arm the card with
+          // the next URL, then decide whether THIS press keeps going.
+          const rearmed = setProgress(prev => {
             const next = prev ? {
               ...prev,
               status: 'error',
@@ -839,6 +938,74 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             } : prev;
             return next;
           });
+          // Stop conditions, in the order they can fire. Every one of these
+          // reuses a decision the code already makes rather than inventing a
+          // new policy:
+          //   - the backend's OWN recovery guidance. It already counts
+          //     consecutive no-progress passes and says 'skip'/stalled; a walk
+          //     that ignored it would re-run by machine exactly the stall a
+          //     user hit by hand (33 identical Glassdoor passes, 0 recovered).
+          //   - the user pressing Skip mid-walk.
+          //   - a URL already attempted this walk (belt and braces: the backend
+          //     de-duplicates its queue, so this can only fire on a bug).
+          //   - the queue cap, so a walk can never outlive its own source.
+          const guidance = result.warning?.recoveryGuidance || null;
+          const stalled = guidance?.stalled === true || guidance?.recommendation === 'skip';
+          const alreadyWalked = result.nextBlockedUrl === pendingUrl
+            || attemptedUrls.has(result.nextBlockedUrl);
+          const walkOn = !stopWalkRef.current
+            && !stalled
+            && !alreadyWalked
+            && passIndex + 1 < SOLVE_WALK_MAX_PASSES
+            && resolverAlive()
+            && capturedRunIsCurrent();
+          if (walkOn) {
+            attemptedUrls.add(pendingUrl);
+            // Re-baseline every per-pass value BEFORE the next iteration.
+            prevForRestore = rearmed;
+            pendingUrl = result.nextBlockedUrl;
+            pendingWarning = nextBlockedWarning;
+            passIndex += 1;
+            const remaining = Number.isFinite(result.remainingBlockedCount)
+              ? Math.max(0, result.remainingBlockedCount)
+              : null;
+            const total = remaining != null ? passIndex + remaining : null;
+            setProgress(prev => prev ? {
+              ...prev,
+              status: 'searching',
+              warning: null,
+              detail: total != null
+                ? `Solving blocked query ${passIndex + 1} of ${total}…`
+                : `Solving blocked query ${passIndex + 1}…`,
+            } : prev);
+            continue;
+          }
+          // The walk is ending with queries still queued. Replace the
+          // "working through them" copy with the reason it stopped and the
+          // action that is actually available now.
+          const stopSuggestion = stopWalkRef.current
+            ? 'Stopped at your request. Click Solve to resume from the next blocked search query, or Skip to score what was gathered.'
+            : stalled
+              ? 'This source stopped recovering new listings. Skip is recommended — Solve will keep reopening queries that return nothing.'
+              : 'Click Solve again to continue from the next blocked search query for this source.';
+          setProgress(prev => prev ? {
+            ...prev,
+            status: 'error',
+            warning: prev.warning ? { ...prev.warning, suggestion: stopSuggestion } : prev.warning,
+          } : prev);
+          solveOutcome = 'still-blocked';
+          solveOutcomeExtra = {
+            nextBlockedUrl: result.nextBlockedUrl,
+            remainingBlockedCount: Number.isFinite(result.remainingBlockedCount) ? result.remainingBlockedCount : null,
+            recoveryGuidance: guidance,
+            stoppedByUser: stopWalkRef.current,
+          };
+          if (stalled) {
+            EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Stopped the blocked-query walk after ${passIndex + 1} pass(es): the backend reports no progress`);
+          } else if (stopWalkRef.current) {
+            EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Blocked-query walk stopped by the user after ${passIndex + 1} pass(es)`);
+          }
+          break;
         } else if (result.warning) {
           // Partial success that's still flagged (e.g. LinkedIn rate-limit: got
           // some descriptions but hit the guest IP ceiling). Keep the returned
@@ -855,6 +1022,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             } : prev;
             return next;
           });
+          solveOutcome = 'still-blocked';
+          solveOutcomeExtra = { recoveryGuidance: result.warning?.recoveryGuidance || null };
+          break;
         } else {
           setDismissed(true);
           // Clear the warning AND update the card's local
@@ -874,6 +1044,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             } : prev;
             return next;
           });
+          solveOutcome = 'resolved';
+          break;
         }
       } else {
         const rawRestoreWarning = result?.warning || prevForRestore?.warning || null;
@@ -951,7 +1123,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // predicate as the branch above so the two halves cannot drift apart.
           setProgress(prev => (prev && !isTerminalSourceStatus(prev.status)) ? prevForRestore : prev);
         }
+        // A pass that did not resolve ends the walk: the remaining queries are
+        // still queued in the backend and the card keeps a live Solve button.
+        solveOutcome = 'failed';
+        break;
       }
+      } // end blocked-query walk
       if (continuationPromises.length > 0) {
         await Promise.allSettled(continuationPromises);
       }
@@ -959,9 +1136,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // Queue cancellation/reset and IPC failures are normal races here. Keep
       // the original actionable state when this card still belongs to the
       // captured run, and never leak an async click-handler rejection.
-      if (!resolverAlive() || !capturedRunIsCurrent()) return;
+      if (!resolverAlive() || !capturedRunIsCurrent()) { solveOutcome = 'fenced'; return; }
       let solveIpcResult = error?.solveIpcResult || null;
       if (resolveQueueCancelled) {
+        solveOutcome = 'cancelled';
         EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Resolve queue cancelled before start`);
       } else {
         const failureError = error instanceof Error ? error : new Error(String(error || 'Solve IPC rejected'));
@@ -995,6 +1173,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           solveIpcResult = solveFailure;
         } else {
           EventLogger.log(`[JobSource][${data.hubId}/${data.sourceId}] Resolve cancelled by lifecycle`);
+          solveOutcome = 'cancelled';
           solveIpcResult = null;
         }
       }
@@ -1056,8 +1235,58 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         resolveStartedRef.current = false;
         setResolving(false);
       }
+      // Outside the resolverAlive() guard on purpose: an unmounted card still
+      // runs this finally, and a driver waiting on it must not hang because the
+      // card went away. Emitted after lease?.release() so the shared 'job-search'
+      // lane is free before the hub dispatches the next source.
+      finishSolveRequest(solveOutcome, solveOutcomeExtra);
     }
   };
+
+  // "Solve all blocked sources" on the owning hub drives each card's own Solve
+  // rather than reimplementing it, so every ownership/run/lock guard inside
+  // handleSolve still applies. The ack is dispatched synchronously during the
+  // request so the hub learns within the same tick whether a listener actually
+  // existed — a freshly spawned card is in the node store before this effect
+  // has run, so an existence check alone cannot prove deliverability.
+  //
+  // Declared AFTER handleSolve and written in an effect, never during render:
+  // `handleSolve` is a const arrow, so a render-phase read above its
+  // declaration is a temporal-dead-zone ReferenceError that takes the whole
+  // card down on its first paint.
+  const handleSolveRef = useRef(null);
+  useEffect(() => {
+    handleSolveRef.current = handleSolve;
+  });
+  useEffect(() => {
+    const onSolveRequest = (event) => {
+      const detail = event.detail || {};
+      if (detail.hubId !== data.hubId || detail.sourceId !== data.sourceId) return;
+      document.dispatchEvent(new CustomEvent('job-source-solve-ack', {
+        detail: { hubId: detail.hubId, sourceId: detail.sourceId, requestId: detail.requestId },
+      }));
+      solveRequestIdRef.current = detail.requestId;
+      void handleSolveRef.current?.();
+    };
+    document.addEventListener('job-source-solve-request', onSolveRequest);
+    return () => document.removeEventListener('job-source-solve-request', onSolveRequest);
+  }, [data.hubId, data.sourceId]);
+
+  // Stop an in-flight blocked-query walk from the owning hub's "Stop solving"
+  // button. Same effect as the card's own Stop: the pass already open finishes,
+  // then the walk ends. Deliberately NOT a task cancel — that would abort the
+  // browser window mid-challenge and, at the hub level, every task registered
+  // under the hub id.
+  useEffect(() => {
+    const onSolveStop = (event) => {
+      const detail = event.detail || {};
+      if (detail.hubId !== data.hubId) return;
+      if (detail.sourceId && detail.sourceId !== data.sourceId) return;
+      stopWalkRef.current = true;
+    };
+    document.addEventListener('job-source-solve-stop', onSolveStop);
+    return () => document.removeEventListener('job-source-solve-stop', onSolveStop);
+  }, [data.hubId, data.sourceId]);
 
   // Hub state via reactive store selectors, not a plain getNode() snapshot —
   // getNode() only reflects the hub's CURRENT data when read, and this card
@@ -1143,7 +1372,13 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     || hubBoardRecoveryOwned || resolverBusy;
   // Skipping is safe during an ordinary live search, but not while this card's
   // own resolver is queued/running: that would race its terminal warning.
-  const sourceActionDisabled = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned || resolving;
+  const sourceOwnershipBlocked = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned;
+  const sourceActionDisabled = sourceOwnershipBlocked || resolving;
+  // A one-press walk can span many blocked queries. Leaving Skip disabled for
+  // its whole duration commits the user to every remaining one, so during a
+  // walk Skip stays live — but ONLY to stop the walk. Ownership guards are
+  // deliberately preserved; only the `resolving` term is relaxed.
+  const canStopSolveWalk = !sourceOwnershipBlocked && resolving;
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
   const isError     = status === 'error';
@@ -1262,7 +1497,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           the warning represents something the visible resolver can change.
           For config-missing (USAJobs no API key) the suggestion text above
           already directs the user to set the env var — no Solve button. */}
-      {warning && !dismissed && (
+      {/* `|| canStopSolveWalk`: a Solve walk deliberately holds `warning: null`
+          for its whole duration so the card reads as working, which would
+          otherwise unmount this row and leave the user with no way to stop a
+          sequence of up to SOLVE_WALK_MAX_PASSES challenge windows. The Solve
+          button inside keeps its own `warning`-dependent gating. */}
+      {((warning && !dismissed) || canStopSolveWalk) && (
         <div className="flex border-t border-white/10">
           {warningCanResolve && (progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn)) && !hasInfo && (!hasWarn || warningBlocksScoring) && (
             <button
@@ -1300,10 +1540,26 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             onClick={(e) => {
               e.stopPropagation();
               if (
-                sourceActionDisabled
+                sourceOwnershipBlocked
                 || isJobWorkflowDeletionPending(data.hubId)
                 || hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)
               ) return;
+              // Mid-walk, this button does exactly one thing: ask the walk to
+              // stop after the pass in flight. It must NOT run the real skip —
+              // that would clear the source's warning and admit scoring while a
+              // browser window is still open on this source. Ownership is
+              // already proven above, so only the `resolving` term is relaxed.
+              if (canStopSolveWalk) {
+                stopWalkRef.current = true;
+                addToast({
+                  title: 'Stopping after this query',
+                  description: 'The blocked search query already open will finish, then Solve stops. Remaining queries stay available.',
+                  type: 'info',
+                  dedupeKey: `job-solve-walk-stop:${id}`,
+                });
+                return;
+              }
+              if (resolving) return;
               const hubDataAtSkip = getNode(data.hubId)?.data || {};
               const sourceJobRunId = effectiveJobSourceCardRunId(
                 progress,
@@ -1373,9 +1629,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               }
             }}
             onPointerDown={(e) => e.stopPropagation()}
-            disabled={sourceActionDisabled}
+            disabled={sourceActionDisabled && !canStopSolveWalk}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/60 hover:text-white bg-white/[0.03] hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default"
-            title={hubLocked
+            title={canStopSolveWalk
+              ? 'Stop after the blocked search query currently open. The rest stay available to Solve later.'
+              : hubLocked
               ? 'Hub is locked'
               : hubBoardRecoveryOwned
                 ? 'The owning Job Board run must finish or be cancelled first'
@@ -1384,7 +1642,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                 : 'Dismiss this warning. It did not pause scoring and does not remove jobs already collected from this source.'}
           >
             <SkipForward size={9} />
-            {warningBlocksScoring ? 'Skip' : 'Dismiss'}
+            {canStopSolveWalk ? 'Stop' : warningBlocksScoring ? 'Skip' : 'Dismiss'}
           </button>
         </div>
       )}

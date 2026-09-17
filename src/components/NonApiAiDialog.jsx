@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
+import { ConfirmDialog } from './ConfirmDialog';
+import { EventLogger } from '../utils/EventLogger';
 
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
@@ -25,11 +27,18 @@ const requestLabel = (request) => {
     && request.rootBatchSize !== request.itemCount
     ? ` · ${request.rootBatchSize}-item root batch`
     : '';
+  // Overall progress through the task, not just this handoff's position in the
+  // batch list: with ~25 batches the useful question is "how many left", and a
+  // batch number alone does not answer it when batches vary in size.
+  const progressLabel = Number.isFinite(request.itemsDone) && Number.isFinite(request.itemsTotal)
+    && request.itemsTotal > 0
+    ? ` · ${request.itemsDone}/${request.itemsTotal} done`
+    : '';
   if (Number.isFinite(request.batch) && Number.isFinite(request.batchTotal)) {
-    return `${task} · ${attemptLabel}batch ${request.batch} of ${request.batchTotal}${itemLabel}${rootLabel}`;
+    return `${task} · ${attemptLabel}batch ${request.batch} of ${request.batchTotal}${itemLabel}${rootLabel}${progressLabel}`;
   }
-  if (Number.isFinite(request.batch)) return `${task} · ${attemptLabel}batch ${request.batch}${itemLabel}${rootLabel}`;
-  return `${task}${attemptLabel ? ` · ${attemptLabel.trim()}` : ''}${itemLabel}${rootLabel}`;
+  if (Number.isFinite(request.batch)) return `${task} · ${attemptLabel}batch ${request.batch}${itemLabel}${rootLabel}${progressLabel}`;
+  return `${task}${attemptLabel ? ` · ${attemptLabel.trim()}` : ''}${itemLabel}${rootLabel}${progressLabel}`;
 };
 
 const attachmentName = (filePath) => String(filePath || '').split(/[/\\]/).filter(Boolean).pop() || 'Attachment';
@@ -64,6 +73,10 @@ export function NonApiAiDialog() {
   const [cancellingRequestIds, setCancellingRequestIds] = useState(() => new Set());
   const [acceptedRequestIds, setAcceptedRequestIds] = useState(() => new Set());
   const [copiedRequestId, setCopiedRequestId] = useState(null);
+  // Holds the full ownership tuple captured when the confirm opens. The confirm
+  // is async and a settled event can swap the active request underneath it, so
+  // the prompt must act on what the user was actually looking at.
+  const [cancelConfirmTarget, setCancelConfirmTarget] = useState(null);
   const dockButtonRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const activeRequestIdRef = useRef(null);
@@ -365,19 +378,17 @@ export function NonApiAiDialog() {
     }
   }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
-  const cancelTask = useCallback(async () => {
-    if (!activeRequestId || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
-    if (actionRequestIdsRef.current.has(activeRequestId)) return;
-    if (!window.electronAPI?.cancelNonApiAiRequest) {
-      setErrors(previous => ({ ...previous, [activeRequestId]: 'Manual AI task cancellation is unavailable.' }));
-      return;
-    }
+  const performCancelTask = useCallback(async ({ requestId, nodeId, runId }) => {
+    // Entry guards live in requestCancelConfirm; re-check only what can have
+    // changed while the confirmation was open.
+    if (!requestId || actionRequestIdsRef.current.has(requestId)) return;
+    if (!requestsRef.current.some(request => request.requestId === requestId)) return;
 
-    const requestId = activeRequestId;
-    // Capture ownership before awaiting: the settled event can change the
-    // selected request while cancellation is in flight.
-    const cancelledNodeId = activeRequest?.nodeId || null;
-    const cancelledRunId = activeRequest?.runId || null;
+    // Ownership was captured when the prompt opened: the settled event can
+    // change the selected request while the confirm is up or while the
+    // cancellation is in flight.
+    const cancelledNodeId = nodeId || null;
+    const cancelledRunId = runId || null;
     actionRequestIdsRef.current.add(requestId);
     setCancellingRequestIds(previous => new Set(previous).add(requestId));
     try {
@@ -413,7 +424,31 @@ export function NonApiAiDialog() {
         return next;
       });
     }
+  }, []);
+
+  const requestCancelConfirm = useCallback(() => {
+    if (!activeRequestId || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
+    if (actionRequestIdsRef.current.has(activeRequestId)) return;
+    if (!window.electronAPI?.cancelNonApiAiRequest) {
+      setErrors(previous => ({ ...previous, [activeRequestId]: 'Manual AI task cancellation is unavailable.' }));
+      return;
+    }
+    EventLogger.log('ConfirmDialog requested: title="Cancel this AI task?"');
+    setCancelConfirmTarget({
+      requestId: activeRequestId,
+      nodeId: activeRequest?.nodeId || null,
+      runId: activeRequest?.runId || null,
+      label: activeRequest ? requestLabel(activeRequest) : '',
+    });
   }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
+
+  // Self-dismiss if the request settles while the confirm is open, so Confirm
+  // can never act on a request id that is already gone.
+  useEffect(() => {
+    if (cancelConfirmTarget && !requests.some(request => request.requestId === cancelConfirmTarget.requestId)) {
+      setCancelConfirmTarget(null);
+    }
+  }, [cancelConfirmTarget, requests]);
 
   const minimize = useCallback(() => {
     setIsExpanded(false);
@@ -439,11 +474,17 @@ export function NonApiAiDialog() {
   const dockLabel = requests.length === 1 ? '1 handoff waiting' : `${requests.length} handoffs waiting`;
 
   return createPortal(
+    // The dock normally sits above everything (z-11000/11001). ConfirmDialog
+    // self-portals to the body at z-10000, so while the cancel confirmation is
+    // open the dock must drop BELOW it — otherwise the opaque dock panel covers
+    // the confirm card (entirely, on a narrow viewport) and its buttons cannot
+    // be clicked. Dropping the dock is preferable to raising ConfirmDialog,
+    // which would change the stacking of every other call site.
     <div
-      className="pointer-events-none fixed inset-0 z-[11000]"
+      className={`pointer-events-none fixed inset-0 ${cancelConfirmTarget ? 'z-[9998]' : 'z-[11000]'}`}
       role="presentation"
     >
-      <div className="pointer-events-auto fixed bottom-4 right-4 z-[11001] w-[min(32rem,calc(100vw-2rem))]">
+      <div className={`pointer-events-auto fixed bottom-4 right-4 ${cancelConfirmTarget ? 'z-[9999]' : 'z-[11001]'} w-[min(32rem,calc(100vw-2rem))]`}>
         {!isExpanded ? (
           <button
             ref={dockButtonRef}
@@ -526,6 +567,10 @@ export function NonApiAiDialog() {
                       key={request.requestId}
                       type="button"
                       onClick={() => setSelectedRequestId(request.requestId)}
+                      // Switching the panel to another hub's handoff while the
+                      // confirm is open would let the prompt say one thing and
+                      // cancel another.
+                      disabled={!!cancelConfirmTarget}
                       aria-current={selected ? 'page' : undefined}
                       aria-label={`${chipLabel}: ${requestLabel(request)}${hasDraft ? ', response pasted' : ''}${hasError ? ', needs correction' : ''}`}
                       title={requestLabel(request)}
@@ -608,7 +653,7 @@ export function NonApiAiDialog() {
               id="non-api-ai-response"
               value={activeResponse}
               onChange={(event) => setActiveResponse(event.target.value)}
-              disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
+              disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted || !!cancelConfirmTarget}
               placeholder="Paste the full response here…"
               className="h-44 w-full resize-y rounded-lg border border-white/15 bg-black/45 p-3 font-mono text-xs leading-relaxed text-white placeholder:text-white/30 outline-none focus:border-violet-400/60 disabled:opacity-60"
               aria-describedby={activeError ? 'non-api-ai-validation-error' : undefined}
@@ -625,14 +670,14 @@ export function NonApiAiDialog() {
 
           <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 pt-1">
             <span className="min-w-48 flex-1 text-xs text-white/40" aria-live="polite">
-              {isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. You can retry as many times as needed.'}
+              {isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. Every response you already pasted for this run is discarded. You can retry as many times as needed.'}
             </span>
             <div className="flex flex-wrap items-center justify-end gap-2">
               {activeRequest.canStepBack && (
                 <button
                   type="button"
                   onClick={stepBack}
-                  disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
+                  disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted || !!cancelConfirmTarget}
                   className="inline-flex items-center gap-1.5 rounded-md border border-white/20 px-3 py-2 text-sm font-medium text-white/75 transition-colors hover:border-violet-300/40 hover:bg-violet-500/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                   title="Return to the previous AI prompt and edit its accepted response"
                 >
@@ -642,8 +687,8 @@ export function NonApiAiDialog() {
               )}
               <button
                 type="button"
-                onClick={cancelTask}
-                disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted}
+                onClick={requestCancelConfirm}
+                disabled={isSubmitting || isSteppingBack || isCancelling || isAccepted || !!cancelConfirmTarget}
                 className="rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
                 title="Cancel the job operation waiting for this AI response"
               >
@@ -651,7 +696,7 @@ export function NonApiAiDialog() {
               </button>
               <button
                 type="submit"
-                disabled={!activeResponse.trim() || isSubmitting || isSteppingBack || isCancelling || isAccepted}
+                disabled={!activeResponse.trim() || isSubmitting || isSteppingBack || isCancelling || isAccepted || !!cancelConfirmTarget}
                 className="inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isSubmitting ? <LoaderCircle size={15} className="animate-spin" aria-hidden="true" /> : <Send size={15} aria-hidden="true" />}
@@ -663,6 +708,34 @@ export function NonApiAiDialog() {
       </section>
         )}
       </div>
+      {/* Sibling of the expanded/minimized branch so the prompt survives a
+          Minimize. ConfirmDialog self-portals at z-[10000] and self-registers
+          with the modal stack; while it is open the dock wrappers above drop to
+          z-[9998]/z-[9999] so the confirm paints on top and the backdrop
+          intercepts clicks on the dock. The dock controls are ALSO disabled —
+          belt and braces, and so a click that does reach one (e.g. via keyboard
+          focus, which the backdrop does not intercept) cannot switch the panel
+          to a different hub's handoff and desync the prompt from its target.
+          No onAbort: there is nothing to roll back. */}
+      {cancelConfirmTarget && (
+        <ConfirmDialog
+          title="Cancel this AI task?"
+          message={`${cancelConfirmTarget.label ? `${cancelConfirmTarget.label}\n\n` : ''}This stops the whole job operation waiting on this handoff, not just this prompt. Every AI response you have already pasted for this run is discarded and cannot be restored. Job data already scraped and saved to disk is kept.`}
+          confirmLabel="Cancel task"
+          cancelLabel="Keep working"
+          variant="danger"
+          onConfirm={() => {
+            const target = cancelConfirmTarget;
+            setCancelConfirmTarget(null);
+            EventLogger.log('ConfirmDialog CONFIRMED');
+            void performCancelTask(target);
+          }}
+          onCancel={() => {
+            setCancelConfirmTarget(null);
+            EventLogger.log('ConfirmDialog CANCELLED');
+          }}
+        />
+      )}
     </div>,
     document.body,
   );

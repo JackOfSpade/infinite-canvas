@@ -3845,6 +3845,14 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const promptSize = Number.isFinite(Number(promptChars))
       ? ` · prompt ${promptChars} chars`
       : '';
+    // Response SIZE only, never content. Batch sizes are an estimate of the
+    // output one handoff needs; this is the observation that can confirm or
+    // refute that estimate against the serving model's real output ceiling. A
+    // response crowding the ceiling is what precedes a truncated paste.
+    const responseChars = boardDiagnosticValue(item, 'responseChars');
+    const responseSize = Number.isFinite(Number(responseChars))
+      ? ` · response ${responseChars} chars (~${Math.round(Number(responseChars) / 4)} tok est.)`
+      : '';
     const channel = lifecycleCode(boardDiagnosticValue(item, 'channel'), 'not retained');
     const origin = channel !== 'not retained'
       ? ` · IPC \`${channel}\``
@@ -3869,7 +3877,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const terminal = settledAt && issuedAt
       ? ` · **${lifecycleCode(boardDiagnosticValue(item, 'outcome'), 'settled')}** in ${handoffElapsed(settledAt - issuedAt)}`
       : ` · **pending** for ${handoffElapsed(Date.now() - issuedAt)}`;
-    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${origin}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${accepted}${terminal}${orchestration}`);
+    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${origin}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${accepted}${terminal}${orchestration}`);
   }
   // Top-level `##`, emitted before the Job Search Pipeline section so the
   // receipts that record manual-handoff issue order are easy to locate.

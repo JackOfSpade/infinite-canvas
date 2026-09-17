@@ -614,7 +614,7 @@ export function linkedInDescriptionPacing({ mode = 'guest', requestsIssued = 0 }
   };
 }
 
-export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false } = {}) {
+export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false, onProgress = null } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
   const cancelledResult = () => ({
     jobs, loginWall: false, loginWallUrl: null, cancelled: true,
@@ -628,6 +628,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
   if (noUrlCount > 0) {
     logger.warn(`[LinkedIn/Browser] ${noUrlCount}/${jobs.length} jobs have no URL — will be skipped in enrichment`);
   }
+  // The loop `continue`s past URL-less rows, so `jobs.length` is a denominator
+  // it provably cannot reach. Report the attemptable count instead so the
+  // progress fraction can actually complete.
+  const navigableTotal = jobs.length - noUrlCount;
 
   // Fast-fail if the egress IP has no internet at all (e.g. a VPN switch that
   // landed on a dead server). Without this, every navigation below times out
@@ -878,6 +882,20 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
           if (signal?.aborted) break;
         }
         attemptedIndexes.add(i);
+        // Same position as the ZipRecruiter reference emitter (manualScraper's
+        // detail loop): after the pacing sleep, immediately before dispatch.
+        // `attemptedIndexes.size` is the only counter that is both monotonic
+        // and bounded by navigableTotal — `i + 1` jumps backwards across the
+        // wall-rotation `i--` paths and `detailRequestsIssued` counts retries,
+        // so it overruns the denominator. Diagnostics only; never throws.
+        try {
+          onProgress?.({
+            completed: attemptedIndexes.size,
+            total: navigableTotal,
+            enriched: successCount,
+            detail: `Fetching descriptions… ${attemptedIndexes.size}/${navigableTotal}`,
+          });
+        } catch { /* progress reporting must never break enrichment */ }
         detailRequestsIssued++;
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         navOk = true;
