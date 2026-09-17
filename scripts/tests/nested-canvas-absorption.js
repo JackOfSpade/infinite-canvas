@@ -15,6 +15,7 @@ import {
   MINIMAP_NODE_COLORS,
   partitionEdgesForMove,
   path,
+  resolveHubDropCue,
   sanitizeNodesForSave,
   settleJobWorkflowDeletion,
   settleJobWorkflowRelocation,
@@ -679,6 +680,94 @@ export default [
         'extractToLevel: must return the ids it actually extracted (the resolved closure, finalIds), not the originally requested ids');
       assert(dragSource.includes('const extractedIds = extractToLevel('),
         'onNodeDragStop breadcrumb handler: must capture and log extractToLevel’s return value (what actually moved) rather than the ids it requested — the closure can silently pull in more');
+    },
+  },
+{
+    // Regression: the drag-hover cue silently stopped appearing when onNodeDrag
+    // began testing intersections against a drag set captured at drag-START.
+    // getIntersectingNodes resolves its rect from the object it is handed
+    // (getNodeRect: `isNode(node) ? node : nodeLookup.get(node.id)`), so a
+    // snapshotted node yields its drag-start rect for the whole gesture and the
+    // cue could only ever appear when the node ALREADY overlapped the target
+    // before the user moved it. The drop kept working — onNodeDragStop resolves
+    // from its own live argument — so nothing failed except the feedback.
+    //
+    // No renderer harness exists for this hook, so the invariant is pinned as a
+    // source-text assertion, the technique this file and fixtures-canvas.js
+    // already use for un-renderable hooks.
+    name: 'source-invariant: onNodeDrag resolves its drag set from React Flow’s live third argument, never from drag-start-frozen state',
+    run: () => {
+      const dragSource = fs.readFileSync(path.resolve('src/hooks/useDragCorrections.js'), 'utf8');
+
+      const onNodeDragStart = dragSource.indexOf('const onNodeDrag = useCallback');
+      const onNodeDragStopStart = dragSource.indexOf('const onNodeDragStop = useCallback');
+      assert(onNodeDragStart >= 0 && onNodeDragStopStart > onNodeDragStart,
+        'source-invariant: both onNodeDrag and onNodeDragStop markers must be present and ordered as expected for the slices below to isolate each function');
+      const onNodeDragScope = dragSource.slice(onNodeDragStart, onNodeDragStopStart);
+      const onNodeDragStopScope = dragSource.slice(onNodeDragStopStart);
+
+      assert(dragSource.includes('const onNodeDrag = useCallback((e, node, draggedNodes) =>'),
+        'onNodeDrag must accept React Flow’s third callback argument (the live drag set). Without it the hover path has no source of mid-drag positions at all');
+
+      // Both callbacks must derive the drag set the same way, or the cue can
+      // describe a different target than the drop acts on.
+      const liveDragSet = 'const dragSet = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];';
+      assert(onNodeDragScope.includes(liveDragSet),
+        'onNodeDrag must resolve dragSet from the live draggedNodes argument — a drag-start snapshot freezes every intersection test at the drag-start rect, so the accept/reject cue never appears for the ordinary gesture of dragging a file onto a hub from elsewhere on the canvas');
+      assert(onNodeDragStopScope.includes(liveDragSet),
+        'onNodeDragStop must resolve dragSet the same way onNodeDrag does, so hover and drop can never disagree about which nodes are being dropped');
+
+      // The specific shape that caused the regression: a ref holding node
+      // objects, read back on every hover frame.
+      assert(!dragSource.includes('dragSetRef'),
+        'useDragCorrections must not hold the dragged nodes in a ref across the gesture — those objects carry drag-start positions, and getIntersectingNodes reads position off whatever object it is given');
+      assert(!/find(?:Hub|Group)DropTarget\(\s*\w+Ref\.current/.test(onNodeDragScope),
+        'onNodeDrag must never feed a ref’s contents to findHubDropTarget/findGroupDropTarget — the intersection test is geometric and requires live positions');
+
+      // dragCanvasRef IS still frozen on purpose: buildGroupHoverState reads
+      // only identity (ids/types/data/edges), never position. Guard the
+      // distinction so the perf freeze is not "fixed" away with the bug.
+      assert(dragSource.includes('dragCanvasRef'),
+        'the node/edge membership snapshot (dragCanvasRef) is a deliberate, position-independent perf freeze for the O(nodes x closure) absorption math — it must survive the live-drag-set fix');
+    },
+  },
+{
+    // Regression: every cue was gated on `!dropsBlocked`, including the reject
+    // verdict — whose label buildHubHoverState derives from the very lock
+    // reason that raises dropsBlocked. 'Locked' / 'Busy' / 'Already started'
+    // were computed and never rendered, so a hub that refused a drop showed
+    // nothing at all while the user hovered it.
+    name: 'resolveHubDropCue: a refusal paints even while drops are blocked, and an acceptance never does',
+    run: () => {
+      const reject = { kind: 'reject', label: 'Already started' };
+      const accept = { kind: 'accept', label: 'Use as resume' };
+
+      const shown = resolveHubDropCue({ dragHover: reject, dropsBlocked: true });
+      assert(shown?.kind === 'reject' && shown.label === 'Already started',
+        'a reject verdict must survive dropsBlocked — it is the explanation FOR being blocked, and suppressing it leaves the hub visually dead while refusing the drop');
+
+      const suppressed = resolveHubDropCue({ dragHover: accept, dropsBlocked: true });
+      assert(suppressed?.kind !== 'accept',
+        'an accept cue must never paint while dropsBlocked — it would promise a drop that handleDrop is about to bounce');
+
+      const fileDragBlocked = resolveHubDropCue({ isDragOver: true, dropsBlocked: true, dropBlockedLabel: 'Locked' });
+      assert(fileDragBlocked?.kind === 'reject' && fileDragBlocked.label === 'Locked',
+        'an OS file drag carries no verdict of its own, so a blocked hub must surface its own reason instead of going silent');
+
+      const fileDragBlockedNoReason = resolveHubDropCue({ isDragOver: true, dropsBlocked: true });
+      assert(fileDragBlockedNoReason === null,
+        'with no reason to show, stay silent rather than paint an unexplained red ring');
+
+      const fileDragOpen = resolveHubDropCue({ isDragOver: true });
+      assert(fileDragOpen?.kind === 'accept' && fileDragOpen.label === null,
+        'an unblocked file drag must invite the drop, leaving the label to the caller’s generic copy');
+
+      const canvasNodeAccept = resolveHubDropCue({ dragHover: accept });
+      assert(canvasNodeAccept?.label === 'Use as resume',
+        'an unblocked canvas-node drag must keep the verdict label buildHubHoverState computed');
+
+      assert(resolveHubDropCue({}) === null && resolveHubDropCue() === null,
+        'no drag overhead means no cue at all');
     },
   },
 ];

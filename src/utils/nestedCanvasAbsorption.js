@@ -208,7 +208,7 @@ export function findSeveredRelations(movedIds, allNodes, edges) {
   for (const edge of crossingEdges) {
     if (!edge?.source || !edge?.target) continue;
     const pair = [edge.source, edge.target].sort();
-    crossingPairs.add(`${pair[0]} ${pair[1]}`);
+    crossingPairs.add(`${pair[0]}\x00${pair[1]}`);
   }
 
   const severedRefs = [];
@@ -217,7 +217,7 @@ export function findSeveredRelations(movedIds, allNodes, edges) {
     if (!fromId || !toId || fromId === toId) return;
     if (moved.has(fromId) === moved.has(toId)) return; // both sides moved together, or both stayed
     const pair = [fromId, toId].sort();
-    if (crossingPairs.has(`${pair[0]} ${pair[1]}`)) return; // already counted as an edge
+    if (crossingPairs.has(`${pair[0]}\x00${pair[1]}`)) return; // already counted as an edge
     const key = `${fromId}|${toId}|${field}`;
     if (seenKeys.has(key)) return;
     seenKeys.add(key);

@@ -70,6 +70,7 @@ export {
 export { BACKGROUND_E2E_DISABLED_CODE, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS, backgroundE2EDisabledError, isBackgroundE2E, runBackgroundE2EShutdownCleanup } from '../electron/utils/backgroundE2e.js';
 export { redactNodeForIssueReport } from '../src/utils/issueReportRedaction.js';
 export { buildHubHoverState, filePayloadFromDraggedNodes } from '../src/utils/hubNodeDrop.js';
+export { resolveHubDropCue } from '../src/utils/hubDropCue.js';
 export { distToSegment, pixelEraseStroke, segmentCircleIntersections, strokePoints } from '../src/utils/geometry.js';
 export { edgeZoneForRadius, fitViewDuration, gridSpacing, panDuration, radialRadius, spiralStep, viewportForZoomAtScreenPoint } from '../src/utils/layoutGeometry.js';
 export { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/layoutUtils.js';

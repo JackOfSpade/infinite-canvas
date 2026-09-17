@@ -40,22 +40,36 @@ function findGroupDropTarget(dragSet, getIntersectingNodes) {
   return null;
 }
 
+// A drag-hover cue that never appears and a drag that never found a target
+// look identical from outside, and until this line existed a bug report could
+// not tell them apart: between rf-drag-start and rf-drag-stop the renderer log
+// held nothing at all about hover resolution. States the observation (what the
+// resolver decided) and asserts no cause. Callers must invoke it ONLY on a
+// transition — never on a stationary pointer-move frame.
+function logHoverTransition(kind, previousId, nextId, hoverState) {
+  if (!previousId && !nextId) return; // no target before, none now — nothing observed
+  const verdict = nextId
+    ? (hoverState ? `${hoverState.kind}:${hoverState.label}` : 'resolved-without-state')
+    : 'none';
+  EventLogger.log(`drag-hover ${kind} target=${nextId || 'none'} was=${previousId || 'none'} verdict=${verdict}`);
+}
+
 export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
   const targetHubIdRef         = useRef(null);
   const dragStartPositionsRef  = useRef(new Map());
-  // React Flow fixes the drag set at drag-start (getDragItems), so it is
-  // captured once here instead of re-derived via getNodes()+filter on every
-  // onNodeDrag pointer-move frame. dragCanvasRef freezes the node/edge
-  // membership alongside it for the same reason: collectAbsorptionClosure and
-  // findSeveredRelations (run inside buildGroupHoverState) are each
-  // O(nodes x closure), and neither the drag set nor canvas membership
-  // changes mid-drag from user input, so there is nothing to gain by pulling
-  // getNodes()/getEdges() again every frame — only onNodeDragStop re-resolves
-  // from live state, right before it actually mutates anything.
-  const dragSetRef             = useRef([]);
+  // The node/edge MEMBERSHIP the absorption hover math runs over, frozen at
+  // drag-start: collectAbsorptionClosure and findSeveredRelations (run inside
+  // buildGroupHoverState) are each O(nodes x closure), and canvas membership
+  // does not change mid-drag from user input, so there is nothing to gain by
+  // pulling getNodes()/getEdges() again every frame — only onNodeDragStop
+  // re-resolves from live state, right before it actually mutates anything.
+  //
+  // The dragged nodes themselves are deliberately NOT frozen alongside it.
+  // They move, and onNodeDrag's hover tests are geometric; see the comment at
+  // that callback's dragSet for what freezing them cost.
   const dragCanvasRef          = useRef({ nodes: [], edges: [] });
   // Per-drag memo of group hover state, keyed by target group id, so a frame
   // that keeps hovering the same sub-canvas does no new closure/severed-refs
@@ -79,6 +93,14 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
   }, [setNodes]);
 
   const onNodeDragStart = useCallback((e, node) => {
+    // Cleared before the animation guard, never after it. restoreDragStartPositions
+    // reads this map by node id with no notion of WHICH drag recorded an entry, so
+    // a start skipped mid-animation used to leave the previous gesture's positions
+    // in place — and a later refused hub drop then "restored" the node to where it
+    // sat two drags ago. Empty means the snap-back is a no-op and the node stays
+    // where it was released, which is the honest outcome for a drag this hook
+    // never observed starting.
+    dragStartPositionsRef.current.clear();
     if (isAnimatingRef?.current) return;
     if (isInteractionRef) isInteractionRef.current = true;
     
@@ -86,7 +108,6 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (takeSnapshot) takeSnapshot();
     
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-    dragStartPositionsRef.current.clear();
     const currentNodes = getNodes ? getNodes() : [node];
     const draggedAtStart = currentNodes.filter(n => n.id === node.id || n.selected);
     const dragSet = draggedAtStart.length > 0 ? draggedAtStart : [node];
@@ -94,10 +115,9 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
       dragStartPositionsRef.current.set(n.id, { ...n.position });
     }
 
-    // Freeze the drag set and the node/edge snapshot used for absorption
-    // hover math (see the comment on these refs above) — computed once here
-    // rather than per pointer-move frame in onNodeDrag.
-    dragSetRef.current = dragSet;
+    // Freeze only the node/edge snapshot the absorption hover math runs over
+    // (see the comment on that ref above) — computed once here rather than per
+    // pointer-move frame in onNodeDrag.
     dragCanvasRef.current = { nodes: currentNodes, edges: getEdges ? getEdges() : [] };
     groupHoverCacheRef.current = new Map();
 
@@ -111,39 +131,60 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     }
   }, [getNodes, getEdges, isAnimatingRef, takeSnapshot, isInteractionRef]);
 
-  const onNodeDrag = useCallback((e, node) => {
+  const onNodeDrag = useCallback((e, node, draggedNodes) => {
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
     if (!getIntersectingNodes) return;
 
-    // React Flow fixes the drag set at drag-start (see onNodeDragStart), so
-    // every check below reads dragSetRef instead of re-deriving it. This also
-    // removes the old reason a drag whose primary node was itself a
-    // group/jobhub/jobboard/sellhub skipped hover work entirely: those types
-    // now participate too, and it is getAbsorptionRejection (via
-    // buildGroupHoverState, e.g. ABSORB_EXCLUDED_TYPES or the run guard) that
-    // decides — with a visible reject cue — whether a given combination is
-    // actually legal, rather than a silent type-based carve-out here.
-    const dragSet = dragSetRef.current.length > 0 ? dragSetRef.current : [node];
+    // Read the LIVE drag set React Flow passes as the third argument — the
+    // same list onNodeDragStop receives, each entry carrying the node's
+    // CURRENT mid-drag position.
+    //
+    // This must never be a set captured at drag-start. getIntersectingNodes
+    // resolves its rect from the object it is handed: getNodeRect does
+    // `isNode(node) ? node : nodeLookup.get(node.id)` and then reads
+    // nodeToUse.position, so a node object snapshotted in onNodeDragStart
+    // yields that node's DRAG-START rect for the whole gesture. Testing
+    // against it asked "did this node overlap the hub before the user moved
+    // it?", so the hub/sub-canvas accept-reject cue could only ever appear
+    // when the answer was already yes — i.e. never, for the ordinary gesture
+    // of dragging a career file onto a Job Search module from elsewhere on
+    // the canvas. The drop still worked, because onNodeDragStop re-resolves
+    // from its own live argument; only the cue was missing.
+    //
+    // Reading the live argument also makes hover and drop agree by
+    // construction: both now resolve their target from the identical list
+    // React Flow actually moved, which is already extent-clamped and
+    // post-snapToGrid, and which excludes a selected-but-undraggable node
+    // that a getNodes()+filter would have wrongly included.
+    //
+    // Note this is the drag set, not the closure — the types that skip hover
+    // work are decided by getAbsorptionRejection (via buildGroupHoverState,
+    // e.g. ABSORB_EXCLUDED_TYPES or the run guard) with a visible reject cue,
+    // never by a silent type-based carve-out here.
+    const dragSet = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];
 
     // --- sub-canvas (group) absorption hover ---
     const targetGroup = findGroupDropTarget(dragSet, getIntersectingNodes);
     const newGroupId = targetGroup ? targetGroup.id : null;
-    if (targetGroupIdRef.current !== newGroupId) {
-      if (targetGroupIdRef.current) {
-        updateNodeData(targetGroupIdRef.current, { isDropTarget: false, dragHover: null });
+    const previousGroupId = targetGroupIdRef.current;
+    const groupTargetChanged = previousGroupId !== newGroupId;
+    if (groupTargetChanged) {
+      if (previousGroupId) {
+        updateNodeData(previousGroupId, { isDropTarget: false, dragHover: null });
       }
       targetGroupIdRef.current = newGroupId;
     }
+    let groupHoverState = null;
     if (newGroupId) {
       // collectAbsorptionClosure/findSeveredRelations inside
       // buildGroupHoverState are each O(nodes x closure) — paying that on
       // every pointer-move frame would stutter the drag on a large canvas.
-      // The drag set and canvas membership are frozen for the whole drag
-      // (dragCanvasRef), so the hover state for a given target group cannot
-      // change frame-to-frame either; memoize by target id so re-hovering the
-      // same group across many frames does no new work.
-      let groupHoverState = groupHoverCacheRef.current.get(newGroupId);
+      // Memoizing by target id is safe because buildGroupHoverState reads only
+      // identity (id/type/data/edges), never position: the dragged nodes move
+      // every frame, but the verdict for a given target group cannot change
+      // while drag membership and canvas membership (dragCanvasRef) hold still.
+      groupHoverState = groupHoverCacheRef.current.get(newGroupId);
       if (!groupHoverState) {
         groupHoverState = buildGroupHoverState(
           dragSet,
@@ -160,6 +201,14 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         isDropTarget: groupHoverState.kind === 'accept',
       });
     }
+    // TRANSITION-ONLY (enter / leave / target switch), and logged here rather
+    // than inside the branch above so the line carries the resolved verdict.
+    // The stationary-frame refresh deliberately stays silent: onNodeDrag runs
+    // per pointer-move frame, and a per-frame line would flush every other
+    // renderer event out of the ring buffer a bug report reads from.
+    if (groupTargetChanged) {
+      logHoverTransition('group', previousGroupId, newGroupId, groupHoverState);
+    }
 
     // --- hub (jobhub/sellhub) drop hover — no closure math involved ---
     // Gated on the same type test onNodeDragStop uses to resolve its own
@@ -175,6 +224,9 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     const newHubId = targetHub?.id || null;
     const hubHoverState = targetHub ? buildHubHoverState(targetHub, dragSet) : null;
     if (newHubId !== targetHubIdRef.current) {
+      // TRANSITION-ONLY — see the sub-canvas branch above for why the
+      // stationary-frame refresh below stays silent.
+      logHoverTransition('hub', targetHubIdRef.current, newHubId, hubHoverState);
       clearHubHover();
       if (newHubId && hubHoverState) {
         updateNodeData(newHubId, { dragHover: hubHoverState });
@@ -186,20 +238,29 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
   }, [getIntersectingNodes, updateNodeData, isAnimatingRef, clearHubHover]);
 
   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
-    if (isAnimatingRef?.current) return;
     if (isInteractionRef) isInteractionRef.current = false;
 
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
 
-    // Clear the drop target visual indicator if active
+    // Everything down to the isAnimatingRef guard below is teardown, and it runs
+    // unconditionally. It used to sit BEHIND that guard, so a drag released
+    // while a viewport animation was still playing left all of it alive: the
+    // hover ring and its accept/reject label stayed lit on whatever node was
+    // last targeted, with no drag in progress, until some unrelated later drag
+    // happened to resolve a different target and trip the "target changed"
+    // clear. Worse, node.id stayed flagged in resizeDragActiveRef /
+    // titleZoneDragActiveRef, which made the NEXT drag of that same node skip
+    // all hover work and read wasResizeDrag/wasTitleZoneDrag as true — silently
+    // disabling the whole hub-drop and group-absorption block for an ordinary
+    // move. An animation is a reason not to INTERPRET this drop; it is never a
+    // reason to leave state behind.
     if (targetGroupIdRef.current) {
       updateNodeData(targetGroupIdRef.current, { isDropTarget: false, dragHover: null });
       targetGroupIdRef.current = null;
     }
     clearHubHover();
-    // The drag is over — drop the frozen drag-set/canvas snapshot and hover
-    // memo so a stale reference from this gesture cannot leak into the next.
-    dragSetRef.current = [];
+    // The drag is over — drop the frozen canvas snapshot and hover memo so a
+    // stale reference from this gesture cannot leak into the next.
     dragCanvasRef.current = { nodes: [], edges: [] };
     groupHoverCacheRef.current = new Map();
 
@@ -212,6 +273,9 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     const tzCorrection = TitleZoneCorrection.get(node.id);
     ResizeCorrection.delete(node.id);
     TitleZoneCorrection.delete(node.id);
+
+    // Teardown is done; from here on the drop is being interpreted.
+    if (isAnimatingRef?.current) return;
 
     if (correction && wasResizeDrag) {
       const { flowCx, flowCy, size } = correction;

@@ -25,7 +25,7 @@ import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/file
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../utils/compsMerge';
 import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers } from '../utils/bundlePricing';
 import { generateId } from '../utils/idGenerator';
-import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../utils/hubDropEligibility';
+import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason, getHubDropRejectLabel } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
 import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
 import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
@@ -289,6 +289,12 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const displayPhotoDropMode = hubState === 'priced' && !data.locked;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['ebay', 'poshmark', 'mercari', 'swappa', 'facebook']);
   const hubDropsBlocked = platformsVerifying || (inputDropsBlocked && !displayPhotoDropMode);
+  // Why a drop would bounce right now, in the same order hubDropsBlocked ORs
+  // its inputs. A priced hub still takes display photos, so its lock reason is
+  // deliberately not surfaced — hubDropsBlocked is false in that case anyway.
+  const dropBlockedLabel = platformsVerifying
+    ? 'Checking connections…'
+    : (displayPhotoDropMode ? null : getHubDropRejectLabel({ type: 'sellhub', data }));
 
   useEffect(() => {
     if (canReplaceFailedInitialPhotos) {
@@ -1826,6 +1832,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       dropsBlocked={hubDropsBlocked}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
+      dropBlockedLabel={dropBlockedLabel}
     >
         {/* Transient: this hub's price check is queued behind another sell-side
             browser op (serialized to avoid the shared-browser captcha-resolve
