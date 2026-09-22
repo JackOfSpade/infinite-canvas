@@ -15,7 +15,7 @@ import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
-import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
+import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter } from '../utils/jobCardFilters';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
@@ -348,6 +348,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // state remains pollable, so a transient filesystem/IPC issue cannot orphan
   // a pending handoff.
   const localStatusErrorStreakRef = useRef(new Map());
+  // jobId → already asked main to open this saved bundle's output folder.
+  // A poll tick keeps re-observing 'saved' long after the one save that
+  // earned it, so this guards the one-time reveal the same way the fallback
+  // manager guards its own terminal write (savedTerminalRef there).
+  const localAiOutputRevealedRef = useRef(new Set());
   // React state does not disable a button until the next render. Keep a
   // synchronous latch too, so two click events in the same render frame cannot
   // enqueue duplicate applications for this one card.
@@ -568,16 +573,29 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         jobTitle: data.title,
         location: data.location,
         canvasFilePath,
+        // This card owns its own explicit, once-guarded reveal below (via the
+        // durable-record-resolving open-local-application-output IPC), so the
+        // generic save path must not also open Finder/Explorer for the exact
+        // same completed save.
+        suppressReveal: true,
       });
       if (!saved?.success || !saved.saved) {
         const saveError = new Error(saved?.error || 'Could not save the imported application.');
         if (saved?.errorCode) saveError.code = saved.errorCode;
         throw saveError;
       }
+      // Reveal regardless of mount state: the save already completed, so a
+      // card dismissed while it was resolving must not forfeit the folder
+      // reveal a still-open Finder window elsewhere might be waiting on.
+      revealSavedLocalApplicationOutputOnce({
+        jobId, canvasFilePath, revealedRef: localAiOutputRevealedRef.current,
+        onError: (error) => EventLogger.log(`[LocalAI] could not open saved bundle folder job=${jobId}: ${error}`),
+      });
       if (isMountedRef.current) {
         setLocalApplication((current) => current?.id === jobId ? {
           ...current,
           status: 'saved',
+          savedDir: saved.dir,
           message: missingArtifacts.length
             ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
             : resumeOverflow
@@ -592,7 +610,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? `Saved editable HTML and listing to ${saved.dir}; ${missingArtifacts.join(' and ')} were unavailable. Use Repair bundle to retry.`
             : resumeOverflow
               ? `Saved the bundle to ${saved.dir}, but the résumé remained ${resumeFit.pageCount} pages after the layout-fit safeguards (target: ${resumeFit.targetPageCount}).`
-            : `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.`,
+            : `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir}.`,
           type: missingArtifacts.length || resumeOverflow ? 'error' : 'success',
         });
       }
@@ -694,7 +712,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           }
         } else {
           localResultSettlingRef.current.delete(jobId);
-          setLocalApplication((current) => current?.id === jobId ? { ...current, ...next } : current);
+          // A restart can resume polling a job that reads 'saved' only from
+          // its terminal receipt (the private folder is already gone). That
+          // receipt carries the same durable output directory a live save
+          // response does, so the reveal-after-the-fact action works here too
+          // — without this the button in the render below would never appear
+          // for a bundle whose save this exact renderer never witnessed.
+          const receiptOutputDir = next.status === 'saved' ? next.receipt?.outputDir : null;
+          setLocalApplication((current) => current?.id === jobId ? {
+            ...current, ...next,
+            ...(receiptOutputDir ? { savedDir: receiptOutputDir } : {}),
+          } : current);
         }
       } catch (error) {
         if (cancelled || !isMountedRef.current) return;
@@ -1276,6 +1304,22 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/15"
             >
               Open Local AI Job Folder
+            </button>
+          )}
+          {localApplication.status === 'saved' && localApplication.savedDir && window.electronAPI?.openLocalApplicationOutput && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const canvasFilePath = localApplication.canvasFilePath
+                  || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
+                // Never send the stored path back to main — it re-resolves the
+                // directory itself from its own durable receipt for this job.
+                window.electronAPI.openLocalApplicationOutput({ jobId: localApplication.id, canvasFilePath });
+              }}
+              className="mt-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-400/15"
+              title="Open the saved application bundle's folder."
+            >
+              Open saved folder
             </button>
           )}
           {localApplication.status === 'saved' && !localApplication.intermediateCleaned

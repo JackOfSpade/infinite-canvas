@@ -13,6 +13,7 @@ import {
   trackApplicationDraftWrite,
   applicationRequestId,
   applicationStageLabel,
+  assignApplicationOrdinals,
   countActiveApplicationHandoffs,
   getApplicationHandoffs,
   isApplicationRequestId,
@@ -404,25 +405,36 @@ export default [
     },
   },
   {
-    name: 'application dock: a rejection never overwrites a correction the person is typing',
+    name: 'application dock: a rejection empties the paste box and no refresh refills it',
     run: () => {
       const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
-      // submit() re-enables the textarea in its finally while the refresh is
-      // still round-tripping, so the person is invited to retype BEFORE
-      // discovery answers — and the draft it answers with is the rejected
-      // text still sitting on disk. Adopting it unconditionally would replace
-      // a correction mid-keystroke.
+      // The rejected text has to go: the correction asks for the COMPLETE
+      // regenerated answer, so every character of it is replaced anyway, and
+      // leaving thousands of characters in the box made a fresh paste look
+      // appended rather than replacing.
+      assert(
+        dock.includes("setDrafts(previous => (previous[requestId] === '' ? previous : { ...previous, [requestId]: '' }));"),
+        'submit must clear the dock draft when a response is rejected',
+      );
+      assert(
+        dock.includes('flushApplicationDraftSave(requestId);'),
+        'the debounced write must be flushed so it cannot re-save the rejected text',
+      );
+      // And the durable draft too, or reopening restores what was discarded.
+      assert(
+        /updateLocalApplicationDraft\(\{[\s\S]{0,200}?draft: '',/.test(dock),
+        'the persisted draft must be cleared as well',
+      );
+      // The refresh that follows must not put it back: the durable clear is
+      // async, so a refresh landing first would carry the rejected text.
       assert(
         dock.includes('const codeChanged = !prior || prior.handoffCode !== item.handoffCode;'),
-        'the draft reset must distinguish a new stage from a correction round',
+        'a new stage must still be distinguished from a correction round',
       );
       assert(
-        dock.includes('const untouched = current === undefined || (prior && current === (prior.initialResponse || \'\'));'),
-        'a same-code refresh must only adopt the stored draft when nothing of the person\'s is at stake',
+        !dock.includes('const untouched ='),
+        'a correction round must not adopt a stored draft at all',
       );
-      const resetIndex = dock.indexOf('const codeChanged =');
-      const guardIndex = dock.indexOf('const untouched =');
-      assert(resetIndex >= 0 && guardIndex > resetIndex, 'the guard must sit inside the reset branch');
     },
   },
   {
@@ -529,6 +541,53 @@ export default [
         dock.includes('for (const focusJobId of [...awaitingFocus])'),
         'iterate a copy, since the loop deletes from the set',
       );
+    },
+  },
+  {
+    name: 'application dock: a new bundle takes a number no queued bundle is using',
+    run: () => {
+      const item = (jobId) => ({ jobId, requestId: applicationRequestId(jobId) });
+      const ordinals = new Map();
+
+      // Three bundles queued in one pass get 1, 2, 3 — the second must see the
+      // number the first just took, or two chips would both read "1".
+      let queue = assignApplicationOrdinals(ordinals, [item('a'), item('b'), item('c')]);
+      assert(queue.map(i => ordinals.get(i.jobId)).join(',') === '1,2,3', 'first pass numbers 1,2,3');
+      assert(new Set(ordinals.values()).size === ordinals.size, 'no two bundles may share a number');
+
+      // A live bundle NEVER renumbers. b finishing must not slide c from 3 to 2
+      // while someone has c's chat open.
+      queue = assignApplicationOrdinals(ordinals, [item('a'), item('c')]);
+      assert(ordinals.get('a') === 1 && ordinals.get('c') === 3, 'survivors keep their numbers');
+      assert(!ordinals.has('b'), 'a finished bundle releases its number');
+
+      // A NEW bundle takes the lowest number nothing in the queue is using —
+      // 2, the one b released — rather than growing to 4.
+      queue = assignApplicationOrdinals(ordinals, [item('a'), item('c'), item('d')]);
+      assert(ordinals.get('d') === 2, `a new bundle reuses the freed number, got ${ordinals.get('d')}`);
+      assert(ordinals.get('a') === 1 && ordinals.get('c') === 3, 'and still does not renumber the others');
+      assert(new Set(ordinals.values()).size === 3, 'the queue never holds a duplicate number');
+
+      // Ordering follows the number, not discovery order, so a reshuffled
+      // enumeration cannot move chips under someone mid-paste.
+      queue = assignApplicationOrdinals(ordinals, [item('c'), item('d'), item('a')]);
+      assert(queue.map(i => i.jobId).join(',') === 'a,d,c', `expected a,d,c got ${queue.map(i => i.jobId).join(',')}`);
+
+      // Emptying the queue frees everything; the next bundle starts at 1 again.
+      assignApplicationOrdinals(ordinals, []);
+      assert(ordinals.size === 0, 'an empty queue holds no numbers');
+      assignApplicationOrdinals(ordinals, [item('e')]);
+      assert(ordinals.get('e') === 1, 'numbering restarts at 1 once nothing is queued');
+
+      // A full strip: ten bundles must occupy exactly 1..10.
+      const ten = new Map();
+      const all = Array.from({ length: APPLICATION_HANDOFF_LIMIT }, (_, i) => item(`job-${i}`));
+      assignApplicationOrdinals(ten, all);
+      assert(
+        [...ten.values()].sort((x, y) => x - y).join(',') === all.map((_, i) => i + 1).join(','),
+        'a full queue occupies 1..limit with no gaps or repeats',
+      );
+      assert(assignApplicationOrdinals(ten, null).length === 0, 'a missing list is empty, not a throw');
     },
   },
   {

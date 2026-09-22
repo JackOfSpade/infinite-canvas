@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, pasteRejectionChangeDocuments, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
@@ -3693,10 +3693,18 @@ export default [
 
         const fallbackSource = await fs.promises.readFile(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
         const saveSource = await fs.promises.readFile(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
+        // The manager now owns its own explicit, once-guarded, durable-record
+        // reveal (revealSavedLocalApplicationOutputOnce, gated on !isOrphan) in
+        // place of the generic save path's implicit reveal, so it always
+        // suppresses that generic one — including for a truly orphaned save,
+        // which still gets no reveal at all because the explicit call is
+        // skipped for isOrphan.
         assert(fallbackSource.includes('discoverLocalApplications')
           && fallbackSource.includes('selectOrphanedLocalAiJobs')
-          && fallbackSource.includes('suppressReveal: isOrphan'),
-        'the mounted canvas manager discovers deleted-card jobs and marks their automatic save as non-revealing');
+          && fallbackSource.includes('suppressReveal: true')
+          && fallbackSource.includes('if (!isOrphan) {')
+          && fallbackSource.includes('revealSavedLocalApplicationOutputOnce({'),
+        'the mounted canvas manager discovers deleted-card jobs, always suppresses the generic save reveal, and only asks for its own explicit reveal when a card still exists');
         assert(saveSource.includes('const revealSkipped = suppressReveal || isBackgroundE2E()')
           && saveSource.includes('if (!revealSkipped)')
           && saveSource.includes('await shell.openPath(dir)'),
@@ -3763,9 +3771,13 @@ export default [
       const receiptCalls = [...localSource.matchAll(/await writeLocalAiTerminalReceipt\(/g)].map(match => match.index);
       assert(registrationAt >= 0
         && /cleanupOnSaveFailure\s*:\s*false/.test(localSource.slice(registrationAt))
-        && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt))
+        // onSuccessfulSave now receives save-application's { dir, manifest } so
+        // it can persist the exact saved OUTPUT directory (not this job's
+        // private folder — that parameter is renamed to savedOutputDir) into
+        // the terminal receipt for the durable-record-only reveal IPC.
+        && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\{\s*dir:\s*savedOutputDir\s*\}\s*=\s*\{\}\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt))
         && /onSaveFailure\s*:\s*async\s*\(\{\s*phase,\s*error\s*\}\)\s*=>[\s\S]{0,800}recordLocalAiSaveFailure\(/.test(localSource.slice(registrationAt)),
-      'a Local AI import registers failure-retention plus hash-bound success and failure callbacks');
+      'a Local AI import registers failure-retention plus hash-bound success and failure callbacks, and the success callback receives the saved output directory');
       assert(receiptCalls.length === 1 && receiptCalls[0] > registrationAt,
         'the terminal receipt is not emitted during measured import before save-application owns the workspace');
       assert(auditBuildAt >= 0 && artifactStageAt > auditBuildAt && registrationAt > artifactStageAt
@@ -3867,6 +3879,90 @@ export default [
           retainedFolderStatus: retainedStatus.status,
           partialCleanupStatus: partialCleanupStatus.status,
         };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // The reveal-after-the-fact capability (open-local-application-output)
+    // exists because the private job folder above is deleted the moment a
+    // bundle saves. It must resolve the exact directory itself from the
+    // terminal receipt this app wrote at save time — never from a path a
+    // caller supplies — and refuse anything that would resolve outside the
+    // canvas folder.
+    name: 'Local AI saved-bundle reveal: resolves the output directory from its own durable receipt, never a supplied path',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
+          canvasFilePath: project.canvasFilePath,
+        });
+        // A real save's onSuccessfulSave callback writes exactly this shape
+        // (see the pinned regex above, and writeLocalAiTerminalReceipt); build
+        // it by hand here so this test exercises the reveal resolver/guard in
+        // isolation from full PDF rendering, which needs a real BrowserWindow
+        // this unit runner does not have.
+        const outputDir = path.join(project.root, 'Applied Jobs', 'Acme', 'Unknown Location', 'Developer');
+        await fs.promises.mkdir(outputDir, { recursive: true });
+        const receiptsRoot = path.join(project.root, '.local-ai', 'handoff-receipts');
+        await fs.promises.mkdir(receiptsRoot, { recursive: true });
+        const receiptPath = path.join(receiptsRoot, `${queued.id}.json`);
+        const receipt = {
+          version: 1,
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          status: 'imported',
+          resultSha256: 'a'.repeat(64),
+          importedAt: new Date().toISOString(),
+          outputDir,
+          resume: { pageCount: 1, targetPageCount: 1, attempts: [{ density: 'default', pageCount: 1 }] },
+          coverLetter: { pageCount: 1, targetPageCount: 1 },
+          message: 'Both documents met their measured targets.',
+        };
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt)}\n`, 'utf8');
+
+        registerLocalAiApplicationHandlers();
+        const openOutput = ipcMain.__getInvokeHandler('open-local-application-output');
+        const sender = { id: 9202, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+
+        const opened = await openOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(opened?.success === true && opened.opened === true && !opened.error,
+          `a reveal request for a genuinely saved job opens the directory resolved from its receipt, got ${JSON.stringify(opened)}`);
+
+        // Extra caller-supplied path-like fields are simply not read: only
+        // jobId/canvasFilePath reach the resolver, which re-derives the path
+        // from the receipt regardless of anything else in the request.
+        const ignoresSuppliedPath = await openOutput({ sender }, {
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, dir: '/etc', path: '/etc',
+        });
+        assert(ignoresSuppliedPath?.success === true && ignoresSuppliedPath.opened === true,
+          'a caller-supplied path never substitutes for the receipt-resolved directory');
+
+        const forgedReceipt = { ...receipt, outputDir: path.join(os.tmpdir(), 'not-the-canvas-folder') };
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(forgedReceipt)}\n`, 'utf8');
+        const escaped = await openOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(escaped?.success === false && /escaped the canvas folder/i.test(escaped.error || ''),
+          `a receipt naming a directory outside the canvas folder is refused rather than opened, got ${JSON.stringify(escaped)}`);
+        await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt)}\n`, 'utf8');
+
+        const neverSavedJobId = '223e4567-e89b-42d3-a456-426614174001';
+        const noReceipt = await openOutput({ sender }, { jobId: neverSavedJobId, canvasFilePath: project.canvasFilePath });
+        assert(noReceipt?.success === false && /no saved application bundle is recorded/i.test(noReceipt.error || ''),
+          `a job with no recorded save is refused with a specific, actionable message, got ${JSON.stringify(noReceipt)}`);
+
+        process.env.INFINITE_CANVAS_E2E_BACKGROUND = '1';
+        let background;
+        try {
+          background = await openOutput({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        } finally {
+          delete process.env.INFINITE_CANVAS_E2E_BACKGROUND;
+        }
+        assert(background?.success === true && background.opened === false && background.skipped === true,
+          `the background smoke test must never trigger a real Finder/Explorer reveal, got ${JSON.stringify(background)}`);
+
+        return { receiptRecorded: true, escapedRefused: true, missingRefused: true, backgroundSkipped: true };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }

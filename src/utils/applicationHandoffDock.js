@@ -213,6 +213,44 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
 }
 
 /**
+ * Assign each bundle the number shown on its chip, and order the queue by it.
+ *
+ * Mutates `ordinals` (jobId -> number) in place and returns the items sorted by
+ * that number. The contract, in one line: a NEW bundle takes the lowest number
+ * no bundle currently in the queue is using.
+ *
+ * Why numbers cannot simply be positions: these chips are how someone keeps up
+ * to ten parallel AI chats straight. Position renumbers everything below any
+ * change — a scoring handoff arriving, or bundle 2 of 5 finishing — so the chat
+ * a person has open as "4" silently becomes someone else's "3" mid-paste. A
+ * number is therefore assigned ONCE and never recomputed while its bundle
+ * lives.
+ *
+ * A finished bundle releases its number, and only then can a new bundle reuse
+ * it. That keeps the strip dense (1..N with no growing gaps) without ever
+ * renumbering a bundle that is still being worked on.
+ */
+export function assignApplicationOrdinals(ordinals, items) {
+  const live = Array.isArray(items) ? items.filter(Boolean) : [];
+  const liveJobIds = new Set(live.map(item => item.jobId));
+  // Release first, so a number freed by a finished bundle is available to a
+  // new one arriving in the very same pass.
+  for (const jobId of [...ordinals.keys()]) {
+    if (!liveJobIds.has(jobId)) ordinals.delete(jobId);
+  }
+  for (const item of live) {
+    if (ordinals.has(item.jobId)) continue;
+    // Recomputed per item, not hoisted: two bundles can arrive in one pass and
+    // the second must see the number the first just took.
+    const taken = new Set(ordinals.values());
+    let next = 1;
+    while (taken.has(next)) next += 1;
+    ordinals.set(item.jobId, next);
+  }
+  return [...live].sort((a, b) => (ordinals.get(a.jobId) || 0) - (ordinals.get(b.jobId) || 0));
+}
+
+/**
  * The dock's single ordered queue.
  *
  * Push handoffs lead: they belong to a job run that is blocked until they are

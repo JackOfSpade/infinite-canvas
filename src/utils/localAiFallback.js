@@ -161,3 +161,25 @@ export function selectOrphanedLocalAiJobs(discoveredJobs, knownJobIds) {
     return true;
   });
 }
+
+// ── Saved-bundle Finder/Explorer reveal ─────────────────────────────────────
+// Both drivers can be the one that turns a job terminal 'saved': the mounted
+// card when it runs its own import+save, or this manager when the card was
+// hidden. Whichever one performed THAT save is the only one that should ask
+// the main process to open its output folder, and only once per job — a
+// later status re-observation of the same terminal 'saved' patch (a poll
+// tick, an ownership handover adopting the manager's write) must not reopen
+// it. `revealedRef` is a Set the caller owns so this stays scoped to one
+// component/hook instance instead of leaking a module-level record across
+// unrelated cards. The main process re-derives the exact directory from its
+// own durable receipt for this jobId — this call never sends it a path.
+export function revealSavedLocalApplicationOutputOnce({ jobId, canvasFilePath, revealedRef, api, onError } = {}) {
+  const electronApi = api || (typeof window !== 'undefined' ? window.electronAPI : null);
+  if (!jobId || !revealedRef || revealedRef.has(jobId) || !electronApi?.openLocalApplicationOutput) return;
+  revealedRef.add(jobId);
+  electronApi.openLocalApplicationOutput({ jobId, canvasFilePath })
+    .then((result) => {
+      if (!result?.opened && !result?.skipped) onError?.(result?.error || 'Could not open the saved application folder.');
+    })
+    .catch((error) => onError?.(error?.message || String(error)));
+}

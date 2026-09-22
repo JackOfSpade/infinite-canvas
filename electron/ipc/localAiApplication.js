@@ -3340,9 +3340,20 @@ async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
 }
 
 async function writeLocalAiTerminalReceipt({
-  canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount,
+  canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount, outputDir,
 }) {
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
+  // The private job folder is deleted right after this receipt is written, so
+  // this is the ONLY durable, app-authored record of where the bundle landed.
+  // A later "reveal saved folder" request resolves through this field instead
+  // of trusting a path the renderer supplies — validate it here, once, while
+  // the caller is still the save transaction that just finished writing those
+  // exact files, rather than re-deriving trust from anything sent later.
+  const resolvedCanvasRoot = path.resolve(canvasRoot);
+  const resolvedOutputDir = outputDir ? path.resolve(String(outputDir)) : '';
+  if (!resolvedOutputDir || !isWithinDirectory(resolvedCanvasRoot, resolvedOutputDir) || resolvedOutputDir === resolvedCanvasRoot) {
+    throw new Error('Local AI terminal receipt requires a saved output directory inside the canvas folder.');
+  }
   const receipt = {
     version: 1,
     jobId,
@@ -3353,6 +3364,7 @@ async function writeLocalAiTerminalReceipt({
     status: 'imported',
     resultSha256: contentHash(resultRaw),
     importedAt: new Date().toISOString(),
+    outputDir: resolvedOutputDir,
     resume: {
       pageCount: Number.isFinite(resumeFit?.pageCount) ? resumeFit.pageCount : null,
       targetPageCount: Number.isFinite(targetPageCount) ? targetPageCount : null,
@@ -3535,6 +3547,36 @@ async function assertRealJobDirectory(jobId, canvasFilePath) {
     throw new Error('Local AI job directory is not trusted.');
   }
   return { root: realRoot, dir: realDir, ...canvas };
+}
+
+// A successful bundle save deletes the private job folder above, so reaching
+// the SAVED OUTPUT afterward cannot resolve through assertRealJobDirectory.
+// It must also never accept a path the renderer supplies — that would let a
+// compromised or buggy renderer ask this process to open any folder on disk.
+// Instead it re-derives the exact directory from the terminal receipt this
+// app itself wrote at save time (see writeLocalAiTerminalReceipt), the same
+// durable, app-authored record the status poll already uses to report
+// 'saved' after the job folder is gone, and revalidates it against the
+// canvas root before ever handing it to shell.openPath.
+async function assertRealSavedApplicationOutputDirectory(jobId, canvasFilePath) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  const receipt = await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, jobId);
+  if (!receipt || typeof receipt.outputDir !== 'string' || !receipt.outputDir) {
+    throw new Error('No saved application bundle is recorded for this job.');
+  }
+  const resolvedRoot = path.resolve(canvas.canvasRoot);
+  const resolvedDir = path.resolve(receipt.outputDir);
+  if (!isWithinDirectory(resolvedRoot, resolvedDir) || resolvedDir === resolvedRoot) {
+    throw new Error('Saved application bundle path escaped the canvas folder.');
+  }
+  const [realRoot, realDir] = await Promise.all([
+    fs.promises.realpath(resolvedRoot),
+    fs.promises.realpath(resolvedDir),
+  ]);
+  if (realRoot !== resolvedRoot || !isWithinDirectory(realRoot, realDir) || realDir === realRoot) {
+    throw new Error('Saved application bundle directory is not trusted.');
+  }
+  return { dir: realDir, ...canvas };
 }
 
 export function resolveLocalOutputBundleRoot(value, projectRoot) {
@@ -7892,7 +7934,12 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       await assertLocalAiResultHashCurrent(root, dir, resultSha256);
     },
     onBeforeDiscard: () => retireLocalAiJobForCleanup(root, dir, resultSha256),
-    onSuccessfulSave: async () => {
+    // save-application calls this with { dir, manifest } — `dir` there is the
+    // FINAL saved output bundle directory (Applied Jobs/<company>/<location>/
+    // <role>), not this job's private folder. Bind the parameter to its own
+    // name so it never shadows the outer job-folder `dir` the hash guards
+    // below still read.
+    onSuccessfulSave: async ({ dir: savedOutputDir } = {}) => {
       await assertLocalAiResultHashCurrent(root, dir, resultSha256);
       await writeLocalAiTerminalReceipt({
         canvasRoot: canvas.canvasRoot,
@@ -7901,6 +7948,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         resultRaw,
         resumeFit,
         coverLetterFit, targetPageCount,
+        outputDir: savedOutputDir,
       });
       // If new bytes landed during receipt publication, retain the job. The
       // old receipt remains valid only for the old hash and status will ignore
@@ -8045,6 +8093,16 @@ export function registerLocalAiApplicationHandlers() {
   handleSafe('open-local-application-folder', async (_event, { jobId, canvasFilePath } = {}) => {
     if (isBackgroundE2E()) return { opened: false, error: null, skipped: true };
     const { dir } = await assertRealJobDirectory(jobId, canvasFilePath);
+    const error = await shell.openPath(dir);
+    return { opened: !error, error: error || null };
+  });
+  // The folder above is gone once a bundle saves. Reaching the SAVED OUTPUT
+  // afterward — an automatic reveal-once from either driver, or a person
+  // pressing a reveal action on a 'saved' card — must resolve its own path
+  // from durable evidence, never from a path the renderer supplies.
+  handleSafe('open-local-application-output', async (_event, { jobId, canvasFilePath } = {}) => {
+    if (isBackgroundE2E()) return { opened: false, error: null, skipped: true };
+    const { dir } = await assertRealSavedApplicationOutputDirectory(jobId, canvasFilePath);
     const error = await shell.openPath(dir);
     return { opened: !error, error: error || null };
   });

@@ -6,6 +6,7 @@ import {
   brokenLocalAiJobDriveState,
   LOCAL_AI_STATUS_ERROR_STREAK_LIMIT,
   isJobCardMounted,
+  revealSavedLocalApplicationOutputOnce,
   selectFallbackLocalAiJobs,
   selectOrphanedLocalAiJobs,
 } from '../utils/localAiFallback';
@@ -52,6 +53,10 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
   // terminal 'failed'. driveJob re-asserts from this map until the write
   // sticks or the card is gone.
   const savedTerminalRef = useRef(new Map());
+  // jobId → already asked main to open this saved bundle's output folder.
+  // driveJob re-asserts the terminal 'saved' patch above every tick until it
+  // sticks, which would otherwise ask again on every retry of that write.
+  const revealedOutputRef = useRef(new Set());
   // Throttle re-offers after a user closes the persistent action or another
   // toast evicts it. The notice remains recoverable this session without
   // flashing back into view every 2.5-second status tick.
@@ -270,9 +275,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           jobTitle: isOrphan ? local.job?.title : liveNode.data?.title,
           location: isOrphan ? local.job?.location : liveNode.data?.location,
           canvasFilePath: saveCanvasFilePath,
-          // An automatic recovery must not steal focus from the work the user
-          // is doing merely because its deleted card's handoff completed.
-          suppressReveal: isOrphan,
+          // This manager owns its own explicit, once-guarded reveal below (via
+          // the durable-record-resolving open-local-application-output IPC)
+          // for a card that still exists, so the generic save path must never
+          // also open Finder/Explorer for the same completed save. A truly
+          // orphaned recovery (no card left to look at it) still gets no
+          // reveal at all — an automatic recovery must not steal focus from
+          // the work the user is doing merely because its deleted card's
+          // handoff completed.
+          suppressReveal: true,
         });
         if (!saved?.success || !saved.saved) {
           const saveError = new Error(saved?.error || 'Could not save the imported application.');
@@ -280,8 +291,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           throw saveError;
         }
         if (!isCurrentQuitGeneration(generation)) return;
+        if (!isOrphan) {
+          revealSavedLocalApplicationOutputOnce({
+            jobId, canvasFilePath: saveCanvasFilePath, revealedRef: revealedOutputRef.current,
+            onError: (error) => EventLogger.log(`[LocalAI] could not open saved bundle folder job=${jobId}: ${error}`),
+          });
+        }
         const savedPatch = {
           status: 'saved',
+          savedDir: saved.dir,
           message: missingArtifacts.length
             ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
             : resumeOverflow
@@ -406,7 +424,14 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         if (next.status !== 'completed') {
           settlingRef.current.delete(jobId);
-          writeDriveState({ ...next });
+          // A restart can resume this poll on a job that reads 'saved' only
+          // from its terminal receipt (the private folder is already gone).
+          // That receipt carries the same durable output directory a live
+          // save response does — carry it into card state too, or the
+          // reveal-after-the-fact button never appears for a bundle this
+          // manager never actually witnessed being saved.
+          const receiptOutputDir = next.status === 'saved' ? next.receipt?.outputDir : null;
+          writeDriveState({ ...next, ...(receiptOutputDir ? { savedDir: receiptOutputDir } : {}) });
           return;
         }
         const resultSha256 = String(next.resultSha256 || '');

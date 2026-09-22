@@ -145,9 +145,13 @@ export default [
         && dialogSource.includes('Cancel task stops the owning job operation.')
         && dialogSource.includes("request.itemCount === 1 ? 'item' : 'items'")
         && dialogSource.includes('const count = Number.isFinite(request.itemCount)')
-        && dialogSource.includes('const selectorLabel = Number.isFinite(request.batch)')
-        && dialogSource.includes('? String(request.batch)')
-        && dialogSource.includes(': String(index + 1);')
+        && dialogSource.includes('const selectorLabel = applicationOrdinal')
+        && dialogSource.includes('Number.isFinite(request.batch) ? String(request.batch)')
+        // Chips stay plain numbers. Scoring keeps its batch number; an
+        // application bundle keeps a stable per-bundle ordinal so ten parallel
+        // chats cannot be renumbered underneath the person working through them.
+        && dialogSource.includes('String(index + 1)')
+        && dialogSource.includes('applicationOrdinalsRef')
         && dialogSource.includes('grid grid-cols-5 gap-1 sm:grid-cols-10')
         && !dialogSource.includes('overflow-x-auto custom-scrollbar')
         && selectorSource.includes('const selectorDescription =')

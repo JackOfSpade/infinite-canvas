@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy,
 import { ConfirmDialog } from './ConfirmDialog';
 import { EventLogger } from '../utils/EventLogger';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
-import { applicationRequestId, applicationStageLabel, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
+import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
 // A failed submit result may carry the job-integrity code: the job's own
 // frozen state failed, not the pasted response, and no further paste can
 // answer that. See applicationHandoffDock.js's doc comment for the shared
@@ -205,10 +205,6 @@ export function NonApiAiDialog() {
   // settle/replay effect below never has to reason about a second kind.
   const [applicationItems, setApplicationItems] = useState([]);
   const [discardingRequestIds, setDiscardingRequestIds] = useState(() => new Set());
-  // Which application items are currently showing their full stage prompt
-  // instead of the (default) correction prompt. Absence means "corrections",
-  // matching ApplicationPasteDialog's showFullPrompt default.
-  const [showFullPromptRequestIds, setShowFullPromptRequestIds] = useState(() => new Set());
   // A job-integrity failure takes no further paste; keyed by requestId so one
   // broken bundle does not affect any other item in the queue.
   const [brokenApplicationMessages, setBrokenApplicationMessages] = useState({});
@@ -223,6 +219,14 @@ export function NonApiAiDialog() {
   const activeRequestIdRef = useRef(null);
   const requestsRef = useRef([]);
   const applicationItemsRef = useRef([]);
+  // jobId -> the number shown on its chip. Assigned ONCE, when a bundle first
+  // appears, and never recomputed: these chips are how someone keeps ten
+  // parallel chats straight, so a bundle that was "3" has to stay "3" for its
+  // whole life. Position cannot supply that — a scoring handoff arriving, or
+  // any earlier bundle finishing, would renumber everything underneath them.
+  // A finished bundle releases its number for the next NEW bundle to reuse,
+  // which keeps the strip dense without ever renumbering a live one.
+  const applicationOrdinalsRef = useRef(new Map());
   // Per-requestId debounce state for application draft saves, mirroring
   // ApplicationPasteDialog's draftTimerRef/pendingDraftRef but keyed because
   // several application items can be mid-edit across the dock's lifetime.
@@ -278,9 +282,13 @@ export function NonApiAiDialog() {
   const activeApplicationCorrections = isApplicationRequest ? (activeRequest.corrections || []) : [];
   // Mirrors ApplicationPasteDialog: a correction round opens on the delta the
   // person asked for, with a toggle to the full stage prompt for a fresh chat.
+  // A correction round shows ONE prompt: the correction. The full stage prompt
+  // existed only to start the answer over in a FRESH chat, which is not how
+  // this is used — the correction is written for the chat that already holds
+  // the stage context, and offering both made the person choose between two
+  // things that look interchangeable and are not.
   const showingApplicationCorrection = isApplicationRequest
-    && activeApplicationCorrections.length > 0
-    && !(activeRequestId && showFullPromptRequestIds.has(activeRequestId));
+    && activeApplicationCorrections.length > 0;
   const activeApplicationPrompt = isApplicationRequest
     ? (showingApplicationCorrection ? (activeRequest.correctionPrompt || '') : (activeRequest.prompt || ''))
     : '';
@@ -307,7 +315,15 @@ export function NonApiAiDialog() {
     }
   }
   const responseCrossPasteBlocked = Boolean(draftMismatchError) || Boolean(applicationCrossPasteError);
-  const effectiveError = [...new Set([draftMismatchError, applicationCrossPasteError, activeValidationDetails].filter(Boolean))].join('\n');
+  // An application rejection already states itself twice over: the header line
+  // says the previous answer did not validate, and the correction prompt the
+  // person is about to copy carries every fix verbatim. Repeating the
+  // validator's own text in a red box below only crowded the paste area off
+  // screen. A cross-paste block is different — it stops a submit, and nothing
+  // else says why — so that one still shows.
+  const effectiveError = isApplicationRequest
+    ? applicationCrossPasteError
+    : [...new Set([draftMismatchError, activeValidationDetails].filter(Boolean))].join('\n');
   const isSubmitting = activeRequestId ? submittingRequestIds.has(activeRequestId) : false;
   const isSteppingBack = activeRequestId ? steppingBackRequestIds.has(activeRequestId) : false;
   const isCancelling = activeRequestId ? cancellingRequestIds.has(activeRequestId) : false;
@@ -546,12 +562,6 @@ export function NonApiAiDialog() {
           next.delete(requestId);
           return next;
         });
-        setShowFullPromptRequestIds(previous => {
-          if (!previous.has(requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(requestId);
-          return next;
-        });
         setBrokenApplicationMessages(previous => {
           if (!(requestId in previous)) return previous;
           const { [requestId]: _cleared, ...remaining } = previous;
@@ -586,18 +596,17 @@ export function NonApiAiDialog() {
           // the textarea was disabled behind "Accepted" while that settled,
           // so nothing of the person's can be sitting in it.
           if (codeChanged) return { ...previous, [item.requestId]: restored };
-          // Same code, new corrections: an ordinary rejection. submit() clears
-          // isSubmitting in its finally, which re-enables the textarea
-          // IMMEDIATELY, while this refresh is still round-tripping through
-          // getLocalApplicationHandoff — so the person is invited to start
-          // retyping before discovery answers. `initialResponse` is the draft
-          // ON DISK, which is still the rejected text (the draft write is
-          // debounced). Overwriting here would silently replace a correction
-          // mid-keystroke, so only adopt the stored draft when this dock has
-          // nothing of the person's to lose. The push path guards the same
-          // way a few lines above.
-          const untouched = current === undefined || (prior && current === (prior.initialResponse || ''));
-          return untouched ? { ...previous, [item.requestId]: restored } : previous;
+          // Same code, new corrections: an ordinary rejection, where submit()
+          // has already emptied the box on purpose. Never restore a draft
+          // here. `initialResponse` is whatever is ON DISK, and the durable
+          // clear that follows a rejection is asynchronous — so a refresh
+          // that lands first would put the just-rejected text straight back
+          // into a box the person watched empty. submit() clears
+          // isSubmitting in its finally, re-enabling the textarea
+          // IMMEDIATELY, so they may also already be typing the replacement;
+          // either way this dock's copy is the authority for a correction
+          // round and discovery has nothing to add to it.
+          return previous;
         });
       }
 
@@ -660,7 +669,12 @@ export function NonApiAiDialog() {
         EventLogger.log('[Manual AI] application bundle focused in the handoff dock');
       }
 
-      setApplicationItems(items);
+      // Render in ordinal order, not discovery order: the underlying node
+      // enumeration is free to change between passes, and the chips must not
+      // move under someone mid-paste.
+      const ordered = assignApplicationOrdinals(applicationOrdinalsRef.current, items);
+      applicationItemsRef.current = ordered;
+      setApplicationItems(ordered);
     });
   }, []);
 
@@ -816,9 +830,23 @@ export function NonApiAiDialog() {
             stringifyValidationError(result?.error) ||
             'That response could not be validated. Adjust it and try again.';
           setErrors(previous => ({ ...previous, [requestId]: detail }));
-          // The pasted text stays exactly as the person left it; the next
-          // discovery read supplies whatever corrections and revised prompt
-          // the durable stage machine issued for it.
+          // Clear the box the moment the answer is rejected. What is in it is
+          // the text the app just refused, and the correction asks for the
+          // COMPLETE regenerated answer — so every character of it has to go
+          // anyway. Leaving it there invited pasting on top of a 3,800-character
+          // block that has to be selected away first, and made a fresh paste
+          // look appended rather than replacing.
+          setDrafts(previous => (previous[requestId] === '' ? previous : { ...previous, [requestId]: '' }));
+          // The durable draft is cleared too, so reopening this bundle later
+          // does not restore the rejected text the dock just discarded.
+          flushApplicationDraftSave(requestId);
+          if (window.electronAPI?.updateLocalApplicationDraft) {
+            trackApplicationDraftWrite(window.electronAPI.updateLocalApplicationDraft({
+              jobId, canvasFilePath: activeRequest.canvasFilePath, handoffCode: activeRequest.handoffCode, draft: '',
+            })).catch(() => {});
+          }
+          // The next discovery read supplies whatever corrections and revised
+          // prompt the durable stage machine issued for this rejection.
           requestApplicationHandoffRefresh(jobId);
           return;
         }
@@ -1060,14 +1088,6 @@ export function NonApiAiDialog() {
     }
   }, []);
 
-  const toggleApplicationPromptView = useCallback(() => {
-    if (!activeRequestId) return;
-    setShowFullPromptRequestIds(previous => {
-      const next = new Set(previous);
-      if (next.has(activeRequestId)) next.delete(activeRequestId); else next.add(activeRequestId);
-      return next;
-    });
-  }, [activeRequestId]);
 
   // Mirrors ApplicationPasteDialog's broken-job "Close": there is no further
   // action this dock can take on a job-integrity failure, so this only stops
@@ -1205,13 +1225,18 @@ export function NonApiAiDialog() {
                   // A full handoff code is already shown in the prompt header.
                   // These controls only select a queued prompt, so one batch
                   // number per button keeps ten concurrent prompts visible.
-                  const selectorLabel = Number.isFinite(request.batch)
-                    ? String(request.batch)
-                    : String(index + 1);
+                  const applicationOrdinal = request.kind === 'application'
+                    ? applicationOrdinalsRef.current.get(request.jobId)
+                    : null;
+                  const selectorLabel = applicationOrdinal
+                    ? String(applicationOrdinal)
+                    : Number.isFinite(request.batch) ? String(request.batch) : String(index + 1);
                   const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
-                  const label = Number.isFinite(request.batch)
-                    ? `Batch ${request.batch}${count}`
-                    : `Prompt ${index + 1}${count}`;
+                  const label = applicationOrdinal
+                    ? `Application ${applicationOrdinal}`
+                    : Number.isFinite(request.batch)
+                      ? `Batch ${request.batch}${count}`
+                      : `Prompt ${index + 1}${count}`;
                   const ownerBadge = multipleHubQueue ? ownerBadgeForNode(request.nodeId) : null;
                   const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;
                   const statusLabel = [
@@ -1325,15 +1350,6 @@ export function NonApiAiDialog() {
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    {isApplicationRequest && activeApplicationCorrections.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={toggleApplicationPromptView}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-                      >
-                        {showingApplicationCorrection ? 'Show full prompt' : 'Show corrections'}
-                      </button>
-                    )}
                     <button
                       type="button"
                       onClick={copyPrompt}
@@ -1344,14 +1360,6 @@ export function NonApiAiDialog() {
                     </button>
                   </div>
                 </div>
-                {isApplicationRequest && activeApplicationCorrections.length > 0 && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100/90">
-                    <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-                    <span>{showingApplicationCorrection
-                      ? 'This is no longer the original prompt. It asks the same chat to fix what the app rejected and to return the complete corrected JSON. Paste it into that same chat. Starting a fresh chat instead? Show the full prompt.'
-                      : 'Showing the full stage prompt for a fresh chat. To answer in the chat that produced the rejected response, show the corrections instead.'}</span>
-                  </div>
-                )}
                 <textarea
                   id="non-api-ai-prompt"
                   readOnly
