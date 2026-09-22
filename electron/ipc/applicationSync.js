@@ -1008,7 +1008,14 @@ async function syncWorkspace(payload) {
         status: 'completed', phase: 'completed', finishedAt: Date.now(), manifest,
       });
       logger.info(`[ApplicationSync] Synced ${documentKind} and verified destination revision in ${workspace.workspaceDir}`);
-      return { document: documentKind, pdfPath };
+      return {
+        document: documentKind,
+        pdfPath,
+        // The browser binds its autosave to this saved panel revision. Returning
+        // it prevents an older same-generation draft from masking the exact
+        // HTML/PDF pair this transaction just verified.
+        htmlSha256: applicationPanelSha256(mergedHtml, documentKind),
+      };
     });
   } catch (error) {
     updateSyncAttempt(attemptId, {

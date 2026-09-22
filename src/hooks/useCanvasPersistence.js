@@ -6,6 +6,39 @@ import { TIMINGS } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
 import { textDocumentSessions } from '../utils/textDocumentSessions';
+import { flushApplicationDraftWrites } from '../utils/applicationHandoffDock';
+import { JOB_TREE_LAYOUT_RESTORE_KEY } from '../nodes/jobsearch/buildJobTree';
+
+// Mark every restored job card (including cards inside a nested canvas) without
+// changing the persisted workspace shape. The marker is stripped by
+// sanitizeNodesForSave; while it is present, JobCardNode ignores the initial
+// ResizeObserver reflow that would otherwise overwrite saved manual positions.
+function markRestoredJobTreeLayouts(nodes, restoreToken) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map((node) => {
+    let next = node;
+    if (node.type === 'jobcard' && node.data?.hubId) {
+      changed = true;
+      next = {
+        ...next,
+        data: { ...next.data, [JOB_TREE_LAYOUT_RESTORE_KEY]: restoreToken },
+      };
+    }
+    if (next.type === 'group' && Array.isArray(next.data?.canvasData?.nodes)) {
+      const inner = markRestoredJobTreeLayouts(next.data.canvasData.nodes, restoreToken);
+      if (inner !== next.data.canvasData.nodes) {
+        changed = true;
+        next = {
+          ...next,
+          data: { ...next.data, canvasData: { ...next.data.canvasData, nodes: inner } },
+        };
+      }
+    }
+    return next;
+  });
+  return changed ? out : nodes;
+}
 
 
 /**
@@ -44,6 +77,7 @@ export function useCanvasPersistence({
   const saveStateTimerRef = useRef(null);
   const loadTimerRef = useRef(null);
   const loadHideTimerRef = useRef(null);
+  const jobTreeRestoreTokenRef = useRef(0);
   const contentRevisionRef = useRef(0);
   const loadRequestRef = useRef(0);
   // Shared with the autosave hook. A close-time/manual save waits for the
@@ -261,7 +295,13 @@ export function useCanvasPersistence({
         // outstanding draft invokes and main's disk barrier before answering the
         // close handshake, otherwise the last edit can trail window destruction.
         try {
-          await window.electronAPI?.flushNonApiAiPersistence?.();
+          // Both halves of the dock: preload's outstanding push-draft invokes
+          // and main's disk barrier, then the application bundles' debounced
+          // draft timers, which exist only in this renderer until they fire.
+          await Promise.allSettled([
+            window.electronAPI?.flushNonApiAiPersistence?.(),
+            flushApplicationDraftWrites(),
+          ]);
         } catch {
           // Main performs the same barrier before destruction; keep the standard
           // close handshake available if this renderer-side optimization fails.
@@ -455,6 +495,13 @@ export function useCanvasPersistence({
         // re-sanitize it. Running the same sanitizer used on save makes load
         // idempotent for clean files and self-healing for stale ones.
         const sanitizedNodes = sanitizeNodesForSave(relocatedNodes);
+        // Preserve the user's saved arrangement while React Flow hydrates an
+        // already-expanded job-results hierarchy. A hierarchy click clears this
+        // renderer-only marker and returns to the usual automatic layout.
+        const restoredNodes = markRestoredJobTreeLayouts(
+          sanitizedNodes,
+          ++jobTreeRestoreTokenRef.current,
+        );
         // Strip orphan edges on load too — files saved before the save-time
         // orphan filter existed can carry hundreds of orphans (refs to
         // long-deleted hub trees) that render as ghost connections in the
@@ -464,10 +511,10 @@ export function useCanvasPersistence({
         // when the pipeline is actively updating hub state). Pass the
         // sanitized nodes so edges to any dropped ephemeral are pruned too.
         const inputEdges = Array.isArray(res.data.edges) ? res.data.edges : [];
-        const cleanEdges = sanitizeEdgesForSave(inputEdges, sanitizedNodes);
+        const cleanEdges = sanitizeEdgesForSave(inputEdges, restoredNodes);
         const loadedDrawings = Array.isArray(res.data.drawings) ? res.data.drawings : [];
-        const loadedFingerprint = persistenceContentFingerprint({ nodes: sanitizedNodes, edges: cleanEdges, drawings: loadedDrawings });
-        setNodes(sanitizedNodes);
+        const loadedFingerprint = persistenceContentFingerprint({ nodes: restoredNodes, edges: cleanEdges, drawings: loadedDrawings });
+        setNodes(restoredNodes);
         setEdges(cleanEdges);
         setDrawings(loadedDrawings);
         currentFileRef.current = res.filePath;
@@ -502,7 +549,7 @@ export function useCanvasPersistence({
               setLoading(0.92, fitDuration > 0 ? 'Fitting workspace...' : 'Framing workspace...');
               customFitView({ duration: fitDuration, reason: isSilent ? 'initial-load' : 'manual-load' });
               setLoading(1, 'Ready');
-              EventLogger.log(`canvas load ready nodes=${sanitizedNodes.length} edges=${cleanEdges.length} fitDuration=${fitDuration}ms elapsed=${Math.round(performance.now() - startedAt)}ms`);
+              EventLogger.log(`canvas load ready nodes=${restoredNodes.length} edges=${cleanEdges.length} fitDuration=${fitDuration}ms elapsed=${Math.round(performance.now() - startedAt)}ms`);
               finishLoading(fitDuration > 0 ? Math.min(fitDuration, 500) : 120);
             });
           });

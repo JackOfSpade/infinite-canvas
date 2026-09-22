@@ -18,6 +18,9 @@ import job_search_queries from './tests/job-search-queries.js';
 import electron_regressions from './tests/electron-regressions.js';
 import renderer_content_security from './tests/renderer-content-security.js';
 import local_ai_application from './tests/local-ai-application.js';
+import paste_application_assembly from './tests/paste-application-assembly.js';
+import paste_application_flow from './tests/paste-application-flow.js';
+import paste_application_fit_save from './tests/paste-application-fit-save.js';
 import local_ai_deletion from './tests/local-ai-deletion.js';
 import login_url_markers from './tests/login-url-markers.js';
 import compensation_assessment from './tests/compensation-assessment.js';
@@ -40,6 +43,7 @@ import packaging_integrity from './tests/packaging-integrity.js';
 import solve_ipc_failure from './tests/solve-ipc-failure.js';
 import nested_canvas_absorption from './tests/nested-canvas-absorption.js';
 import job_role_lock_regressions from './tests/job-role-lock-regressions.js';
+import application_handoff_dock from './tests/application-handoff-dock.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -63,6 +67,9 @@ const testGroups = [
   ['electron-regressions.js', electron_regressions],
   ['renderer-content-security.js', renderer_content_security],
   ['local-ai-application.js', local_ai_application],
+  ['paste-application-assembly.js', paste_application_assembly],
+  ['paste-application-flow.js', paste_application_flow],
+  ['paste-application-fit-save.js', paste_application_fit_save],
   ['local-ai-deletion.js', local_ai_deletion],
   ['login-url-markers.js', login_url_markers],
   ['compensation-assessment.js', compensation_assessment],
@@ -85,6 +92,7 @@ const testGroups = [
   ['solve-ipc-failure.js', solve_ipc_failure],
   ['nested-canvas-absorption.js', nested_canvas_absorption],
   ['job-role-lock-regressions.js', job_role_lock_regressions],
+  ['application-handoff-dock.js', application_handoff_dock],
 ];
 
 function validateTestRegistry(groups) {

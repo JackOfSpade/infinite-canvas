@@ -96,6 +96,18 @@ assert(/repeat the precise noun phrase/i.test(rule6),
   'Rule 6 prescribes repeating the precise noun phrase when antecedents are ambiguous',
   'no noun-phrase-repetition repair found');
 
+console.log('\nRule 6 — prior-employer continuity');
+assert(/Prior-employer reference/i.test(rule6),
+  'Rule 6 gives prior-employer references their own continuity guidance',
+  'no prior-employer continuity guidance found');
+assert(/Within the same paragraph, let the candidate continue naturally/i.test(rule6)
+  && /At a new paragraph, use a short cue such as/i.test(rule6),
+  'Rule 6 distinguishes natural same-paragraph continuation from an optional new-paragraph cue',
+  'paragraph-boundary employer-reference guidance is missing');
+assert(/Repeat the employer name when multiple\s+employers or roles could otherwise be the antecedent/i.test(rule6),
+  'Rule 6 preserves full employer names when ambiguity requires them',
+  'employer-reference ambiguity repair is missing');
+
 console.log('\nRule 6 — repairs, and what is not a repair');
 assert(/[Rr]ewrite it as a concrete, evidence-scoped conclusion/.test(rule6),
   'Rule 6 offers the evidence-scoped rewrite as repair 1', 'rewrite repair missing');
@@ -145,6 +157,9 @@ assert(/most of my work\|throughout my career/.test(skill),
 assert(/plausible\s+antecedent/i.test(skill),
   'SKILL.md gate step names the one-antecedent check',
   'no antecedent check in the pipeline gate');
+assert(/Do not repeat a prior employer’s full name merely from\s+habit/i.test(skill),
+  'SKILL.md avoids mechanical prior-employer repetition',
+  'no prior-employer repetition guidance in the pipeline');
 assert(/never by\s+inserting a filler transition/i.test(skill),
   'SKILL.md forbids the filler-transition non-repair',
   'no filler-transition prohibition in SKILL.md');
@@ -161,6 +176,9 @@ assert(/Five prose failures/i.test(readme),
 assert(/exactly one plausible antecedent/i.test(readme),
   'readme.md states the one-antecedent rule for paragraph transitions',
   'no antecedent rule in readme.md');
+assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme),
+  'readme.md documents natural prior-employer reference',
+  'no natural prior-employer reference guidance in readme.md');
 assert(/repeat the\s+precise noun phrase instead/i.test(readme) &&
   /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme),
   'readme.md defines the explicit-transition repair without prescribing copy',

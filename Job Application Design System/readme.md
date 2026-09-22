@@ -276,8 +276,13 @@ State why a new employer, project, or period belongs before its details. Do not
 use “now,” “still,” or a similar temporal contrast without stating the other
 side of the contrast.
 Prefer ordinary contemporary wording (“closed the gap,” not “answered the
-gap”), and name a prior employer once before using the role, system, or “there”
-when the reference is clear. Narrow evidence-derived connective language is
+gap”). Do not repeat a prior employer’s full name merely from habit. Within a
+paragraph, continue naturally with “I” when the candidate remains the subject.
+At a new paragraph, use “In that role” when it helps identify the continued
+role, and omit it when the continuation is already clear; repeat the proper
+name when multiple employers or roles could be its antecedent. Do not use bare
+“there” when a platform, place, or multiple employers could be its antecedent.
+Narrow evidence-derived connective language is
 part of good synthesis; invented candidate facts are not.
 
 ### Tone

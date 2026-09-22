@@ -1759,7 +1759,7 @@ ${editableRuntimeSanitizerSource()}
   // meaningful against the revision they were typed over, so each autosave slot
   // is stamped with the fingerprint the GENERATOR computed for the markup this
   // file shipped with. Regenerating the application changes that fingerprint and
-  // the superseded copy is dropped rather than replayed over fresh content — the
+  // the superseded copy is preserved for recovery rather than replayed over fresh content — the
   // failure mode being an old draft silently masking (and, through Sync,
   // overwriting) a newer document the generator had just written to disk.
   // Stamped at generation rather than hashed here so the value is a property of
@@ -1769,26 +1769,32 @@ ${editableRuntimeSanitizerSource()}
   // Sync deliberately does NOT recompute these. It merges the edited main back
   // into the file, so afterwards the stamp describes markup the file no longer
   // has — that looks like a bug and is not one. The stamp identifies the
-  // GENERATION, not the current bytes. Recomputing it on Sync would strand every
-  // edit typed after that Sync: those autosave under the old stamp, and the next
-  // load would move them to :superseded, which nothing can read. That is the
-  // exact data loss this guard exists to prevent.
+  // GENERATION, not the current bytes. The paired panel-revision hash records
+  // the last saved HTML/PDF revision without changing this generation stamp.
   var RESUME_MARKUP_FINGERPRINT = ${jsStringLiteral(resumeFingerprint)};
   var COVER_MARKUP_FINGERPRINT = ${jsStringLiteral(coverFingerprint)};
   // A standalone cover letter's only main.page binds to main/resumeMain
   // below (there is no separate cover panel to route it through), so this
   // tracks what the DOCUMENT actually is rather than always assuming resume.
   var MAIN_SANITIZE_KIND = ${jsStringLiteral(standaloneSanitizeKind)};
-  function icReadAutosave(key, fingerprint) {
+  function icReadAutosave(key, fingerprint, baseHtmlSha256) {
     if (!fingerprint) return null;
     var saved = null;
     try { saved = localStorage.getItem(key); } catch (e) { return null; }
     if (!saved) return null;
     var stamped = null;
-    try { stamped = localStorage.getItem(key + ':fingerprint'); } catch (e) {}
-    if (stamped === fingerprint) return saved;
-    // Unstamped entries predate this guard and cannot be shown to match, so
-    // they are treated as superseded for the same reason a mismatch is.
+    var stampedBase = null;
+    try {
+      stamped = localStorage.getItem(key + ':fingerprint');
+      stampedBase = localStorage.getItem(key + ':base-html-sha256');
+    } catch (e) {}
+    // A generation stamp distinguishes regenerated source, while the saved
+    // panel revision distinguishes a later Sync or external PDF import within
+    // that same generation. Require the latter whenever this file embeds it.
+    if (stamped === fingerprint && (!baseHtmlSha256 || stampedBase === baseHtmlSha256)) return saved;
+    // Unstamped or pre-revision entries cannot be shown to match a file that
+    // carries a saved panel hash. Preserve them for recovery rather than
+    // replaying them over a newer on-disk document.
     // Superseded is not the same as worthless: this slot is only ever written by
     // a real edit, and an edit that was never Synced exists nowhere else. Move it
     // aside instead of deleting it so it stays recoverable. If the stash throws
@@ -1797,14 +1803,23 @@ ${editableRuntimeSanitizerSource()}
       localStorage.setItem(key + ':superseded', saved);
       localStorage.removeItem(key);
       localStorage.removeItem(key + ':fingerprint');
+      localStorage.removeItem(key + ':base-html-sha256');
     } catch (e) {}
     return null;
   }
-  function icWriteAutosave(key, markup, fingerprint) {
+  function icWriteAutosave(key, markup, fingerprint, baseHtmlSha256) {
     try {
       localStorage.setItem(key, markup);
       localStorage.setItem(key + ':fingerprint', fingerprint);
+      if (baseHtmlSha256) localStorage.setItem(key + ':base-html-sha256', baseHtmlSha256);
+      else localStorage.removeItem(key + ':base-html-sha256');
     } catch (e) {}
+  }
+  function icPanelRevisionSha256(kind) {
+    var value = BUNDLE_DATA && BUNDLE_DATA.sync && BUNDLE_DATA.sync.documents
+      && BUNDLE_DATA.sync.documents[kind] && BUNDLE_DATA.sync.documents[kind].htmlSha256;
+    value = String(value || '').toLowerCase();
+    return /^[a-f0-9]{64}$/.test(value) ? value : '';
   }
   function icQuarantineAutosave(kind) {
     var key = kind === 'cover' ? STORAGE_KEY + ':cover' : STORAGE_KEY;
@@ -1813,6 +1828,7 @@ ${editableRuntimeSanitizerSource()}
       if (saved) localStorage.setItem(key + ':superseded', saved);
       localStorage.removeItem(key);
       localStorage.removeItem(key + ':fingerprint');
+      localStorage.removeItem(key + ':base-html-sha256');
     } catch (e) {}
   }
   var trustedResumeDerivations = icTrustedDerivationMap(resumeMain);
@@ -2118,7 +2134,7 @@ ${editableRuntimeSanitizerSource()}
   // (and different applications generated from the same hub) never collide. ----
   if (main) {
     try {
-      var saved = icReadAutosave(STORAGE_KEY, RESUME_MARKUP_FINGERPRINT);
+      var saved = icReadAutosave(STORAGE_KEY, RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
       if (saved) {
         // Parse/sanitize in a detached template first. Assigning legacy rich
         // HTML directly to a connected main can fire an image/event payload
@@ -2136,7 +2152,7 @@ ${editableRuntimeSanitizerSource()}
         // The main variable follows the selected tab. Capture the stable résumé node so
         // switching to the cover tab during the debounce cannot save cover
         // markup into the résumé's storage slot.
-        icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT);
+        icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
       }, 500);
     }
     main.addEventListener('input', function () {
@@ -2147,7 +2163,7 @@ ${editableRuntimeSanitizerSource()}
   }
   if (coverMain) {
     try {
-      var savedCover = icReadAutosave(STORAGE_KEY + ':cover', COVER_MARKUP_FINGERPRINT);
+      var savedCover = icReadAutosave(STORAGE_KEY + ':cover', COVER_MARKUP_FINGERPRINT, icPanelRevisionSha256('cover'));
       if (savedCover) {
         coverMain.innerHTML = icSanitizeEditableMarkup(savedCover, 'cover');
         restoredAutosave.cover = true;
@@ -2162,7 +2178,7 @@ ${editableRuntimeSanitizerSource()}
     coverMain.addEventListener('input', function () {
       if (coverSaveTimer) clearTimeout(coverSaveTimer);
       coverSaveTimer = setTimeout(function () {
-        icWriteAutosave(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover'), COVER_MARKUP_FINGERPRINT);
+        icWriteAutosave(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover'), COVER_MARKUP_FINGERPRINT, icPanelRevisionSha256('cover'));
       }, 500);
       markPdfStale('cover');
       if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
@@ -2219,7 +2235,12 @@ ${editableRuntimeSanitizerSource()}
       stopEditing();
       persistBundleData();
       var documentToSync = activeDocument === 'cover' ? 'cover' : 'resume';
-      if (main) main.innerHTML = icSanitizeEditableMarkup(main.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
+      // The main variable follows the selected tab. Keep the selected panel node stable
+      // through the async request so switching tabs cannot stamp the other
+      // document into this document's autosave slot on success.
+      var syncPanel = main;
+      if (syncPanel) syncPanel.innerHTML = icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
+      var syncedPanelMarkup = syncPanel ? syncPanel.innerHTML : '';
       syncMessage = '';
       var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;
       syncInFlight = true;
@@ -2233,8 +2254,26 @@ ${editableRuntimeSanitizerSource()}
       }).then(function (response) {
         return response.json().catch(function () { return {}; }).then(function (body) {
           if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not sync this application.');
-          pdfStale[documentToSync] = false;
-          syncMessage = 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder.';
+          var syncedHtmlSha256 = String(body.htmlSha256 || '').toLowerCase();
+          if (!/^[a-f0-9]{64}$/.test(syncedHtmlSha256)) throw new Error('Infinite Canvas did not confirm the saved document revision.');
+          if (!BUNDLE_DATA.sync) BUNDLE_DATA.sync = {};
+          if (!BUNDLE_DATA.sync.documents) BUNDLE_DATA.sync.documents = {};
+          if (!BUNDLE_DATA.sync.documents[documentToSync]) BUNDLE_DATA.sync.documents[documentToSync] = {};
+          BUNDLE_DATA.sync.documents[documentToSync].htmlSha256 = syncedHtmlSha256;
+          var livePanelMarkup = syncPanel
+            ? icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null)
+            : syncedPanelMarkup;
+          var changedDuringSync = livePanelMarkup !== syncedPanelMarkup;
+          icWriteAutosave(
+            documentToSync === 'cover' ? STORAGE_KEY + ':cover' : STORAGE_KEY,
+            livePanelMarkup,
+            documentToSync === 'cover' ? COVER_MARKUP_FINGERPRINT : RESUME_MARKUP_FINGERPRINT,
+            syncedHtmlSha256,
+          );
+          pdfStale[documentToSync] = changedDuringSync;
+          syncMessage = changedDuringSync
+            ? 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder. Newer edits still need Sync.'
+            : 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder.';
           if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
         });
       }).catch(function (error) {

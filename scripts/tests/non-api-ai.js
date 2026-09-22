@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, ipcMain, materializeNonApiPrompt, NON_API_AI_TRANSPORT, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
+import { getRecentLogs, logger } from '../../electron/logger.js';
+import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../../src/utils/nonApiAiNavigation.js';
 
 // A handful of representative marketplace tasks used below to prove routing
 // and dispatch are task-agnostic now that every task shares the one manual
@@ -20,6 +22,32 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
 ];
 
 export default [
+  {
+    name: 'non-API AI: delayed next batch keeps focus ahead of an older correction',
+    run: () => {
+      const olderCorrection = { requestId: 'A', nodeId: 'node', runId: 'run', task: 'job-scoring', batch: 1 };
+      const completed = { requestId: 'B', nodeId: 'node', runId: 'run', task: 'job-scoring', batch: 2 };
+      const delayedNext = { requestId: 'C', nodeId: 'node', runId: 'run', task: 'job-scoring', batch: 3 };
+      const nextPhase = { requestId: 'D', nodeId: 'node', runId: 'run', task: 'job-taxonomy-plan', batch: 1 };
+      const unrelated = { requestId: 'X', nodeId: 'other-node', runId: 'other-run', task: 'job-scoring', batch: 1 };
+      const immediate = selectionAfterHandoffSettlement({ queue: [olderCorrection, completed, delayedNext], settledRequestId: 'B', activeRequestId: 'B', accepted: true });
+      const delayed = selectionAfterHandoffSettlement({ queue: [olderCorrection, completed], settledRequestId: 'B', activeRequestId: 'B', accepted: true });
+      const userSelection = selectionAfterHandoffSettlement({ queue: [olderCorrection, completed], settledRequestId: 'B', activeRequestId: 'A', accepted: true });
+      const mixedQueue = selectionAfterHandoffSettlement({ queue: [olderCorrection, completed, unrelated, delayedNext], settledRequestId: 'B', activeRequestId: 'B', accepted: true });
+      const delayedWithUnrelated = selectionAfterHandoffSettlement({ queue: [olderCorrection, completed, unrelated], settledRequestId: 'B', activeRequestId: 'B', accepted: true });
+      const preserved = successorPreferenceAfterSettlement({ existing: delayedWithUnrelated.awaitingSuccessor, selection: userSelection, settledRequestId: 'X', activeRequestId: 'X' });
+      assert(immediate.selectedRequestId === 'C' && immediate.awaitingSuccessor === null
+        && delayed.selectedRequestId === 'A' && isWorkflowSuccessor(delayed.awaitingSuccessor, delayedNext)
+        && isWorkflowSuccessor(delayed.awaitingSuccessor, nextPhase)
+        && !isWorkflowSuccessor(delayed.awaitingSuccessor, { ...delayedNext, batch: 2 })
+        && userSelection.selectedRequestId === 'A' && userSelection.awaitingSuccessor === null
+        && mixedQueue.selectedRequestId === 'C' && delayedWithUnrelated.selectedRequestId === 'X'
+        && isWorkflowSuccessor(delayedWithUnrelated.awaitingSuccessor, delayedNext)
+        && preserved === delayedWithUnrelated.awaitingSuccessor,
+      'an already-queued next batch is selected immediately, a delayed larger batch or next workflow phase becomes the intended successor, and unrelated queue activity cannot erase that continuation preference');
+      return { immediate: immediate.focus, delayed: delayed.focus };
+    },
+  },
   {
     name: 'non-API AI: every known task id routes to the single manual transport',
     run: () => {
@@ -60,8 +88,10 @@ export default [
       const present = banned.filter(token => lowered.includes(token));
       assert(present.length === 0,
         `llm.js must name no provider, credential, or removed routing helper; found: ${present.join(', ') || 'none'}`);
-      assert(llmSource.includes("import { NON_API_AI_TRANSPORT, requestNonApiAi } from './nonApiAi.js';"),
-        'llm.js imports only the manual handoff transport, never a provider SDK module');
+      assert(llmSource.includes("from './nonApiAi.js';")
+        && llmSource.includes('NON_API_AI_TRANSPORT')
+        && llmSource.includes('requestNonApiAi'),
+      'llm.js imports only manual-handoff helpers, never a provider SDK module');
       for (const fn of ['callLLMText', 'callLLMRaw', 'callLLMVision', 'callLLMDocument']) {
         const start = llmSource.indexOf(`export async function ${fn}`);
         assert(start >= 0, `${fn} is exported from llm.js`);
@@ -108,17 +138,44 @@ export default [
       const replay = dialogSource.indexOf('api.replayPendingNonApiAiRequests?.()');
       assert(requestListener >= 0 && settledListener > requestListener && replay > settledListener,
         'both live handoff listeners are installed before the dialog asks main to replay pending prompts');
+      const selectorStart = dialogSource.indexOf('<nav aria-label="Pending AI handoff batches"');
+      const selectorEnd = dialogSource.indexOf('</nav>', selectorStart);
+      const selectorSource = dialogSource.slice(selectorStart, selectorEnd);
       assert(dialogSource.includes('window.electronAPI.cancelNonApiAiRequest(requestId)')
         && dialogSource.includes('Cancel task stops the owning job operation.')
         && dialogSource.includes("request.itemCount === 1 ? 'item' : 'items'")
         && dialogSource.includes('const count = Number.isFinite(request.itemCount)')
-        && dialogSource.includes('`Batch ${request.batch}${count}`')
+        && dialogSource.includes('const selectorLabel = Number.isFinite(request.batch)')
+        && dialogSource.includes('? String(request.batch)')
+        && dialogSource.includes(': String(index + 1);')
+        && dialogSource.includes('grid grid-cols-5 gap-1 sm:grid-cols-10')
+        && !dialogSource.includes('overflow-x-auto custom-scrollbar')
+        && selectorSource.includes('const selectorDescription =')
+        && selectorSource.includes("isWorking ? 'action in progress' : null")
+        && selectorSource.includes('<span>{selectorLabel}</span>')
+        && !selectorSource.includes('handoffCode')
+        && dialogSource.includes('{activeRequest?.handoffCode && (')
+        && dialogSource.includes('{activeRequest.handoffCode}')
         && dialogSource.includes('selectedRequestId')
         && dialogSource.includes('Pending AI handoff batches')
-        && dialogSource.includes('requests.find(request => request.requestId === selectedRequestId)')
+        && dialogSource.includes('mergedRequests.find(request => request.requestId === selectedRequestId)')
+        // Application bundles and scoring batches are ONE queue: selection,
+        // the chip strip, the pending count and the dock label all read the
+        // merged list, so a bundle can never be stranded behind a scoring run.
+        && dialogSource.includes('mergeDockQueue(requests, visibleApplicationItems)')
+        && dialogSource.includes('subscribeApplicationHandoffs')
         && dialogSource.includes('submittingRequestIds.has(activeRequestId)')
         && dialogSource.includes('actionRequestIdsRef.current.has(activeRequestId)'),
       'the handoff UI exposes every pending batch, tracks each request action independently, and binds cancellation to its captured request');
+      assert(dialogSource.includes('const awaitingSuccessorRef = useRef(null)')
+        && dialogSource.includes("focus awaiting workflow successor")
+        && dialogSource.includes('isWorkflowSuccessor(successor, incoming)')
+        && dialogSource.includes('workflow successor issued; focus advanced from prior completed handoff')
+        // A direct chip click cancels BOTH automatic preferences before it
+        // selects: the settling run's queued successor, and a bundle whose
+        // card asked for focus before discovery had published it.
+        && dialogSource.includes('awaitingSuccessorRef.current = null;\n                        pendingFocusJobIdsRef.current.clear();\n                        setSelectedRequestId(request.requestId);'),
+      'when the active handoff settles before its workflow can issue the next prompt, focus follows that same run’s successor instead of reverting to an older correction; a direct user selection cancels the automatic preference');
       // Overall progress through the task. A batch number alone does not answer
       // "how many are left" when the run is dozens of handoffs long.
       assert(dialogSource.includes('` · ${request.itemsDone}/${request.itemsTotal} done`')
@@ -129,13 +186,96 @@ export default [
       'the handoff dialog reports overall task progress, and the transport carries it through to the renderer');
       // cleanBatchNumber floors at 1; a progress counter reads 0 on the first
       // handoff and must not be blanked exactly when it is most reassuring.
+      // Concurrency: independent batches must issue together, BOUNDED, and a
+      // failure must tear its siblings down rather than leave prompts on screen
+      // that nothing can cancel once the IPC layer drops the controller.
+      const prefSource = readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8');
+      const jobsIpcSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      assert(jobsIpcSource.includes('hasExactDurableRawHandoff')
+        && jobsIpcSource.includes('legacyResearchStepProbe: ({ prompt, task, grounding, hints })')
+        && jobsIpcSource.includes('researchStepStatusProbe: ({ prompt, task, grounding, hints, retryOnTruncation })')
+        && jobsIpcSource.includes('retryOnTruncation,')
+        && prefSource.includes('legacyResearchStepProbe({')
+        && prefSource.includes('const legacyRequests = [];')
+        && prefSource.includes('const freshRequests = [];'),
+      'a resumed run keeps only its exact old company handoffs on the legacy contract, while unissued sibling employers enter packed batches');
+      assert(prefSource.includes('export const MANUAL_HANDOFF_CONCURRENCY = 10;')
+        && prefSource.includes('await mapWithConcurrency(roundStarts, LISTING_EVAL_CONCURRENCY, async (start, position) =>')
+        && prefSource.includes('mapWithConcurrency(batches, MANUAL_HANDOFF_CONCURRENCY, async (entries, index) =>')
+        && prefSource.includes('mapWithConcurrency(assessmentBatches, MANUAL_HANDOFF_CONCURRENCY, async (entries, index) =>')
+        && !prefSource.includes('RESEARCH_CONCURRENCY'),
+      'listing and company-research batches share the bounded ten-handoff window instead of dispatching serially or three at a time');
+      // CONTINUOUSLY adaptive, not calibrate-once: model verbosity drifts, so
+      // each round re-derives its size from what the previous responses cost.
+      assert(prefSource.includes('const { size: listingBatchSize, observedTokensPerMatch, recalled } = await roundSize(round);')
+        && prefSource.includes('while (cursor < pool.length) {')
+        && prefSource.includes("const observedTokensPerMatch = (await calibration?.observedTokensPerMatch?.(items.length)) ?? null;"),
+      'every round re-sizes itself from measured output rather than a fixed estimate');
+      assert(transportSource.includes('const sessionCalibration = new Map();')
+        && transportSource.includes('const seriesKey = calibrationSeriesKey(task, planItemCount);')
+        && transportSource.includes('sessionCalibration.get(calibrationSeriesKey(task, planItemCount))?.samples || []')
+        && transportSource.includes('sessionCalibration.clear();')
+        && !transportSource.includes('state.calibration'),
+      'response-size calibration is isolated to the current process and preference-plan size until the manual chat model/profile is identifiable');
+      assert(transportSource.includes('handoffCodeVerificationVersion: effectiveSavedStep')
+        && transportSource.includes('? (effectiveSavedStep.handoffCodeVerificationVersion || null)')
+        && transportSource.includes(': HANDOFF_CODE_VERIFICATION_VERSION,'),
+      'an exact pending pre-enforcement step keeps its code-optional contract; only a genuinely new handoff opts into code enforcement');
+      // The declared output budget in the prompt must come from the SAME
+      // measured rate the batch size did. When they diverged, a verbose model
+      // correctly shrank the batch while the prompt still quoted the old static
+      // budget — instructing the model to write less than the answer needs.
+      assert(prefSource.includes('planItemCount: items.length, observedTokensPerMatch }'),
+        'the measured rate rides on the hints so the declared output budget tracks the batch size');
+      // Replay must reproduce the ORIGINAL layout: by replay time every sample
+      // exists, so recomputing would choose a different size and the durable
+      // step keys would miss — making the person redo answers already pasted.
+      assert(prefSource.includes('const recalled = await calibration?.recallRoundSize?.(round, passKey);')
+        && prefSource.includes('await calibration?.rememberRoundSize?.(round, size, passKey, observedTokensPerMatch);')
+        && prefSource.includes('return { size: recalled.size, observedTokensPerMatch: recalled.rate ?? null, recalled: true };'),
+      'a recorded round size is replayed in preference to recomputing an adaptive one');
+      // The RATE is replayed too, not just the size. The rate sets the declared
+      // output budget, which is written into the prompt and hashed into the
+      // durable step key — re-reading a drifted live rate on replay would change
+      // the prompt and make every accepted step miss its cache.
+      assert(transportSource.includes('sizes[round] = { size: cleanSize, rate:')
+        && prefSource.indexOf('const recalled = await calibration?.recallRoundSize')
+           < prefSource.indexOf('const observedTokensPerMatch = (await calibration?.observedTokensPerMatch?.(items.length))'),
+      'the rate in force when a round was first issued is recorded and replayed with its size');
+      // One run can evaluate more than once (a post-run source append), and each
+      // pass restarts its round counter — so a bare round index would let the
+      // second pass inherit the first pass's layout for a different pool.
+      assert(prefSource.includes('const passKey = `${pool.length}x${items.length}`;')
+        && transportSource.includes('export async function recallRunRoundSize(runId, round, passKey'),
+      'recorded round sizes are namespaced per evaluation pass, not just per round index');
+      // batchTotal must NOT be reported once sizes adapt: it is unknowable
+      // mid-run AND it is hashed into the durable step key.
+      assert(!prefSource.includes('hints: { itemCount: batch.length, matchCount: batch.length * items.length, batch: thisBatchIndex, batchTotal')
+        && prefSource.includes('batch: thisBatchIndex, itemsDone: listingsDone'),
+      'adaptive listing evaluation omits a drifting batchTotal from its step key; itemsDone/itemsTotal carry progress instead');
+      assert(prefSource.includes('listingAbort.abort(error);')
+        && prefSource.includes('AbortSignal.any([signal, listingAbort.signal])'),
+      'a failing worker aborts its in-flight siblings, so no orphaned prompt outlives the operation that owns it');
+      // Batch numbers must come from a fixed array position, not a shared
+      // counter: under concurrency a mutable counter races, and the number is
+      // hashed into the durable step key that makes a resumed run skip work the
+      // person already pasted.
+      assert(prefSource.includes('const thisBatchIndex = roundFirstBatch + position + 1;')
+        && !prefSource.includes('batchIndex += 1;'),
+      'each concurrent batch derives its number from its own fixed round offset and array position, keeping durable step keys stable');
+      // Progress must count COMPLETED work: with 10 in flight, issue order is no
+      // longer completion order.
+      assert(prefSource.includes('listingsDone += batch.length;')
+        && prefSource.includes('itemsDone: listingsDone'),
+      'pool progress counts merged batches, not the position of whichever prompt is on screen');
+
       assert(transportSource.includes('function cleanProgressCount(value)')
         && transportSource.includes('number >= 0 && number <= 100_000'),
       'the progress counter admits 0 rather than reusing the 1-based batch-number sanitizer');
       // THE resume invariant: these are display-only. Hashing them would change
       // the step key and make a resumed run re-ask for answers already pasted.
       const stepKeyStart = transportSource.indexOf('function durableStepKey(');
-      const stepKeyEnd = transportSource.indexOf('async function durableStep(', stepKeyStart);
+      const stepKeyEnd = transportSource.indexOf('function selectDurableStepByLogicalOrRawKey(', stepKeyStart);
       const stepKeyBody = transportSource.slice(stepKeyStart, stepKeyEnd);
       assert(stepKeyStart >= 0 && stepKeyEnd > stepKeyStart
         && !stepKeyBody.includes('itemsDone') && !stepKeyBody.includes('itemsTotal'),
@@ -336,7 +476,15 @@ export default [
         && handoff.includes('Do not place file attachments or file cards')
         && handoff.includes('schema requires an http(s) URL')
         && handoff.includes('ordinary literal JSON string rather than a rich link')
-        && handoff.includes('normally add a citation to the file containing this prompt, omit it'),
+        && handoff.includes('normally add a citation to the file containing this prompt, omit it')
+        && handoff.includes('STRICT JSON SERIALIZATION CHECK')
+        && handoff.includes('Never emit placeholder syntax such as value1 | value2, comments, ellipses, or type annotations')
+        && handoff.includes('JSON-escape embedded double quotes, backslashes, tabs, carriage returns, and line breaks')
+        && handoff.includes('every object member and array item has the required comma')
+        && handoff.includes('strict JSON.parse-equivalent check')
+        && handoff.includes('never omit required rows, evidence, source facts, or document text')
+        && handoff.includes('Always finish and close the JSON')
+        && handoff.lastIndexOf('STRICT JSON SERIALIZATION CHECK') > handoff.indexOf(JSON.stringify(schema, null, 2)),
       'the structured contract isolates the exact schema in a copyable code block and forbids chat-UI widgets that do not survive a plain-text copy');
       return { chars: handoff.length };
     },
@@ -358,6 +506,7 @@ export default [
         && !freeText.includes('--- REQUIRED RESPONSE FORMAT ---')
         && !freeText.includes('Emit exactly the properties named in the schema')
         && !freeText.includes('fenced JSON code block')
+        && !freeText.includes('STRICT JSON SERIALIZATION CHECK')
         && !freeText.includes('no file attachments or file cards'),
       'a schema-less handoff carries no structured-output rules');
 
@@ -373,9 +522,144 @@ export default [
         && structured.includes('exactly one fenced JSON code block labelled `json`')
         && structured.includes('automatic paste attachment')
         && structured.includes('Do not place file attachments or file cards')
-        && structured.includes('schema requires an http(s) URL'),
+        && structured.includes('schema requires an http(s) URL')
+        && structured.includes('STRICT JSON SERIALIZATION CHECK'),
       'a schema-bearing handoff carries both rules');
       return { freeText: freeText.length, structured: structured.length };
+    },
+  },
+  {
+    name: 'non-API AI: displayed task prompts replace legacy pseudo-JSON without changing durable source bytes',
+    run: () => {
+      const visionSource = `Inspect the images.\n\nReturn a JSON object:\n{\n  "condition": "New | Used"\n}\n\nBe specific about what you can clearly see.`;
+      const scoringSource = `Score these jobs.\n\nReturn JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:\n{\n  "priority": "required|important|preferred|contextual"\n}\n\nIMPORTANT SCORING RULES:\nUse evidence.`;
+      const querySource = `Build searches.\n\nReturn a JSON object with four arrays of search query strings:\n\n{\n  "canonicalLocation": {} // STRUCTURED, per the rules above\n}\n\nBe creative with suggestedRoleQueries while remaining relevant.`;
+      const fitSource = `Assess platforms.\n\nReturn a JSON object with one entry per platform id. The "reason" field is REQUIRED for unfit verdicts.\n{\n  "fit": "good" | "unfit"\n}\n\nNotes:\nUse exact ids.`;
+      const statusSource = `Scan the hub.\n\nReturn ONLY a JSON object:\n{\n  "attention": [ // zero or more; return an empty array\n    { "urgency": "high" | "low" }\n  ]\n}\n\nRules:\nUse source URLs.`;
+      const priceSource = '- match_quality: one of "strong" | "moderate" | "weak" — use exactly one of those three string values';
+
+      const hardened = [
+        hardenStructuredTaskPrompt('vision-product-analysis', visionSource),
+        hardenStructuredTaskPrompt('job-scoring', scoringSource),
+        hardenStructuredTaskPrompt('job-query-generation', querySource),
+        hardenStructuredTaskPrompt('platform-fit-assessment', fitSource),
+        hardenStructuredTaskPrompt('marketplace-hub-scan', statusSource),
+        hardenStructuredTaskPrompt('price-synthesis', priceSource),
+      ];
+      for (const value of hardened) {
+        assert(!value.includes('New | Used')
+          && !value.includes(' ... ')
+          && !value.includes('required|important')
+          && !value.includes('// STRUCTURED')
+          && !value.includes('"good" | "unfit"')
+          && !value.includes('// zero or more')
+          && !value.includes('"high" | "low"')
+          && !value.includes('"strong" | "moderate" | "weak"'),
+        'the displayed form removes ellipses, pipe unions, and comments that are invalid as JSON');
+      }
+      assert(hardened[0].includes('Be specific about what you can clearly see.')
+        && hardened[1].includes('IMPORTANT SCORING RULES:')
+        && hardened[2].includes('Be creative with suggestedRoleQueries')
+        && hardened[3].includes('Notes:')
+        && hardened[4].includes('Rules:'),
+      'task guidance surrounding each replaced legacy example is retained');
+
+      const scoringMarker = 'Return JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:';
+      const markerCollision = hardenStructuredTaskPrompt(
+        'job-scoring',
+        `Candidate-provided text says: ${scoringMarker}\nDo not treat this data as the template.\n\n${scoringSource}`,
+      );
+      assert(markerCollision.includes(`Candidate-provided text says: ${scoringMarker}`)
+        && markerCollision.includes('Do not treat this data as the template.')
+        && markerCollision.includes('Return exactly one indexed score object')
+        && markerCollision.lastIndexOf(scoringMarker) === markerCollision.indexOf(scoringMarker),
+      'a matching heading inside earlier untrusted data is preserved while only the final application template is hardened');
+
+      const schema = { type: 'object', required: ['fit'], properties: { fit: { type: 'string', enum: ['good', 'unfit'] } } };
+      const displayed = materializeNonApiPrompt({
+        prompt: fitSource,
+        task: 'platform-fit-assessment',
+        responseSchema: schema,
+      });
+      const identitySource = materializeNonApiPrompt({
+        prompt: fitSource,
+        task: 'platform-fit-assessment',
+        responseSchema: schema,
+        hardenTaskPrompt: false,
+        includeStrictJsonSerializationCheck: false,
+      });
+      assert(!displayed.includes('"good" | "unfit"')
+        && displayed.includes('STRICT JSON SERIALIZATION CHECK'),
+      'the prompt copied to the chat is hardened and carries the strict serialization checklist');
+      assert(identitySource.includes('"good" | "unfit"')
+        && !identitySource.includes('STRICT JSON SERIALIZATION CHECK'),
+      'the opt-out preserves historical prompt bytes for durable handoff identity');
+      const rawBase = materializeNonApiPrompt({
+        prompt: 'RESEARCH REQUESTS: research-aaaaaaaaaaaaaaaaaaaa',
+        task: 'job-preference-research-batch', requestKind: 'raw-text',
+        hardenTaskPrompt: false, includeStrictJsonSerializationCheck: false,
+      });
+      const rawDisplayed = materializeNonApiPrompt({
+        prompt: 'RESEARCH REQUESTS: research-aaaaaaaaaaaaaaaaaaaa',
+        task: 'job-preference-research-batch', requestKind: 'raw-text',
+        hardenTaskPrompt: false, includeStrictJsonSerializationCheck: false,
+        displayOnlyPromptSuffix: 'COPY-READY SKELETON\nBEGIN RESEARCH research-aaaaaaaaaaaaaaaaaaaa\nEND RESEARCH research-aaaaaaaaaaaaaaaaaaaa',
+      });
+      assert(!rawBase.includes('COPY-READY SKELETON')
+        && rawDisplayed.includes('COPY-READY SKELETON')
+        && rawDisplayed.includes('BEGIN RESEARCH research-aaaaaaaaaaaaaaaaaaaa'),
+      'an actual-ID response skeleton is display-only: callers omit it from durable base materialization and append it only to the copied prompt');
+      return { auditedPromptTypes: hardened.length };
+    },
+  },
+  {
+    name: 'non-API AI: display-only raw suffix reaches the copied prompt without entering durable base material',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 718, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const source = 'RESEARCH REQUESTS: research-aaaaaaaaaaaaaaaaaaaa';
+      const suffix = 'COPY-READY RESEARCH OUTPUT SKELETON\nBEGIN RESEARCH research-aaaaaaaaaaaaaaaaaaaa\nEND RESEARCH research-aaaaaaaaaaaaaaaaaaaa';
+      const durableBase = materializeNonApiPrompt({
+        prompt: source, task: 'job-preference-research-batch', requestKind: 'raw-text',
+        hardenTaskPrompt: false, includeStrictJsonSerializationCheck: false,
+      });
+      const durableBaseAgain = materializeNonApiPrompt({
+        prompt: source, task: 'job-preference-research-batch', requestKind: 'raw-text',
+        hardenTaskPrompt: false, includeStrictJsonSerializationCheck: false,
+      });
+      const expectedStepKey = __durableStepKeysForTests({
+        materializedPrompt: durableBase,
+        task: 'job-preference-research-batch',
+        nodeId: 'display-suffix-node',
+        attachmentPaths: [],
+      }).logicalKey;
+      handleSafe('non-api-display-suffix-test', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: source, task: 'job-preference-research-batch', requestKind: 'raw-text',
+          displayOnlyPromptSuffix: suffix, signal,
+        }),
+      }));
+      // This test deliberately inspects the freshly materialized final prompt;
+      // a failed prior test process can leave a durable pending handoff behind,
+      // so do not let that old row become this test's input on the next run.
+      const run = ipcMain.__getInvokeHandler('non-api-display-suffix-test')({ sender }, { nodeId: 'display-suffix-node', manualAiRunId: `display-suffix-run-${Date.now()}` });
+      for (let attempt = 0; attempt < 100 && !sent.some(item => item.channel === 'non-api-ai-request'); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const request = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      assert(durableBase === durableBaseAgain
+        && !durableBase.includes('COPY-READY RESEARCH OUTPUT SKELETON')
+        && request?.prompt.includes(suffix)
+        && request?.stepKey === expectedStepKey,
+      'the suffix is absent from the stable base material used for durable identity, does not change its exact durable key, and is present only in the final copyable prompt');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { displayOnly: true };
     },
   },
   {
@@ -429,10 +713,10 @@ export default [
         && JSON.stringify(taxonomyMeta.fallbacks?.map(fallback => fallback.stage)) === JSON.stringify(['plan'])
         && taxonomyMeta.fallback?.stage === 'plan',
       'planner-only completion preserves its model diagnostics without fabricating a classifier stage');
-      assert(jobsSource.includes('Promise.all(scoringBatches.map(async (batch, batchIndex) =>')
+      assert(jobsSource.includes('await mapWithConcurrency(scoringBatches, MANUAL_HANDOFF_CONCURRENCY, async (batch, batchIndex) =>')
         && jobsSource.includes('completedScoringJobCount')
         && jobsSource.includes('scored: signal?.aborted ? completedScoringJobCount : scoredJobs.length'),
-      'scoring starts independent top-level batches together, preserves separate completion progress, and reports completed work on abort without saving partial results');
+      'scoring starts independent top-level batches together but BOUNDED, preserves separate completion progress, and reports completed work on abort without saving partial results');
       return { scoringStable: true, taxonomyBatches: hints.length, peakClassifications };
     },
   },
@@ -506,6 +790,7 @@ export default [
         },
       };
       const value = validateNonApiAiSubmission({
+        expectedHandoffCode: null,
         response: 'Here is the requested result:\n```json\n{ "condition": "new", "count": 2, }\n```',
         responseSchema: schema,
         task: 'job-scoring',
@@ -513,6 +798,39 @@ export default [
       assert(value.condition === 'New' && value.count === 2,
         'a fenced response with a recoverable trailing comma is parsed and enum casing is normalized to the exact schema value');
       return value;
+    },
+  },
+  {
+    name: 'non-API AI: ChatGPT content-reference artifacts are removed before structured validation',
+    run: () => {
+      const schema = {
+        type: 'object', required: ['evidence', 'score'], additionalProperties: false,
+        properties: {
+          evidence: { type: 'string', minLength: 1 },
+          score: { type: 'integer', minimum: 1, maximum: 100 },
+        },
+      };
+      const artifact = ':chatgpt-content-reference{index="0"}';
+      let validatorRan = false;
+      const value = validateNonApiAiSubmission({
+        expectedHandoffCode: null,
+        // This is the exact auto-inserted token found in the report. Its
+        // unescaped quote makes an otherwise-complete JSON response invalid.
+        response: `{"evidence":"The job requires seven years. ${artifact}","score":72}`,
+        responseSchema: schema,
+        task: 'job-preference-evaluation',
+        responseValidator: (candidate) => {
+          validatorRan = true;
+          assert(candidate.score === 72 && candidate.evidence.includes('seven years'),
+            'the normal schema-parsed value reaches the task-specific validator');
+        },
+      });
+      assert(validatorRan
+        && value.score === 72
+        && !value.evidence.includes(':chatgpt-content-reference')
+        && !JSON.stringify(value).includes(artifact),
+      'the known transport artifact is absent from the accepted value without bypassing schema/domain validation');
+      return { validatorRan, evidence: value.evidence };
     },
   },
   {
@@ -524,7 +842,7 @@ export default [
       };
       let failure = null;
       try {
-        validateNonApiAiSubmission({ response: '{"score": 101, "leaked": true}', responseSchema: schema, task: 'job-scoring' });
+        validateNonApiAiSubmission({ expectedHandoffCode: null, response: '{"score": 101, "leaked": true}', responseSchema: schema, task: 'job-scoring' });
       } catch (error) { failure = error; }
       assert(failure?.code === 'STRUCTURED_OUTPUT_SCHEMA_INVALID'
         && failure.message.includes("task 'job-scoring'")
@@ -544,6 +862,7 @@ export default [
       let failure = null;
       try {
         validateNonApiAiSubmission({
+          expectedHandoffCode: null,
           response: '{"scores":[{"index":7}]}', responseSchema: schema, task: 'job-scoring',
           responseValidator: (value) => {
             if (value.scores[0]?.index !== 0) throw new Error('Score row index must match its requested job index.');
@@ -727,9 +1046,65 @@ export default [
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
       assert(request && request.prompt.includes('Request kind: raw-text'),
         'callLLMRaw reaches the manual handoff without a responseSchema — it is deliberately exempt from the structured-output guard');
+      assert(request.prompt.includes('Retry-on-truncation setting: true'),
+        'callLLMRaw keeps the existing default retry-on-truncation prompt setting when no override is supplied');
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
       await run;
       return { guardedEntrypoints: 3, exemptEntrypoint: 'callLLMRaw' };
+    },
+  },
+  {
+    name: 'non-API AI: callLLMRaw forwards explicit retry policy and its response validator to the manual handoff',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 912, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      handleSafe('non-api-raw-validator-thread-test', async (_event, _args, signal) => ({
+        result: await callLLMRaw('Return a source-backed research digest.', {
+          signal,
+          task: 'job-preference-research-batch',
+          retryOnTruncation: false,
+          displayOnlyPromptSuffix: 'COPY-READY DISPLAY-ONLY RAW SKELETON',
+          responseValidator: (value) => {
+            if (!String(value).startsWith('validated:')) {
+              throw new Error('Raw research digest must start with validated:.');
+            }
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-raw-validator-thread-test')({ sender }, { nodeId: 'node-raw-validator-thread' });
+      await new Promise(resolve => setImmediate(resolve));
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request?.prompt.includes('Task: job-preference-research-batch')
+        && request.prompt.includes('Request kind: raw-text')
+        && request.prompt.includes('Retry-on-truncation setting: false')
+        && request.prompt.includes('COPY-READY DISPLAY-ONLY RAW SKELETON'),
+      'the raw batch handoff materializes its task, explicit false retry policy, and display-only response scaffold');
+      const invalid = await submit({ sender }, {
+        requestId: request.requestId,
+        response: `Handoff: ${request.handoffCode}\n\nnot yet validated`,
+      });
+      const correction = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      assert(invalid.accepted === false
+        && invalid.validationErrors?.[0] === 'Raw research digest must start with validated:.'
+        && correction?.requestId === request.requestId
+        && correction?.isCorrection === true,
+      'a raw response validator rejects an invalid research digest and keeps the same handoff open for correction');
+      const accepted = await submit({ sender }, {
+        requestId: request.requestId,
+        response: `Handoff: ${request.handoffCode}\n\nvalidated: source-backed digest`,
+      });
+      const result = await run;
+      assert(accepted.accepted === true
+        && result.success === true
+        && result.result === 'validated: source-backed digest',
+      'a corrected raw response reaches the caller only after the forwarded validator accepts it');
+      return { retryOnTruncation: false, validatorForwarded: true };
     },
   },
   {
@@ -766,7 +1141,7 @@ export default [
     },
   },
   {
-    name: 'non-API AI: callLLMText threads its caller-supplied responseValidator through the pasted response before settling',
+    name: 'non-API AI: malformed and domain-invalid submissions reissue an actionable correction prompt before settling',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
@@ -779,6 +1154,7 @@ export default [
         result: await callLLMText('Return the requested JSON.', {
           signal, task: 'job-scoring',
           responseSchema: { type: 'object', required: ['index'], properties: { index: { type: 'integer' } } },
+          displayOnlyPromptSuffix: 'DISPLAY-ONLY STRUCTURED VALIDATION CHECK',
           responseValidator: (value) => {
             if (value.index !== 0) throw new Error('index must be 0 for this single-row request.');
           },
@@ -788,15 +1164,77 @@ export default [
       await new Promise(resolve => setImmediate(resolve));
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
-      const rejected = await submit({ sender }, { requestId: request.requestId, response: '{"index": 7}' });
+      const malformed = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index": "0" missing-comma}` });
+      const syntaxCorrection = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      assert(malformed.accepted === false
+        && malformed.validationErrors?.[0]?.includes('AI returned invalid JSON')
+        && request.prompt.includes('DISPLAY-ONLY STRUCTURED VALIDATION CHECK')
+        && syntaxCorrection?.requestId === request.requestId
+        && syntaxCorrection.isCorrection === true
+        && syntaxCorrection.prompt.includes('--- CORRECTION REQUIRED ---')
+        && syntaxCorrection.prompt.includes('previous answer was not syntactically valid JSON')
+        && syntaxCorrection.prompt.includes('Regenerate the entire answer')
+        && syntaxCorrection.prompt.includes('JSON-escape every quote, backslash, or line break'),
+      'malformed JSON keeps the same request pending and gives the chat a full regeneration prompt instead of only exposing a parser exception');
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index": 7}` });
+      const semanticCorrection = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
       assert(rejected.accepted === false
-        && rejected.validationErrors?.[0] === 'index must be 0 for this single-row request.',
+        && rejected.validationErrors?.[0] === 'index must be 0 for this single-row request.'
+        && semanticCorrection?.isCorrection === true
+        && semanticCorrection.prompt.includes('failed the application\'s response checks'),
       'a schema-valid but semantically wrong paste is rejected by the caller-supplied validator before the invoke can settle');
-      const accepted = await submit({ sender }, { requestId: request.requestId, response: '{"index": 0}' });
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index": 0}` });
       const result = await run;
       assert(accepted.accepted === true && result.success === true && result.result?.index === 0,
         'a corrected paste that satisfies both schema and validator settles the original callLLMText invocation with the validated value');
-      return { validated: true };
+      return { malformedCorrected: true, validated: true };
+    },
+  },
+  {
+    name: 'non-API AI: validation details remain in the correction UI but never enter the main-process log',
+    run: async () => {
+      const transportSource = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
+      const validationLogLines = transportSource.split('\n').filter(line => /Rejected response for task|Ignoring invalid (legacy )?saved response/.test(line));
+      assert(validationLogLines.length === 3
+        && validationLogLines.every(line => line.includes('nonApiAiLogErrorCode(error)') && !line.includes('error?.message')),
+      'all live and durable structured-response validation logs use only a fixed safe error code');
+
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 735, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const privateSentinel = 'PRIVATE_VALIDATOR_DETAIL_MUST_NOT_ENTER_MAIN_LOGS';
+      let reject = true;
+      handleSafe('non-api-private-validation-test', async (_event, _args, signal) => ({
+        result: await callLLMText('Return the requested JSON.', {
+          signal,
+          task: 'job-scoring',
+          responseSchema: { type: 'object', required: ['index'], properties: { index: { type: 'integer' } } },
+          responseValidator: () => {
+            if (reject) throw new Error(privateSentinel);
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-private-validation-test')({ sender }, { nodeId: 'node-private-validation' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index":0}` });
+      const recentLogs = getRecentLogs();
+      assert(rejected.accepted === false
+        && rejected.validationErrors?.[0] === privateSentinel
+        && recentLogs.some(entry => entry.message.includes("[Non-API AI] Rejected response for task 'job-scoring' (code=VALIDATION_FAILED)."))
+        && !recentLogs.some(entry => entry.message.includes(privateSentinel)),
+      'the renderer retains the precise correction detail while report-visible logs retain only a safe validation classification');
+      reject = false;
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index":0}` });
+      const result = await run;
+      assert(accepted.accepted === true && result.success === true,
+        'redacting the log does not alter validation retry or successful settlement behavior');
+      return { uiDetailPreserved: true, logRedacted: true };
     },
   },
   {
@@ -848,10 +1286,10 @@ export default [
     name: 'non-API AI: raw response remains verbatim and blank response is rejected',
     run: () => {
       const raw = 'Research result with useful prose.\n\nhttps://example.test/source';
-      assert(validateNonApiAiSubmission({ response: raw, task: 'job-compensation-research' }) === raw,
+      assert(validateNonApiAiSubmission({ expectedHandoffCode: null, response: raw, task: 'job-compensation-research' }) === raw,
         'free-text/grounded responses are returned unchanged rather than forced through JSON parsing');
       let failure = null;
-      try { validateNonApiAiSubmission({ response: '  ', task: 'job-compensation-research' }); }
+      try { validateNonApiAiSubmission({ expectedHandoffCode: null, response: '  ', task: 'job-compensation-research' }); }
       catch (error) { failure = error; }
       assert(failure?.message === 'Paste a non-empty AI response before submitting.',
         'empty submissions are rejected before a manual request can settle');
@@ -868,6 +1306,7 @@ export default [
       let failure = null;
       try {
         validateNonApiAiSubmission({
+          expectedHandoffCode: null,
           response: 'Sorry, I no longer have access to that conversation.',
           responseSchema: schema, task: 'job-scoring',
         });
@@ -898,7 +1337,7 @@ export default [
       };
       const scores = Array.from({ length: 11 }, (_, index) => ({ index, matchScore: 50 + index }));
       const response = JSON.stringify({ scores });
-      const value = validateNonApiAiSubmission({ response, responseSchema: schema, task: 'job-scoring' });
+      const value = validateNonApiAiSubmission({ expectedHandoffCode: null, response, responseSchema: schema, task: 'job-scoring' });
       assert(Array.isArray(value.scores) && value.scores.length === 11,
         'a real, fully-populated response clears the delimiter gate and reaches the caller unchanged');
       return { accepted: true, length: response.length };
@@ -920,6 +1359,7 @@ export default [
       };
       const response = '{"roleByIndex":[0]}';
       const value = validateNonApiAiSubmission({
+        expectedHandoffCode: null,
         response, responseSchema: schema, task: 'job-taxonomy-classify', itemCount: 24,
       });
       assert(Array.isArray(value.roleByIndex) && value.roleByIndex.length === 1,
@@ -962,21 +1402,21 @@ export default [
         result: await callLLMText('RETURN COMPACT JSON.', {
           signal,
           task: 'job-scoring',
-          hints: { itemCount: 15 },
+          hints: { itemCount: 22 },
           responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } },
         }),
       }));
       const run = ipcMain.__getInvokeHandler('non-api-manual-cap-test')({ sender }, { nodeId: 'manual-cap-node' });
       await new Promise(resolve => setImmediate(resolve));
       const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
-      assert(request?.itemCount === 15
-        && request?.prompt.includes('Maximum output tokens: 10600')
-        && request.prompt.includes('Output-cap formula seed: 10600')
+      assert(request?.itemCount === 22
+        && request?.prompt.includes('Maximum output tokens: 14800')
+        && request.prompt.includes('Output-cap formula seed: 14800')
         && !request.prompt.includes('Maximum output tokens: 48000'),
-      'manual job scoring exposes its 15-item workload and uses the bounded per-item formula, never a flat historical cap');
+      'manual job scoring exposes its 22-item workload and uses the bounded per-item formula, never a flat historical cap');
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
       await run;
-      return { manualCap: 10600 };
+      return { manualCap: 14800 };
     },
   },
   {
@@ -1021,7 +1461,7 @@ export default [
       const unavailable = await stepBackRequest({ sender }, { requestId: firstResearch.requestId });
       assert(unavailable.steppedBack === false,
         'the main process rejects Back when the active handoff has no real preceding step');
-      await submit({ sender }, { requestId: firstResearch.requestId, response: 'WRONG RESEARCH' });
+      await submit({ sender }, { requestId: firstResearch.requestId, response: `Handoff: ${firstResearch.handoffCode}\n\nWRONG RESEARCH` });
       await new Promise(resolve => setImmediate(resolve));
 
       const firstExtraction = requests()[1];
@@ -1040,14 +1480,14 @@ export default [
         && replacementResearch?.prompt.includes('RESEARCH STEP')
         && replacementResearch.initialResponse === 'WRONG RESEARCH',
       'Back reissues the previous prompt with the accepted paste restored as an editable draft');
-      await submit({ sender }, { requestId: replacementResearch.requestId, response: 'CORRECT RESEARCH' });
+      await submit({ sender }, { requestId: replacementResearch.requestId, response: `Handoff: ${replacementResearch.handoffCode}\n\nCORRECT RESEARCH` });
       await new Promise(resolve => setImmediate(resolve));
 
       const replacementExtraction = requests()[3];
       assert(replacementExtraction?.prompt.includes('CORRECT RESEARCH')
         && !replacementExtraction.prompt.includes('WRONG RESEARCH'),
       'the downstream prompt is rebuilt from the corrected response, not the already-resolved wrong value');
-      await submit({ sender }, { requestId: replacementExtraction.requestId, response: '{"answer":"accepted"}' });
+      await submit({ sender }, { requestId: replacementExtraction.requestId, response: `{"handoffCode":"${replacementExtraction.handoffCode}","answer":"accepted"}` });
       const result = await run;
       assert(result.success === true && result.research === 'CORRECT RESEARCH' && result.answer === 'accepted',
         'the owning operation continues and returns only the corrected research result');
@@ -1249,7 +1689,7 @@ export default [
       // Simulate a same-frame dialog/listener remount having missed its initial
       // events. Its newly-mounted listener calls the sender-owned replay IPC.
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
-      const rejected = await submit({ sender: senderA }, { requestId: initial[0].requestId, response: '{}' });
+      const rejected = await submit({ sender: senderA }, { requestId: initial[0].requestId, response: `{"handoffCode":"${initial[0].handoffCode}"}` });
       assert(rejected.accepted === false,
         'the first pending request remains open after an invalid response before the simulated dialog remount');
       sent.length = 0;
@@ -1310,7 +1750,14 @@ export default [
       const firstRun = invoke({ sender: firstSender }, { nodeId: 'durable-node', manualAiRunId: runId });
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
       const firstRequest = (await waitForRequestCount(firstSent, 1))[0]?.payload;
-      await submit({ sender: firstSender }, { requestId: firstRequest.requestId, response: '{"answer":"first accepted"}' });
+      // This exact hash predates handoff-code injection. Keeping it stable lets
+      // an accepted response from a prior release remain reachable on resume.
+      const historicalStepKey = '492e2bd40d56db2b0bd60555ce345ab88d4aafc159b89a9ae18f8556932e9b31';
+      assert(firstRequest?.stepKey === historicalStepKey,
+        'the fixed durable request keeps its literal pre-handoff-code step key');
+      assert(firstRequest?.handoffCode,
+        'the current request still receives a handoff code after its durable key is derived');
+      await submit({ sender: firstSender }, { requestId: firstRequest.requestId, response: `{"handoffCode":"${firstRequest.handoffCode}","answer":"first accepted"}` });
       const secondRequest = (await waitForRequestCount(firstSent, 2))[1]?.payload;
       assert(secondRequest?.runId === runId && secondRequest?.stepKey,
         'durable requests expose their workflow and deterministic step identity to the renderer');
@@ -1318,6 +1765,9 @@ export default [
         { sender: firstSender },
         { requestId: secondRequest.requestId, response: '{"answer":"draft survives"}' },
       );
+      assert(await durableRunHasAnyTask(runId, ['job-scoring'])
+        && !(await durableRunHasAnyTask(runId, ['job-preference-research'])),
+      'the read-only compatibility probe sees accepted/pending tasks only in their owning durable run');
       firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
       const interrupted = await firstRun;
       assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
@@ -1333,15 +1783,374 @@ export default [
       assert(resumedRequests.length === 1
         && resumedRequests[0].prompt.includes('DURABLE STEP TWO')
         && resumedRequests[0].initialResponse === '{"answer":"draft survives"}',
-      'restart replays the accepted first step silently and restores the exact unfinished-step draft');
-      await submit({ sender: resumedSender }, { requestId: resumedRequests[0].requestId, response: '{"answer":"second accepted"}' });
+        'restart replays the accepted first step silently and restores the exact unfinished-step draft');
+      assert(!resumedRequests.some(request => request.stepKey === historicalStepKey),
+        'the accepted first response replays without issuing its first handoff again');
+      await submit({ sender: resumedSender }, { requestId: resumedRequests[0].requestId, response: `{"handoffCode":"${resumedRequests[0].handoffCode}","answer":"second accepted"}` });
       const completed = await resumedRun;
       assert(completed.success === true
         && completed.first === 'first accepted'
         && completed.second === 'second accepted',
       'the restarted workflow continues from the checkpoint and completes with both accepted values');
       await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
+      assert(!(await durableRunHasAnyTask(runId, ['job-scoring'])),
+        'the compatibility probe stops selecting a legacy contract after its durable run is explicitly completed');
       return { resumedAt: 'step-two', draftRestored: true };
+    },
+  },
+  {
+    name: 'non-API AI: a ten-handoff window restores every code and draft after restart',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `durable-ten-wide-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      handleSafe('non-api-durable-ten-wide-test', async (_event, _args, signal) => ({
+        rows: await Promise.all(Array.from({ length: 10 }, (_, index) => requestNonApiAi({
+          prompt: `DURABLE PARALLEL STEP ${index + 1}`,
+          task: 'job-scoring',
+          batch: index + 1,
+          batchTotal: 10,
+          itemCount: 1,
+          responseSchema: schema,
+          signal,
+        }))),
+      }));
+      const waitForRequests = async (sent, count) => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+          if (requests.length >= count) return requests;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      };
+      const makeSender = (id, sent) => {
+        const sender = new EventEmitter();
+        sender.id = id;
+        sender.isDestroyed = () => false;
+        sender.send = (channel, payload) => sent.push({ channel, payload });
+        return sender;
+      };
+      const invoke = ipcMain.__getInvokeHandler('non-api-durable-ten-wide-test');
+      const updateDraft = ipcMain.__getInvokeHandler('update-non-api-ai-draft');
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+
+      const firstSent = [];
+      const firstSender = makeSender(803, firstSent);
+      const firstRun = invoke({ sender: firstSender }, { nodeId: 'durable-ten-node', manualAiRunId: runId });
+      const firstRequests = await waitForRequests(firstSent, 10);
+      assert(firstRequests.length === 10
+        && new Set(firstRequests.map(request => request.handoffCode)).size === 10,
+      'one workflow may durably expose ten distinct handoffs at the same time');
+      await Promise.all(firstRequests.map(request => updateDraft(
+        { sender: firstSender },
+        { requestId: request.requestId, response: `draft-${request.batch}` },
+      )));
+      const originalByBatch = new Map(firstRequests.map(request => [request.batch, request]));
+      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      const interrupted = await firstRun;
+      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
+        'the ten-wide workflow checkpoints cleanly when its renderer restarts');
+
+      const resumedSent = [];
+      const resumedSender = makeSender(804, resumedSent);
+      const resumedRun = invoke({ sender: resumedSender }, { nodeId: 'durable-ten-node', manualAiRunId: runId });
+      const resumedRequests = await waitForRequests(resumedSent, 10);
+      assert(resumedRequests.length === 10 && resumedRequests.every((request) => {
+        const original = originalByBatch.get(request.batch);
+        return original
+          && request.handoffCode === original.handoffCode
+          && request.stepKey === original.stepKey
+          && request.initialResponse === `draft-${request.batch}`;
+      }), 'restart must restore all ten pending identities, codes, and drafts without rotating them three at a time');
+      await Promise.all(resumedRequests.map(request => submit(
+        { sender: resumedSender },
+        { requestId: request.requestId, response: JSON.stringify({ handoffCode: request.handoffCode, answer: `accepted-${request.batch}` }) },
+      )));
+      const completed = await resumedRun;
+      assert(completed.success === true
+        && completed.rows.length === 10
+        && completed.rows.every((row, index) => row.answer === `accepted-${index + 1}`),
+      'the restored ten-wide workflow accepts every exact response and rejoins results in batch order');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
+      return { restored: resumedRequests.length, distinctCodes: new Set(resumedRequests.map(request => request.handoffCode)).size };
+    },
+  },
+  {
+    name: 'non-API AI: collision fallback code persists across durable restart',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `durable-code-collision-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      const waitForRequest = async (sent) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+          if (request) return request;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      };
+      handleSafe('non-api-durable-code-collision-holder', async (_event, _args, signal) => (
+        requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'job-scoring', responseSchema: schema, signal })
+      ));
+      handleSafe('non-api-durable-code-collision-target', async (_event, _args, signal) => ({
+        answer: (await requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'job-scoring', responseSchema: schema, signal })).answer,
+      }));
+
+      const holderSent = [];
+      const holderSender = new EventEmitter();
+      holderSender.id = 804;
+      holderSender.isDestroyed = () => false;
+      holderSender.send = (channel, payload) => holderSent.push({ channel, payload });
+      const holderRun = ipcMain.__getInvokeHandler('non-api-durable-code-collision-holder')(
+        { sender: holderSender }, { nodeId: 'durable-code-node' },
+      );
+      const holderRequest = await waitForRequest(holderSent);
+      assert(holderRequest?.handoffCode, 'the first live request reserves the base code');
+
+      const firstSent = [];
+      const firstSender = new EventEmitter();
+      firstSender.id = 805;
+      firstSender.isDestroyed = () => false;
+      firstSender.send = (channel, payload) => firstSent.push({ channel, payload });
+      const invokeTarget = ipcMain.__getInvokeHandler('non-api-durable-code-collision-target');
+      const firstRun = invokeTarget(
+        { sender: firstSender }, { nodeId: 'durable-code-node', manualAiRunId: runId },
+      );
+      const fallbackRequest = await waitForRequest(firstSent);
+      assert(fallbackRequest?.handoffCode && fallbackRequest.handoffCode !== holderRequest.handoffCode,
+        'the second live request atomically selects a distinct collision fallback code');
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      await submit({ sender: firstSender }, {
+        requestId: fallbackRequest.requestId,
+        response: JSON.stringify({ handoffCode: fallbackRequest.handoffCode, answer: 'stored fallback answer' }),
+      });
+      const firstResult = await firstRun;
+      assert(firstResult.success === true && firstResult.answer === 'stored fallback answer',
+        'the fallback-stamped response is accepted and checkpointed');
+
+      const cancelled = await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')(
+        { sender: holderSender }, { requestId: holderRequest.requestId },
+      );
+      const holderResult = await holderRun;
+      assert(cancelled.cancelled === true && holderResult.success === false,
+        'the original base-code holder is removed before restart simulation');
+
+      const resumedSent = [];
+      const resumedSender = new EventEmitter();
+      resumedSender.id = 806;
+      resumedSender.isDestroyed = () => false;
+      resumedSender.send = (channel, payload) => resumedSent.push({ channel, payload });
+      const resumedResult = await invokeTarget(
+        { sender: resumedSender }, { nodeId: 'durable-code-node', manualAiRunId: runId },
+      );
+      assert(resumedResult.success === true && resumedResult.answer === 'stored fallback answer'
+        && !resumedSent.some(item => item.channel === 'non-api-ai-request'),
+      'restart reuses the persisted fallback code and consumes its stamped step without a new handoff');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
+      return { fallbackCode: fallbackRequest.handoffCode, resumedWithoutPrompt: true };
+    },
+  },
+  {
+    name: 'non-API AI: an accepted legacy structured step replays only through its exact alias',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `legacy-replay-${process.pid}-${Date.now()}`;
+      const legacySchema = {
+        type: 'object', required: ['assessments'],
+        properties: { assessments: { type: 'array' } },
+      };
+      const currentSchema = {
+        type: 'object', required: ['assessments'],
+        properties: { assessments: { type: 'array' } },
+      };
+      const legacyPrompt = 'EXACT LEGACY LISTING PROMPT';
+      const legacyValidator = value => {
+        if (!Array.isArray(value?.assessments) || value.assessments[0]?.index !== 0 || Object.hasOwn(value.assessments[0], 'listingId')) {
+          throw new Error('legacy response shape required');
+        }
+      };
+      const currentValidator = value => {
+        if (value?.assessments?.[0]?.listingId !== 'v2-listing-id') throw new Error('v2 listing ID required');
+      };
+      handleSafe('legacy-replay-seed', async (_event, _args, signal) => requestNonApiAi({
+        prompt: legacyPrompt, task: 'job-preference-evaluation', responseSchema: legacySchema,
+        responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1, signal,
+      }));
+      handleSafe('legacy-replay-current', async (_event, _args, signal) => requestNonApiAi({
+        prompt: 'CURRENT V2 LISTING PROMPT', task: 'job-preference-evaluation', responseSchema: currentSchema,
+        responseValidator: currentValidator,
+        // The historical adaptive handoff explicitly carried no total. Its
+        // alias must preserve null even when the current request carries an
+        // unrelated total, or the accepted durable row is not discoverable.
+        legacyReplay: { prompt: legacyPrompt, responseSchema: legacySchema, responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1 },
+        batch: 3, batchTotal: 9, itemCount: 1,
+        signal,
+      }));
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 807;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const seed = ipcMain.__getInvokeHandler('legacy-replay-seed')(
+        { sender }, { nodeId: 'legacy-replay-node', manualAiRunId: runId },
+      );
+      for (let attempt = 0; attempt < 100 && !sent.length; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+      const seedRequest = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(seedRequest, 'the v1 seed request was issued once');
+      await ipcMain.__getInvokeHandler('submit-non-api-ai-response')(
+        { sender }, { requestId: seedRequest.requestId, response: JSON.stringify({ handoffCode: seedRequest.handoffCode, assessments: [{ index: 0, matches: [] }] }) },
+      );
+      const seeded = await seed;
+      assert(seeded.success === true, 'the accepted legacy response was checkpointed');
+      sent.length = 0;
+      const replayed = await ipcMain.__getInvokeHandler('legacy-replay-current')(
+        { sender }, { nodeId: 'legacy-replay-node', manualAiRunId: runId },
+      );
+      assert(replayed.success === true && replayed.assessments?.[0]?.index === 0
+        && !Object.hasOwn(replayed.assessments[0], 'listingId')
+        && !sent.some(item => item.channel === 'non-api-ai-request'),
+      'a current request consumes only the accepted exact v1 alias with its explicit historical null batchTotal, without issuing a legacy-shaped fresh prompt');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+      return { acceptedLegacyReplayed: true, freshV2PromptNotIssued: true };
+    },
+  },
+  {
+    name: 'non-API AI: an exact pending legacy listing alias restores its prompt, code, and draft',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const runId = `legacy-pending-replay-${process.pid}-${Date.now()}`;
+      const legacySchema = {
+        type: 'object', required: ['assessments'],
+        properties: { assessments: { type: 'array' } },
+      };
+      const currentSchema = {
+        type: 'object', required: ['assessments'],
+        properties: { assessments: { type: 'array' } },
+      };
+      const legacyPrompt = 'EXACT PENDING LEGACY LISTING PROMPT';
+      const legacyValidator = value => {
+        if (!Array.isArray(value?.assessments) || value.assessments[0]?.index !== 0 || Object.hasOwn(value.assessments[0], 'listingId')) {
+          throw new Error('legacy response shape required');
+        }
+      };
+      const currentValidator = value => {
+        if (value?.assessments?.[0]?.listingId !== 'v2-listing-id') throw new Error('v2 listing ID required');
+      };
+      handleSafe('legacy-pending-replay-seed', async (_event, _args, signal) => requestNonApiAi({
+        prompt: legacyPrompt, task: 'job-preference-evaluation', responseSchema: legacySchema,
+        responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1, signal,
+      }));
+      handleSafe('legacy-pending-replay-current', async (_event, _args, signal) => requestNonApiAi({
+        prompt: 'CURRENT V2 LISTING PROMPT MUST NOT REPLACE THE DRAFT', task: 'job-preference-evaluation', responseSchema: currentSchema,
+        responseValidator: currentValidator,
+        legacyReplay: { prompt: legacyPrompt, responseSchema: legacySchema, responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1 },
+        batch: 3, batchTotal: 9, itemCount: 1,
+        signal,
+      }));
+      const waitForRequest = async (sent) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+          if (request) return request;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      };
+      const firstSent = [];
+      const firstSender = new EventEmitter();
+      firstSender.id = 808;
+      firstSender.isDestroyed = () => false;
+      firstSender.send = (channel, payload) => firstSent.push({ channel, payload });
+      const seed = ipcMain.__getInvokeHandler('legacy-pending-replay-seed')(
+        { sender: firstSender }, { nodeId: 'legacy-pending-replay-node', manualAiRunId: runId },
+      );
+      const seedRequest = await waitForRequest(firstSent);
+      assert(seedRequest?.handoffCode, 'the pending v1 listing request has a durable code to restore');
+      await ipcMain.__getInvokeHandler('update-non-api-ai-draft')(
+        { sender: firstSender }, { requestId: seedRequest.requestId, response: '{"assessments":[{"index":0,"matches":[]}]}' },
+      );
+      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      const interrupted = await seed;
+      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
+        'the original pending v1 request is interrupted only after its draft is checkpointed');
+
+      const resumedSent = [];
+      const resumedSender = new EventEmitter();
+      resumedSender.id = 809;
+      resumedSender.isDestroyed = () => false;
+      resumedSender.send = (channel, payload) => resumedSent.push({ channel, payload });
+      const resumed = ipcMain.__getInvokeHandler('legacy-pending-replay-current')(
+        { sender: resumedSender }, { nodeId: 'legacy-pending-replay-node', manualAiRunId: runId },
+      );
+      const restored = await waitForRequest(resumedSent);
+      assert(restored?.prompt.includes(legacyPrompt)
+        && !restored.prompt.includes('CURRENT V2 LISTING PROMPT MUST NOT REPLACE THE DRAFT')
+        && restored.handoffCode === seedRequest.handoffCode
+        && restored.batch === 3 && restored.batchTotal === null && restored.itemCount === 1
+        && restored.initialResponse === '{"assessments":[{"index":0,"matches":[]}]}',
+      'restart reissues the exact pending V1 listing handoff with its original code and draft, not a V2 replacement');
+      await ipcMain.__getInvokeHandler('submit-non-api-ai-response')(
+        { sender: resumedSender }, {
+          requestId: restored.requestId,
+          response: JSON.stringify({ handoffCode: restored.handoffCode, assessments: [{ index: 0, matches: [] }] }),
+        },
+      );
+      const completed = await resumed;
+      assert(completed.success === true && completed.assessments?.[0]?.index === 0
+        && !Object.hasOwn(completed.assessments[0], 'listingId'),
+      'the restored V1 validator accepts its V1 response and completes without issuing a V2 prompt');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
+      return { prompt: 'legacy', draftRestored: true, codeRestored: true };
+    },
+  },
+  {
+    name: 'non-API AI: durable keys canonicalize generated boundary nonces without weakening legacy replay',
+    run: () => {
+      const schema = { type: 'object', required: ['assessments'], properties: { assessments: { type: 'array' } } };
+      const firstPrompt = materializeNonApiPrompt({
+        prompt: `LISTINGS: ${wrapUntrustedText('job-listings', '[{"title":"Engineer"}]')}`,
+        task: 'job-preference-evaluation', responseSchema: schema,
+      });
+      const secondPrompt = materializeNonApiPrompt({
+        prompt: `LISTINGS: ${wrapUntrustedText('job-listings', '[{"title":"Engineer"}]')}`,
+        task: 'job-preference-evaluation', responseSchema: schema,
+      });
+      const keyInput = prompt => ({ materializedPrompt: prompt, task: 'job-preference-evaluation', nodeId: 'nonce-node', batch: 4, batchTotal: 9, itemCount: 1, attachmentPaths: [] });
+      const firstKeys = __durableStepKeysForTests(keyInput(firstPrompt));
+      const secondKeys = __durableStepKeysForTests(keyInput(secondPrompt));
+      const firstTag = firstPrompt.match(/<untrusted-job-listings-[a-f0-9]{8}>/)?.[0];
+      const secondTag = secondPrompt.match(/<untrusted-job-listings-[a-f0-9]{8}>/)?.[0];
+      assert(firstTag && secondTag && firstTag !== secondTag
+        && firstKeys.logicalKey === secondKeys.logicalKey
+        && firstKeys.rawKey !== secondKeys.rawKey
+        && canonicalizeGeneratedUntrustedBoundaryNonces(firstPrompt) === canonicalizeGeneratedUntrustedBoundaryNonces(secondPrompt),
+      'displayed prompts retain distinct random untrusted-boundary tags while their new logical durable key is stable');
+
+      const acceptedRaw = { status: 'accepted', task: 'job-preference-evaluation', batch: 4, batchTotal: 9, itemCount: 1 };
+      assert(__selectDurableStepForTests({ [firstKeys.rawKey]: acceptedRaw }, firstKeys)?.step === acceptedRaw,
+        'a reconstructable pre-canonical raw accepted key remains reachable before metadata fallback');
+      const metadata = { task: 'job-preference-evaluation', batch: 4, batchTotal: 9, itemCount: 1 };
+      const nonceChangedLegacySteps = { historical: acceptedRaw };
+      assert(__selectDurableStepForTests(nonceChangedLegacySteps, secondKeys) === null
+        && __selectUniqueAcceptedLegacyStepForTests(nonceChangedLegacySteps, metadata)?.step === acceptedRaw,
+      'a unique accepted legacy step can recover when a changed nonce prevents raw-key reconstruction');
+      const ambiguous = {
+        first: acceptedRaw,
+        second: { ...acceptedRaw },
+        pending: { ...acceptedRaw, status: 'pending' },
+      };
+      assert(__selectUniqueAcceptedLegacyStepForTests(ambiguous, metadata) === null,
+        'two accepted metadata matches are ambiguous and are never auto-consumed; pending steps are excluded');
+      return { logicalNonceStable: true, rawCompatibility: true, uniqueLegacyFallback: true, ambiguousLegacyBlocked: true };
     },
   },
   {
@@ -1387,19 +2196,428 @@ export default [
       });
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
       const firstRequest = (await waitForRequests(1))[0];
-      await submit({ sender }, { requestId: firstRequest.requestId, response: '{"answer":"file one"}' });
+      await submit({ sender }, { requestId: firstRequest.requestId, response: `{"handoffCode":"${firstRequest.handoffCode}","answer":"file one"}` });
       const requests = await waitForRequests(2);
       assert(requests.length === 2
         && requests[0].stepKey !== requests[1].stepKey
         && requests[0].attachments[0] !== requests[1].attachments[0]
         && requests[1].recoveryMode === 'append-scored-jobs',
       'same-prompt document handoffs have distinct opaque identities and retain their workflow recovery mode');
-      await submit({ sender }, { requestId: requests[1].requestId, response: '{"answer":"file two"}' });
+      await submit({ sender }, { requestId: requests[1].requestId, response: `{"handoffCode":"${requests[1].handoffCode}","answer":"file two"}` });
       const completed = await pending;
       assert(completed.success === true && completed.first === 'file one' && completed.second === 'file two',
         'the second attachment receives its own response instead of silently replaying the first file response');
       await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
       return { attachmentSteps: requests.length, distinct: true };
+    },
+  },
+  {
+    name: 'non-API AI: shared display progress counts only durable accepted sibling submissions',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 725, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const runId = `progress-scope-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      let releaseLate;
+      const lateGate = new Promise(resolve => { releaseLate = resolve; });
+      const request = (batch, itemsDone, signal, itemCount = 12) => requestNonApiAi({
+        prompt: `PROGRESS SCOPE BATCH ${batch}`,
+        task: 'job-preference-evaluation', responseSchema: schema,
+        batch, batchTotal: 3, itemCount, itemsDone, itemsTotal: 36, signal,
+        progressScopeId: 'preference-pass-a', progressUnitId: `batch-${batch}`, progressUnits: itemCount,
+      });
+      handleSafe('non-api-progress-scope-test', async (_event, _args, signal) => {
+        // Batch 2 deliberately arrives before batch 1: these are planned
+        // caller offsets, not evidence that either handoff was submitted.
+        const batch2 = request(2, 12, signal);
+        const batch1 = request(1, 0, signal);
+        await lateGate;
+        const batch3 = request(3, 24, signal, 20);
+        return { rows: await Promise.all([batch1, batch2, batch3]) };
+      });
+      const invoke = ipcMain.__getInvokeHandler('non-api-progress-scope-test');
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const run = invoke({ sender }, { nodeId: 'progress-scope-node', manualAiRunId: runId });
+      const waitFor = async predicate => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+          if (predicate(requests)) return requests;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      };
+      const latestByBatch = requests => new Map(requests.map(item => [item.batch, item]));
+      const initial = await waitFor(requests => latestByBatch(requests).size >= 2);
+      let latest = latestByBatch(initial);
+      const batch1 = latest.get(1);
+      const batch2 = latest.get(2);
+      assert(batch1?.itemsDone === 0 && batch2?.itemsDone === 0,
+        'two pending planned offsets converge on their shared zero baseline before any response is submitted');
+
+      const rejected = await submit({ sender }, {
+        requestId: batch1.requestId,
+        response: JSON.stringify({ handoffCode: batch1.handoffCode }),
+      });
+      latest = latestByBatch(sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload));
+      assert(rejected.accepted === false && latest.get(1)?.itemsDone === 0 && latest.get(2)?.itemsDone === 0,
+        'viewing, selecting, copying, and a rejected paste cannot advance display progress');
+
+      // Submit batch 2 first and race a duplicate invocation while its durable
+      // accepted checkpoint is in flight. Only one commit may charge 12 items.
+      const batch2Answer = JSON.stringify({ handoffCode: batch2.handoffCode, answer: 'batch two' });
+      const duplicate = await Promise.all([
+        submit({ sender }, { requestId: batch2.requestId, response: batch2Answer }),
+        submit({ sender }, { requestId: batch2.requestId, response: batch2Answer }),
+      ]);
+      latest = latestByBatch(await waitFor(requests => latestByBatch(requests).get(1)?.itemsDone === 12));
+      assert(duplicate.filter(result => result.accepted).length === 1 && latest.get(1)?.itemsDone === 12,
+        'an out-of-order durable acceptance advances pending siblings once, while a duplicate submit cannot double-count it');
+
+      releaseLate();
+      latest = latestByBatch(await waitFor(requests => latestByBatch(requests).has(3)));
+      const batch3 = latest.get(3);
+      assert(batch3?.itemsDone === 12,
+        'a sibling issued after an accepted handoff starts at the current accepted count, not its planned offset');
+
+      const batch3Answer = JSON.stringify({ handoffCode: batch3.handoffCode, answer: 'batch three' });
+      await Promise.all([
+        submit({ sender }, { requestId: batch3.requestId, response: batch3Answer }),
+        submit({ sender }, { requestId: batch3.requestId, response: batch3Answer }),
+      ]);
+      latest = latestByBatch(await waitFor(requests => latestByBatch(requests).get(1)?.itemsDone === 32));
+      assert(latest.get(1)?.itemsDone === 32,
+        'each distinct accepted record contributes its own itemCount exactly once, regardless of acceptance order');
+
+      await submit({ sender }, {
+        requestId: batch1.requestId,
+        response: JSON.stringify({ handoffCode: batch1.handoffCode, answer: 'batch one' }),
+      });
+      const completed = await run;
+      const receipts = getNonApiAiHandoffLifecycle({ windowId: sender.id })
+        .filter(receipt => receipt.runId === runId);
+      assert(completed.success === true && receipts.length === 3
+        && receipts.every(receipt => receipt.outcome === 'accepted' && receipt.itemsDone === 36),
+      'accepted lifecycle receipts converge on the capped accepted-submission total rather than their original planned offsets');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+      return { baseline: 0, acceptedItems: 36, receipts: receipts.length };
+    },
+  },
+  {
+    name: 'non-API AI: explicit progress scopes preserve durable holes and isolate recovery passes',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 726, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const runId = `progress-durable-hole-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      const handoff = (prompt, {
+        scope = 'pass-a', unit, units = 12, itemCount = units, itemsDone, batch, measureProgressUnits,
+      }, signal) => requestNonApiAi({
+        prompt, task: 'job-preference-evaluation', responseSchema: schema,
+        batch, batchTotal: 3, itemCount, itemsDone, itemsTotal: 36,
+        progressScopeId: scope, progressUnitId: unit, progressUnits: units, measureProgressUnits, signal,
+      });
+      const waitFor = async predicate => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+          if (predicate(requests)) return requests;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      };
+
+      handleSafe('non-api-progress-durable-seed', async (_event, _args, signal) => ({
+        result: await handoff('PROGRESS DURABLE UNIT TWO', { unit: 'unit-2', units: 12, itemCount: 5, itemsDone: 12, batch: 2 }, signal),
+      }));
+      const seed = ipcMain.__getInvokeHandler('non-api-progress-durable-seed')(
+        { sender }, { nodeId: 'progress-durable-node', manualAiRunId: runId },
+      );
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const seedRequest = (await waitFor(requests => requests.length >= 1)).at(-1);
+      await submit({ sender }, {
+        requestId: seedRequest.requestId,
+        response: JSON.stringify({ handoffCode: seedRequest.handoffCode, answer: 'durably accepted' }),
+      });
+      await seed;
+
+      // Simulate a fresh main process: durable accepted rows remain, whereas
+      // display-only coordinator state does not. The resumed call must rebuild
+      // that accepted hole before its still-pending siblings are displayed.
+      _resetNonApiAiHandoffLifecycle();
+      sent.length = 0;
+      handleSafe('non-api-progress-durable-resume', async (_event, _args, signal) => {
+        const replayed = await handoff('PROGRESS DURABLE UNIT TWO', { unit: 'unit-2', units: 12, itemCount: 5, itemsDone: 12, batch: 2 }, signal);
+        const lowerBaseline = handoff('PROGRESS LOWER BASELINE', {
+          unit: 'unit-1', itemsDone: 0, batch: 1, measureProgressUnits: () => 5,
+        }, signal);
+        const partialRecovery = handoff('PROGRESS RECOVERY FOR UNIT ONE', {
+          unit: 'unit-1', itemsDone: 24, batch: 1, measureProgressUnits: () => 7,
+        }, signal);
+        const isolatedPass = handoff('PROGRESS ISOLATED PASS', { scope: 'pass-b', unit: 'unit-1', itemsDone: 0, batch: 1 }, signal);
+        return { replayed, rows: await Promise.all([lowerBaseline, partialRecovery, isolatedPass]) };
+      });
+      const resumed = ipcMain.__getInvokeHandler('non-api-progress-durable-resume')(
+        { sender }, { nodeId: 'progress-durable-node', manualAiRunId: runId },
+      );
+      const resumedRequests = await waitFor(requests => requests.length >= 3);
+      const lower = resumedRequests.find(request => request.prompt.includes('PROGRESS LOWER BASELINE'));
+      const recovery = resumedRequests.find(request => request.prompt.includes('PROGRESS RECOVERY FOR UNIT ONE'));
+      const isolated = resumedRequests.find(request => request.prompt.includes('PROGRESS ISOLATED PASS'));
+      assert(lower?.itemsDone === 5 && recovery?.itemsDone === 5 && isolated?.itemsDone === 0,
+        'a durable accepted hole replays its five-item split contribution (not its 12-item unit cap); a later lower baseline preserves it, while a distinct scope starts independently');
+
+      await submit({ sender }, {
+        requestId: recovery.requestId,
+        response: JSON.stringify({ handoffCode: recovery.handoffCode, answer: 'partial recovery' }),
+      });
+      const afterRecovery = (await waitFor(requests => requests.some(request => request.requestId === lower.requestId)))
+        .filter(request => request.requestId === lower.requestId).at(-1);
+      assert(afterRecovery?.itemsDone === 12,
+        'a partial/recovery handoff contributes only its measured rows to the shared logical-unit cap, instead of charging the root unit again');
+
+      await submit({ sender }, {
+        requestId: lower.requestId,
+        response: JSON.stringify({ handoffCode: lower.handoffCode, answer: 'lower unit' }),
+      });
+      await submit({ sender }, {
+        requestId: isolated.requestId,
+        response: JSON.stringify({ handoffCode: isolated.handoffCode, answer: 'isolated unit' }),
+      });
+      const completed = await resumed;
+      const receipts = getNonApiAiHandoffLifecycle({ windowId: sender.id })
+        .filter(receipt => receipt.runId === runId);
+      assert(completed.success === true && receipts.length === 3
+        && receipts.filter(receipt => receipt.task === 'job-preference-evaluation').every(receipt => receipt.itemsDone === 17 || receipt.itemsDone === 12),
+      'resumed lifecycle receipts reflect capped per-step contributions, without cross-pass or recovery overcounting');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+      return { durableHole: true, recoveryDeduped: true, isolatedPass: true };
+    },
+  },
+  {
+    name: 'non-API AI: attempt-local abort preserves scoped sibling progress',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 728, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const runId = `progress-attempt-abort-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      let abortFirst;
+      let releaseThird;
+      const thirdGate = new Promise(resolve => { releaseThird = resolve; });
+      const handoff = (label, batch, itemsDone, signal) => requestNonApiAi({
+        prompt: `PROGRESS ATTEMPT ${label}`, task: 'job-preference-evaluation', responseSchema: schema,
+        batch, batchTotal: 3, itemCount: 12, itemsDone, itemsTotal: 36,
+        progressScopeId: 'attempt-pass', progressUnitId: `unit-${batch}`, progressUnits: 12, signal,
+      });
+      handleSafe('non-api-progress-attempt-abort', async (_event, _args, handlerSignal) => {
+        const firstController = new AbortController();
+        abortFirst = () => firstController.abort(new Error('Split this attempt'));
+        const first = handoff('FIRST', 1, 0, firstController.signal);
+        const second = handoff('SECOND', 2, 12, handlerSignal);
+        await thirdGate;
+        const third = handoff('THIRD', 3, 24, handlerSignal);
+        return { results: await Promise.allSettled([first, second, third]) };
+      });
+      const invoke = ipcMain.__getInvokeHandler('non-api-progress-attempt-abort');
+      const run = invoke({ sender }, { nodeId: 'progress-attempt-node', manualAiRunId: runId });
+      const waitFor = async predicate => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+          if (predicate(requests)) return requests;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      };
+      const initial = await waitFor(requests => requests.filter(request => request.prompt.includes('PROGRESS ATTEMPT')).length >= 2);
+      const second = initial.find(request => request.prompt.includes('PROGRESS ATTEMPT SECOND'));
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      await submit({ sender }, {
+        requestId: second.requestId,
+        response: JSON.stringify({ handoffCode: second.handoffCode, answer: 'second' }),
+      });
+      abortFirst();
+      releaseThird();
+      const third = (await waitFor(requests => requests.some(request => request.prompt.includes('PROGRESS ATTEMPT THIRD'))))
+        .find(request => request.prompt.includes('PROGRESS ATTEMPT THIRD'));
+      assert(third?.itemsDone === 12,
+        'aborting one attempt leaves its scope alive, so a later sibling inherits the already accepted sibling contribution');
+      await submit({ sender }, {
+        requestId: third.requestId,
+        response: JSON.stringify({ handoffCode: third.handoffCode, answer: 'third' }),
+      });
+      const completed = await run;
+      const secondReceipt = getNonApiAiHandoffLifecycle({ windowId: sender.id })
+        .find(receipt => receipt.requestId === second.requestId.slice(0, 12));
+      assert(completed.success === true && completed.results[0].status === 'rejected'
+        && completed.results[1].status === 'fulfilled' && completed.results[2].status === 'fulfilled'
+        && secondReceipt?.itemsDone === 24,
+      'the surviving sibling advances normally and its detached lifecycle receipt keeps the shared accepted count after an attempt-local abort');
+      await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
+      return { preserved: true };
+    },
+  },
+  {
+    name: 'non-API AI: no-run display scopes retire on completion and prune only inactive leftovers',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 729, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      const waitFor = async label => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const request = sent.filter(item => item.channel === 'non-api-ai-request')
+            .map(item => item.payload).find(item => item.prompt.includes(label));
+          if (request) return request;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return null;
+      };
+      const handoff = (label, units, signal) => requestNonApiAi({
+        prompt: label, task: 'job-preference-evaluation', responseSchema: schema,
+        batch: 1, batchTotal: 1, itemCount: units, itemsDone: 0, itemsTotal: units,
+        progressScopeId: label, progressUnitId: 'unit-1', progressUnits: units, signal,
+      });
+      handleSafe('non-api-ephemeral-complete', async (_event, _args, signal) => ({
+        result: await handoff('EPHEMERAL COMPLETE', 4, signal),
+      }));
+      const complete = ipcMain.__getInvokeHandler('non-api-ephemeral-complete')({ sender }, { nodeId: 'ephemeral-node' });
+      const completeRequest = await waitFor('EPHEMERAL COMPLETE');
+      await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, {
+        requestId: completeRequest.requestId,
+        response: JSON.stringify({ handoffCode: completeRequest.handoffCode, answer: 'done' }),
+      });
+      await complete;
+      assert(__nonApiAiProgressScopeSnapshotForTests().inactiveEphemeral === 0,
+        'a no-run scope retires immediately after its final accepted lifecycle receipt reaches itemsTotal');
+
+      let abortAttempt;
+      handleSafe('non-api-ephemeral-abort', async () => {
+        const attempt = new AbortController();
+        abortAttempt = () => attempt.abort(new Error('Attempt interrupted'));
+        return { settled: await Promise.allSettled([handoff('EPHEMERAL INCOMPLETE', 4, attempt.signal)]) };
+      });
+      const incomplete = ipcMain.__getInvokeHandler('non-api-ephemeral-abort')({ sender }, { nodeId: 'ephemeral-node' });
+      await waitFor('EPHEMERAL INCOMPLETE');
+      const future = Date.now() + (31 * 60 * 1000);
+      assert(__pruneInactiveEphemeralProgressScopesForTests(future) === 0
+        && __nonApiAiProgressScopeSnapshotForTests().activeEphemeral === 1,
+      'age pruning never evicts an active no-run handoff');
+      abortAttempt();
+      await incomplete;
+      assert(__nonApiAiProgressScopeSnapshotForTests().inactiveEphemeral === 1
+        && __pruneInactiveEphemeralProgressScopesForTests(future) === 1
+        && __nonApiAiProgressScopeSnapshotForTests().inactiveEphemeral === 0,
+      'an incomplete no-run scope remains available for a conservative gap window, then is pruned once inactive and stale');
+      return { ephemeralRetired: true, stalePruned: true };
+    },
+  },
+  {
+    name: 'non-API AI: cancellation during an accepted durable write cannot revive progress',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 727, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const runId = `progress-cancel-write-${process.pid}-${Date.now()}`;
+      const schema = {
+        type: 'object', required: ['answer'], additionalProperties: false,
+        properties: { answer: { type: 'string' } },
+      };
+      handleSafe('non-api-progress-cancel-write', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: 'PROGRESS CANCEL DURING WRITE', task: 'job-preference-evaluation', responseSchema: schema,
+          batch: 1, batchTotal: 1, itemCount: 12, itemsDone: 0, itemsTotal: 12,
+          progressScopeId: 'cancel-write-pass', progressUnitId: 'unit-1', progressUnits: 12, signal,
+        }),
+      }));
+      const invoke = ipcMain.__getInvokeHandler('non-api-progress-cancel-write');
+      const run = invoke({ sender }, { nodeId: 'progress-cancel-node', manualAiRunId: runId });
+      const waitForRequest = async () => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const request = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+          if (request) return request;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        return null;
+      };
+      const request = await waitForRequest();
+      const originalWriteFile = fs.promises.writeFile;
+      let releaseWrite;
+      let writeStarted;
+      const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+      const writeStartedGate = new Promise(resolve => { writeStarted = resolve; });
+      let holdAcceptedWrite = true;
+      fs.promises.writeFile = async (...args) => {
+        if (holdAcceptedWrite && String(args[0]).includes('non-api-ai-handoffs.json')) {
+          writeStarted();
+          await writeGate;
+        }
+        return originalWriteFile(...args);
+      };
+      try {
+        const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+        const submitting = submit({ sender }, {
+          requestId: request.requestId,
+          response: JSON.stringify({ handoffCode: request.handoffCode, answer: 'too late' }),
+        });
+        await writeStartedGate;
+        const cancelling = ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        // abortNodeTasks runs before its durable cleanup barrier, so the
+        // request is settled while this accepted write remains intentionally
+        // paused. Releasing it exercises the post-await transport guard.
+        await new Promise(resolve => setImmediate(resolve));
+        holdAcceptedWrite = false;
+        releaseWrite();
+        const [submitResult, cancelled, completed] = await Promise.all([submitting, cancelling, run]);
+        const receipt = getNonApiAiHandoffLifecycle({ windowId: sender.id })
+          .find(item => item.requestId === request.requestId.slice(0, 12));
+        assert(submitResult.accepted === false && cancelled.cancelled === true
+          && completed.success === false && receipt?.outcome === 'cancelled'
+          && !receipt.acceptedAt && receipt.itemsDone === 0,
+        'an abort during the awaited accepted write returns a non-accepted submit result and cannot commit progress, lifecycle acceptance, or a successful owner result');
+      } finally {
+        holdAcceptedWrite = false;
+        releaseWrite?.();
+        fs.promises.writeFile = originalWriteFile;
+      }
+      return { guarded: true };
     },
   },
   {
@@ -1479,9 +2697,9 @@ export default [
         edges: [], drawings: [], nodeInternals: [], nodeComponentStates: [], frontEndState: {}, eventLogs: [],
       }, sender.id).markdown;
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
-      const rejected = await submit({ sender }, { requestId: request.requestId, response: '{}' });
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}"}` });
       const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
-      const accepted = await submit({ sender }, { requestId: request.requestId, response: '{"result":"TOP_SECRET_RESPONSE"}' });
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","result":"TOP_SECRET_RESPONSE"}` });
       await run;
       const lifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
       const receipt = lifecycle.find(item => item.requestId === request.requestId.slice(0, 12));
@@ -1511,6 +2729,7 @@ export default [
         && markdown.includes('1 replayed after dialog remount')
         && markdown.includes('**partial-row recovery** from 24-item root batch')
         && markdown.includes('**accepted** in')
+        && !markdown.includes(request.handoffCode)
         && !markdown.includes('TOP_SECRET_PROMPT')
         && !markdown.includes('TOP_SECRET_RESPONSE')
         && !markdown.includes('is missing required property'),
@@ -1548,6 +2767,296 @@ export default [
         && !taxonomyReport.includes('TOP_SECRET_NODE'),
       'TAXONOMY retains its redacted manual taxonomy-handoff receipt while honoring heavy-node exclusions');
       return { deliveries: receipt.deliveries, replays: receipt.replays, filter: 'JOBHANDOFF+TAXONOMY' };
+    },
+  },
+  {
+    name: 'non-API AI: typed rejection diagnostics stay bounded, redacted, correlated, and actionable',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 719, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const privateMessage = 'PRIVATE_VALIDATOR_MESSAGE /Users/private/secret.txt value=never-export';
+      let diagnosticAttempt = 0;
+      handleSafe('non-api-safe-diagnostic-test', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: 'TOP_SECRET_RAW_PROMPT', task: 'job-preference-research-batch', requestKind: 'raw-text', signal,
+          responseValidator: () => {
+            const error = new Error(privateMessage);
+            error.code = 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID';
+            const diagnostic = {
+              stage: 'research-sections', reason: 'MISSING_SECTION',
+              expectedCount: 2, receivedCount: 1,
+              markerCount: 2_000_000,
+              path: '/Users/private/secret.txt', value: 'TOP_SECRET_DIAGNOSTIC_VALUE',
+            };
+            // Exercise both the current typed field and the supported legacy
+            // alias while proving oversized/unlisted metadata is discarded.
+            if (diagnosticAttempt === 0) error.validationDiagnostic = diagnostic;
+            else error.diagnostic = diagnostic;
+            diagnosticAttempt += 1;
+            throw error;
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-safe-diagnostic-test')({ sender }, { nodeId: 'safe-diagnostic-node' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const rejected = await submit({ sender }, {
+          requestId: request.requestId,
+          response: `Handoff: ${request.handoffCode}\n\nTOP_SECRET_RAW_RESPONSE_${attempt}`,
+        });
+        assert(rejected.accepted === false && rejected.validationErrors?.[0] === privateMessage,
+          'the renderer-local validation detail remains unchanged after a typed safe diagnostic is added');
+      }
+      const correction = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      const lifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
+      const receipt = lifecycle.find(item => item.requestId === request.requestId.slice(0, 12));
+      const copiedFailures = receipt?.failures;
+      if (copiedFailures?.[0]) copiedFailures[0].validationDiagnostic.counts.expectedCount = 999;
+      const unmutated = getNonApiAiHandoffLifecycle({ windowId: sender.id })
+        .find(item => item.requestId === request.requestId.slice(0, 12));
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['safe-diagnostic-node']), sender.id);
+      const focused = applyBugReportCode([
+        '[Non-API AI] Rejected response for task job-preference-research-batch (code=JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID).',
+        'viewport changed source=interaction',
+      ], {}, 'AIHANDOFF');
+      assert(correction?.requestId === request.requestId
+        && correction?.isCorrection === true
+        && correction?.validationCode === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'
+        && correction?.validationDiagnostic?.stage === 'research-sections'
+        && correction?.validationDiagnostic?.reason === 'MISSING_SECTION'
+        && correction?.validationDiagnostic?.counts?.expectedCount === 2
+        && correction?.validationDiagnostic?.counts?.receivedCount === 1
+        && !Object.hasOwn(correction?.validationDiagnostic?.counts || {}, 'markerCount')
+        && correction?.validationError === privateMessage
+        && correction.prompt.includes('missing section')
+        && correction.prompt.includes('expected 2, received 1')
+        && !correction.prompt.includes(privateMessage)
+        && !JSON.stringify(correction.validationDiagnostic).includes('TOP_SECRET_DIAGNOSTIC_VALUE'),
+      'the reissued request keeps the full local detail but exposes only a typed safe diagnostic and uses it for actionable raw-research correction text');
+      assert(unmutated?.rejected === 10
+        && unmutated?.failures?.length === 8
+        && unmutated.failures.every(failure => failure.at > 0
+          && failure.validationCode === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'
+          && failure.validationDiagnostic?.reason === 'MISSING_SECTION'
+          && failure.validationDiagnostic?.counts?.expectedCount === 2
+          && !Object.hasOwn(failure.validationDiagnostic?.counts || {}, 'markerCount')
+          && failure.responseChars > 0
+          && /^[a-f0-9]{8}$/.test(failure.responseHash || ''))
+        && unmutated?.failures?.[0]?.validationDiagnostic?.counts?.expectedCount === 2,
+      'each retained rejection is correlated to this lifecycle with timestamp/code/reason/count/size/hash metadata, capped at eight and deep-copied to callers');
+      assert(markdown.includes('rejection detail:')
+        && markdown.includes('research-sections:MISSING_SECTION')
+        && markdown.includes('expected 2, received 1')
+        && markdown.includes('receipt tag `')
+        && markdown.includes('2 earlier rejection detail(s) not retained (newest 8 shown)')
+        && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID/.test(markdown)
+        && !markdown.includes(' · 0 item(s)')
+        && !markdown.includes('response null chars')
+        && !markdown.includes(privateMessage)
+        && !markdown.includes('TOP_SECRET_RAW_PROMPT')
+        && !markdown.includes('TOP_SECRET_RAW_RESPONSE')
+        && !markdown.includes('TOP_SECRET_DIAGNOSTIC_VALUE'),
+      'the bug-report lifecycle renders only compact typed failure metadata, never raw validation text, prompts, responses, paths, or values');
+      assert(focused.matchedCodes.includes('AIHANDOFF')
+        && focused.filteredLogs.some(line => line.includes('Rejected response'))
+        && focused.sectionExclusions.has('nodes')
+        && focused.sectionExclusions.has('nodeInternals'),
+      'AIHANDOFF is a general focused filter for manual Non-API AI lifecycle evidence while FULL stays unfiltered');
+      const finalResponse = await submit({ sender }, {
+        requestId: request.requestId,
+        response: `Handoff: ${request.handoffCode}\n\naccepted raw research`,
+      });
+      // The test validator intentionally rejects every raw response. Cancel the
+      // owning controller after assertions so it leaves no pending handoff for
+      // later tests.
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      assert(finalResponse.accepted === false,
+        'the diagnostic-only test never accepts an arbitrary raw response before its explicit cleanup');
+      return { retainedFailures: receipt.failures.length, filter: 'AIHANDOFF' };
+    },
+  },
+  {
+    name: 'non-API AI: structured research assessment diagnostics produce phase-correct JSON corrections',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 720, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const reasons = [
+        'ASSESSMENT_COVERAGE_INVALID',
+        'ASSESSMENT_IDENTITY_INVALID',
+        'ASSESSMENT_QUOTE_NOT_GROUNDED',
+        'ASSESSMENT_URL_NOT_GROUNDED',
+        'ASSESSMENT_SOURCE_DATE_NOT_GROUNDED',
+      ];
+      const privateMessage = 'PRIVATE_ASSESSMENT_VALIDATOR_TEXT research-secret-id';
+      let attempt = 0;
+      handleSafe('non-api-assessment-diagnostic-test', async (_event, _args, signal) => ({
+        result: await callLLMText('Assess every supplied research identity.', {
+          signal,
+          task: 'job-preference-research-batch-assessment',
+          responseSchema: { type: 'object', required: ['assessments'], properties: { assessments: { type: 'array' } } },
+          responseValidator: () => {
+            const error = new Error(privateMessage);
+            error.code = 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID';
+            error.validationDiagnostic = {
+              stage: 'research-assessment',
+              reason: reasons[Math.min(attempt, reasons.length - 1)],
+              expectedCount: 27,
+              receivedCount: 26,
+              researchId: 'research-secret-id',
+            };
+            attempt += 1;
+            throw error;
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-assessment-diagnostic-test')({ sender }, { nodeId: 'assessment-diagnostic-node' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const corrections = [];
+      for (const reason of reasons) {
+        const rejected = await submit({ sender }, {
+          requestId: request.requestId,
+          response: JSON.stringify({ handoffCode: request.handoffCode, assessments: [] }),
+        });
+        const correction = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+        assert(rejected.accepted === false
+          && rejected.validationErrors?.[0] === privateMessage
+          && correction?.isCorrection === true
+          && correction?.validationDiagnostic?.stage === 'research-assessment'
+          && correction?.validationDiagnostic?.reason === reason
+          && correction?.validationDiagnostic?.counts?.expectedCount === 27
+          && correction?.validationDiagnostic?.counts?.receivedCount === 26
+          && !JSON.stringify(correction.validationDiagnostic).includes('research-secret-id'),
+        `the ${reason} diagnostic stays typed and redacted across the structured handoff boundary`);
+        corrections.push(correction.prompt);
+      }
+      assert(corrections[0].includes('exactly one JSON assessment row for every requested researchId')
+        && corrections[1].includes('Copy each researchId and preferenceId exactly')
+        && corrections[2].includes('one short contiguous passage')
+        && corrections[3].includes('literal http(s) URL')
+        && corrections[4].includes('otherwise use an empty string')
+        && corrections.every(prompt => prompt.includes('Return the complete JSON assessment again, not BEGIN/END RESEARCH sections.'))
+        && corrections.every(prompt => !prompt.includes('Regenerate every requested BEGIN RESEARCH / END RESEARCH block')),
+      'each structured assessment failure gets specific JSON/provenance correction text and never the raw-section retry instruction');
+
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['assessment-diagnostic-node']), sender.id);
+      const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert(reasons.every(reason => markdown.includes(`research-assessment:${reason}`))
+        && !markdown.includes(privateMessage)
+        && !markdown.includes('research-secret-id'),
+      'the bug report retains every safe assessment reason while redacting validator and row content');
+      assert(dialogSource.includes('correctionGuidanceFor(validationCode, activeRequest?.validationDiagnostic)')
+        && dialogSource.includes('pasted JSON assessment')
+        && dialogSource.includes("validationDiagnostic?.stage === 'research-assessment'")
+        && !dialogSource.includes('{correctionGuidance || (isCorrection'),
+      'the renderer selects assessment-specific rejection copy from the safe diagnostic stage');
+
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { reasons: reasons.length, phase: 'research-assessment' };
+    },
+  },
+  {
+    name: 'non-API AI: compensation assessment diagnostics reach FULL as typed, redacted receipts',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 721, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const reasons = [
+        'COMPENSATION_COHORT_COVERAGE_INVALID',
+        'COMPENSATION_COHORT_IDENTITY_INVALID',
+        'COMPENSATION_ROLE_FAMILY_COVERAGE_INVALID',
+        'COMPENSATION_ROLE_FAMILY_IDENTITY_INVALID',
+        'COMPENSATION_ASSESSMENT_COVERAGE_INVALID',
+        'COMPENSATION_RANGE_INVALID',
+        'COMPENSATION_EVIDENCE_NOT_GROUNDED',
+        'COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED',
+      ];
+      const privateMessage = 'PRIVATE_COMPENSATION_VALIDATOR_TEXT cohort-secret-id';
+      let attempt = 0;
+      handleSafe('non-api-compensation-diagnostic-test', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({
+          prompt: 'TOP_SECRET_COMPENSATION_PROMPT', task: 'job-compensation-assessment-batch', requestKind: 'raw-text', signal,
+          responseValidator: () => {
+            const error = new Error(privateMessage);
+            error.code = 'JOB_COMPENSATION_RESPONSE_INVALID';
+            error.validationDiagnostic = {
+              stage: 'compensation-assessment',
+              reason: reasons[Math.min(attempt, reasons.length - 1)],
+              expectedCount: 2,
+              receivedCount: 1,
+              cohortId: 'cohort-secret-id',
+            };
+            attempt += 1;
+            throw error;
+          },
+        }),
+      }));
+      const run = ipcMain.__getInvokeHandler('non-api-compensation-diagnostic-test')({ sender }, { nodeId: 'compensation-diagnostic-node' });
+      await new Promise(resolve => setImmediate(resolve));
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      for (const reason of reasons) {
+        const rejected = await submit({ sender }, {
+          requestId: request.requestId,
+          response: `Handoff: ${request.handoffCode}\n\ncompensation answer`,
+        });
+        assert(rejected.accepted === false && rejected.validationErrors?.[0] === privateMessage,
+          `the ${reason} rejection preserves its detailed message only in the active renderer`);
+      }
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['compensation-diagnostic-node']), sender.id);
+      assert(reasons.every(reason => markdown.includes(`compensation-assessment:${reason}`))
+        && markdown.includes('JOB_COMPENSATION_RESPONSE_INVALID')
+        && markdown.includes('expected 2, received 1')
+        && !markdown.includes(privateMessage)
+        && !markdown.includes('cohort-secret-id')
+        && !markdown.includes('TOP_SECRET_COMPENSATION_PROMPT'),
+      'FULL reports the typed compensation validation cause and counts without exporting private response, research, or cohort data');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+      await run;
+      return { reasons: reasons.length, stage: 'compensation-assessment' };
+    },
+  },
+  {
+    name: 'non-API AI: AIHANDOFF narrows main-process logs but FULL keeps the global ring',
+    run: () => {
+      const unrelated = `UNRELATED_MAIN_PROCESS_AUDIT_${Date.now()}`;
+      const handoffLog = `[Non-API AI] AIHANDOFF_MAIN_PROCESS_AUDIT_${Date.now()}`;
+      logger.warn(unrelated);
+      logger.warn(handoffLog);
+      const basePayload = {
+        description: 'A pasted manual AI response was rejected.',
+        filterStats: { eventsShown: 0, eventsTotal: 0, omittedSections: [], currentNodeIds: [], currentJobHubIds: [] },
+        nodes: [], edges: [], drawings: [], nodeInternals: [], nodeComponentStates: [],
+        frontEndState: {}, eventLogs: [],
+      };
+      const focused = generateMarkdown({ ...basePayload, filterCode: 'AIHANDOFF' }).markdown;
+      const full = generateMarkdown({ ...basePayload, filterCode: 'FULL' }).markdown;
+      assert(focused.includes(handoffLog) && !focused.includes(unrelated)
+        && full.includes(handoffLog) && full.includes(unrelated),
+      'AIHANDOFF keeps manual-AI main-process evidence without exporting unrelated ring entries, while FULL remains global');
+      return { focusedMainLogs: true };
     },
   },
   {
@@ -1628,7 +3137,8 @@ export default [
       await new Promise(resolve => setImmediate(resolve));
       const requestId = sent.find(item => item.channel === 'non-api-ai-request')?.payload?.requestId;
       failDelivery = true;
-      const submit = await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, { requestId, response: '{}' });
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const submit = await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, { requestId, response: `{"handoffCode":"${request?.handoffCode}"}` });
       const result = await run;
       const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')?.({ sender });
       assert(submit.accepted === false
@@ -1645,11 +3155,15 @@ export default [
       // only pre-handoff await (checkPromptFits) was gated on `batch.length > 1`,
       // and requestNonApiAi sends its IPC synchronously — so inside the single
       // Promise.all dispatch pass the singleton skipped a microtask turn and
-      // jumped the queue. 61 jobs at 15/batch presented as 5, 1, 2, 3, 4.
+      // jumped the queue. A historical 61-job run presented as 5, 1, 2, 3, 4.
       const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
       const scoreBatchBody = jobsSource.slice(
         jobsSource.indexOf('const scoreBatch = async (batch, context = {}) => {'),
         jobsSource.indexOf('const batchMeta = {};'),
+      );
+      const scoreBatchSource = jobsSource.slice(
+        jobsSource.indexOf('const scoreBatch = async (batch, context = {}) => {'),
+        jobsSource.indexOf('\n    // Live per-batch scoring progress'),
       );
       assert(scoreBatchBody.length > 0
         && /\n\s*let fit = null;\n\s*try \{\n\s*fit = await checkPromptFits\(/.test(scoreBatchBody)
@@ -1657,8 +3171,25 @@ export default [
       'the context-window preflight await runs for EVERY batch size, so no batch can skip a microtask turn and issue its handoff early');
       assert(/if \(fit && !fit\.fits && batch\.length > 1\) \{/.test(scoreBatchBody),
         'the SPLIT stays guarded on batch.length > 1 — at length 1 mid is 1, the right half is empty, and scoreBatch would recurse forever');
-      assert(jobsSource.includes('Promise.all(scoringBatches.map(async (batch, batchIndex) =>'),
-        'top-level batches still dispatch together so the person can run every manual prompt in parallel');
+      // A retry/split is causally dependent on the parent response. Keep its
+      // children serial: dispatching both halves together while the other nine
+      // top-level handoffs are still open would turn one completed prompt into
+      // two replacements and exceed the fixed ten-prompt work set.
+      assert(/const \[left, right\] = \[\s*await scoreBatch\(batch\.slice\(0, mid\), context\),\s*await scoreBatch\(batch\.slice\(mid\), context\),\s*\];/.test(scoreBatchSource)
+        && !/Promise\.all\(\[\s*scoreBatch\(batch\.slice\(0, mid\), context\)/.test(scoreBatchSource),
+      'a defensive scoring split resolves its two dependent children one at a time, so it cannot fan one active top-level slot into two handoffs');
+      // Partial recovery is similarly a dependency of the response just
+      // accepted for this SAME root batch. Awaiting it before scoreBatch
+      // returns prevents mapWithConcurrency from considering that top-level
+      // slot settled and beginning a fresh independent batch early.
+      assert(/const recovered = await scoreBatch\(missingJobs, \{ \.\.\.context, partialRecovery: true \}\);/.test(scoreBatchSource),
+      'a partial-score recovery stays inside its original top-level batch instead of rotating a new independent batch into the active wave');
+      // Bounded, not unbounded: independent batches still dispatch together so
+      // the person can run several prompts at once, but a large run must not
+      // put every batch on screen simultaneously — that is a backlog, not
+      // parallelism, and it is the same cap the preference-evaluation phase uses.
+      assert(jobsSource.includes('await mapWithConcurrency(scoringBatches, MANUAL_HANDOFF_CONCURRENCY, async (batch, batchIndex) =>'),
+        'top-level batches dispatch together under the shared fixed-wave helper, so a new independent prompt cannot replace one that settles early');
 
       // Renderer-side belt and braces: arrival order is not a contract, so the
       // queue sorts itself rather than trusting main to emit in order.
@@ -1709,6 +3240,495 @@ export default [
       assert(mixed.map(r => r.requestId).join(',') === 'r1,r2,taxonomy,other-hub',
         'ordering is scoped to one node+task: unnumbered handoffs and other hubs keep arrival order instead of being interleaved');
       return { ordering: 'batch-ascending', scope: 'node+task' };
+    },
+  },
+  {
+    name: 'non-API AI: handoff code appears in prompt first-line banner, settings block, and rendered schema',
+    run: () => {
+      const schema = {
+        type: 'object', required: ['handoffCode', 'answer'], additionalProperties: false,
+        properties: {
+          // A schema is not supposed to own this transport field. Keep a
+          // conflicting declaration here to prove the rendered request const
+          // cannot be overwritten by a future schema edit.
+          handoffCode: { type: 'string', const: 'HANDOFF-STALE1' },
+          answer: { type: 'string' },
+        },
+      };
+      const code = 'HANDOFF-K7Q3M2';
+      const originalSchema = JSON.stringify(schema);
+      const prompt = materializeNonApiPrompt({
+        prompt: 'TEST PROMPT',
+        cachedPrefix: 'TEST PREFIX',
+        task: 'job-preference-evaluation',
+        batch: 36,
+        batchTotal: 259,
+        handoffCode: code,
+        responseSchema: schema,
+      });
+      assert(prompt.startsWith('=== HANDOFF-K7Q3M2 · job-preference-evaluation · batch 36 of 259 ===\n\nTEST PREFIX\n\nTEST PROMPT'),
+        'prompt begins with the exact handoff code banner as the first line before cachedPrefix');
+      assert(prompt.includes('Handoff code: HANDOFF-K7Q3M2'),
+        'settings block includes the Handoff code line');
+      assert(prompt.includes('"handoffCode": {\n      "type": "string",\n      "const": "HANDOFF-K7Q3M2"\n    }'),
+        'schema is rendered with handoffCode const property injected at top of properties');
+      assert(!prompt.includes('HANDOFF-STALE1'),
+        'a conflicting schema handoffCode declaration cannot replace the per-request const');
+      assert(prompt.includes('The top-level `handoffCode` property must be copied verbatim'),
+        'schema instructions include the handoffCode verbatim copy requirement');
+      const stamped = validateNonApiAiSubmission({
+        response: JSON.stringify({ handoffCode: code, answer: 'stamped answer' }),
+        responseSchema: schema,
+        task: 'job-preference-evaluation',
+        expectedHandoffCode: code,
+      });
+      const codeFree = validateNonApiAiSubmission({
+        requireHandoffCode: false,
+        response: JSON.stringify({ answer: 'legacy answer' }),
+        responseSchema: schema,
+        task: 'job-preference-evaluation',
+        expectedHandoffCode: code,
+      });
+      assert(stamped.answer === 'stamped answer' && !('handoffCode' in stamped)
+        && codeFree.answer === 'legacy answer',
+      'both stamped and code-free responses validate against the task schema after the transport field is stripped');
+      assert(JSON.stringify(schema) === originalSchema,
+        'prompt rendering and transport validation never mutate the caller schema');
+
+      // Free-text prompt
+      const freeText = materializeNonApiPrompt({
+        prompt: 'RESEARCH THIS',
+        task: 'job-compensation-research',
+        handoffCode: code,
+      });
+      assert(freeText.startsWith('=== HANDOFF-K7Q3M2 · job-compensation-research ===\n\nRESEARCH THIS'),
+        'free-text prompt begins with handoff code banner');
+      assert(freeText.includes('Handoff: HANDOFF-K7Q3M2'),
+        'free-text prompt requires Handoff: code on first line of response');
+      return { bannerChecked: true };
+    },
+  },
+  {
+    name: 'non-API AI: deriveHandoffCode is deterministic across calls for the same logical request',
+    run: () => {
+      const args = {
+        basePrompt: 'EVALUATE PREFERENCES',
+        task: 'job-preference-evaluation',
+        nodeId: 'node-123',
+        batch: 38,
+        batchTotal: 259,
+        itemCount: 8,
+        attachmentPaths: [],
+      };
+      const code1 = deriveHandoffCode(args);
+      const code2 = deriveHandoffCode(args);
+      assert(typeof code1 === 'string' && code1.startsWith('HANDOFF-') && code1.length === 14,
+        'deriveHandoffCode returns a HANDOFF-XXXXXX string');
+      assert(code1 === code2,
+        'calling deriveHandoffCode twice with identical parameters yields identical code');
+      const firstPrompt = `LISTINGS: ${wrapUntrustedText('job-listings', '[{"title":"Engineer"}]')}`;
+      const secondPrompt = `LISTINGS: ${wrapUntrustedText('job-listings', '[{"title":"Engineer"}]')}`;
+      const firstTag = firstPrompt.match(/<untrusted-job-listings-[a-f0-9]{8}>/)?.[0];
+      const secondTag = secondPrompt.match(/<untrusted-job-listings-[a-f0-9]{8}>/)?.[0];
+      const regeneratedCode1 = deriveHandoffCode({ ...args, basePrompt: firstPrompt });
+      const regeneratedCode2 = deriveHandoffCode({ ...args, basePrompt: secondPrompt });
+      assert(firstTag && secondTag && firstTag !== secondTag && regeneratedCode1 === regeneratedCode2,
+        'distinct visible generated boundaries for the same logical prompt derive one stable handoff code');
+      for (const ch of code1.slice(8)) {
+        assert(HANDOFF_CODE_ALPHABET.includes(ch), `code character ${ch} belongs to HANDOFF_CODE_ALPHABET`);
+      }
+      return { code: code1 };
+    },
+  },
+  {
+    name: 'non-API AI: two different batches of the same task derive different handoff codes',
+    run: () => {
+      const common = {
+        basePrompt: 'EVALUATE PREFERENCES',
+        task: 'job-preference-evaluation',
+        nodeId: 'node-123',
+        batchTotal: 259,
+        itemCount: 8,
+        attachmentPaths: [],
+      };
+      const code38 = deriveHandoffCode({ ...common, batch: 38 });
+      const code39 = deriveHandoffCode({ ...common, batch: 39 });
+      assert(code38 !== code39,
+        `batch 38 (${code38}) and batch 39 (${code39}) derive different codes`);
+      return { code38, code39 };
+    },
+  },
+  {
+    name: 'non-API AI: validateNonApiAiSubmission rejects mismatched handoff codes with informative error',
+    run: () => {
+      const schema = { type: 'object', properties: { ok: { type: 'boolean' } } };
+      let rejectedStructured = false;
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ handoffCode: 'HANDOFF-W8NG11', ok: true }),
+          responseSchema: schema,
+          task: 'test-task',
+          expectedHandoffCode: 'HANDOFF-C8RECT',
+        });
+      } catch (err) {
+        rejectedStructured = true;
+        assert(err instanceof NonApiAiCodeMismatchError || err.isCodeMismatch, 'throws code mismatch error');
+        assert(err.message.includes('HANDOFF-W8NG11'), 'error message names observed code');
+        assert(err.message.includes('HANDOFF-C8RECT'), 'error message names expected code');
+        assert(err.message.includes('Nothing was saved'), 'error message states nothing was saved');
+      }
+      assert(rejectedStructured, 'structured submission with wrong handoffCode was rejected');
+
+      let rejectedRaw = false;
+      try {
+        validateNonApiAiSubmission({
+          response: 'Some text mentioning HANDOFF-W8NG22 somewhere in response',
+          task: 'job-compensation-research',
+          expectedHandoffCode: 'HANDOFF-C8RECT',
+        });
+      } catch (err) {
+        rejectedRaw = true;
+        assert(err.message.includes('HANDOFF-W8NG22') && err.message.includes('HANDOFF-C8RECT'),
+          'raw sweep mismatch names both codes');
+      }
+      assert(rejectedRaw, 'raw text containing wrong handoff code was rejected');
+      return { rejectedStructured, rejectedRaw };
+    },
+  },
+  {
+    name: 'non-API AI: legacy code-free responses remain compatible while current handoffs require their code',
+    run: () => {
+      const schema = { type: 'object', required: ['result'], properties: { result: { type: 'string' } } };
+      const legacyResponse = JSON.stringify({ result: 'accepted legacy value' });
+      const value = validateNonApiAiSubmission({
+        requireHandoffCode: false,
+        response: legacyResponse,
+        responseSchema: schema,
+        task: 'job-scoring',
+        expectedHandoffCode: 'HANDOFF-EXPECT',
+      });
+      assert(value?.result === 'accepted legacy value',
+        'a pre-enforcement durable response remains code-free compatible');
+      let currentRejected = false;
+      try {
+        validateNonApiAiSubmission({
+          response: legacyResponse,
+          responseSchema: schema,
+          task: 'job-scoring',
+          expectedHandoffCode: 'HANDOFF-EXPECT',
+          requireHandoffCode: true,
+        });
+      } catch (error) {
+        currentRejected = error?.code === 'HANDOFF_CODE_MISSING'
+          && error?.message.includes('HANDOFF-EXPECT');
+      }
+      assert(currentRejected,
+        'a current handoff rejects a code-free structured response before it can be accepted');
+      let quotedCodeRejected = false;
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ result: 'The prompt mentioned HANDOFF-EXPECT, but the transport property is absent.' }),
+          responseSchema: schema,
+          task: 'job-scoring',
+          expectedHandoffCode: 'HANDOFF-EXPECT',
+          requireHandoffCode: true,
+        });
+      } catch (error) { quotedCodeRejected = error?.code === 'HANDOFF_CODE_MISSING'; }
+      assert(quotedCodeRejected,
+        'an expected token quoted inside structured content cannot impersonate the top-level transport property');
+      return { acceptedLegacy: true, currentRejected, quotedCodeRejected };
+    },
+  },
+  {
+    name: 'non-API AI: an unstated handoff expectation fails loudly instead of accepting any paste',
+    run: () => {
+      const schema = { type: 'object', required: ['result'], properties: { result: { type: 'string' } } };
+      const issuedCode = 'HANDOFF-K7Q3M2';
+      // A complete, schema-valid answer that was written for a DIFFERENT
+      // handoff. Nothing about its shape reveals that; only the code does.
+      const foreignPaste = JSON.stringify({ handoffCode: 'HANDOFF-FRGN27', result: 'answer written for another handoff' });
+      let omission = '';
+      try {
+        validateNonApiAiSubmission({ response: foreignPaste, responseSchema: schema, task: 'job-preference-evaluation' });
+      } catch (error) { omission = String(error?.message || error); }
+      assert(omission.includes('requires the handoff code') && omission.includes('different handoff'),
+        `a caller that states no handoff expectation must fail loudly, not validate a foreign paste, got ${omission || 'silent acceptance'}`);
+
+      // Naming the issued code is enough to get the full guard: the caller
+      // does not also have to remember to ask for the requirement.
+      let structuredMissing = '';
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ result: 'code-free answer' }),
+          responseSchema: schema,
+          task: 'job-preference-evaluation',
+          expectedHandoffCode: issuedCode,
+        });
+      } catch (error) { structuredMissing = error?.code || ''; }
+      let rawMissing = '';
+      try {
+        validateNonApiAiSubmission({
+          response: 'Research prose with no handoff header.',
+          task: 'job-compensation-research',
+          expectedHandoffCode: issuedCode,
+        });
+      } catch (error) { rawMissing = error?.code || ''; }
+      assert(structuredMissing === 'HANDOFF_CODE_MISSING' && rawMissing === 'HANDOFF_CODE_MISSING',
+        `a code-bearing handoff requires its code back by default on both transports, got ${structuredMissing || 'acceptance'} and ${rawMissing || 'acceptance'}`);
+
+      // Both permissive modes survive, but each is now requested by name.
+      const legacyStep = validateNonApiAiSubmission({
+        response: JSON.stringify({ result: 'pre-enforcement answer' }),
+        responseSchema: schema,
+        task: 'job-preference-evaluation',
+        expectedHandoffCode: issuedCode,
+        requireHandoffCode: false,
+      });
+      const codelessStep = validateNonApiAiSubmission({
+        response: JSON.stringify({ result: 'durable row recorded before codes existed' }),
+        responseSchema: schema,
+        task: 'job-preference-evaluation',
+        expectedHandoffCode: null,
+      });
+      assert(legacyStep.result === 'pre-enforcement answer'
+        && codelessStep.result === 'durable row recorded before codes existed',
+      'a pre-enforcement durable step still validates when its call site declares that it carries no verifiable code');
+
+      let contradiction = '';
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ result: 'x' }),
+          responseSchema: schema,
+          task: 'job-preference-evaluation',
+          expectedHandoffCode: null,
+          requireHandoffCode: true,
+        });
+      } catch (error) { contradiction = String(error?.message || error); }
+      assert(/never issued one/u.test(contradiction),
+        `requiring a code that was never issued is a programming error, got ${contradiction || 'silent acceptance'}`);
+      return { omissionRejected: true, structuredMissing, rawMissing };
+    },
+  },
+  {
+    name: 'non-API AI: handoffCode is stripped from validated structured response before return',
+    run: () => {
+      const schema = { type: 'object', required: ['result'], properties: { result: { type: 'string' } } };
+      const response = JSON.stringify({ handoffCode: 'HANDOFF-MATCH1', result: 'clean result' });
+      const value = validateNonApiAiSubmission({
+        response,
+        responseSchema: schema,
+        task: 'job-scoring',
+        expectedHandoffCode: 'HANDOFF-MATCH1',
+      });
+      assert(value?.result === 'clean result', 'result contains expected schema payload');
+      assert(!('handoffCode' in value), 'handoffCode is stripped from returned object');
+      return { stripped: true };
+    },
+  },
+  {
+    name: 'non-API AI: free-text submission strips matching Handoff header line from returned prose',
+    run: () => {
+      const rawWithHeader = 'Handoff: HANDOFF-FRE888\n\nThis is the actual research text.\nLine two.';
+      const cleaned = validateNonApiAiSubmission({
+        response: rawWithHeader,
+        task: 'job-compensation-research',
+        expectedHandoffCode: 'HANDOFF-FRE888',
+      });
+      assert(cleaned === 'This is the actual research text.\nLine two.',
+        'Handoff: header and following blank line are stripped');
+
+      const rawWithoutHeader = 'This is research text without header.';
+      const untouched = validateNonApiAiSubmission({
+        requireHandoffCode: false,
+        response: rawWithoutHeader,
+        task: 'job-compensation-research',
+        expectedHandoffCode: 'HANDOFF-FRE888',
+      });
+      assert(untouched === 'This is research text without header.',
+        'legacy text without a Handoff header is returned untouched');
+      let missingRawRejected = false;
+      try {
+        validateNonApiAiSubmission({
+          response: rawWithoutHeader,
+          task: 'job-compensation-research',
+          expectedHandoffCode: 'HANDOFF-FRE888',
+          requireHandoffCode: true,
+        });
+      } catch (error) { missingRawRejected = error?.code === 'HANDOFF_CODE_MISSING'; }
+      assert(missingRawRejected,
+        'a current raw handoff rejects a missing first-line Handoff code');
+      let buriedRawRejected = false;
+      try {
+        validateNonApiAiSubmission({
+          response: 'Research begins here.\nHandoff: HANDOFF-FRE888\nThis code is not the first line.',
+          task: 'job-compensation-research',
+          expectedHandoffCode: 'HANDOFF-FRE888',
+          requireHandoffCode: true,
+        });
+      } catch (error) { buriedRawRejected = error?.code === 'HANDOFF_CODE_MISSING'; }
+      assert(buriedRawRejected,
+        'a matching token below the first line cannot impersonate the raw-text transport header');
+      return { cleaned: true, untouched: true, missingRawRejected, buriedRawRejected };
+    },
+  },
+  {
+    name: 'non-API AI: listing IDs bind preference evaluations to their exact root rows',
+    run: () => {
+      const plan = {
+        softPreferences: [{ id: 'rule1', criterion: 'Remote only', category: 'location' }],
+        strictRequirements: [{ id: 'rule2', criterion: 'Python stack', category: 'skills' }],
+        direction: { roleDirections: [], avoidDirections: [] },
+      };
+      const batchAJobs = Array.from({ length: 8 }, (_, i) => ({ source: 'alpha', id: `jobA_${i}`, title: `Job A ${i}` }));
+      const batchBJobs = Array.from({ length: 8 }, (_, i) => ({ source: 'beta', id: `jobB_${i}`, title: `Job B ${i}` }));
+      const idsA = listingIdsForRootBatch(batchAJobs);
+      const responseFor = ids => ({ assessments: ids.map((listingId, index) => ({
+        index, listingId, matches: [
+          { preferenceId: 'rule1', outcome: 'confirmed', evidenceQuote: 'Remote position' },
+          { preferenceId: 'rule2', outcome: 'unverified' },
+        ],
+      })) });
+      const correct = responseFor(idsA);
+      assert(validateJobPreferenceListingSubmission(correct, batchAJobs, plan) === correct,
+        'a complete v2 response with each row\'s exact opaque ID is accepted');
+
+      const rejects = value => {
+        try { validateJobPreferenceListingSubmission(value, batchAJobs, plan); return false; } catch { return true; }
+      };
+      assert(rejects(responseFor(idsA.map((_, index) => listingIdsForRootBatch(batchBJobs)[index]))),
+        'a same-size response from a different batch is rejected by listing identity');
+      const sameMetadataDifferentNativeId = Array.from({ length: 8 }, (_, i) => ({
+        source: 'alpha', id: `other-native-id-${i}`, title: 'Software Engineer', company: 'Example', location: 'Toronto, ON',
+      }));
+      assert(rejects(responseFor(listingIdsForRootBatch(sameMetadataDifferentNativeId))),
+        'distinct provider-native id values prevent same-source, same-title/location batches from aliasing');
+      const missing = responseFor(idsA); delete missing.assessments[0].listingId;
+      const swapped = responseFor(idsA); [swapped.assessments[0].listingId, swapped.assessments[1].listingId] = [swapped.assessments[1].listingId, swapped.assessments[0].listingId];
+      const duplicate = responseFor(idsA); duplicate.assessments[1].listingId = duplicate.assessments[0].listingId;
+      assert(rejects(missing) && rejects(swapped) && rejects(duplicate),
+        'missing, swapped, and duplicate listing IDs are all rejected before a result can be accepted');
+
+      const duplicateRoot = [
+        { source: 'alpha', jobkey: 'same-id', title: 'Same copy' },
+        { source: 'alpha', jobkey: 'same-id', title: 'Same copy' },
+      ];
+      const rootIds = listingIdsForRootBatch(duplicateRoot);
+      const recovered = { assessments: [{ index: 0, listingId: rootIds[1], matches: [
+        { preferenceId: 'rule1', outcome: 'unverified' },
+        { preferenceId: 'rule2', outcome: 'unverified' },
+      ] }] };
+      assert(rootIds[0] !== rootIds[1]
+        && listingIdsForRootBatch([duplicateRoot[1]])[0] !== rootIds[1]
+        && validateJobPreferenceListingSubmission(recovered, [duplicateRoot[1]], plan, { listingIds: [rootIds[1]] }) === recovered,
+        'partial recovery preserves the root batch ID while its remaining row is reindexed locally');
+      return { v2Accepted: true, wrongBatchRejected: true, malformedIdsRejected: true, partialRootIdPreserved: true };
+    },
+  },
+  {
+    name: 'non-API AI: current pending records enforce handoff codes through the IPC submit path',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 888, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+
+      handleSafe('test-collision-channel', async (_event, args, signal) => {
+        return requestNonApiAi({
+          prompt: `PROMPT FOR BATCH ${args.batch}`,
+          task: 'job-preference-evaluation',
+          batch: args.batch,
+          batchTotal: 259,
+          itemCount: 8,
+          responseSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+          signal,
+        });
+      });
+
+      // Issue batch 38
+      const run38 = ipcMain.__getInvokeHandler('test-collision-channel')({ sender }, { batch: 38, nodeId: 'node-col' });
+      await new Promise(resolve => setImmediate(resolve));
+      const req38 = sent.find(item => item.payload?.batch === 38)?.payload;
+      assert(req38?.handoffCode, 'req38 has a handoffCode');
+
+      // Test code mismatch rejection on batch 38
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      const mismatchResult = await submit({ sender }, {
+        requestId: req38.requestId,
+        response: JSON.stringify({ handoffCode: 'HANDOFF-W8NG99', ok: true }),
+      });
+      assert(mismatchResult.accepted === false, 'mismatch response is rejected');
+      assert(mismatchResult.validationErrors[0].includes('HANDOFF-W8NG99')
+        && mismatchResult.validationErrors[0].includes(req38.handoffCode),
+        'rejection error names both codes');
+
+      // A newly issued record is code-bound; a code-free historical response
+      // must not be accepted into it.
+      const missing38 = await submit({ sender }, {
+        requestId: req38.requestId,
+        response: JSON.stringify({ ok: true }),
+      });
+      assert(missing38.accepted === false && missing38.validationErrors[0].includes(req38.handoffCode),
+        'batch 38 rejects a code-free response');
+      const missingCodeCorrection = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      assert(missingCodeCorrection?.requestId === req38.requestId
+        && missingCodeCorrection.isCorrection === true
+        && missingCodeCorrection.prompt.includes('omitted the required transport identifier')
+        && missingCodeCorrection.prompt.includes('exact `Handoff: ...` first line')
+        && missingCodeCorrection.prompt.includes('exact `handoffCode` property'),
+      'a missing code reissue repeats the safe transport contract without sourcing a code from the error');
+      const accepted38 = await submit({ sender }, {
+        requestId: req38.requestId,
+        response: JSON.stringify({ handoffCode: req38.handoffCode, ok: true }),
+      });
+      assert(accepted38.accepted === true, 'batch 38 accepts its own stamped response');
+      await run38;
+
+      // Issue batch 39
+      const run39 = ipcMain.__getInvokeHandler('test-collision-channel')({ sender }, { batch: 39, nodeId: 'node-col' });
+      await new Promise(resolve => setImmediate(resolve));
+      const req39 = sent.find(item => item.payload?.batch === 39)?.payload;
+      assert(req39?.handoffCode && req39.handoffCode !== req38.handoffCode,
+        'req39 has distinct handoffCode');
+
+      // Attempt pasting a response stamped with batch 38's code into batch 39 -> rejected!
+      const batch38StampedAnswer = JSON.stringify({ handoffCode: req38.handoffCode, ok: true });
+      const rejectedCrossBatch = await submit({ sender }, {
+        requestId: req39.requestId,
+        response: batch38StampedAnswer,
+      });
+      assert(rejectedCrossBatch.accepted === false,
+        'pasting batch 38 answer stamped with code 38 into batch 39 is rejected by code mismatch');
+
+      const missing39 = await submit({ sender }, {
+        requestId: req39.requestId,
+        response: JSON.stringify({ ok: true }),
+      });
+      assert(missing39.accepted === false && missing39.validationErrors[0].includes(req39.handoffCode),
+        'batch 39 also rejects a code-free response');
+      const accepted39 = await submit({ sender }, {
+        requestId: req39.requestId,
+        response: JSON.stringify({ handoffCode: req39.handoffCode, ok: true }),
+      });
+      assert(accepted39.accepted === true, 'batch 39 accepts only its own stamped response');
+      await run39;
+
+      // Check markdown output
+      const lifecycle = getNonApiAiHandoffLifecycle({ windowId: sender.id });
+      const receipt38 = lifecycle.find(item => item.batch === 38);
+      const receipt39 = lifecycle.find(item => item.batch === 39);
+      assert(receipt38?.responseHash === receipt39?.failures?.[0]?.responseHash
+        && receipt38.responseHash !== receipt39?.responseHash,
+      'the process-keyed receipt tag correlates identical pasted bodies but distinguishes different accepted responses');
+      const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['node-col']), sender.id);
+      assert(!markdown.includes(req38.handoffCode), 'markdown redacts req38 handoff code');
+      assert(!markdown.includes(req39.handoffCode), 'markdown redacts req39 handoff code');
+      assert(markdown.includes('code mismatch rejection(s)'), 'markdown reports code mismatch rejection');
+      assert(markdown.includes('receipt tag `'), 'markdown reports a process-keyed response receipt tag');
+      return { lifecycleVerified: true, missingCodesRejected: true };
     },
   },
 ];

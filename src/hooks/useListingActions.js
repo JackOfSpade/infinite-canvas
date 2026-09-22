@@ -145,6 +145,34 @@ export function useListingActions(id, data) {
     return result;
   }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
 
+  // Versioned item-keyed path for fresh pricing work. The main process packs
+  // independent bundle components into bounded manual handoffs and returns the
+  // result keyed to the caller's stable item key, not response position.
+  const synthesizePricesBatch = useCallback(async (items) => {
+    if (!window.electronAPI?.synthesizePricesBatch) throw new Error('synthesizePricesBatch API unavailable');
+    const rows = Array.isArray(items) ? items : [];
+    const result = await window.electronAPI.synthesizePricesBatch({
+      nodeId: id,
+      items: rows.map((item) => ({
+        itemKey: item.key || 'primary',
+        itemLabel: item.label || item.query || 'Item',
+        query: item.query || buildSearchQuery(),
+        condition: item.condition || product.condition || 'Used - Good',
+        productSpec: item.productSpec || (item.key === 'primary'
+          ? { model: product.model, color: product.color, title: product.generated_title }
+          : { title: item.label || item.query }),
+        pricingNotes: item.pricingNotes !== undefined ? item.pricingNotes : (item.key === 'primary' ? (data.pricingNotes || '') : ''),
+        comps: item.comps || { sold: [], active: [] },
+      })),
+    });
+    if (!result.success) {
+      const err = new Error(result.error);
+      if (result.isRateLimit) err.isRateLimit = true;
+      throw err;
+    }
+    return result;
+  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
+
   // Multi-item bundle: ask the AI for attributable bundle/tier pricing factors
   // across independently-priced items. The backend deterministically derives
   // whole-listing quick/best/max prices and explanation from those factors.
@@ -180,6 +208,7 @@ export function useListingActions(id, data) {
     scrapePriceComps,
     rescrapeSource,
     synthesizePrice,
+    synthesizePricesBatch,
     synthesizeBundlePrice,
   };
 }

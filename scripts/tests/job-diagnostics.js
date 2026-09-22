@@ -1,4 +1,5 @@
 import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { clearRestoredJobTreeLayout } from '../test-dependencies.js';
 import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
@@ -19,6 +20,7 @@ import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } 
 import { buildAuthLifecycleTableMarkdown, buildNativeChallengeSessionMarkdown, formatAuthHistoryTruncationNote, selectAuthHistoryForReport } from '../../electron/ipc/bugReport.js';
 import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
+import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
 import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterDetailErrorShell, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs, zipRecruiterDetailErrorShellBackoffMs } from '../test-dependencies.js';
@@ -51,6 +53,73 @@ import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 
 export default [
+  {
+    name: 'Local Application paste handoff diagnostics retain bounded safe parse metadata only',
+    run: () => {
+      _resetPasteHandoffDiagnostics();
+      try {
+        recordPasteHandoffDiagnostic({
+          stage: 'evidence-plan', outcome: 'rejected', reason: 'INVALID_JSON',
+          responseChars: 16020, syntaxLine: 21, syntaxColumn: 66, artifactCandidates: 1,
+          jobId: 'PRIVATE_JOB_ID', handoffCode: 'PRIVATE_HANDOFF', response: 'PRIVATE_RESPONSE',
+          validationText: 'PRIVATE_CONTACT@example.com PRIVATE_QUOTE',
+        });
+        const markdown = buildPasteHandoffDiagnosticsMarkdown();
+        assert(markdown.includes('Local Application Paste Handoff Lifecycle')
+          && markdown.includes('stage `evidence-plan`')
+          && markdown.includes('INVALID_JSON')
+          && markdown.includes('16020 chars')
+          && markdown.includes('syntax line 21, column 66')
+          && markdown.includes('content-reference candidates 1'),
+        'the Local Application receipt exposes the rejection classification and parser location needed to debug a bad paste');
+        for (const secret of ['PRIVATE_JOB_ID', 'PRIVATE_HANDOFF', 'PRIVATE_RESPONSE', 'PRIVATE_CONTACT@example.com', 'PRIVATE_QUOTE']) {
+          assert(!markdown.includes(secret), 'paste receipt never retains untrusted response or identity data');
+        }
+        recordPasteHandoffDiagnostic({ stage: 'resume', outcome: 'rejected', reason: 'SCHEMA_INVALID' });
+        const missingMetadata = buildPasteHandoffDiagnosticsMarkdown();
+        assert(!missingMetadata.includes(' · 0 chars')
+          && !missingMetadata.includes('syntax line 0')
+          && !missingMetadata.includes('candidates 0'),
+        'omitted optional parser metadata remains absent rather than being coerced to zero');
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+      return { privacySafe: true };
+    },
+  },
+  {
+    name: 'FULL and APPLICATION reports include only redacted Local Application paste-handoff receipts',
+    run: () => {
+      _resetPasteHandoffDiagnostics();
+      try {
+        recordPasteHandoffDiagnostic({
+          stage: 'evidence-plan', outcome: 'rejected', reason: 'INVALID_JSON',
+          responseChars: 16002, syntaxLine: 9, syntaxColumn: 41, artifactCandidates: 1,
+          response: 'PRIVATE_PASTED_RESPONSE', jobId: 'PRIVATE_JOB', handoffCode: 'PRIVATE_CODE',
+        });
+        const base = {
+          description: 'Paste-back application response was rejected.', nodes: [], edges: [], drawings: [],
+          frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        };
+        const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+        const application = generateMarkdown({ ...base, filterCode: 'APPLICATION' }).markdown;
+        const unrelated = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+        for (const report of [full, application, unrelated]) {
+          for (const secret of ['PRIVATE_PASTED_RESPONSE', 'PRIVATE_JOB', 'PRIVATE_CODE']) {
+            assert(!report.includes(secret), 'report filter output never exposes paste handoff private values');
+          }
+        }
+        assert(full.includes('## Local Application Paste Handoff Lifecycle')
+          && application.includes('## Local Application Paste Handoff Lifecycle')
+          && full.includes('syntax line 9, column 41')
+          && !unrelated.includes('## Local Application Paste Handoff Lifecycle'),
+        'FULL and APPLICATION expose a compact rejection receipt while unrelated report scopes omit it');
+        return { full: true, application: true };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
   {
     name: 'job diagnostics never joins ambiguous terminal receipts to another hub snapshot',
     run: () => {
@@ -4220,8 +4289,8 @@ export default [
       assert(!source.includes('_retiredRemoteApplicationGeneration')
         && !source.includes("from './llm.js'")
         && routine.includes('Never add an unrecorded outcome')
-        && routine.includes('Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter'),
-      'application truthfulness and letter-scope rules live exclusively in the Local AI routine; the retired API authoring path is absent');
+        && !/legal work status|work authorization/iu.test(routine),
+      'application truthfulness and letter-scope rules live exclusively in the Local AI routine, which polices no work authorization; the retired API authoring path is absent');
       return { localOnly: true };
 
     },
@@ -10602,6 +10671,26 @@ export default [
       const fSrc = computeJobTreeView(tree(), 'hub', { sourceFilter: 'dice' });
       assert(hiddenOf(fSrc, 'c2') === false && hiddenOf(fSrc, 'c1') === true, 'flat: source filter keeps only matching source');
       return { ok: true };
+    },
+  },
+{
+    name: 'Job tree restore guard preserves saved manual positions until a hierarchy action',
+    run: () => {
+      const nodes = [
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'group', type: 'jobgroup', hidden: false, position: { x: 123, y: 456 }, data: { hubId: 'hub', kind: 'role', childIds: ['card'], expanded: true, visibleCount: 1 } },
+        { id: 'card', type: 'jobcard', hidden: false, position: { x: 789, y: 321 }, data: { hubId: 'hub', _preserveTreeLayoutOnRestore: 1 } },
+      ];
+      const cleared = clearRestoredJobTreeLayout(nodes, 'hub');
+      assert(cleared !== nodes
+        && !('_preserveTreeLayoutOnRestore' in cleared.find(n => n.id === 'card').data)
+        && cleared.find(n => n.id === 'card').position.x === 789,
+      'clearing the restore guard must leave saved positions intact until the subsequent hierarchy layout');
+      const laidOut = computeJobTreeView(cleared, 'hub', {}, COL_X, true);
+      assert(laidOut.find(n => n.id === 'group').position.x === COL_X.role
+        && laidOut.find(n => n.id === 'card').position.x === COL_X.job,
+      'the next explicit hierarchy layout must still organize the restored tree');
+      return { restoredCardX: nodes[2].position.x, laidOutCardX: laidOut.find(n => n.id === 'card').position.x };
     },
   },
 {

@@ -3,7 +3,7 @@ import { useReactFlow, useStore } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import { EventLogger } from '../utils/EventLogger';
-import { computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
+import { clearRestoredJobTreeLayout, computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
 import { hubCardFilter } from '../utils/jobCardFilters';
 
 /**
@@ -134,7 +134,10 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
         }
         return n;
       });
-      return computeJobTreeView(updated, data.hubId, filter);
+      // A hierarchy click is an explicit request to use the automatic layout
+      // again, including after this tree was restored with manually arranged
+      // cards.
+      return computeJobTreeView(clearRestoredJobTreeLayout(updated, data.hubId), data.hubId, filter);
     });
     EventLogger.log(`[JobTree] ${willExpand ? 'expanded' : 'collapsed'} ${kind} "${data.label}" id=${id}`);
   };
@@ -146,7 +149,10 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
     const filter = hubFilter();
     setNodes(nodes =>
       computeJobTreeView(
-        nodes.map(n => (n.id === id ? { ...n, data: { ...n.data, visibleCount: nextCount } } : n)),
+        clearRestoredJobTreeLayout(
+          nodes.map(n => (n.id === id ? { ...n, data: { ...n.data, visibleCount: nextCount } } : n)),
+          data.hubId,
+        ),
         data.hubId,
         filter,
       ),

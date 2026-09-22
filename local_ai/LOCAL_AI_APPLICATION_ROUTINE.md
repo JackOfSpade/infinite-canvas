@@ -126,6 +126,17 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    choose one controlling throughline at the intersection of an emphasized
    employer need cluster and a distinctive supported candidate capability;
    select the minimum sufficient evidence to establish that argument. The
+   one-sentence `roleThesis` records the plan's controlling angle. It does not
+   prescribe the sentence count or wording of any final paragraph.
+   employer need must come from the posting, not from the mechanics of a prior
+   project. Before writing `coverLetterArgument.roleThesis` or the generation
+   audit's `controllingThesis`, name the actual target responsibility, the
+   narrow transferable capability supported by career evidence, and how that
+   capability would help with the target responsibility. Do not turn a prior
+   project's feature, trigger, industry, or workflow into a target requirement.
+   The thesis and opening must state the transfer in ordinary language rather
+   than place the target work beside the old artifact and ask the reader to
+   supply the connection. The
    résumé owns breadth, so a cover letter must not introduce another employer,
    project, or tool solely to cover another job requirement. Each additional
    evidence block must deepen, corroborate, extend, or honestly qualify the
@@ -155,9 +166,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    run one adversarial critique for relevance, specificity, factual support,
    argument continuity, minimum-sufficient evidence, redundancy, concision,
    grammatical parallelism, and any misleading inference. For the cover letter,
-   explicitly verify that the first sentence adds information beyond the application context and
-   advances the candidate's argument; reject any opening that merely announces
-   the application or the document's purpose. Also reject unclear antecedents,
+   explicitly verify that the opening paragraph adds information beyond the application context,
+   shows interest implicitly through a precise observation about concrete target
+   work and a credible candidate connection, and previews the transferable
+   capability before the first source-specific proof; use the detailed
+   opening rule in step 5 rather than an administrative
+   application announcement. Also reject unclear antecedents,
    unexplained employer or time-period changes, chronological backtracking
    unless its purpose is explicit, inventory-style paragraphs, delayed
    relevance, paragraphs that introduce a second thesis, colon-led evidence
@@ -192,7 +206,24 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    earlier decision, but it is not an employer-facing conclusion unless the
    action-to-target link is already explicit. Add that link when needed; do not
    repeat the target formulaically when the existing prose already makes it
-   clear. Keep completed experience in a past-tense evidence sentence. When
+   clear. Within a paragraph, after introducing a skill, system, or example,
+   use a natural implicit reference such as `it`, `that experience`, or `the
+   system` instead of repeating the full phrase when the antecedent is
+   unambiguous. If more than one referent is plausible, retain the shortest
+   clear noun or name. This applies to continuity throughout the paragraph,
+   including the transfer sentence: it must still name the specific target
+   responsibility, and a bare `this` or `that` is not enough. For cross-domain proof, lead with the reusable capability and name
+   the actual target responsibility it supports. Then give only enough detail
+   about the prior artifact to prove that capability. `For this role's
+   interactive simulation work, I would apply my experience designing
+   input-driven web interactions` states the supported transferable capability;
+   a target-facing sentence that instead names an old artifact without the
+   shared mechanism leaves the transfer unstated. The later past-tense proof
+   can name the source-specific workflow. Explain
+   how that capability would help build the interactions this role actually
+   calls for.
+   Do not claim prior simulation experience unless the evidence says so.
+   Keep completed experience in a past-tense evidence sentence. When
    describing work the candidate would do after hiring, use conditional or
    explicitly future-facing language. Do not make the completed project the
    subject of a past/present readiness bridge such as `That project prepared
@@ -205,9 +236,17 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    preceding paragraph: replace `this`, `that`, or `it` when more than one
    antecedent is plausible, and never open a paragraph with `That <thing>` or
    `This <thing>` unless the previous paragraph is about that thing; otherwise
-   restate the referent in full. When a new paragraph follows one that names a
-   prior employer, do not open with an organization shorthand such as `The
-   district`; repeat the proper name when it bridges the next evidence block.
+   restate the referent in full. When a new paragraph continues evidence from
+   one prior employer named in the preceding paragraph, do not repeat its full
+   name merely from habit. Within a paragraph, continue naturally when the
+   candidate remains the subject or when an introduced skill, system, or
+   example has one unambiguous antecedent; use a natural implicit reference or
+   the shortest clear noun instead of repeating the full phrase. At a new
+   paragraph, use a concise re-entry cue such as `In that role` when it helps
+   the reader identify the role being continued; omit it when the continuation
+   is already clear. Repeat the proper name or shortest clear noun when more
+   than one employer, role, system, or example could be the antecedent. Do not use bare `There` when a platform,
+   place, or more than one employer could be its antecedent.
    This does not prohibit ordinary definite descriptions such as `The system`
    when they name the paragraph's actual subject. Pair noun phrases with noun
    phrases or actions with actions; do not add bureaucratic padding to conceal
@@ -224,6 +263,12 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    governing verb that describes its actual role. Do not group tools with
    distinct roles under one operation: a container orchestrator, web server,
    and application server require distinct descriptions. Reject a bridge
+   sentence that uses `full-stack` as though it described a hub, tool
+   collection, or product. Make it modify the candidate's work, implementation,
+   or responsibility, then state the artifact and the supported contribution
+   directly. For example, write `I built the internal tools hub, including its
+   React front end and Django back end`; write `owned` only when the supplied
+   evidence establishes ownership. Reject a bridge
    sentence that merely restates a category (`For tools that remained in-house,
    I built software`) without adding a decision, mechanism, constraint, or
    result. Honest
@@ -283,7 +328,22 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    audit inside `result.json`; Infinite Canvas validates it and writes any
    durable audit companion in the final application folder itself.
 
-   Canonical checklist, version 2:
+   For checklist version 3, each final cover-letter paragraph that states a
+   completed candidate action must carry an `argumentMapping` in its matching
+   `generationAudit.coverLetterPlan.paragraphs` entry. Copy four exact final
+   text spans: `claim` (the capability asserted), `proof` (the concrete past
+   action), and `relevance` (the explicit connection to this role's work), plus
+   a short `jobNeedQuote` copied verbatim from `context/job-listing.md`. The
+   spans may overlap and relevance may come before proof, but they must identify
+   distinct argumentative work: capability claim, past proof, and target-facing
+   relevance. Do not use a generic
+   bridge such as "I would bring this to your team". A paragraph with no
+   completed candidate proof, such as a closing invitation, uses
+   `"argumentMapping": null`. These are final-state bindings, not notes or
+   draft commentary: every non-null span must occur in its final paragraph and
+   the job quote must occur in the selected listing.
+
+   Canonical checklist, version 3:
 
    - `resume-source-grounding`
    - `resume-priority-alignment`
@@ -304,7 +364,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    - `cover-register`
    - `cover-sentence-craft`
    - `cover-figure-discipline`
-   - `cover-legal-status`
+   - `cover-logistics-exclusion`
    - `cover-envelope`
    - `cross-document-consistency`
    - `requirement-coverage`
@@ -312,7 +372,7 @@ Use any local coding agent with filesystem and shell access. The routine is prov
 
    Use the full requirements in steps 3–5 and the design-system references to
    decide each item. The identifiers are an index, not a replacement for those
-   rules. Confirm that `input.json.qualityChecklist` is version 2 and contains
+   rules. Confirm that `input.json.qualityChecklist` is version 3 and contains
    this exact ordered set; if it differs, use the app-owned input contract and
    do not silently omit an item. `result.json` must include every identifier exactly once, all with
    `status: "pass"` and a specific verification note. Infinite Canvas rejects
@@ -364,6 +424,23 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      or causal result, and never move a fact between employers or projects. If
      the data supports only familiarity and no applied action can be derived,
      keep it in Skills or omit it from the highlights.
+   - When one application or system pairs an identifying or observing capability with
+     a connected action that changes why the artifact matters, name both in the
+     sentence that introduces it. Do not make an initial clause sound like the
+     application or system existed only to perform its first named function and defer its
+     connected action to the next sentence. Use a natural coordinated predicate
+     that names what the app does, not an awkward implementation transition such
+     as "and connected." Express relationships plainly instead of stacking nouns:
+     prefer `a web application for the organization` over a compressed noun
+     stack
+     when that is the supported relationship. Place the relationship before the
+     application when it could otherwise attach ambiguously. Do not catalog
+     every feature. For example: `I built a web application that accepted the
+     source-supported input and, when the stated condition applied, initiated
+     the supported follow-up action through an external service.` Preserve the
+     source's exact trigger and scope: describe a follow-up action only when
+     the career evidence says the application or system could initiate it, and
+     do not imply that every input initiated that action.
    - Order each role's highlights by interview value for this target job, not
      chronology or source order: lead with direct, credible evidence for a hard
      screen or highest-priority requirement; follow with distinctive outcomes,
@@ -482,7 +559,17 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    load-bearing proof, summarize related implementation details, and use short
    causal sentences instead of an inventory unloaded after a colon, a
    semicolon, or a dash.
-   Give every paragraph one argumentative job. When a paragraph changes from
+   Include prior-project implementation detail only when it proves the narrow
+   transferable capability or decision relevant to this posting. Preserve the
+   source-supported trigger and scope without turning a prior workflow,
+   industry, feature, or tool into a requirement of the target role. Do not
+   catalog features: explain the shared mechanism that makes the selected proof
+   useful for the responsibility named in this posting.
+   Give every paragraph one argumentative job, not one sentence. Use as many
+   sentences as that paragraph needs to make its point, establish its proof,
+   and explain its relevance clearly. Do not compress those jobs into one
+   sentence or force a paragraph to follow a fixed claim-proof-relevance
+   sentence pattern. When a paragraph changes from
    one implementation path, system, employer, or proof to another, state the
    real relationship before the new details; a generic connective or a truism
    does not create coherence. When the thesis names multiple decision branches,
@@ -490,7 +577,11 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    an established branch with a new abstraction at the transition. The last sentence of every non-final paragraph
    must either conclude that paragraph's point or explicitly name the exact
    subject carried into the next paragraph. If it merely launches a new topic,
-   develop it there, move it to the next paragraph, or delete it.
+   develop it there, move it to the next paragraph, or delete it. Read each
+   paragraph's final sentence beside the next paragraph's opening. Cut a
+   factual but optional detail, such as capacity for future additions, when it
+   neither completes the current proof nor prepares the next decision. Shared
+   employer context alone does not make that detail a useful bridge.
    Prefer the concrete system, data flow, responsibility, or decision to an abstract
    metaphor, and never repeat a metaphor across paragraphs as connective
    tissue. Within a paragraph, do not place distinct systems or responsibilities
@@ -539,7 +630,15 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    mention, introduce every unfamiliar candidate project, product, system, or
    prior employer with the candidate's role or relationship and a concise
    descriptor before relying on its name; the reader cannot be assumed to have
-   read the résumé first. Name a specific tool, framework, or product
+   read the résumé first. When an opening uses completed work as proof, make
+   its prior-work setting clear at that first mention: give the supported role
+   and employer when useful, or a concise prior-role cue when the employer's
+   name would distract. For example, `my work building a district tools hub`
+   leaves the employment context unstated; `in my previous software
+   engineering role, I built a district tools hub` supplies it when
+   the source supports that role and chronology. Keep the target need first,
+   then situate the evidence without adding an unsupported employer, role, or
+   timeline. Name a specific tool, framework, or product
    only when the job listing or the research names it, or as that paragraph's
    single concrete anchor; otherwise describe it by category, as in `a Python
    back end` or `containerized deployment`. The résumé carries the stack, so a
@@ -551,20 +650,20 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    tour. Do not assert a cross-domain
    equivalence with `maps onto`, `translates directly to`, or `mirrors`, and
    do not quote the employer's phrasing back as the second half of an analogy:
-   argue the shared mechanism (constraints, data flow, failure modes) and let
-   the transfer stay implicit. Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter: legal work status belongs on the application form. Do not state application
-   logistics either: availability, start date, schedule, the work location
-   of the job being applied for, relocation, commute, travel willingness, and
-   sponsorship belong in
+   state the transferable capability and the shared mechanism (such as
+   interaction design or data flow) explicitly, while preserving the boundary
+   between the prior domain and the target work. Do not state application
+   logistics: availability, start date, schedule, the work location
+   of the job being applied for, relocation, commute, and travel willingness
+   belong in
    application fields, even when career data or the listing mentions them.
    This bars them from the letter's prose only, and says nothing about the
    résumé's per-role employment locations, which step 4 requires.
    Infinite Canvas rejects a result that includes
-   them (for example `willing to work anywhere`, `available to start`,
-   `authorized to work`, or `visa sponsorship`).
+   them (for example `willing to work anywhere` or `available to start`).
    If the final paragraph invites a conversation, use direct present-tense
    language and connect the candidate's relevant contribution to the specific
-   target work. Do not end solely on what the candidate wants to learn, hear,
+   target work. Do not repeat the opening's reason for interest there. Do not end solely on what the candidate wants to learn, hear,
    or discuss. Avoid conditional or deferential closing boilerplate: write `I
    welcome a conversation` rather than `I would welcome a conversation` or `I
    would welcome a discussion`. Apply this as a register rule, not as a
@@ -589,12 +688,22 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    `full-stack engineer`, `district-wide`, `third-party integrations`,
    `real-time data`, `open-source project`) and use one spelling of a compound
    throughout both documents.
-   The first sentence must
-   immediately advance the candidate's argument with a job-specific thesis, a
-   concrete evidence-to-need connection, or a supported observation about the
-   company's work that establishes the candidate's relevant direction. Never
-   announce that the candidate is applying or that the document is a cover
-   letter. Reject openings such as `I am writing to apply`, `I'm writing to
+   The opening paragraph must demonstrate interest implicitly: lead with a
+   precise observation about concrete employer, team, or role work, then make a
+   credible candidate connection through the transferable capability. Let that
+   understanding and connection show why the work merits attention. Preview the
+   transferable capability before the first source-specific proof. Use a
+   separate sentence when the observation and connection each need room; combine
+   them only when one sentence is simpler and equally clear.
+   Develop each body paragraph's point, proof, and relevance across as many
+   sentences as clarity requires; do not force those functions into the opening
+   sentence, a fixed sequence, or a single sentence. Do not announce
+   interest, motivation, or enthusiasm through first-person emotional
+   declarations or formulas such as `interests me because`, `I am interested
+   in`, or `I am excited about`. Name the concrete work and capability directly.
+   The application already identifies the candidate and
+   position, so never announce that the candidate is applying
+   or that the document is a cover letter. Reject openings such as `I am writing to apply`, `I'm writing to
    apply`, `I’m writing to apply`, `I am applying for`, `I'm applying for`,
    `I’m applying for`, `I am writing to express my interest`, `Please accept
    my application`, and equivalent administrative throat-clearing.
@@ -613,10 +722,14 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    that pairs a thing's downsides with its upsides is unfalsifiable filler in
    either direction, so state the specific judgment the evidence supports.
    The
-   company or exact role title may appear when it contributes substantively to
-   the argument, but not merely to identify the application. Respect the
+   company or exact role title may appear only when it distinguishes the target
+   responsibility being discussed, not merely to identify the application. Respect the
    recruiter's intelligence: every opening sentence must contain information
-   the application context did not already provide. The host owns the
+   the application context did not already provide. Do not open with the name
+   or description of a personal project, prior employer, or other proof item,
+   even when it is introduced correctly. First state the job-specific
+   capability or evidence-to-need connection that makes the proof relevant;
+   then introduce the artifact as evidence. The host owns the
    envelope: use the candidate name/contact from the résumé, omit the recipient
    block, and use `Dear [Company] Hiring Team,` as the salutation. Infinite
    Canvas reconstructs these deterministic fields at import, so do not make
@@ -716,6 +829,14 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      carries no page counts, no layout, no utilization, and no revision
      instruction. Read its bounded `error` string, correct only that problem,
      overwrite only `result.json`, and wait again in this same session.
+     `rejectedDocuments` names which of `resume` and `coverLetter` the
+     rejected checks were reading, decided by those checks rather than by
+     re-reading the `error` prose, so it stays complete even where that
+     bounded string had to drop a defect. It is a pointer into the same
+     rejection, never a measurement: it adds no page count, layout, or
+     utilization, and an empty array says the defects sat in fields outside
+     both documents — the quality review, the generation audit — not that
+     there is nothing to correct.
      Because the rejected draft was never measured, the app's prior-version
      comparison did not move: keep the `qualityReview` decisions the app
      expects for your last MEASURED state — `drafted` while no
@@ -732,6 +853,11 @@ this exact shape, with the selected job's real id and the effective
 `OUTPUT_BUNDLE_ROOT` value copied exactly. A queued legacy job with no audit
 contract uses the same shape except that it omits `generationAudit`. Write the
 result to `<INPUT_JOBS_ROOT>/<job-id>/result.json`:
+
+The example below is structural only. Its schematic phrases are not prose to
+copy into a letter, a paragraph template, or a required sequence. Record
+every sentence the final paragraph needs, whether that is one, two, three, or
+more.
 
 ```json
 {
@@ -757,15 +883,41 @@ result to `<INPUT_JOBS_ROOT>/<job-id>/result.json`:
       "controllingThesis": "One specific controlling claim that organizes the complete letter.",
       "paragraphs": [
         {
-          "paragraph": "Argument-led opening connecting supported candidate evidence to the employer's priority need.",
+          "paragraph": "Specific target-work observation. Supported candidate capability claim. Concrete past action. Second proof sentence. Explicit transfer to target responsibility.",
           "argumentativeJob": "Establish the controlling evidence-to-need connection.",
           "relationToThesis": "Introduces the exact capability and employer need named by the thesis.",
           "relationToPreviousParagraph": "opening",
+          "argumentMapping": {
+            "claim": "Supported candidate capability claim.",
+            "proof": "Concrete past action. Second proof sentence.",
+            "relevance": "Explicit transfer to target responsibility.",
+            "jobNeedQuote": "Exact short verbatim requirement copied from context/job-listing.md."
+          },
           "sentences": [
             {
-              "sentence": "Argument-led opening connecting supported candidate evidence to the employer's priority need.",
-              "function": "Establishes the letter's controlling direction.",
+              "sentence": "Specific target-work observation.",
+              "function": "Establishes the target-work-first direction.",
               "relationToPreviousSentence": "opening"
+            },
+            {
+              "sentence": "Supported candidate capability claim.",
+              "function": "States the capability that connects to the target work.",
+              "relationToPreviousSentence": "Makes the candidate connection introduced by the target-work observation."
+            },
+            {
+              "sentence": "Concrete past action.",
+              "function": "Supplies the first completed proof.",
+              "relationToPreviousSentence": "Begins the evidence for the capability claim."
+            },
+            {
+              "sentence": "Second proof sentence.",
+              "function": "Develops the completed proof.",
+              "relationToPreviousSentence": "Adds a second proof detail before the transfer."
+            },
+            {
+              "sentence": "Explicit transfer to target responsibility.",
+              "function": "States the explicit relevance to the target work.",
+              "relationToPreviousSentence": "Connects the completed proof to the target responsibility."
             }
           ]
         },
@@ -787,7 +939,7 @@ result to `<INPUT_JOBS_ROOT>/<job-id>/result.json`:
     "finalDecisionSummary": "The final documents use the strongest supported evidence without adding a second cover-letter argument."
   },
   "qualityReview": {
-    "checklistVersion": 2,
+    "checklistVersion": 3,
     "criteria": [
       { "id": "resume-source-grounding", "status": "pass", "evidence": "All résumé claims and provenance-bearing project categories were traced to supplied career evidence without broadening scope." },
       { "id": "resume-priority-alignment", "status": "pass", "evidence": "Direct evidence for the highest-priority role needs appears first." },
@@ -801,14 +953,14 @@ result to `<INPUT_JOBS_ROOT>/<job-id>/result.json`:
       { "id": "cover-source-grounding", "status": "pass", "evidence": "Every factual letter claim remains within supplied evidence and its attribution." },
       { "id": "cover-single-argument", "status": "pass", "evidence": "One specific controlling argument organizes every paragraph." },
       { "id": "cover-minimum-evidence", "status": "pass", "evidence": "Only evidence necessary to establish and support that argument remains." },
-      { "id": "cover-priority-alignment", "status": "pass", "evidence": "The argument connects distinctive evidence to an emphasized employer need." },
-      { "id": "cover-opening", "status": "pass", "evidence": "The opening immediately adds a substantive evidence-to-need connection." },
-      { "id": "cover-continuity", "status": "pass", "evidence": "Every paragraph advances the same argument with relevance stated before detail." },
-      { "id": "cover-reference-clarity", "status": "pass", "evidence": "Actors and systems are explicit, the selected position is referenced proximally, and reporting verbs belong to their source documents." },
+      { "id": "cover-priority-alignment", "status": "pass", "evidence": "The argument explicitly connects a supported transferable capability to an actual emphasized posting responsibility without projecting prior-project mechanics onto the target work." },
+      { "id": "cover-opening", "status": "pass", "evidence": "The opening shows interest implicitly through a precise observation about target work and a credible candidate connection, then previews the transferable capability before later proof." },
+      { "id": "cover-continuity", "status": "pass", "evidence": "Every paragraph advances the same argument with relevance stated before detail, using implicit references only where their same-paragraph antecedent is clear." },
+      { "id": "cover-reference-clarity", "status": "pass", "evidence": "Opening proof is situated in its supported prior-work setting, actors and systems are explicit, the selected position is referenced proximally, and reporting verbs belong to their source documents." },
       { "id": "cover-register", "status": "pass", "evidence": "The letter uses direct natural prose without generic or bureaucratic language." },
       { "id": "cover-sentence-craft", "status": "pass", "evidence": "Sentences are concise and grammatical with no semicolon or dash clause splices." },
       { "id": "cover-figure-discipline", "status": "pass", "evidence": "Every retained figure is necessary and present in selected résumé evidence." },
-      { "id": "cover-legal-status", "status": "pass", "evidence": "No application logistics or legal-work-status statement appears." },
+      { "id": "cover-logistics-exclusion", "status": "pass", "evidence": "No application logistics statement appears in the letter." },
       { "id": "cover-envelope", "status": "pass", "evidence": "Identity and contact fields match the résumé and no envelope fact was inferred." },
       { "id": "cross-document-consistency", "status": "pass", "evidence": "Résumé, letter, and argument contract agree on identity, facts, and scope." },
       { "id": "requirement-coverage", "status": "pass", "evidence": "High-priority requirements were addressed or honestly omitted without invention." },
@@ -889,7 +1041,9 @@ was reviewed.
 `coverLetterPlan.paragraphs` must bind every final cover-letter paragraph
 exactly once, in order, and each nested `sentences` array must do the same for
 every sentence in that paragraph. Copy the final paragraph and sentence text
-exactly. For the first paragraph, `relationToPreviousParagraph` is `opening`;
+exactly. The sentence arrays record the prose that the paragraph needs; they
+do not prescribe a sentence count or a claim-proof-relevance sequence. For the
+first paragraph, `relationToPreviousParagraph` is `opening`;
 every later paragraph must state its substantive relationship to the previous
 paragraph. Within each paragraph, the first sentence's
 `relationToPreviousSentence` is `opening`; every later sentence must state the
@@ -964,7 +1118,7 @@ the complete company name. A project with no company is identified by its
 project title alone; never invent a company label to satisfy this provenance
 field. `logistics` is a compatibility object only: omit it, or leave its
 `statement` empty. Never use it to place availability, relocation, commute,
-schedule, work location, travel, start date, or legal-work-status facts in a
+schedule, work location, travel, or start-date facts in a
 letter; those belong in application fields and must not be inferred from the
 job location, employer, school, profile, or context. This governs the letter.
 The résumé's per-role employment locations are a separate, required fact

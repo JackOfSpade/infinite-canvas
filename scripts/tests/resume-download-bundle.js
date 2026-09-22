@@ -185,7 +185,7 @@ export default [
       const calls = [];
       dom.window.fetch = async (endpoint, options) => {
         calls.push({ endpoint, payload: JSON.parse(options.body) });
-        return { ok: true, json: async () => ({ success: true }) };
+        return { ok: true, json: async () => ({ success: true, htmlSha256: 'b'.repeat(64) }) };
       };
       assert(!sync.disabled && sync.textContent.includes('résumé'), 'a configured saved HTML enables Sync without manually attaching a PDF');
       document.getElementById('ic-cover-tab').click();
@@ -517,6 +517,7 @@ export default [
       const sourceHtmlPath = path.join(sourceDir, 'Application.html');
       const sourceListingPath = path.join(sourceDir, 'Original Job Listing.md');
       const sourceAuditPath = path.join(sourceDir, 'generation-audit.json');
+      const sourceGenerationLogPath = path.join(sourceDir, 'Generation Log.jsonl');
       const legacyHtmlPath = path.join(legacySourceDir, 'Application.html');
       const legacyListingPath = path.join(legacySourceDir, 'Original Job Listing.md');
       const sourceHtml = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">Resume</main></section><section data-ic-document-panel="cover"><main class="page">Cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
@@ -599,14 +600,15 @@ export default [
         registerJobApplicationHandlers();
         const saveApplication = ipcMain.__getInvokeHandler('save-application');
         assert(typeof saveApplication === 'function', 'the save-application handler must be registered for the integration fixture');
-        const registerAuditWorkspace = (auditData = generationAudit) => registerPendingApplicationWorkspace({
+        const registerAuditWorkspace = (auditData = generationAudit, generationLog = null) => registerPendingApplicationWorkspace({
           workDir: sourceDir, senderId, company: 'Audit Co', applicationRoot: outputRoot,
           resumeHtmlPath: sourceHtmlPath, jobListingPath: sourceListingPath,
           generationAuditPath: sourceAuditPath,
           generationAuditJobId,
           generationAuditRequired: true,
+          generationLogPath: generationLog == null ? null : sourceGenerationLogPath,
           cleanupOnDiscard: false, cleanupOnSaveFailure: false,
-          artifactData: { resumeHtml: sourceHtml, jobListing: sourceListing, generationAudit: auditData },
+          artifactData: { resumeHtml: sourceHtml, jobListing: sourceListing, generationAudit: auditData, generationLog },
         });
         registerAuditWorkspace();
 
@@ -704,6 +706,43 @@ export default [
           && auditManifest[0].generationAuditStagedArtifactsValid
           && auditManifest[0].generationAuditSavedArtifactsValid,
         'destination readback must prove exact bytes, schema/job identity, required sections, and staged/final artifact bindings');
+
+        const generationEvent = (sequence, type) => JSON.stringify({
+          jobId: generationAuditJobId, sequence, type, at: `2026-09-05T12:0${sequence}:00.000Z`,
+          response: { summary: { alpha: 1, beta: ['retained'] } },
+        });
+        const reorderedGenerationEvent = (sequence, type) => JSON.stringify({
+          response: { summary: { beta: ['retained'], alpha: 1 } },
+          type, at: `2026-09-05T13:0${sequence}:00.000Z`, sequence, jobId: generationAuditJobId,
+        });
+        const firstRevisionLog = `${[0, 1, 2].map(sequence => generationEvent(sequence, 'review-edit')).join('\n')}\n`;
+        await fs.promises.writeFile(sourceGenerationLogPath, firstRevisionLog);
+        registerAuditWorkspace(generationAudit, firstRevisionLog);
+        const firstLogSave = await saveApplication({ sender }, { ...saveArgs, generationLogPath: sourceGenerationLogPath });
+        // A post-crash retry can produce equivalent JSON with a fresh timestamp
+        // and a different object-key order. Stable event identity must retain
+        // the existing durable revision rather than reject or duplicate it.
+        const secondRevisionLog = `${reorderedGenerationEvent(2, 'review-edit')}\n${generationEvent(3, 'approved')}\n`;
+        await fs.promises.writeFile(sourceGenerationLogPath, secondRevisionLog);
+        registerAuditWorkspace(generationAudit, secondRevisionLog);
+        const secondLogSave = await saveApplication({ sender }, { ...saveArgs, generationLogPath: sourceGenerationLogPath });
+        const durableLog = await fs.promises.readFile(secondLogSave.generationLogFile, 'utf8');
+        const durableEvents = durableLog.trim().split('\n').map(line => JSON.parse(line));
+        assert(firstLogSave.generationLogFile === secondLogSave.generationLogFile
+          && durableEvents.length === 4
+          && durableEvents.map(event => event.sequence).join(',') === '0,1,2,3',
+        'Generation Log.jsonl appends every revision across saves and dedupes an equivalent crash retry by stable jobId and sequence without replacing prior history');
+
+        const logTarget = path.join(root, 'must-not-write-through-log-link.txt');
+        await fs.promises.writeFile(logTarget, 'outside log bytes');
+        await fs.promises.unlink(secondLogSave.generationLogFile);
+        await fs.promises.symlink(logTarget, secondLogSave.generationLogFile);
+        registerAuditWorkspace(generationAudit, secondRevisionLog);
+        const linkedLogSave = await saveApplication({ sender }, { ...saveArgs, generationLogPath: sourceGenerationLogPath });
+        assert(linkedLogSave.success
+          && !(await fs.promises.lstat(linkedLogSave.generationLogFile)).isSymbolicLink()
+          && await fs.promises.readFile(logTarget, 'utf8') === 'outside log bytes',
+        'a destination Generation Log.jsonl symlink is replaced as a link object and never writes through its target');
 
         const staleSavedHashPath = path.join(root, 'stale-saved-hash-audit.json');
         const staleSavedHashAudit = `${JSON.stringify({

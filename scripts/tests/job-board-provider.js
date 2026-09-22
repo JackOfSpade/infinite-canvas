@@ -3505,6 +3505,65 @@ export default [
         && sourceCard.includes('finishSolveRequest(solveOutcome, solveOutcomeExtra);'),
       'the card answers the hub through its OWN Solve (keeping every guard) and reports exactly one terminal signal per request');
 
+      // "Try again" must retry the operation that FAILED. A login wall hit while
+      // resuming, followed by Try again, used to silently start a fresh
+      // multi-source scrape — hours of scraping the user never asked for,
+      // because the retry handler had no idea what had been attempted.
+      const retryStart = search.indexOf('const handleRetryFailed = useCallback(');
+      const retryEnd = search.indexOf('const savedAnalysisWarning =', retryStart);
+      assert(retryStart >= 0 && retryEnd > retryStart, 'the error-banner retry handler must exist and be delimited');
+      const retry = search.slice(retryStart, retryEnd);
+      // The tag is honoured only while it still describes the error ON SCREEN.
+      // ~20 sites raise this banner and most do not tag themselves, so an
+      // unrelated failure can overwrite errorMessage and leave an older tag
+      // behind; binding the two makes every untagged path safe at once.
+      assert(retry.includes('retryData.retryOperationFor === retryData.errorMessage')
+        && retry.includes("if (failedOperation === 'resume-saved-scrape') {")
+        && retry.includes("if (failedOperation === 'resume-run') {")
+        && retry.includes("if (failedOperation === 'resume-scoring') {")
+        && retry.includes('handleRerun({ frameSourceCards: false });'),
+      'Try again routes back to the failed operation and still falls back to a fresh run when none was recorded');
+      // Deliberately NO extra precondition on the recovery branches. Each
+      // recovery is cheap and self-guarding (handleResumeSavedScrape toasts
+      // "No Saved Scrape" and returns; resumeScoring fences on deletion,
+      // retirement, an active run and Board ownership), while the FALLBACK is
+      // the expensive full re-scrape. A precondition evaluated here would read
+      // asynchronously repopulated React state, and a transiently-false read
+      // would drop the user into that re-scrape — the exact bug this routing
+      // exists to prevent, reintroduced as a race. Staleness is handled by
+      // clearing the tag on dismiss, on retry, and on both hub resets.
+      assert(!retry.includes('savedAnalysisMeta') && !retry.includes('resumeRunActionable'),
+        'recovery branches route on the tag alone; the expensive fresh-run fallback must not be reachable through a state race');
+      // A reset starts a new run; the route must not outlive the failure.
+      // Both hub-reset writes (Reset and Clear career files) return the hub to
+      // 'empty'; each must drop the retry route along with the banner.
+      const emptyResetAt = [];
+      let scanFrom = 0;
+      for (;;) {
+        const at = search.indexOf("hubState: 'empty', queuedModuleRun: null", scanFrom);
+        if (at < 0) break;
+        emptyResetAt.push(at);
+        scanFrom = at + 1;
+      }
+      assert(emptyResetAt.length >= 2
+        && emptyResetAt.every(at => search.slice(at, at + 1200).includes('retryOperation: null')),
+      `every hub reset to 'empty' clears the retry route left from a previous failure (${emptyResetAt.length} reset sites found)`);
+      // Every failure path must stamp what it was doing, or the routing above
+      // silently degrades to the old always-rerun behaviour.
+      assert(search.includes("retryOperation: 'resume-run',")
+        && search.includes("retryOperation: 'resume-saved-scrape',")
+        && search.includes("retryOperation: 'resume-scoring',")
+        && search.includes("retryOperation: 'rerun',")
+        && (search.match(/retryOperationFor: error\?\.message \|\| String\(error\)/g) || []).length === 4,
+      'EVERY failure path that raises the banner records which operation produced it — an untagged path silently falls back to a full fresh scrape');
+      // Dismiss clears the route with the banner. Otherwise a dismissed
+      // failure's route survives and a later unrelated error retries it.
+      assert(/User clicked Dismiss Error[\s\S]{0,400}?retryOperation: null/.test(search),
+        'dismissing the banner clears the retry route it belonged to');
+      // Cleared on retry so a later unrelated failure cannot inherit a stale route.
+      assert(retry.includes('retryOperation: null'),
+        'the recorded operation is cleared when the retry is dispatched');
+
       const manualCancelStart = search.indexOf('const onManualAiNodeCancelled = (event) =>');
       const manualCancelEnd = search.indexOf("document.addEventListener('non-api-ai-node-cancelled'", manualCancelStart);
       const manualCancel = search.slice(manualCancelStart, manualCancelEnd);

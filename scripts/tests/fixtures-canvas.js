@@ -1151,6 +1151,12 @@ export default [
       assert(normal.includes('rerunOutcome') && normal.includes('rerunNotice'), 'Transient jobhub save rules: zero-new rerun notice should be session-only');
       assert(!sourcesReady.includes('scrapeWarnings'), 'Transient jobhub save rules: sources-ready should preserve scrapeWarnings');
       assert(sourcesReady.includes('errorMessage') && sourcesReady.includes('isRateLimit') && sourcesReady.includes('rerunNotice'), 'Transient jobhub save rules: sources-ready should still strip banners/notices');
+      // retryOperation records which operation raised the banner so Try again
+      // retries THAT one. It is meaningless without the error it belongs to, so
+      // it must be stripped wherever errorMessage is — otherwise a reload keeps
+      // a route pointing at a failure that is no longer on screen.
+      assert(normal.includes('retryOperation') && sourcesReady.includes('retryOperation'),
+        'Transient jobhub save rules: the retry route is stripped wherever errorMessage is — a route that outlives its error points at nothing');
       return { normal, sourcesReady };
     },
   },
@@ -5424,13 +5430,21 @@ export default [
       'Node Diagnostics shares the timestamp validator: legacy numeric strings render ISO, while booleans are never coerced into epoch dates');
       const completionWriter = source.slice(
         source.indexOf('const completeJobRun = useCallback'),
-        source.indexOf('const [savedAnalysisMeta', source.indexOf('const completeJobRun = useCallback')),
+        source.indexOf('const recordCollectionCompletion = useCallback', source.indexOf('const completeJobRun = useCallback')),
       );
-      assert(completionWriter.includes('normalizeCompletionTimestamp(result?.receipt?.completedAt)')
-        && completionWriter.includes('updateGlobal(id, () => canPublish() ? { lastCompletedRunAt: completedAt } : null)')
-        && completionWriter.includes('if (!canPublish()) return result;')
-        && !completionWriter.includes('Number(result?.receipt?.completedAt)'),
-      'only a strictly valid backend completion timestamp may be persisted; null and booleans must never become epoch zero');
+      const collectionWriter = source.slice(
+        source.indexOf('const recordCollectionCompletion = useCallback'),
+        source.indexOf('const retryTerminalFinalization', source.indexOf('const recordCollectionCompletion = useCallback')),
+      );
+      const collectionBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(!completionWriter.includes('lastCompletedRunAt')
+        && collectionWriter.includes('normalizeCompletionTimestamp(searchResult?.collectionCompletedAt) ?? Date.now()')
+        && collectionWriter.includes('lastCompletedRunAt: collectionCompletedAt')
+        && collectionWriter.includes('isCancelled?.()')
+        && collectionBackendSource.includes('const collectionCompletedAt = Date.now();')
+        && collectionBackendSource.includes("setJobRunStage(canvasFilePath, 'gathered', collectionCompletedAt")
+        && collectionBackendSource.includes('collectionCompletedAt,'),
+      'the displayed scrape timestamp is recorded at the all-platform gathered boundary, not at later scoring or terminal receipt completion');
 
       // The hub rests at 'done' after every successful run, so the clear action
       // has to be reachable from there too — otherwise swapping career files
@@ -5527,7 +5541,7 @@ export default [
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes("reason.message === 'Node deleted'")
         && jobsSource.includes("phase: 'aborted'")
-        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageAdvanced = await setJobRunStage') >= 0
+        && jobsSource.indexOf('await throwIfSearchAborted();\n    const collectionCompletedAt = Date.now();\n    const gatheredStageAdvanced = await setJobRunStage') >= 0
         && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),
       'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
@@ -5933,7 +5947,7 @@ export default [
       const cBig = compsForPricing(1000, 1000);
       assert(cBig.sold === cBig.active && cBig.sold > 15, 'Job date and cap helpers: large comp set should scale proportionally above the old caps');
       assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
-      assert(jobScoringBatchSize() >= 5 && jobScoringBatchSize() <= 15, 'Job date and collection-limit helpers: scoring batch out of bounds');
+      assert(jobScoringBatchSize() === 22, 'Job date and collection-limit helpers: scoring batch must fill the 15,360-token manual-output budget');
       return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), defaultPages: JOB_COLLECTION_LIMITS_DEFAULT.pagesPerPlatform };
     },
   },
@@ -6530,6 +6544,20 @@ export default [
       const form = applyBugReportCode([...logs, '[Focus] date "Must sell by" node=8e27f3ce'], {}, 'FORM');
       assert(form.filteredLogs.some(line => line.includes('[Focus]')) && form.matchedCodes.includes('FORM'),
         'Bug report code filtering: FORM should retain form-field focus events');
+      const manualAi = applyBugReportCode([
+        ...logs,
+        '[Manual AI] user selected queued handoff batch=3',
+        '[Non-API AI] Rejected response for task job-compensation-assessment-batch (code=JOB_COMPENSATION_RESPONSE_INVALID).',
+      ], {}, 'AIHANDOFF');
+      assert(manualAi.matchedCodes.includes('AIHANDOFF')
+        && manualAi.filteredLogs.some(line => line.includes('[Manual AI] user selected queued handoff'))
+        && manualAi.filteredLogs.some(line => line.includes('JOB_COMPENSATION_RESPONSE_INVALID'))
+        && manualAi.sectionExclusions.has('nodeInternals'),
+      'Bug report code filtering: AIHANDOFF retains privacy-safe manual prompt-queue navigation and validation evidence');
+      const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(bugReportSource.includes("reportCodes.has('AIHANDOFF')")
+        && bugReportSource.includes("isFullReport || reportCodes.has('AIHANDOFF')"),
+      'Bug report code filtering: AIHANDOFF includes the manual-handoff lifecycle and focused main-process log receipt');
       const render = applyBugReportCode([...logs, '[RenderStorm] sellhub 8e27f3ce: 24 renders in 1000ms'], {}, 'RENDER');
       assert(render.filteredLogs.some(line => line.includes('[RenderStorm]')) && render.matchedCodes.includes('RENDER'),
         'Bug report code filtering: RENDER should retain render-storm diagnostics');

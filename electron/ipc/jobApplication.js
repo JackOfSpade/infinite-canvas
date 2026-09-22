@@ -157,6 +157,7 @@ export function registerPendingApplicationWorkspace({
   workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
+  generationLogPath = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
   artifactData = {}, cleanupOnSaveFailure = true, onBeforeSave = null, onBeforeDiscard = null,
   onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onSaveFailure = null,
@@ -169,7 +170,7 @@ export function registerPendingApplicationWorkspace({
   }
   const resolvedWorkDir = path.resolve(String(workDir || ''));
   const required = [resumeHtmlPath, jobListingPath].map(value => path.resolve(String(value || '')));
-  const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath]
+  const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath, generationLogPath]
     .map(value => value ? path.resolve(String(value)) : null);
   const paths = [...required, ...optional.filter(Boolean)];
   if (paths.some(value => !isWithinDirectory(resolvedWorkDir, value))) {
@@ -190,11 +191,13 @@ export function registerPendingApplicationWorkspace({
     coverLetterPdf: applicationArtifactSha256(artifactData.coverLetterPdf),
     jobListing: applicationArtifactSha256(artifactData.jobListing),
     generationAudit: applicationArtifactSha256(artifactData.generationAudit),
+    generationLog: applicationArtifactSha256(artifactData.generationLog),
   };
   if (!artifactSha256.resumeHtml || !artifactSha256.jobListing
     || (optional[0] && !artifactSha256.resumePdf)
     || (optional[1] && !artifactSha256.coverLetterPdf)
-    || (optional[2] && !artifactSha256.generationAudit)) {
+    || (optional[2] && !artifactSha256.generationAudit)
+    || (optional[3] && !artifactSha256.generationLog)) {
     throw new Error('Cannot register application artifacts without trusted source fingerprints.');
   }
   const expectedGenerationAuditJobId = String(generationAuditJobId || '').trim();
@@ -235,6 +238,7 @@ export function registerPendingApplicationWorkspace({
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
     generationAuditPath: optional[2],
+    generationLogPath: optional[3],
     generationAuditJobId: optional[2] ? expectedGenerationAuditJobId : null,
     generationAuditRequired: optional[2] ? generationAuditRequired : null,
     jobListingPath: required[1], cleanupOnDiscard: cleanupOnDiscard !== false,
@@ -975,6 +979,19 @@ function projectProvenanceRegionForRenderedName(regions, renderedName) {
   return labels.size === 1 ? matches[0] : null;
 }
 
+/**
+ * Return the exact, source-owned project provenance heading for a displayed
+ * name when it is unambiguous. The structured paste renderer uses this same
+ * parser as final import, preventing divergent treatment of nested Markdown,
+ * plain section boundaries, and multi-file career-data imports.
+ */
+export function careerDataProjectProvenanceHeadingForName(careerData, renderedName) {
+  return projectProvenanceRegionForRenderedName(
+    careerDataProjectProvenanceRegions(careerData),
+    renderedName,
+  )?.label || '';
+}
+
 function directSectionHeading(section) {
   for (const child of Array.from(section?.children || [])) {
     if (child.classList?.contains('section-head')) {
@@ -1242,6 +1259,20 @@ export function extractResumeEvidence(mainHtml) {
 const DEPENDENT_RESUME_SYSTEM_REFERENCE = /\b(?:that|those|these)\s+(APIs?|applications?|databases?|datasets?|feeds?|integrations?|pipelines?|platforms?|services?|systems?|tools?)\b/iu;
 const LEADING_RESUME_REFERENCE = /^(?:This|That|These|Those|It|They|Such)\b/u;
 
+// The bullet checks below already collect every offending bullet rather than
+// stopping at the first, and then printed only the first eight with nothing
+// said about the rest — so a résumé with ten overlong bullets read as a
+// résumé with eight, and the round spent fixing those eight discovered the
+// other two. The count stays bounded; what it left out is now disclosed, the
+// same way coverLetterChecks.js's observationResult discloses it.
+const MAX_RESUME_CHECK_OBSERVATIONS = 8;
+
+function resumeCheckDetail(observations) {
+  const visible = observations.slice(0, MAX_RESUME_CHECK_OBSERVATIONS);
+  const omitted = observations.length - visible.length;
+  return `${visible.join('; ')}${omitted ? `; ${omitted} additional observation(s) omitted` : ''}`;
+}
+
 /**
  * Résumé bullets are independently scanned by recruiters and ATS previews.
  * Reject only high-confidence backward references here; broader antecedent
@@ -1266,7 +1297,7 @@ export function checkResumeBulletSelfContainment(mainHtml) {
     });
   });
   return observations.length
-    ? { id: 'resume-bullet-self-containment', passed: false, detail: observations.slice(0, 8).join('; ') }
+    ? { id: 'resume-bullet-self-containment', passed: false, detail: resumeCheckDetail(observations) }
     : { id: 'resume-bullet-self-containment', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) are self-contained` };
 }
 
@@ -1290,7 +1321,7 @@ export function checkResumeBulletFocus(mainHtml) {
     });
   });
   return observations.length
-    ? { id: 'resume-bullet-focus', passed: false, detail: observations.slice(0, 8).join('; ') }
+    ? { id: 'resume-bullet-focus', passed: false, detail: resumeCheckDetail(observations) }
     : { id: 'resume-bullet-focus', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) keep one principal achievement` };
 }
 
@@ -1323,7 +1354,7 @@ export function checkResumeBulletLength(mainHtml) {
     });
   });
   return observations.length
-    ? { id: 'resume-bullet-length', passed: false, detail: observations.slice(0, 8).join('; ') }
+    ? { id: 'resume-bullet-length', passed: false, detail: resumeCheckDetail(observations) }
     : { id: 'resume-bullet-length', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) fit the ${RESUME_BULLET_CHARACTER_BUDGET}-character budget` };
 }
 
@@ -1500,6 +1531,109 @@ function finalizeGenerationAuditData(data, {
   return `${JSON.stringify(finalized, null, 2)}\n`;
 }
 
+function generationLogEventId(entry, label) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    throw new Error(`Generation Log.jsonl ${label} must be a JSON object.`);
+  }
+  const jobId = String(entry.jobId || '').trim();
+  const sequence = entry.sequence;
+  if (!jobId || jobId.length > 120 || !Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error(`Generation Log.jsonl ${label} must contain a jobId and nonnegative integer sequence.`);
+  }
+  return `${jobId}\u0000${sequence}`;
+}
+
+// The log identity deliberately excludes its clock value. A process can crash
+// after appending an event and before recording the next manifest state; a
+// retry can serialize the same JSON with a different object-key order (and a
+// new timestamp). Preserve the original durable line in that case, while
+// still rejecting a genuinely conflicting event for the stable identity.
+function canonicalGenerationLogEvent(entry) {
+  if (Array.isArray(entry)) return `[${entry.map(canonicalGenerationLogEvent).join(',')}]`;
+  if (entry && typeof entry === 'object') {
+    return `{${Object.keys(entry).sort().map(key => `${JSON.stringify(key)}:${canonicalGenerationLogEvent(entry[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(entry);
+}
+
+function generationLogComparableEvent(entry) {
+  const { at: _at, ...withoutTimestamp } = entry;
+  return canonicalGenerationLogEvent(withoutTimestamp);
+}
+
+function parseGenerationLog(data, label) {
+  if (data == null) return [];
+  const text = Buffer.from(data).toString('utf8');
+  const entries = [];
+  for (const [index, raw] of text.split(/\r?\n/u).entries()) {
+    const line = raw.trim();
+    if (!line) continue;
+    let value;
+    try { value = JSON.parse(line); }
+    catch { throw new Error(`Generation Log.jsonl ${label} line ${index + 1} is not valid JSON.`); }
+    entries.push({
+      id: generationLogEventId(value, `${label} line ${index + 1}`),
+      line,
+      comparable: generationLogComparableEvent(value),
+    });
+  }
+  return entries;
+}
+
+/**
+ * Append newly staged app-owned generation events to the durable bundle log.
+ * It runs while the destination lock is held, keeping concurrent saves from
+ * dropping a revision. Stable jobId+sequence IDs make save retries idempotent.
+ */
+async function mergeApplicationGenerationLogs(destination, sourceData) {
+  let existing = null;
+  let handle;
+  try {
+    const expected = await fs.promises.lstat(destination);
+    // The transaction below replaces a final-name symlink as a filesystem
+    // object without following it. Treat it as no retained history here so a
+    // legacy save can safely remove a stale link, and a paste save can safely
+    // replace it with a new regular log file. Directories remain invalid.
+    if (expected.isSymbolicLink()) {
+      // A link cannot be trusted as prior history. The atomic replacement
+      // either removes it (no staged log) or promotes a regular log beside
+      // it, without ever opening its target.
+      existing = null;
+    } else if (!expected.isFile()) {
+      throw new Error('Generation Log.jsonl destination must be a regular file.');
+    } else {
+      const noFollow = Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
+      handle = await fs.promises.open(destination, fs.constants.O_RDONLY | noFollow);
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+        throw new Error('Generation Log.jsonl destination changed while it was being read.');
+      }
+      existing = await handle.readFile();
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+  const retained = parseGenerationLog(existing, 'destination');
+  const appended = parseGenerationLog(sourceData, 'staged source');
+  if (!retained.length && !appended.length) return null;
+  const seen = new Map();
+  const lines = [];
+  for (const entry of [...retained, ...appended]) {
+    if (seen.has(entry.id)) {
+      if (seen.get(entry.id) !== entry.comparable) {
+        throw new Error(`Generation Log.jsonl has conflicting content for stable event ${entry.id.replace('\u0000', ':')}.`);
+      }
+      continue;
+    }
+    seen.set(entry.id, entry.comparable);
+    lines.push(entry.line);
+  }
+  const merged = `${lines.join('\n')}\n`;
+  return merged;
+}
+
 export async function inspectApplicationExport(files) {
   const manifest = [];
   for (const file of files) {
@@ -1643,7 +1777,7 @@ export function registerJobApplicationHandlers() {
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
+  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, workDir, jobTitle, location, canvasFilePath, suppressReveal = false }) => {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
@@ -1651,7 +1785,8 @@ export function registerJobApplicationHandlers() {
       && path.resolve(String(jobListingPath || '')) === pending.jobListingPath
       && (resumePdfPath ? path.resolve(resumePdfPath) : null) === pending.resumePdfPath
       && (coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null) === pending.coverLetterPdfPath
-      && (generationAuditPath ? path.resolve(generationAuditPath) : null) === pending.generationAuditPath;
+      && (generationAuditPath ? path.resolve(generationAuditPath) : null) === pending.generationAuditPath
+      && (generationLogPath ? path.resolve(generationLogPath) : null) === pending.generationLogPath;
     if (!matchesPending) {
       throw new Error('Generated application paths did not match this generation session — please regenerate.');
     }
@@ -1669,6 +1804,7 @@ export function registerJobApplicationHandlers() {
     coverLetterPdfPath = pending.coverLetterPdfPath;
     jobListingPath = pending.jobListingPath;
     generationAuditPath = pending.generationAuditPath;
+    generationLogPath = pending.generationLogPath;
     const company = pending.company;
     let exportPhase = 'validating generated sources';
     let exportDir = null;
@@ -1728,11 +1864,12 @@ export function registerJobApplicationHandlers() {
     const coverLetterFile = path.join(dir, 'Cover Letter.pdf');
     const jobListingFile = path.join(dir, 'Original Job Listing.md');
     const generationAuditFile = path.join(dir, 'Generation Audit.json');
+    const generationLogFile = path.join(dir, 'Generation Log.jsonl');
     exportPhase = 'reading generated artifacts';
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
     };
-    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData, generationAuditData] = await Promise.all([
+    const [sourceHtml, sourceResumePdfData, sourceCoverLetterPdfData, jobListingData, generationAuditData, generationLogData] = await Promise.all([
       readRegisteredApplicationArtifact(resolvedWorkDir, resumeHtmlPath, {
         ...registeredReadOptions,
         encoding: 'utf8',
@@ -1757,6 +1894,11 @@ export function registerJobApplicationHandlers() {
         ...registeredReadOptions,
         encoding: 'utf8',
         expectedSha256: pending.artifactSha256?.generationAudit,
+      }) : null,
+      generationLogPath ? readRegisteredApplicationArtifact(resolvedWorkDir, generationLogPath, {
+        ...registeredReadOptions,
+        encoding: 'utf8',
+        expectedSha256: pending.artifactSha256?.generationLog,
       }) : null,
     ]);
     if (generationAuditData != null) {
@@ -1810,17 +1952,20 @@ export function registerJobApplicationHandlers() {
         savedArtifacts: savedArtifactData,
       });
 
-    // The workspace is deliberately unzipped and predictable. Treat all five
+    // The workspace is deliberately unzipped and predictable. Treat all six
     // siblings as one transaction: unavailable optional artifacts remove stale
     // predecessors, while any promotion/readback failure restores the complete
     // prior generation instead of leaving a mixed bundle.
     exportPhase = 'writing and verifying destination bundle';
-    const manifest = await withApplicationSyncWorkspaceLock(dir, () => replaceApplicationBundleAtomically([
+    const manifest = await withApplicationSyncWorkspaceLock(dir, async () => {
+      const finalizedGenerationLogData = await mergeApplicationGenerationLogs(generationLogFile, generationLogData);
+      return replaceApplicationBundleAtomically([
         { destination: applicationFile, data: generatedHtml },
         { destination: resumeFile, data: resumePdfData },
         { destination: coverLetterFile, data: coverLetterPdfData },
         { destination: jobListingFile, data: jobListingData },
         { destination: generationAuditFile, data: finalizedGenerationAuditData },
+        { destination: generationLogFile, data: finalizedGenerationLogData },
       ], {
         verify: async () => {
           const readback = await inspectApplicationExport([
@@ -1844,11 +1989,18 @@ export function registerJobApplicationHandlers() {
               },
               expectedSavedArtifacts: savedArtifactData,
             },
+            {
+              path: generationLogFile,
+              expected: finalizedGenerationLogData != null,
+              expectedData: finalizedGenerationLogData,
+              kind: 'generation-log',
+            },
           ]);
           await registerApplicationSyncWorkspace(dir, syncToken);
           return readback;
         },
-      }));
+      });
+    });
     const missingFiles = [!hasPdf && 'résumé PDF', !hasCoverLetterPdf && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
     const syncStatus = applicationSyncStatusSnapshot();
     const bundleWarnings = [
@@ -1915,6 +2067,7 @@ export function registerJobApplicationHandlers() {
       coverLetterFile: hasCoverLetterPdf ? coverLetterFile : null,
       jobListingFile: hasListing ? jobListingFile : null,
       generationAuditFile: hasGenerationAudit ? generationAuditFile : null,
+      generationLogFile: manifest.some(row => row.name === 'Generation Log.jsonl' && row.expected) ? generationLogFile : null,
       bundleError,
     };
     } catch (error) {

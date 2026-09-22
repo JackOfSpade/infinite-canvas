@@ -42,6 +42,12 @@ const JOBSEARCH_TRANSIENT_KEYS = [
   // often a second large copy of careerData, so strip it with the run buffer.
   'pendingCareerData',
   'errorMessage',
+  // Pairs with errorMessage: it records WHICH operation raised the banner so
+  // Try again can retry that one rather than always starting a fresh scrape.
+  // It must be stripped alongside errorMessage — keeping a route after the
+  // error it belongs to is gone leaves a stale route with nothing to route.
+  'retryOperation',
+  'retryOperationFor',
   'isRateLimit',
   // A healthy history-suppressed re-run explanation belongs only to the
   // active session; reopening must not surface stale run context.
@@ -79,6 +85,9 @@ const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
   'queuedModuleRun',
   '_boardRollbackSourceProgressFence',
   'errorMessage',
+  // Stripped with errorMessage here too — see JOBSEARCH_TRANSIENT_KEYS.
+  'retryOperation',
+  'retryOperationFor',
   'isRateLimit',
   'rerunOutcome',
   'rerunNotice',

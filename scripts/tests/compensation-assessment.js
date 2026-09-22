@@ -1,5 +1,6 @@
 import { assert } from '../test-dependencies.js';
 import { buildJobTreeNodes, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { estimateCompensationExperienceYearsFromDescription, selectCompensationExperienceYears } from '../../electron/ipc/jobCompensation.js';
 
 const assessment = {
   schemaVersion: 1,
@@ -128,6 +129,69 @@ export default [
       assert(grouped.newNodes.find((node) => node.type === 'jobcard')?.data?.compensationAssessment === assessment,
         'grouped hierarchy cards must retain compensation research');
       return { groupedCards: grouped.newNodes.filter((node) => node.type === 'jobcard').length };
+    },
+  },
+  {
+    name: 'Salary analysis estimates experience from a job description when the fit assessment lacks years',
+    run: () => {
+      const explicitMinimum = estimateCompensationExperienceYearsFromDescription({
+        description: 'You bring at least 5 years of experience building distributed systems.',
+      });
+      const explicitRange = estimateCompensationExperienceYearsFromDescription({
+        description: 'Requirements: 3–5 years of product design experience.',
+      });
+      const titleSeniority = estimateCompensationExperienceYearsFromDescription({
+        title: 'Senior Platform Engineer',
+        description: 'Own critical systems and mentor teammates.',
+      }, { seniority: 'senior' });
+      const principalSeniority = estimateCompensationExperienceYearsFromDescription({
+        title: 'Principal Product Manager',
+      });
+      const juniorReportingLine = estimateCompensationExperienceYearsFromDescription({
+        title: 'Junior Data Analyst',
+        description: 'This position reports to the Director of Analytics and supports the broader team.',
+      });
+      const juniorManager = estimateCompensationExperienceYearsFromDescription({ title: 'Junior Manager' });
+      const unspecifiedDescription = estimateCompensationExperienceYearsFromDescription({
+        description: 'The role supports 3 products, has a 5-person team, and offers $125,000 annually.',
+      });
+      const noEvidence = estimateCompensationExperienceYearsFromDescription({
+        description: 'We are looking for a thoughtful collaborator who enjoys building useful software.',
+      });
+      const titleOnly = estimateCompensationExperienceYearsFromDescription({ title: 'Operations Coordinator' });
+      const unrelatedExternalPage = {
+        title: 'Junior Engineer',
+        descriptionCapture: 'external-page-full-text',
+        description: 'Senior Architect: requires 8 years of software engineering experience. Junior Engineer: work with the team.',
+      };
+      const externalPageEstimate = estimateCompensationExperienceYearsFromDescription(unrelatedExternalPage);
+      const unsupportedCategory = selectCompensationExperienceYears({
+        categorySpecificExperience: [{ requiredMinimumYears: 8, jobEvidenceGrounded: true, jobEvidence: 'Experience with distributed systems.' }],
+      }, { job: { description: 'Experience with distributed systems.' } });
+      const unsupportedCandidateYears = selectCompensationExperienceYears({
+        categorySpecificExperience: [{ reportedYears: 8, candidateEvidenceGrounded: false }],
+      });
+      assert(explicitMinimum.years === 5 && explicitMinimum.basis === 'description-stated-minimum',
+        'an explicit job-description minimum must place the listing in a salary experience band when structured scoring evidence lacks years');
+      assert(explicitRange.years === 5 && explicitRange.basis === 'description-stated-minimum',
+        'a stated experience range must use its highest explicit requirement when choosing a salary market');
+      assert(titleSeniority.years === 5 && titleSeniority.basis === 'description-seniority-estimate'
+        && principalSeniority.years === 10 && principalSeniority.basis === 'description-seniority-estimate',
+      'a listed seniority level must produce a clearly marked market estimate when the description has no numeric experience requirement');
+      assert(juniorReportingLine.years === 1 && juniorReportingLine.basis === 'description-seniority-estimate',
+        'a reporting line must not upgrade a junior listing into the director salary market');
+      assert(juniorManager.years === 1 && juniorManager.basis === 'description-seniority-estimate',
+        'a junior title must take precedence over a role noun when pricing the experience band');
+      assert(unspecifiedDescription.years === 2 && unspecifiedDescription.basis === 'description-unspecified-estimate',
+        'a real description with no stated level must use the disclosed conservative market anchor instead of abandoning salary research');
+      assert(noEvidence.years === 2 && noEvidence.basis === 'description-unspecified-estimate',
+        'a complete listing description with no numeric experience signal must still receive the disclosed conservative market anchor');
+      assert(titleOnly.years === 2 && titleOnly.basis === 'description-unspecified-estimate',
+        'a title-only listing must receive the disclosed conservative market anchor instead of abandoning salary research');
+      assert(externalPageEstimate.years === 1 && externalPageEstimate.basis === 'description-seniority-estimate'
+        && unsupportedCategory.years === null && unsupportedCandidateYears.years === null,
+      'an unrelated full-page role, grounded quote without its claimed number, or ungrounded candidate years must not upgrade this listing’s salary band');
+      return { explicitMinimum: explicitMinimum.years, explicitRange: explicitRange.years };
     },
   },
 ];

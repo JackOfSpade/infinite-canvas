@@ -3,6 +3,7 @@ import { EventLogger } from '../utils/EventLogger';
 import {
   LOCAL_AI_POLL_INTERVAL_MS,
   LOCAL_AI_RESULT_SETTLE_MS,
+  brokenLocalAiJobDriveState,
   LOCAL_AI_STATUS_ERROR_STREAK_LIMIT,
   isJobCardMounted,
   selectFallbackLocalAiJobs,
@@ -188,14 +189,20 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         }
         const result = imported.localApplication;
         if (result.status === 'revision-required') {
+          const pasteRevision = result.localJob?.mode === 'paste' || result.localJob?.transport === 'paste';
           if (!isOrphan) writeImportState({
-            ...result.localJob, status: 'revision-required',
-            message: result.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.',
+            ...result.localJob,
+            status: pasteRevision ? (result.localJob?.status || 'queued') : 'revision-required',
+            message: pasteRevision
+              ? (result.fitMessage || 'The measured layout check requested another review. Reopen the AI handoff to review and edit the structured documents.')
+              : (result.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.'),
           });
           EventLogger.log(`[LocalAI] fallback revision-required job=${jobId} card=${nodeId}`);
           toast?.({
-            title: 'Local AI Document Revision Needed',
-            description: 'No bundle was saved. Reopen the Local AI job and revise result.json using the app’s measured fit feedback.',
+            title: pasteRevision ? 'Application Review and Edit Needed' : 'Local AI Document Revision Needed',
+            description: pasteRevision
+              ? 'No bundle was saved. Reopen the AI handoff; the next review prompt asks the AI to make the measured-fit edits in its JSON response.'
+              : 'No bundle was saved. Reopen the Local AI job and revise result.json using the app’s measured fit feedback.',
             type: 'error',
           });
           return;
@@ -256,6 +263,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           coverLetterPdfPath: result.coverLetterPdfPath,
           jobListingPath: result.jobListingPath,
           generationAuditPath: result.generationAuditPath,
+          generationLogPath: result.generationLogPath,
           workDir: result.workDir,
           company: result.company,
           candidateName: result.candidateName,
@@ -298,6 +306,26 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         });
       } catch (error) {
         if (disposed || !isCurrentQuitGeneration(generation)) return;
+        // Read before every branch below, because each of them — including the
+        // generic tail — parks this job at 'completed', which is in neither
+        // driver's idle list: the next tick would poll the same broken job and
+        // start the settle/import cycle again, while the card it belongs to
+        // reads as a finished result. Same judgement as the status poll above,
+        // from the same helper.
+        const broken = brokenLocalAiJobDriveState(error);
+        if (broken) {
+          statusErrorStreakRef.current.delete(jobId);
+          if (!isOrphan) writeImportState(broken);
+          EventLogger.log(`[LocalAI] fallback job ended job=${jobId} ${isOrphan ? 'orphaned-card' : `card=${nodeId}`}: ${broken.message}`);
+          // The card driving this job is unmounted by definition, so the toast
+          // is the only surface that can carry the sentence. Not for an
+          // orphan: its card was deleted, and that sentence names an action on
+          // a job card — offering it for a folder with no card routes a person
+          // to something they cannot press. The log line above keeps the
+          // ended folder diagnosable without saying so.
+          if (!isOrphan) ctxRef.current.addToast?.({ title: 'Local AI Job Cannot Be Completed', description: broken.message, type: 'error', dedupeKey: `local-ai-broken:${jobId}` });
+          return;
+        }
         if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
           settlingRef.current.delete(jobId);
           if (!isOrphan) writeImportState({ status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' });
@@ -347,6 +375,15 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         // The card may have mounted while the IPC round-trip was in flight —
         // it owns the job now.
         if (disposed || !isCurrentQuitGeneration(generation) || isJobCardMounted(nodeId)) return;
+        // Same rule as the mounted card: a broken job is terminal, and the
+        // throw below would park it in the transient retry loop instead.
+        const broken = brokenLocalAiJobDriveState(statusResult);
+        if (broken) {
+          statusErrorStreakRef.current.delete(jobId);
+          settlingRef.current.delete(jobId);
+          if (!isOrphan) writeDriveState(broken);
+          return;
+        }
         if (!statusResult?.success || !statusResult.localJob) throw new Error(statusResult?.error || 'Could not check Local AI job status.');
         statusErrorStreakRef.current.delete(jobId);
         const next = statusResult.localJob;
@@ -407,10 +444,17 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       try {
         const allNodes = nav.enumerateAllNodes();
         const pending = selectFallbackLocalAiJobs(allNodes);
-        for (const node of pending) {
-          if (disposed || !isCurrentQuitGeneration(generation)) return;
-          await driveJob(node, null, generation);
-        }
+        // Drive every pending job's status poll CONCURRENTLY rather than one
+        // `await` per node in sequence. A poll is a cheap per-jobId read (the
+        // main process holds no cross-job lock on it), but driveJob can end in
+        // a multi-second measured PDF import; a sequential loop let that one
+        // job's import stall every other job's poll for the rest of the tick,
+        // and the next tick's no-op on tickBusyRef meant they got NO poll at
+        // all until it finished. Concurrency here does not add a second import
+        // in flight: importBusyRef still admits exactly one, and every other
+        // concurrent driveJob call finds it already claimed and defers to a
+        // later tick instead of blocking on this one.
+        await Promise.allSettled(pending.map((node) => driveJob(node, null, generation)));
         if (!isCurrentQuitGeneration(generation)) return;
         const canvasFilePath = ctxRef.current.getCurrentFile?.();
         if (!canvasFilePath || !window.electronAPI?.discoverLocalApplications) return;
@@ -433,10 +477,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           .map((node) => node?.data?.localApplication?.id)
           .filter(Boolean));
         const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);
-        for (const orphanJob of orphaned) {
-          if (disposed || !isCurrentQuitGeneration(generation)) return;
-          await driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob, generation);
-        }
+        // Same head-of-line hazard applies to orphaned folders discovered for
+        // this canvas: nothing about one card-less job's import should hold up
+        // another's poll.
+        await Promise.allSettled(orphaned.map((orphanJob) => (
+          driveJob({ id: null, data: { localApplication: orphanJob } }, orphanJob, generation)
+        )));
       } finally {
         tickBusyRef.current = false;
       }

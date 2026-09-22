@@ -143,8 +143,12 @@ End-to-end, given candidate data + job description:
    letter. Establish why a new employer, project, or period belongs before its
    details; never use a temporal contrast such as “now” without stating the
    contrasted state. Prefer common contemporary verbs (“closed the gap,” not
-   "answered the gap"), and avoid repeating an ordinary prior employer name
-   once the role or system is unambiguous. Narrow connective or causal language
+   "answered the gap"). Do not repeat a prior employer’s full name merely from
+   habit. Within a paragraph, continue naturally with `I` when the candidate
+   remains the subject. At a new paragraph, use `In that role` when it helps
+   identify the continued role, and omit it when the continuation is already
+   clear; repeat the name when multiple employers or roles make a reference
+   ambiguous. Narrow connective or causal language
    entailed by the evidence is allowed for cohesion; new candidate facts are not.
    Treat an employer, team, product, or operational assertion that comes only
    from the job listing as the listing's description, not as independently

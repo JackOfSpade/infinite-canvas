@@ -9,16 +9,24 @@ import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
-import { computeJobTreeView, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
+import { computeJobTreeView, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
-import { LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
+import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter } from '../utils/jobCardFilters';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
-import { ApplicationLaunchPromptDialog } from '../components/ApplicationLaunchPromptDialog';
+import {
+  APPLICATION_DOCK_IDLE_STATUSES,
+  APPLICATION_HANDOFF_LIMIT,
+  applicationLimitMessage,
+  countActiveApplicationHandoffs,
+  getDismissedApplicationBundles,
+  requestApplicationHandoffFocus,
+  requestApplicationHandoffRefresh,
+} from '../utils/applicationHandoffDock';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -159,7 +167,7 @@ function compactHiringFitAudit(assessment) {
   };
 }
 
-// A local coding agent often makes a sequence of atomic edits while composing one
+// A legacy local coding agent can make a sequence of atomic edits while composing one
 // revision. Import only after the same complete result has survived a few poll
 // cycles, otherwise a valid intermediate JSON document can be measured as if
 // it were the author's final revision. (LOCAL_AI_RESULT_SETTLE_MS lives in
@@ -194,7 +202,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [showScoreAudit, setShowScoreAudit] = useState(false);
   const [showCompensationDetails, setShowCompensationDetails] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
-  const [applicationLaunchPrompt, setApplicationLaunchPrompt] = useState('');
   // Local AI is deliberately a human-in-the-loop workflow. The durable job
   // folder is authoritative; this persisted pointer lets a remounted card
   // reconnect without implying that an application was submitted.
@@ -216,6 +223,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     useCallback((store) => store.nodeLookup.get(id)?.measured?.height ?? null, [id])
   );
   const previousMeasuredHeightRef = useRef(measuredHeight);
+  const preserveTreeLayoutOnRestore = Boolean(data[JOB_TREE_LAYOUT_RESTORE_KEY]);
 
   // Cache id for closure safety + a mounted flag so async settlements after
   // unmount don't setState.
@@ -270,6 +278,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [id, data.localApplication, localApplication, localApplicationKey, updateGlobal]);
 
+  // The dock (not this card) now owns discarding an application handoff.
+  // Without this listener the durable job folder and this card's pointer
+  // would disagree: the fallback manager still sees a pending job on disk and
+  // resurrects it into the very card the person just discarded it from.
+  useEffect(() => {
+    const handleDiscarded = (event) => {
+      const jobId = event?.detail?.jobId;
+      const nodeId = event?.detail?.nodeId;
+      if (!jobId || nodeId !== id) return;
+      updateGlobal(id, (node) => {
+        const live = node?.data?.localApplication;
+        // Only clear the pointer this discard actually targeted; a newer
+        // bundle this card queued in the meantime must survive.
+        return live?.id === jobId ? { localApplication: null } : null;
+      });
+      setLocalApplication((current) => current?.id === jobId ? null : current);
+    };
+    document.addEventListener('application-handoff-discarded', handleDiscarded);
+    return () => { document.removeEventListener('application-handoff-discarded', handleDiscarded); };
+  }, [id, updateGlobal]);
+
   // Match and compensation disclosures change the card's DOM height
   // asynchronously through ResizeObserver. A first measurement only needs a
   // reflow if it outgrows the row reserved by the initial tree layout; later
@@ -279,6 +308,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // disclosure state, so an old 308px measurement can legitimately become the
   // normal 210px measurement when the card returns.
   useEffect(() => {
+    // An expanded hierarchy is restored at its saved positions. React Flow
+    // reports fresh DOM measurements immediately after that restore; treating
+    // those as an in-session disclosure change would auto-organize cards the
+    // user had placed manually. The next hierarchy interaction clears this
+    // restore-only flag and re-enables the normal measured-card reflow.
+    if (preserveTreeLayoutOnRestore) return;
     const previousMeasuredHeight = previousMeasuredHeightRef.current;
     previousMeasuredHeightRef.current = measuredHeight;
     const node = getNode(id);
@@ -293,7 +328,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       setNodes((nodes) => computeJobTreeView(nodes, data.hubId, hubCardFilter(hubData), undefined, true));
     });
     return () => cancelAnimationFrame(frame);
-  }, [id, measuredHeight, data.hubId, getNode, getLiveNode, setNodes]);
+  }, [id, measuredHeight, data.hubId, getNode, getLiveNode, setNodes, preserveTreeLayoutOnRestore]);
 
   // Local disclosure state is intentionally non-persistent, but report it while
   // mounted so a bug report can explain a measured-height/layout discrepancy.
@@ -321,7 +356,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // snapshot is authoritative across a hidden-card unmount/remount, preventing
   // a remounted card from accidentally enqueueing a second application.
   const queuedApplicationRun = moduleRunSnapshot.queued.find((entry) => entry.nodeId === id && entry.kind === 'application');
-  const activeApplicationRun = moduleRunSnapshot.active?.nodeId === id && moduleRunSnapshot.active?.kind === 'application';
+  // Application handoffs queue in their own 'application' lane (see
+  // generateApplication) so 10 concurrent Generate clicks never wait behind an
+  // unrelated marketplace run. moduleRunSnapshot.active prefers the shared
+  // 'global' lane whenever it is occupied, so it is not reliably this card's
+  // active entry; activeRuns carries one active entry per lane instead.
+  const activeApplicationRun = moduleRunSnapshot.activeRuns?.some((entry) => entry.nodeId === id && entry.kind === 'application');
   const displayedApplicationRun = queuedApplicationRun
     ? { state: 'queued', position: queuedApplicationRun.position }
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
@@ -452,15 +492,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       const local = imported.localApplication;
       if (local.status === 'revision-required') {
+        const pasteRevision = local.localJob?.mode === 'paste' || local.localJob?.transport === 'paste';
         if (isMountedRef.current) {
           setLocalApplication((current) => current?.id === jobId ? {
             ...current, ...local.localJob,
-            status: 'revision-required',
-            message: local.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.',
+            status: pasteRevision ? (local.localJob?.status || 'queued') : 'revision-required',
+            message: pasteRevision
+              ? (local.fitMessage || 'The measured layout check requested another review. Reopen the AI handoff to review and edit the structured documents.')
+              : (local.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.'),
           } : current);
           addToast({
-            title: 'Local AI Document Revision Needed',
-            description: 'No bundle was saved. Reopen the Local AI job and revise result.json using the app’s measured fit feedback.',
+            title: pasteRevision ? 'Application Review and Edit Needed' : 'Local AI Document Revision Needed',
+            description: pasteRevision
+              ? 'No bundle was saved. Reopen the AI handoff; the next review prompt asks the AI to make the measured-fit edits in its JSON response.'
+              : 'No bundle was saved. Reopen the Local AI job and revise result.json using the app’s measured fit feedback.',
             type: 'error',
           });
         }
@@ -516,6 +561,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         coverLetterPdfPath: local.coverLetterPdfPath,
         jobListingPath: local.jobListingPath,
         generationAuditPath: local.generationAuditPath,
+        generationLogPath: local.generationLogPath,
         workDir: local.workDir,
         company: local.company,
         candidateName: local.candidateName,
@@ -552,6 +598,23 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
     } catch (error) {
       if (!isMountedRef.current) return;
+      // Read before every branch below, because each of them — including the
+      // generic tail — parks this job at 'completed': a status the card
+      // renders as "Local AI result ready", that keeps Generate disabled, and
+      // that neither driver's idle list stops polling. A job the main process
+      // has just declared unfinishable would read as a finished application,
+      // and the poll that follows would begin the settle/import cycle again.
+      // Same judgement as the status poll, from the same helper.
+      const broken = brokenLocalAiJobDriveState(error);
+      if (broken) {
+        localStatusErrorStreakRef.current.delete(jobId);
+        localResultSettlingRef.current.delete(jobId);
+        setLocalApplication((current) => current?.id === jobId ? { ...current, ...broken } : current);
+        // The card can be scrolled out of view or behind another level, so the
+        // sentence that names the action is said on both surfaces.
+        addToast({ title: 'Local AI Job Cannot Be Completed', description: broken.message, type: 'error', dedupeKey: `local-ai-broken:${jobId}` });
+        return;
+      }
       if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
         setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Local AI saved a newer result — waiting briefly for the final save…' } : current);
         return;
@@ -568,7 +631,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveNode, isMountedRef]);
 
-  // The local coding agent writes result.json manually/asynchronously. Polling only reads
+  // Legacy coding-agent jobs write result.json manually/asynchronously. Polling only reads
   // that app-owned job; after a short stable-result window, the import happens
   // once the result validates.
   useEffect(() => {
@@ -581,6 +644,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       try {
         const result = await window.electronAPI.getLocalApplicationStatus({ jobId, canvasFilePath });
         if (cancelled || !isMountedRef.current) return;
+        // Read before the generic failure throw: a broken job is terminal, and
+        // the throw below routes every failure into the transient streak,
+        // which retries forever and names no action.
+        const broken = brokenLocalAiJobDriveState(result);
+        if (broken) {
+          localStatusErrorStreakRef.current.delete(jobId);
+          localResultSettlingRef.current.delete(jobId);
+          setLocalApplication((current) => current?.id === jobId ? { ...current, ...broken } : current);
+          return;
+        }
         if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
         localStatusErrorStreakRef.current.delete(jobId);
         const next = result.localJob;
@@ -646,7 +719,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // which merges several modules and holds no career data itself; data.hubId
   // is the board). Not stored per-card, to avoid bloating the canvas file.
   // Application Generate always writes a self-contained Local AI handoff next
-  // to the saved canvas. A local coding agent produces the documents, then
+  // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
@@ -676,6 +749,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       return;
     }
+    // The dock caps how many application bundles may wait for a pasted
+    // response at once (see applicationHandoffDock.js) — an eleventh prompt
+    // could never be worked on and would only make the chip strip lie about
+    // what is actionable. Regeneration replaces this card's own bundle rather
+    // than adding a new one, so this card's current bundle is excluded here.
+    const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== id);
+    if (countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) >= APPLICATION_HANDOFF_LIMIT) {
+      addToast({
+        title: 'Too Many Pending Applications',
+        description: applicationLimitMessage(),
+        type: 'error',
+      });
+      return;
+    }
     applicationSubmissionRef.current = true;
     let lease = null;
     let cancelledBeforeStart = false;
@@ -689,6 +776,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       lease = await acquireModuleRun({
         nodeId: id,
         kind: 'application',
+        // A dedicated lane keeps up to APPLICATION_HANDOFF_LIMIT concurrent
+        // Generate clicks queuing only behind other application creations,
+        // instead of behind the default 'global' lane shared with SellHub
+        // marketplace runs (see moduleRunQueue.js — lanes are independently
+        // FIFO with capacity 1).
+        lane: 'application',
         label: `Application: ${data.company || data.title || 'job'}`,
         onQueued: ({ position }) => {
           if (isMountedRef.current) setApplicationRun({ state: 'queued', position });
@@ -752,6 +845,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const queued = await window.electronAPI.queueLocalApplication({
         nodeId: idRef.current,
         canvasFilePath,
+        transport: 'paste',
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
           // New Google rows keep the direct Apply-on URL in `url`; legacy
@@ -768,6 +862,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           source: data.source, posted: data.posted, language: data.language,
         },
         careerData,
+        // Paste-mode structured rendering retains this saved-profile role
+        // snapshot and rejects any model attempt to alter its metadata.
+        resumeProfile: originHub.data?.resumeProfile || null,
         additionalNotes: additionalNotes.trim(),
         reasoning: data.reasoning,
         matchScore: data.matchScore,
@@ -831,10 +928,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       if (isMountedRef.current) {
         setLocalApplication(queued.localJob);
-        setApplicationLaunchPrompt(queued.prompt || '');
+        // This card no longer owns a modal for the handoff — the global AI
+        // handoff dock does. Ask it to select this job's prompt and to
+        // re-read the job folder now, rather than waiting for the dock's own
+        // discovery pass to notice a bundle that did not exist a moment ago.
+        requestApplicationHandoffFocus(queued.localJob.id);
+        requestApplicationHandoffRefresh(queued.localJob.id);
         addToast({
-          title: 'Launch Prompt Ready',
-          description: 'Paste the prompt into any local coding agent with filesystem access. This card will import the completed application automatically.',
+          title: 'Application AI Handoff Ready',
+          description: 'Open the AI handoff dock in the bottom-right corner, copy each prompt into your local AI chat, and paste back its JSON response. The app will validate every stage and request review-and-edit rounds until the quality checks pass.',
           type: 'success',
         });
       }
@@ -847,7 +949,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
       }
     } finally {
-      // The lease only covers durable handoff creation. Local coding-agent execution,
+      // The lease only covers durable handoff creation. Paste-back authoring or legacy coding-agent execution,
       // polling, validation, and final save continue independently.
       lease?.release();
       applicationSubmissionRef.current = false;
@@ -1142,15 +1244,27 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
-                {localApplication.status === 'queued' ? 'Local AI queued — run launch prompt' :
+                {localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued' ? 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.' : '')}</div>
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued'
+                ? (localApplication.mode === 'paste' || localApplication.transport === 'paste'
+                  ? 'Open the AI handoff, copy its self-contained prompt into your local AI chat, and paste back the requested JSON. Review prompts ask the AI to make edits in that same response; the app reviews again afterwards.'
+                  : 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.')
+                : '')}</div>
             </div>
           </div>
+          {(localApplication.mode === 'paste' || localApplication.transport === 'paste') && !APPLICATION_DOCK_IDLE_STATUSES.includes(localApplication.status) && (
+            <button
+              onClick={(e) => { e.stopPropagation(); requestApplicationHandoffFocus(localApplication.id); }}
+              className="mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"
+            >
+              Continue AI handoff
+            </button>
+          )}
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && !['saved', 'failed'].includes(localApplication.status) && (
             <button
               onClick={(e) => {
@@ -1213,7 +1327,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? 'A Local AI job is waiting for the local-agent routine or is being imported.'
             : displayedApplicationRun.state === 'queued'
             ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
-            : 'AI researches the company, then writes a tailored résumé + cover letter and saves the application bundle next to your canvas'}
+            : 'Copy app-provided prompts into your local AI chat and paste back structured JSON. Infinite Canvas validates, renders, reviews, and saves the tailored application bundle next to your canvas'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
           {localJobPending
@@ -1224,10 +1338,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </button>
 
       </div>
-      <ApplicationLaunchPromptDialog
-        prompt={applicationLaunchPrompt}
-        onClose={() => setApplicationLaunchPrompt('')}
-      />
     </div>
   );
 });

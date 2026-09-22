@@ -19,15 +19,16 @@
 // taskModelRoutingSnapshot()'s own single-transport contract is covered in
 // platform-utils.js ('llm: taskModelRoutingSnapshot reports the single
 // manual transport for every known task') — not duplicated here.
-import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, POSTED_DATE_PATTERN, assert, buildCoverLetterDocument, buildResumeDocument, cancellationError, checkPromptFits, decodeTextEscapes, dicePostedBucket, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, fetchDiceListings, filterJobsByAge, formatDiceBaseSalary, getKnownTaskIds, inspectJobTaxonomyRoleIndexes, jobScoringBatchSize, listingEvaluationBatchSize, listingEvaluationMaxTokens, nodeCancellationError, normalizeJobTaxonomyPlan, parsePostedDate, parseSalaryToNumeric, runBoundedJobTaxonomy, safeApiFetch, taskMaxTokensFor, validateJobTaxonomyPlan } from '../test-dependencies.js';
+import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CHUNK_SIZE, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, POSTED_DATE_PATTERN, assert, buildCoverLetterDocument, buildJobTaxonomyPlanSummary, buildResumeDocument, cancellationError, checkPromptFits, decodeTextEscapes, dicePostedBucket, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, fetchDiceListings, filterJobsByAge, formatDiceBaseSalary, getKnownTaskIds, inspectJobTaxonomyRoleIndexes, jobPreferenceResearchAssessmentMaxTokens, jobPreferenceResearchMaxTokens, jobScoringBatchFits, jobScoringBatchSize, jobScoringEstimatedTokens, jobScoringMaxTokens, listingEvaluationBatchSize, listingEvaluationMaxTokens, marketplaceHubScanBatchEstimatedTokens, marketplaceHubScanBatchFits, marketplaceHubScanMaxPagesForPlatform, nodeCancellationError, normalizeJobTaxonomyPlan, parsePostedDate, parseSalaryToNumeric, priceSynthesisBatchEstimatedTokens, priceSynthesisBatchFits, priceSynthesisBatchMaxComps, priceSynthesisBatchMaxTokens, runBoundedJobTaxonomy, safeApiFetch, taskMaxTokensFor, validateJobTaxonomyPlan } from '../test-dependencies.js';
 
 export default [
 {
     name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
     run: () => {
-      assert(taskMaxTokensFor('job-scoring', { itemCount: 100 }) === 12000
+      assert(taskMaxTokensFor('job-scoring', { itemCount: 22 }) === 14800
+        && taskMaxTokensFor('job-scoring', { itemCount: 23 }) === 15360
         && taskMaxTokensFor('job-scoring', { itemCount: 15 }) === 10600,
-        'job-scoring caps the compact manual evidence audit instead of inviting impractical 32,000-token pastes');
+        'job-scoring keeps old 15-row handoffs byte-stable while fresh 22-row work uses the 15,360-token packed ceiling');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) === 12288,
         'per-cohort compensation assessment has the larger 12,288-token ceiling');
       assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
@@ -206,15 +207,21 @@ export default [
         && fallback.roleByIndex[24] === 'Classified',
       'only the unmapped residual is classified in a bounded 1-based chunk and written back to its original index');
 
-      const sequentialJobs = Array.from({ length: 50 }, (_, index) => ({
+      const sequentialJobs = Array.from({ length: 1000 }, (_, index) => ({
         title: `Sequential Role ${index}`,
         careerDirection: `Sequential Direction ${index}`,
         salary: '$100k/yr',
       }));
       const sequentialPlan = {
         ...diversePlan,
-        directionRoleIndexes: Array.from({ length: 24 }, (_, index) => ({ direction: `Sequential Direction ${index}`, roleIndex: 0 })),
+        directionRoleIndexes: buildJobTaxonomyPlanSummary(sequentialJobs).commonSuggestedDirections
+          .map(({ direction }) => ({ direction, roleIndex: 0 })),
       };
+      const sequentialPlanned = sequentialPlan.directionRoleIndexes.length;
+      const sequentialResidualSizes = [];
+      for (let remaining = sequentialJobs.length - sequentialPlanned; remaining > 0; remaining -= JOB_TAXONOMY_CHUNK_SIZE) {
+        sequentialResidualSizes.push(Math.min(JOB_TAXONOMY_CHUNK_SIZE, remaining));
+      }
       const sequentialHints = [];
       let activeClassifiers = 0;
       let peakClassifiers = 0;
@@ -229,9 +236,151 @@ export default [
           return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
         },
       });
-      assert(peakClassifiers === 1
-        && JSON.stringify(sequentialHints.map(hint => [hint.batch, hint.batchTotal, hint.itemCount])) === JSON.stringify([[1, 2, 24], [2, 2, 2]]),
-      'manual taxonomy classifier handoffs are issued one at a time in stable batch order so different-length replies cannot be cross-pasted');
+      assert(peakClassifiers === 3
+        && JSON.stringify(sequentialHints.map(hint => [hint.batch, hint.batchTotal, hint.itemCount]))
+          === JSON.stringify(sequentialResidualSizes.map((itemCount, index) => [index + 1, sequentialResidualSizes.length, itemCount]))
+        && sequentialHints.every((hint, index) => hint.itemsTotal === sequentialJobs.length
+          && hint.itemsDone === sequentialPlanned
+          && hint.progressUnits === sequentialResidualSizes[index]
+          && hint.progressUnitId === `fresh:${index + 1}`
+          && typeof hint.progressScopeId === 'string' && hint.progressScopeId.length > 0)
+        && new Set(sequentialHints.map(hint => hint.progressScopeId)).size === 1,
+      'v2 taxonomy fills the 15,360-token ceiling with 448 compact rows per handoff, dispatches independent chunks together with stable identities, and reports only accepted scoped progress');
+
+      // A manual handoff dock must remain a stable ten-prompt work set. This
+      // deliberately holds nine first-wave answers open after accepting the
+      // first: a draining worker pool would already have replaced it with
+      // batch 11, while the fixed-wave contract must wait for all ten.
+      const fixedWaveJobs = Array.from({ length: 5_000 }, (_, index) => ({
+        title: `Fixed Wave Role ${index}`,
+        careerDirection: `Fixed Wave Direction ${index}`,
+        salary: '$100k/yr',
+      }));
+      const fixedWavePlan = {
+        ...diversePlan,
+        directionRoleIndexes: buildJobTaxonomyPlanSummary(fixedWaveJobs).commonSuggestedDirections
+          .map(({ direction }) => ({ direction, roleIndex: 0 })),
+      };
+      const fixedWaveStarts = [];
+      const releaseFirstWave = new Map();
+      let notifyFirstWaveReady;
+      const firstWaveReady = new Promise(resolve => { notifyFirstWaveReady = resolve; });
+      const fixedWaveRun = runBoundedJobTaxonomy(fixedWaveJobs, {
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return fixedWavePlan;
+          const { batch, itemCount } = options.hints;
+          fixedWaveStarts.push(batch);
+          const result = { roleByIndex: Array.from({ length: itemCount }, () => 1) };
+          if (batch > 10) return result;
+          return new Promise(resolve => {
+            releaseFirstWave.set(batch, () => resolve(result));
+            if (releaseFirstWave.size === 10) notifyFirstWaveReady();
+          });
+        },
+      });
+      await firstWaveReady;
+      assert(JSON.stringify(fixedWaveStarts) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+        `taxonomy must issue its full first fixed wave before awaiting it, got ${JSON.stringify(fixedWaveStarts)}`);
+      releaseFirstWave.get(1)();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert(fixedWaveStarts.length === 10,
+        `taxonomy must not replace a solved handoff before the other first-wave prompts settle, got ${JSON.stringify(fixedWaveStarts)}`);
+      for (let batch = 2; batch <= 10; batch += 1) releaseFirstWave.get(batch)();
+      await fixedWaveRun;
+      assert(fixedWaveStarts.length > 10 && fixedWaveStarts[10] === 11,
+        'taxonomy releases the next independent work set only after the whole first ten-prompt wave settles');
+
+      // The same rule applies across a restart boundary: one exact v1
+      // classifier prompt and untouched v2 chunks classify disjoint rows, so
+      // the latter must not wait for the restored prompt to be answered.
+      let hybridWaveProbeCount = 0;
+      const hybridWaveStarts = [];
+      const releaseHybridWave = new Map();
+      let notifyHybridWaveReady;
+      const hybridWaveReady = new Promise(resolve => { notifyHybridWaveReady = resolve; });
+      const hybridWaveRun = runBoundedJobTaxonomy(fixedWaveJobs, {
+        legacyClassifierStepProbe: async () => (++hybridWaveProbeCount === 1),
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return fixedWavePlan;
+          const { itemCount } = options.hints;
+          const { task } = options;
+          hybridWaveStarts.push(task);
+          const result = { roleByIndex: Array.from({ length: itemCount }, () => 1) };
+          if (hybridWaveStarts.length > 10) return result;
+          return new Promise(resolve => {
+            releaseHybridWave.set(hybridWaveStarts.length, () => resolve(result));
+            if (releaseHybridWave.size === 10) notifyHybridWaveReady();
+          });
+        },
+      });
+      await hybridWaveReady;
+      assert(hybridWaveStarts.length === 10
+        && hybridWaveStarts[0] === 'job-taxonomy-classify'
+        && hybridWaveStarts.slice(1).every(task => task === 'job-taxonomy-classify-batch'),
+      `one restored taxonomy classifier plus nine fresh chunks must fill the first wave, got ${JSON.stringify(hybridWaveStarts)}`);
+      releaseHybridWave.get(1)();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert(hybridWaveStarts.length === 10,
+        'a solved restored taxonomy prompt must not churn a replacement into the current fixed wave');
+      for (let index = 2; index <= 10; index += 1) releaseHybridWave.get(index)();
+      await hybridWaveRun;
+      assert(hybridWaveStarts.length > 10 && hybridWaveStarts[10] === 'job-taxonomy-classify-batch',
+        'fresh taxonomy chunks continue in a later fixed wave after the restored/fresh work set settles');
+
+      const legacyJobs = sequentialJobs.slice(0, 50);
+      const legacyPlan = {
+        ...diversePlan,
+        directionRoleIndexes: buildJobTaxonomyPlanSummary(legacyJobs).commonSuggestedDirections
+          .map(({ direction }) => ({ direction, roleIndex: 0 })),
+      };
+      const legacyHints = [];
+      let activeLegacyClassifiers = 0;
+      let peakLegacyClassifiers = 0;
+      await runBoundedJobTaxonomy(legacyJobs, {
+        useLegacyClassifierBatches: true,
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return legacyPlan;
+          legacyHints.push({ task: options.task, ...options.hints });
+          activeLegacyClassifiers += 1;
+          peakLegacyClassifiers = Math.max(peakLegacyClassifiers, activeLegacyClassifiers);
+          await new Promise(resolve => setTimeout(resolve, 1));
+          activeLegacyClassifiers -= 1;
+          return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
+        },
+      });
+      assert(peakLegacyClassifiers === 2
+        && JSON.stringify(legacyHints.map(hint => [hint.task, hint.batch, hint.batchTotal, hint.itemCount]))
+          === JSON.stringify([['job-taxonomy-classify', 1, 2, 24], ['job-taxonomy-classify', 2, 2, 2]]),
+      'a durable legacy taxonomy run retains its exact 24-row task contract while independent prompts share one fixed wave');
+
+      const hybridProbes = [];
+      const hybridCalls = [];
+      const hybrid = await runBoundedJobTaxonomy(sequentialJobs, {
+        legacyClassifierStepProbe: async ({ prompt, task, responseSchema, hints }) => {
+          hybridProbes.push({ prompt, task, responseSchema, hints });
+          return hybridProbes.length === 1;
+        },
+        callText: async (_prompt, options) => {
+          if (options.task === 'job-taxonomy-plan') return sequentialPlan;
+          hybridCalls.push({ task: options.task, hints: options.hints });
+          return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
+        },
+      });
+      const hybridFreshSizes = [];
+      for (let remaining = sequentialJobs.length - sequentialPlanned - 24; remaining > 0; remaining -= JOB_TAXONOMY_CHUNK_SIZE) {
+        hybridFreshSizes.push(Math.min(JOB_TAXONOMY_CHUNK_SIZE, remaining));
+      }
+      assert(hybridProbes.length === Math.ceil((sequentialJobs.length - sequentialPlanned) / 24)
+        && hybridProbes.every((probe, index) => probe.task === 'job-taxonomy-classify'
+          && probe.hints.batch === index + 1
+          && probe.hints.batchTotal === hybridProbes.length),
+      'the resume probe must reconstruct every original 24-row v1 identity, never broadly inspect task history');
+      assert(JSON.stringify(hybridCalls.map(call => [call.task, call.hints.batch, call.hints.batchTotal, call.hints.itemCount])) === JSON.stringify([
+        ['job-taxonomy-classify', 1, hybridProbes.length, 24],
+        ...hybridFreshSizes.map((itemCount, index) => ['job-taxonomy-classify-batch', index + 1, hybridFreshSizes.length, itemCount]),
+      ]), 'only the exact durable classifier prompt may replay; all unissued rows must move to deterministic 448-row v2 chunks');
+      assert(hybrid.roleByIndex.length === sequentialJobs.length && hybrid.roleByIndex.every(Boolean),
+        'hybrid taxonomy migration must assign each original job exactly once without any unclassified gap');
 
       const shortCalls = [];
       let failed = false;
@@ -244,7 +393,7 @@ export default [
           },
         });
       } catch { failed = true; }
-      assert(!failed && shortCalls.filter(task => task === 'job-taxonomy-classify').length === 1,
+      assert(!failed && shortCalls.filter(task => task === 'job-taxonomy-classify-batch').length === 1,
         'a one-row residual accepts an exact one-index classifier result');
       let shortFailure = '';
       try {
@@ -279,16 +428,25 @@ export default [
       'classifier diagnostics reject unknown indexes and distinguish raw response length from expected-position coverage');
       const noOther = normalizeJobTaxonomyPlan({ roleFamilies: ['Engineering'], salaryRanges: [] });
       assert(!noOther.valid, 'a plan without the reserved Other role is rejected before any classification call');
-      const malformedSalaryPlan = validateJobTaxonomyPlan({
+      const gappedSalaryPlan = {
         roleFamilies: ['Engineering', 'Other'],
         salaryRanges: [
           { label: '$120k+/yr', minSalary: 120000, maxSalary: 0 },
           { label: '$80k–$100k/yr', minSalary: 80000, maxSalary: 100000 },
           { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
         ],
-      });
+      };
+      // This plan is rejected on its salary ranges, long before the direction
+      // mapping is read; the directions it must cover are stated all the same.
+      const malformedSalaryPlan = validateJobTaxonomyPlan(gappedSalaryPlan, []);
       assert(!malformedSalaryPlan.valid && malformedSalaryPlan.reason.includes('preceding range'),
         'a schema-valid but gapped salary plan remains in the manual retry loop instead of being silently normalized into another taxonomy');
+      // Validating with no stated directions accepted any direction the
+      // response invented, and read as a pass. It is a host defect now.
+      let unstatedDirections = '';
+      try { validateJobTaxonomyPlan(gappedSalaryPlan); } catch (error) { unstatedDirections = String(error?.message || error); }
+      assert(/requires the list of career directions/u.test(unstatedDirections),
+        `a plan validated with no stated directions must fail loudly, got ${unstatedDirections || 'a verdict'}`);
       return { chunks: classifications, promptMax: Math.max(...prompts.map(({ prompt }) => prompt.length)) };
     },
   },
@@ -314,6 +472,62 @@ export default [
       const defaultCap = taskMaxTokensFor('default');
       assert(Number.isFinite(defaultCap) && defaultCap > 0, 'the default fallback cap is itself a positive finite number');
       return { defaultCap };
+    },
+  },
+  {
+    name: 'llm: batched job-preference research tasks are registered and use the shared result-cap formulas',
+    run: () => {
+      const known = getKnownTaskIds();
+      const itemCounts = [1, 3, 8, 12, 27];
+      assert(known.has('job-preference-research-batch')
+        && known.has('job-preference-research-batch-assessment')
+        && known.has('job-role-screen-batch')
+        && known.has('job-taxonomy-classify-batch')
+        && known.has('job-compensation-research-batch')
+        && known.has('job-compensation-assessment-batch')
+        && known.has('marketplace-hub-scan-batch')
+        && known.has('price-synthesis-batch'),
+      'every versioned packed-work task id is registered instead of falling through to the default cap');
+      for (const itemCount of itemCounts) {
+        assert(taskMaxTokensFor('job-preference-research-batch', { itemCount })
+          === jobPreferenceResearchMaxTokens(itemCount),
+        `research batch cap delegates to resultCaps at ${itemCount} item(s)`);
+        assert(taskMaxTokensFor('job-preference-research-batch-assessment', { itemCount })
+          === jobPreferenceResearchAssessmentMaxTokens(itemCount),
+          `research assessment batch cap delegates to resultCaps at ${itemCount} item(s)`);
+      }
+      assert(jobPreferenceResearchMaxTokens(1) === 4096
+        && jobPreferenceResearchAssessmentMaxTokens(1) === 2048
+        && jobPreferenceResearchMaxTokens(6) === 9216
+        && jobPreferenceResearchAssessmentMaxTokens(6) === 4608
+        && jobPreferenceResearchMaxTokens(12) === 15360
+        && jobPreferenceResearchAssessmentMaxTokens(12) === 7680
+        && jobPreferenceResearchAssessmentMaxTokens(27) === 15360,
+      'batched research keeps the legacy singleton floors and fills the usable output budget at twelve employers');
+      const packedCaps = [
+        taskMaxTokensFor('price-synthesis-batch', { itemCount: 4, totalCompCount: 53 }),
+        taskMaxTokensFor('marketplace-hub-scan-batch', { platformCount: 4, urlCount: 8 }),
+        taskMaxTokensFor('job-role-screen-batch', { itemCount: 298 }),
+        taskMaxTokensFor('job-taxonomy-classify-batch', { itemCount: JOB_TAXONOMY_CHUNK_SIZE }),
+        taskMaxTokensFor('job-compensation-research-batch', { roleFamilyCount: 7, itemCount: 7 }),
+        taskMaxTokensFor('job-compensation-research-batch', { cohortCount: 4, itemCount: 4 }),
+        taskMaxTokensFor('job-compensation-assessment-batch', { cohortCount: 4, itemCount: 12 }),
+      ];
+      assert(packedCaps.every(cap => Number.isFinite(cap) && cap > 0 && cap <= 15360)
+        && packedCaps[0] === 15224
+        && packedCaps[1] === 15360,
+      `packed manual handoffs must stay at or below the 15,360-token usable ceiling, got ${packedCaps.join(', ')}`);
+      assert(priceSynthesisBatchEstimatedTokens(1, 67) === 15324
+        && priceSynthesisBatchFits(1, 67)
+        && !priceSynthesisBatchFits(1, 68)
+        && priceSynthesisBatchMaxComps(1) === 67
+        && priceSynthesisBatchMaxTokens(1, 68) === 15360
+        && marketplaceHubScanMaxPagesForPlatform() === 26
+        && marketplaceHubScanBatchEstimatedTokens(1, 26) === 15360
+        && marketplaceHubScanBatchFits(1, 26)
+        && !marketplaceHubScanBatchFits(1, 27),
+      'packers compare unclamped estimates at the exact price-comp and hub-page boundaries while prompt caps clamp to 15,360');
+      return { itemCounts };
     },
   },
 {
@@ -416,11 +630,26 @@ export default [
       // times the user is interrupted AND to the truncation risk, so pin it.
       assert(listingEvaluationBatchSize(8) === 10,
         `a typical 8-item plan must still afford the measured-safe 10 listings, got ${listingEvaluationBatchSize(8)}`);
+      // THE REGRESSION THIS PINS: a 32-item preference plan (the size actually
+      // measured, from a real canvas) once collapsed to 3 listings per handoff
+      // because the per-match constant was derived from schema worst-case field
+      // lengths instead of measured output. That turned a 2070-listing run into
+      // 690 copy/paste prompts instead of 207 — a 3.3x increase in human work,
+      // produced by a constant nobody could see was wrong.
+      assert(listingEvaluationBatchSize(32) === 10,
+        `the measured 32-item plan must afford 10 listings per handoff, got ${listingEvaluationBatchSize(32)}`);
+      assert(Math.ceil(2070 / listingEvaluationBatchSize(32)) === 207,
+        'a 2070-listing pool at the measured plan size must cost 207 handoffs, not 690');
+      // The per-match term must stay at or below the floor crossover for the one
+      // plan size with real data behind it, or the floor stops governing and the
+      // batch silently drops below the 10 that has a 20/20 no-truncation record.
+      assert(listingEvaluationMaxTokens(10 * 32, 10) <= CEILING,
+        'the measured-safe batch must not declare more output than the model can emit');
       return { ceiling: CEILING, atEightItemPlan: listingEvaluationBatchSize(8) };
     },
   },
   {
-    name: 'resultCaps: jobScoringBatchSize takes no argument and returns the clamped scoring-quality ceiling',
+    name: 'resultCaps: jobScoringBatchSize derives the largest fresh manual-output-safe pack',
     run: () => {
       // jobScoringBatchSize used to take a model id (jobScoringBatchSize(model))
       // so the caller could size the batch to that model's output budget. There
@@ -428,8 +657,12 @@ export default [
       // cap is fixed, so the function is zero-arg now.
       assert(jobScoringBatchSize.length === 0, 'jobScoringBatchSize takes no argument (no per-model sizing survives)');
       const size = jobScoringBatchSize();
-      assert(Number.isInteger(size) && size >= 5 && size <= 15,
-        `jobScoringBatchSize stays within its documented [5,15] scoring-quality bounds (got ${size})`);
+      assert(size === 22
+        && jobScoringEstimatedTokens(size) === 14800
+        && jobScoringBatchFits(size)
+        && !jobScoringBatchFits(size + 1)
+        && jobScoringMaxTokens(size) === 14800,
+        `jobScoringBatchSize packs the maximum 22 jobs below 15,360 output tokens (got ${size})`);
       assert(jobScoringBatchSize() === size, 'the result is stable across repeated calls (no hidden state/model drift)');
       return { batchSize: size };
     },

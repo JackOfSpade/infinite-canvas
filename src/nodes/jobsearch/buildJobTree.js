@@ -35,6 +35,32 @@ import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
 export const COL_X = { likelihood: 400, salary: 700, role: 1000, job: 1400 };
 const ROW_H = { group: 70, job: 280 }; // module-local: only used within this file
 
+// A workspace restore can mount an already-expanded tree whose cards were
+// deliberately arranged by the user. This renderer-only flag prevents a
+// post-hydration ResizeObserver measurement from immediately replacing that
+// arrangement with the deterministic tree layout. It is cleared by the next
+// explicit hierarchy action (expand/collapse/Show more), which is intentionally
+// allowed to organize the tree again.
+export const JOB_TREE_LAYOUT_RESTORE_KEY = '_preserveTreeLayoutOnRestore';
+
+/**
+ * Drop the restore-only layout guard from this board's cards. Returns the same
+ * array when there is nothing to clear, preserving React Flow's no-op path.
+ */
+export function clearRestoredJobTreeLayout(nodes, hubId) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map((node) => {
+    if (node.type !== 'jobcard'
+        || node.data?.hubId !== hubId
+        || !node.data?.[JOB_TREE_LAYOUT_RESTORE_KEY]) return node;
+    changed = true;
+    const { [JOB_TREE_LAYOUT_RESTORE_KEY]: _restoreLayout, ...data } = node.data;
+    return { ...node, data };
+  });
+  return changed ? out : nodes;
+}
+
 // Vertical gap kept below an EXPANDED job card (one whose measured height exceeds
 // the fixed ROW_H.job). Collapsed/normal cards keep the original ROW_H.job
 // spacing via the Math.max in computeLayoutPositions, so the default layout is

@@ -723,6 +723,7 @@ export function sanitizeNodesForSave(nodes) {
         dragHover: _dh,
         _hmr: _h,
         _boardRollbackProgressRestore: _rollbackProgressRestore,
+        _preserveTreeLayoutOnRestore: _preserveTreeLayoutOnRestore,
         ...cleanData
       } = n.data || {};
       const hasTransientData = n.data && (
@@ -730,6 +731,7 @@ export function sanitizeNodesForSave(nodes) {
         || 'dragHover' in n.data
         || '_hmr' in n.data
         || '_boardRollbackProgressRestore' in n.data
+        || '_preserveTreeLayoutOnRestore' in n.data
       );
       if (
         hasTransientData
@@ -769,6 +771,7 @@ export function sanitizeNodesForSave(nodes) {
       || 'dragHover' in n.data
       || '_hmr' in n.data
       || '_boardRollbackProgressRestore' in n.data
+      || '_preserveTreeLayoutOnRestore' in n.data
     );
     const hasTransientOpacity = n.type === 'jobcard' && n.style?.opacity !== undefined;
 
@@ -831,6 +834,7 @@ export function sanitizeNodesForSave(nodes) {
         dragHover: _dh,
         _hmr: _h,
         _boardRollbackProgressRestore: _rollbackProgressRestore,
+        _preserveTreeLayoutOnRestore: _preserveTreeLayoutOnRestore,
         ...cleanData
       } = result.data || {};
       if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';

@@ -283,9 +283,17 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  AIHANDOFF: {
+    label: 'Manual AI Handoff',
+    description: 'Manual Non-API AI prompt-queue navigation, validation, and lifecycle receipts for every copy/paste AI task, including safe per-attempt rejection code/reason/count/size/hash metadata. Use when Next prompt returns to an earlier correction, a chat reply was rejected, a correction loop repeats, or a manual AI request appears stuck. JOBHANDOFF remains available for job-focused reports; FULL remains unfiltered.',
+    logFilter: line =>
+      /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   APPLICATION: {
     label: 'Application Generation',
-    description: 'Local application handoff audit — queued-job lifecycle, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, hangs, produces no document/PDF, or cannot save its artifacts. Included automatically in FULL.',
+    description: 'Local application handoff audit — queued-job lifecycle, pasted JSON acceptance/rejection metadata, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, a pasted AI response is rejected, no document/PDF is produced, or artifacts cannot save. Included automatically in FULL.',
     logFilter: line =>
       /\[LocalAI(?:-Fallback)?\]|queue-local-application|get-local-application-status|import-local-application|save-application|ApplicationSync|JobApplication.*(?:Saved|import)|fit-feedback|result\.json|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],

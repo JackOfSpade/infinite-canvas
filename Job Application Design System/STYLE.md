@@ -543,7 +543,7 @@ it anyway is welcome, and never a defect.
 |---|---|
 | "Led the migration — reducing p99 latency by 40%." | "Led the migration, reducing p99 latency by 40%." |
 | "Improved the system — and reduced operating cost." | "Improved the system and reduced operating cost." |
-| "I am interested in this role – it aligns with my experience." | "I am interested in this role because it aligns with my experience." |
+| "I am interested in this role – it involves product-listing workflows." | "The role's product-listing workflows call for maintainable web applications." |
 | "The project succeeded - despite the initial constraints." | "The project succeeded despite the initial constraints." |
 
 The repair kit, in order of preference: a comma, a semicolon, a colon
@@ -1511,6 +1511,11 @@ The opening sentence must begin with one of:
    read on what the company is building, connected to where the
    candidate's own work has been pointed.
 
+This gate applies to the first sentence only. The opening paragraph may use
+as many further sentences as it needs to establish the connection, evidence,
+and relevance clearly; those functions do not need to fit a fixed sequence or
+one sentence.
+
 When that sentence first introduces an unfamiliar prior employer, it
 must also identify the candidate's role or relationship there. A bare
 organization-first opening is too abrupt because the recruiter has no reason
@@ -1748,6 +1753,14 @@ none of them, and the transition the sentence was supposed to make
 does not happen. Repeat the precise noun phrase instead, even at the cost of a
 few words. The same test applies inside a paragraph whenever more than
 one candidate antecedent precedes the reference.
+
+*Prior-employer reference.* Name a prior employer fully on its first relevant
+mention. Within the same paragraph, let the candidate continue naturally as
+the subject when that is clear. At a new paragraph, use a short cue such as
+"In that role" when it helps re-establish the continued role; omit it when
+the continuity is already clear. Repeat the employer name when multiple
+employers or roles could otherwise be the antecedent. Do not make a name
+repeat automatic merely because a paragraph breaks.
 
 **Repair** a detached synthesis one of two ways, and no third way:
 

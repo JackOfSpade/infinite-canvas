@@ -108,7 +108,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const {
     product, editing, setEditing, justificationExpanded,
     handleFieldEdit, handlePricingNotesChange, toggleJustification,
-    scrapePriceComps, rescrapeSource, synthesizePrice, synthesizeBundlePrice,
+    scrapePriceComps, rescrapeSource, synthesizePricesBatch, synthesizeBundlePrice,
   } = useListingActions(id, data);
 
   // ── Phase-2 marketplace cards ──────────────────────────────────────────
@@ -675,44 +675,49 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // Price each item independently (its own comps / query / condition), then
       // sum into a suggested bundle total. Item 0 is always the primary
       // (AI-analyzed) product, so it uses the product-derived defaults.
-      const itemPricings = [];
+      const cannedPricings = new Map();
+      const aiItems = [];
       for (const it of items) {
         const comps = it.comps || { sold: [], active: [] };
         const compCount = (comps.sold?.length || 0) + (comps.active?.length || 0);
         // No comps → skip the AI call entirely (don't spend tokens to be told
         // "no listings"); stamp a canned empty result instead.
         if (compCount === 0) {
-          itemPricings.push({
+          cannedPricings.set(it.key, {
             key: it.key, label: it.label, query: it.query, condition: it.condition, pricingNotes: it.pricingNotes || '', comps,
             pricing: { recommended_price: null, justification: 'No similar listings found — set your own price.', market_summary: { sold_count: 0, active_count: 0 }, recommended_platforms: [] },
           });
           continue;
         }
-        // Primary keeps its product-derived defaults (its notes come from
-        // data.pricingNotes inside the hook). Each EXTRA passes its OWN query,
-        // condition, and pricing notes so it's priced as an independent item.
-        const overrides = it.key === 'primary'
-          ? { itemKey: it.key, itemLabel: it.label || it.query }
-          : {
-              itemKey: it.key,
-              itemLabel: it.label || it.query,
-              query: it.query,
-              condition: it.condition,
-              productSpec: { title: it.label || it.query },
-              pricingNotes: it.pricingNotes || '',
-            };
-        const synthResult = await synthesizePrice(comps, overrides);
-        if (cancelled()) return;
-        itemPricings.push({
-          key: it.key,
-          label: it.label,
-          query: it.query,
-          condition: it.condition,
-          pricingNotes: it.pricingNotes || '',
-          pricing: synthResult.pricing,
-          comps,
-        });
+        aiItems.push({ ...it, comps });
       }
+      // Every fresh AI-priced item, including a singleton, goes through the
+      // versioned identity-keyed batch endpoint. The main process packs only
+      // independent items that fit together; bundle-factor reasoning remains
+      // deliberately dependent and runs after these results return.
+      const pricedByKey = new Map(cannedPricings);
+      if (aiItems.length > 0) {
+        const synthResults = await synthesizePricesBatch(aiItems);
+        if (cancelled()) return;
+        for (const item of synthResults.items || []) {
+          const original = aiItems.find(candidate => candidate.key === item.itemKey);
+          if (!original || !item.pricing) throw new Error(`Pricing batch omitted ${item.itemKey || 'an item'} result.`);
+          pricedByKey.set(original.key, {
+            key: original.key,
+            label: original.label,
+            query: original.query,
+            condition: original.condition,
+            pricingNotes: original.pricingNotes || '',
+            pricing: item.pricing,
+            comps: original.comps,
+          });
+        }
+      }
+      const itemPricings = items.map(item => {
+        const pricing = pricedByKey.get(item.key);
+        if (!pricing) throw new Error(`Pricing batch omitted ${item.key || 'an item'} result.`);
+        return pricing;
+      });
       const primary = itemPricings[0];
       const isBundle = itemPricings.length > 1;
       // Arithmetic sum of the per-item prices — kept as the reference figure AND
@@ -845,7 +850,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
-  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes, syncResolveWorkCount]);
+  }, [id, updateGlobal, synthesizePricesBatch, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes, syncResolveWorkCount]);
 
   const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
     let lease = null;

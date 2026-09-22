@@ -94,7 +94,7 @@ export default [
       const result = await screenJobRolesByTitle({
         jobs, titles: ['Product Manager'],
         callText: async (_prompt, options) => {
-          assert(options.task === 'job-role-screen', `expected task 'job-role-screen', got '${options.task}'`);
+          assert(options.task === 'job-role-screen-batch', `expected task 'job-role-screen-batch', got '${options.task}'`);
           return {
             verdicts: [
               { index: 0, outcome: 'match', reason: '' },
@@ -135,7 +135,81 @@ export default [
       assert(emptyPoolResult.acceptedJobs.length === 0 && emptyPoolResult.droppedJobs.length === 0,
         'an empty job pool must short-circuit with zero AI calls');
 
-      return { failOpenRespected: true, noMutation: true, zeroCallsWhenEmpty: true };
+      const packedJobs = Array.from({ length: 597 }, (_, index) => ({ title: `Product Manager ${index}`, company: 'Acme' }));
+      const packedHints = [];
+      let activeBatches = 0;
+      let peakBatches = 0;
+      const packed = await screenJobRolesByTitle({
+        jobs: packedJobs,
+        titles: ['Product Manager'],
+        callText: async (_prompt, options) => {
+          packedHints.push({ task: options.task, ...options.hints });
+          activeBatches += 1;
+          peakBatches = Math.max(peakBatches, activeBatches);
+          await new Promise(resolve => setTimeout(resolve, options.hints.batch === 1 ? 5 : 0));
+          activeBatches -= 1;
+          return { verdicts: Array.from({ length: options.hints.itemCount }, (_, index) => ({ index, outcome: 'match', reason: '' })) };
+        },
+      });
+      assert(peakBatches === 3
+        && packed.acceptedJobs.length === 597
+        && JSON.stringify(packedHints.map(hint => [hint.task, hint.batch, hint.batchTotal, hint.itemCount]))
+          === JSON.stringify([
+            ['job-role-screen-batch', 1, 3, 298],
+            ['job-role-screen-batch', 2, 3, 298],
+            ['job-role-screen-batch', 3, 3, 1],
+          ]),
+      'fresh role screening fills the 15,360-token budget with 298 rows and dispatches independent batches together');
+
+      const legacyTasks = [];
+      await screenJobRolesByTitle({
+        jobs,
+        titles: ['Product Manager'],
+        useLegacyRoleScreen: true,
+        callText: async (_prompt, options) => {
+          legacyTasks.push(options.task);
+          return { verdicts: [] };
+        },
+      });
+      assert(JSON.stringify(legacyTasks) === JSON.stringify(['job-role-screen']),
+        'an in-progress legacy run retains its original role-screen task contract');
+
+      return { failOpenRespected: true, noMutation: true, zeroCallsWhenEmpty: true, packedBatches: packedHints.length };
+    },
+  },
+  {
+    name: 'REGRESSION: a resumed role screen replays only exact v1 chunks and packs untouched rows into v2 batches without duplicates or gaps',
+    run: async () => {
+      const jobs = Array.from({ length: 500 }, (_, index) => ({ title: `Product Manager ${index}`, company: 'Acme' }));
+      const probes = [];
+      const calls = [];
+      const result = await screenJobRolesByTitle({
+        jobs,
+        titles: ['Product Manager'],
+        // v1 split the original pool at 0..199, 200..399, 400..499. Only
+        // the first is already durable; later chunks must not be held hostage
+        // by that fact and must use today's 298-row packed layout.
+        legacyRoleScreenStepProbe: async ({ prompt, task, responseSchema, hints }) => {
+          probes.push({ prompt, task, responseSchema, hints });
+          return probes.length === 1;
+        },
+        callText: async (_prompt, options) => {
+          calls.push({ task: options.task, hints: options.hints });
+          return { verdicts: Array.from({ length: options.hints.itemCount }, (_, index) => ({ index, outcome: 'match', reason: '' })) };
+        },
+      });
+      assert(JSON.stringify(probes.map(probe => [probe.task, probe.hints.itemCount])) === JSON.stringify([
+        ['job-role-screen', 200], ['job-role-screen', 200], ['job-role-screen', 100],
+      ]), 'the exact-step probe must reconstruct every original fixed v1 chunk before choosing a contract');
+      assert(JSON.stringify(calls.map(call => [call.task, call.hints.batch || null, call.hints.batchTotal || null, call.hints.itemCount])) === JSON.stringify([
+        ['job-role-screen', null, null, 200],
+        ['job-role-screen-batch', 1, 2, 298],
+        ['job-role-screen-batch', 2, 2, 2],
+      ]), 'only the durable v1 prompt may replay; all untouched rows must enter deterministic 298-row v2 batches');
+      assert(result.acceptedJobs.length === jobs.length
+        && new Set(result.acceptedJobs.map(job => job.title)).size === jobs.length,
+      'hybrid replay must preserve every original row exactly once');
+      return { probes: probes.length, calls: calls.length, accepted: result.acceptedJobs.length };
     },
   },
   {

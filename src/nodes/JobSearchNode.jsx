@@ -1217,12 +1217,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           `[JobSearch][${id}] Job-run completion receipt/cleanup was not fully recorded`
           + ` run=${runId} cleared=${result?.cleared === true ? 'yes' : 'no'}`,
         );
-      } else if (terminalStatus === 'completed') {
-        recordFinalizationState(false);
-        const completedAt = normalizeCompletionTimestamp(result?.receipt?.completedAt);
-        if (completedAt != null) {
-          updateGlobal(id, () => canPublish() ? { lastCompletedRunAt: completedAt } : null);
-        }
       } else recordFinalizationState(false);
       return result;
     } catch (error) {
@@ -1232,6 +1226,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return null;
     }
   }, [canvasFilePath, id, updateGlobal]);
+  // The displayed completion history is collection history: scoring,
+  // preference evaluation, and terminal receipt cleanup can take much longer
+  // than the last platform scrape, so none of them may move this timestamp.
+  // Older main processes lack `collectionCompletedAt`; receiving a successful
+  // search response still proves collection just completed, so Date.now() is a
+  // safe compatibility fallback.
+  const recordCollectionCompletion = useCallback((searchResult, isCancelled = () => false) => {
+    if (isCancelled?.()) return;
+    const collectionCompletedAt = normalizeCompletionTimestamp(searchResult?.collectionCompletedAt) ?? Date.now();
+    updateGlobal(id, () => (isCancelled?.() ? null : { lastCompletedRunAt: collectionCompletedAt }));
+  }, [id, updateGlobal]);
   const retryTerminalFinalization = useCallback(async (descriptor, cancelled = () => false) => {
     const runId = typeof descriptor?.runId === 'string' ? descriptor.runId : '';
     const expectedDisposition = typeof descriptor?.resultDisposition === 'string'
@@ -4184,6 +4189,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (!searchResult.success) {
         throw new Error(searchResult.error || 'Job search failed');
       }
+      recordCollectionCompletion(searchResult, cancelled);
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       // Reconcile the backend's stale final list with source actions that
       // completed while it was still gathering. Failed attempts have no
@@ -4473,6 +4479,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: hubHasResults ? 'done' : 'empty',
         resultDisposition: hubHasResults ? 'incomplete' : null,
         errorMessage: error?.message || String(error),
+        retryOperationFor: error?.message || String(error),
+        // Explicit rather than relying on absence-of-field: a full pipeline
+        // failure retries as a full pipeline run.
+        retryOperation: 'rerun',
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -4511,7 +4521,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (lease) await waitForRendererCommitFrame();
       lease?.release();
     }
-  }, [id, updateGlobal, getNode, getNodes, getEdges, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast, completeManualAiRun, completeJobRun, evaluatePreferencesForRun]);
+  }, [id, updateGlobal, getNode, getNodes, getEdges, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast, completeManualAiRun, completeJobRun, evaluatePreferencesForRun, recordCollectionCompletion]);
 
   const startProcessing = useCallback((fileOrFiles, {
     frameSourceCards = true,
@@ -5059,6 +5069,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'sources-ready',
         errorMessage: error?.message || String(error),
+        retryOperationFor: error?.message || String(error),
+        // The listings are already gathered and the hub stays paused on them.
+        // Without this tag Try again falls through to a full fresh scrape,
+        // throwing that gathered work away and re-running every source — the
+        // most expensive possible response to a bad paste.
+        retryOperation: 'resume-scoring',
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -5539,6 +5555,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (!searchResult?.success) {
         throw new Error(searchResult?.error || 'Job search failed');
       }
+      recordCollectionCompletion(searchResult, cancelled);
       const foundJobs = Array.isArray(searchResult.jobs) ? searchResult.jobs : [];
       // A crash-resume receives the same response shape as a fresh search.
       // Prefer its source-card-aligned collection total; `rawCount` is only
@@ -5666,6 +5683,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: hubHasResults ? 'done' : 'empty',
         resultDisposition: hubHasResults ? 'incomplete' : null,
         errorMessage: error?.message || String(error),
+        retryOperationFor: error?.message || String(error),
+        // Which operation produced this error, so "Try again" retries THAT and
+        // not a fresh scrape. A login-wall failure is the common case: the user
+        // logs in, clicks Try again, and must land back in the resume they
+        // asked for rather than a multi-hour re-scan they did not.
+        retryOperation: 'resume-run',
         rerunOutcome: null,
         rerunNotice: null,
       });
@@ -5690,7 +5713,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (lease) await waitForRendererCommitFrame();
       lease?.release();
     }
-  }, [addToast, canvasFilePath, resumeOffer, id, data, collectionLimits, enabledSourceIds, epoch, getEdges, getNode, getNodes, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun, deferDirectSearchToBoard]);
+  }, [addToast, canvasFilePath, resumeOffer, id, data, collectionLimits, enabledSourceIds, epoch, getEdges, getNode, getNodes, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef, completeJobRun, completeManualAiRun, evaluatePreferencesForRun, deferDirectSearchToBoard, recordCollectionCompletion]);
 
   resumeInterruptedRunRef.current = handleResumeRun;
 
@@ -6755,6 +6778,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     hubStateRef.current = 'empty';
     updateGlobal(id, {
       hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null,      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
+      // A reset starts a NEW run, so any retry route left by the previous
+      // failure must not outlive it — Try again would otherwise re-enter a
+      // recovery for work this reset just discarded.
+      retryOperation: null,
+      retryOperationFor: null,
       manualAiResume: null,
       terminalFinalizationRecovery: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
@@ -8833,6 +8861,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     setSavedAnalysisMeta(null);
     updateGlobal(id, {
       hubState: 'empty', queuedModuleRun: null, errorMessage: null, rerunOutcome: null, rerunNotice: null, reanalysisNotice: null, testModeNote: null,      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
+      // A reset starts a NEW run, so any retry route left by the previous
+      // failure must not outlive it — Try again would otherwise re-enter a
+      // recovery for work this reset just discarded.
+      retryOperation: null,
+      retryOperationFor: null,
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
@@ -9429,6 +9462,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           hubState: hubHasResults ? 'done' : 'empty',
           resultDisposition: hubHasResults ? 'incomplete' : null,
           errorMessage: error?.message || String(error),
+          retryOperationFor: error?.message || String(error),
+          // See the resume-run catch: Try again must re-enter the saved-scrape
+          // re-score, never fall through to a fresh multi-source search.
+          retryOperation: 'resume-saved-scrape',
           rerunOutcome: null,
           rerunNotice: null,
         });
@@ -9641,7 +9678,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
-    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null });
+    // retryOperation is cleared WITH the banner it belongs to. Left behind, a
+    // dismissed failure's route survives in live node data and a later,
+    // unrelated error's Try again would retry the wrong operation.
+    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null, retryOperation: null, retryOperationFor: null });
     // Cleanup orphaned platform cards if this hub never produced results (the
     // results cascade lives on a Job Board Module now, so "has results" = stored
     // scoredJobs rather than on-canvas job cards).
@@ -9782,10 +9822,55 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return;
     }
     if (deferDirectSearchToBoard('Error retry')) return;
-    EventLogger.log(`[JobSearch][${id}] User clicked Try Again on error banner`);
-    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null });
+    // Retry what actually FAILED. Before this, every Try again fell through to
+    // handleRerun — so a user who hit a login wall while RESUMING, logged in,
+    // and clicked Try again silently got a fresh multi-source scrape instead of
+    // the resume they asked for. The deliberate fresh-scan entry points (the
+    // done-state "Re-run Search" button and the resume banner) are untouched;
+    // only this error-banner retry becomes operation-aware.
+    // Honour the tag ONLY if it still describes the error on screen. About
+    // twenty places raise this banner and most do not tag themselves, so an
+    // unrelated failure can overwrite errorMessage while leaving an older tag
+    // behind — and Try again would then re-enter a recovery for a failure the
+    // user is no longer looking at. Binding the tag to the exact message it was
+    // recorded for makes every untagged path safe without enumerating them.
+    const retryData = getNode(id)?.data || {};
+    const failedOperation = (retryData.retryOperation && retryData.retryOperationFor === retryData.errorMessage)
+      ? retryData.retryOperation
+      : null;
+    EventLogger.log(`[JobSearch][${id}] User clicked Try Again on error banner (retrying ${failedOperation || 'rerun'})`);
+    updateGlobal(id, { errorMessage: null, rerunOutcome: null, rerunNotice: null, testModeNote: null, retryOperation: null, retryOperationFor: null });
+    // Route on the tag and let each handler apply its OWN guards — deliberately,
+    // and it is worth saying why, because adding preconditions here looks safer
+    // and is not.
+    //
+    // The asymmetry: every recovery branch is CHEAP (re-score data already on
+    // disk) while the fallback, handleRerun, is the expensive one — a full
+    // multi-source re-scrape. handleResumeSavedScrape already toasts "No Saved
+    // Scrape" and returns if there is nothing to resume; resumeScoring already
+    // fences on deletion, manual-AI retirement, an active run and Board
+    // ownership. So a stale tag routed into them costs a no-op the user can
+    // click past. A precondition evaluated HERE, by contrast, reads React state
+    // that is repopulated asynchronously — and if it is transiently false the
+    // retry silently falls through to a full re-scrape. That is exactly the bug
+    // this whole change exists to fix, reintroduced as a race.
+    //
+    // Staleness is handled where it belongs instead: the tag is cleared on
+    // dismiss, on retry, and on both hub resets.
+    if (failedOperation === 'resume-saved-scrape') {
+      handleResumeSavedScrape();
+      return;
+    }
+    if (failedOperation === 'resume-scoring') {
+      resumeScoring();
+      return;
+    }
+    if (failedOperation === 'resume-run') {
+      handleResumeRun();
+      return;
+    }
     handleRerun({ frameSourceCards: false });
-  }, [addToast, canvasFilePath, data.locked, deferDirectSearchToBoard, epoch, getEdges, getNode, getNodes, id, moduleRunQueue, retryTerminalFinalization, settleManualAiRetirement, updateGlobal, handleRerun]);
+  }, [addToast, canvasFilePath, data.locked, deferDirectSearchToBoard, epoch, getEdges, getNode, getNodes, id, moduleRunQueue, retryTerminalFinalization, settleManualAiRetirement, updateGlobal, handleResumeRun, handleResumeSavedScrape, resumeScoring, handleRerun]);
 
   const savedAnalysisWarning = getSavedAnalysisWarning(savedAnalysisMeta, id, canvasFilePath);
   const savedScoreReadyCount = Math.max(0, Number(savedAnalysisMeta?.gatheredJobCount) || 0);
@@ -10024,7 +10109,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   files. Keep it visible after Clear career files so the user can
                   distinguish an intentionally cleared hub from one that never ran. */}
               {!!lastCompletedRunAtText && (
-                <p className="text-white/35 text-[9px] mt-1">Last completed: {lastCompletedRunAtText}</p>
+                <p className="text-white/35 text-[9px] mt-1">Last scraped: {lastCompletedRunAtText}</p>
               )}
               {!platformsVerifying && <div
                 className="nodrag mt-4 w-full flex flex-col items-stretch gap-1.5 text-[10px] text-white/40"

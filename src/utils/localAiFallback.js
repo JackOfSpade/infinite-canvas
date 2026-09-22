@@ -39,6 +39,73 @@ export const LOCAL_AI_FALLBACK_IDLE_STATUSES = Object.freeze([
   'saved', 'failed',
 ]);
 
+// LOCAL_AI_JOB_INTEGRITY_CODE, as electron/ipc/pasteApplicationAssembly.js
+// spells it and handleSafe hands it back on a failed IPC result. It marks the
+// one failure class that the response now on screen cannot answer: what failed
+// is state the job already holds — its career corpus, its listing, the
+// evidence plan and identity its first stage accepted, its input record — and
+// no response this job can still take supplies any of them. Two of those did
+// arrive in a pasted response, at a stage that has since closed, so this is
+// not "a defect the app authored"; it is one no remaining round can reach.
+export const LOCAL_AI_JOB_INTEGRITY_ERROR_CODE = 'LOCAL_AI_JOB_INTEGRITY';
+
+// Said only when the main process somehow sent the code without its sentence.
+// The action is the one the main process names, so the two cannot disagree.
+const BROKEN_JOB_FALLBACK_MESSAGE = 'This application job cannot be completed, and no pasted response can repair it. Press Generate on the job card to build this application again from current career data and the current listing.';
+
+/**
+ * The message to show for a failure that reports a broken job, or '' when it
+ * is anything else.
+ *
+ * A paste surface branches on this BEFORE it treats a failure as a correction
+ * round: a correction round asks for another paste, and asking for one here is
+ * asking a person to keep answering a rejection that cannot be answered.
+ *
+ * Two shapes carry the same fault, because the drivers read the same failure
+ * at two different distances. A status poll or a paste submit reads the IPC
+ * result itself ({ success: false, errorCode, error }, as handleSafe builds
+ * it). An import has a bundle save AFTER its IPC, so it rethrows that result
+ * as an Error ({ code, message }) and one catch covers both steps — the same
+ * way its LOCAL_AI_RESULT_CHANGED / LOCAL_AI_IMPORT_IN_FLIGHT branches read
+ * it. Answering only the first shape leaves the import catch judging the same
+ * fault a second way, so both are read here, once. An IPC result always
+ * carries `success`; a rethrown Error never does, so neither shape can be
+ * mistaken for the other.
+ */
+export function jobIntegrityFailureMessage(result) {
+  if (!result || typeof result !== 'object') return '';
+  const isIpcResult = result.success !== undefined;
+  if (isIpcResult && result.success !== false) return '';
+  if ((isIpcResult ? result.errorCode : result.code) !== LOCAL_AI_JOB_INTEGRITY_ERROR_CODE) return '';
+  const reported = isIpcResult ? result.error : result.message;
+  const message = typeof reported === 'string' ? reported.trim() : '';
+  return message || BROKEN_JOB_FALLBACK_MESSAGE;
+}
+
+/**
+ * The card state a STATUS POLL or an IMPORT must adopt for a failure reporting
+ * a broken job, or null for anything else.
+ *
+ * Both drivers treat a failed status IPC as transient: three consecutive
+ * failures park the card at 'status-error … Retrying automatically…', which is
+ * in neither driver's idle list, so the poll runs forever. That is the right
+ * answer for a canvas re-save renaming files under the resolver, and the wrong
+ * one for a job whose own manifest, input record or frozen corpus can no
+ * longer be read — retrying reproduces it every 2.5 seconds and names no
+ * action. 'failed' is terminal in both idle lists and re-enables Generate,
+ * which is the action the main process's sentence names.
+ *
+ * Both import catches need the same answer for a different reason: every
+ * branch they have parks the job at 'completed', which the card renders as a
+ * finished result and neither driver's idle list stops. A job the main
+ * process has just declared unfinishable would be shown as one that finished,
+ * and the poll that follows would start the settle/import cycle over.
+ */
+export function brokenLocalAiJobDriveState(result) {
+  const message = jobIntegrityFailureMessage(result);
+  return message ? { status: 'failed', message } : null;
+}
+
 // ── Mounted-card registry ────────────────────────────────────────────────────
 // Module-level so the manager (a different component tree) can consult it
 // synchronously before every poll/import/state write. A card registers for its

@@ -1,6 +1,6 @@
-import { assert, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationResearchFingerprint } from '../test-dependencies.js';
+import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
-import { researchCompensationAssessments } from '../../electron/ipc/jobs.js';
+import { compensationContextForSalary, researchCompensationAssessments } from '../../electron/ipc/jobs.js';
 import {
   classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
@@ -13,6 +13,7 @@ import {
   canonicalizeCompensationLocation,
   compensationCohortKey,
   selectCompensationExperienceYears,
+  estimateCompensationExperienceYearsFromDescription,
   isValidCompensationExperienceBandLadder,
   selectCompensationExperienceBand,
   isAuditableCompensationSource,
@@ -20,9 +21,329 @@ import {
   sourcesPresentInGroundedResearch,
 } from '../../electron/ipc/jobCompensation.js';
 import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
-import { ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
+import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
+  name: 'Compensation batch contracts bind every role/cohort to an opaque raw-research section',
+  run: () => {
+    const roleId = 'a'.repeat(24);
+    const otherId = 'b'.repeat(24);
+    const raw = `BEGIN COMPENSATION RESEARCH ${roleId}\nEngineering framework: Senior engineers lead work. Updated 2026-01-01. https://roles.example.test/engineering\nEND COMPENSATION RESEARCH ${roleId}\nBEGIN COMPENSATION RESEARCH ${otherId}\nDesign framework: Principal designers lead design. Updated 2026-02-02. https://roles.example.test/design\nEND COMPENSATION RESEARCH ${otherId}`;
+    const sections = parseCompensationResearchSections(raw, [roleId, otherId]);
+    const ladders = validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [{
+      researchId: roleId, roleFamily: 'Engineering', reusedFrom: '',
+      bands: [{ label: 'Early', minYears: 0, maxYears: 2 }, { label: 'Senior', minYears: 3, maxYears: 99 }],
+      sources: [{ name: 'Engineering framework', url: 'https://roles.example.test/engineering' }],
+      evidenceQuote: 'Senior engineers lead work', sourceDate: '2026-01-01',
+    }, {
+      researchId: otherId, roleFamily: 'Design', reusedFrom: '',
+      bands: [{ label: 'Early', minYears: 0, maxYears: 2 }, { label: 'Principal', minYears: 3, maxYears: 99 }],
+      sources: [{ name: 'Design framework', url: 'https://roles.example.test/design' }],
+      evidenceQuote: 'Principal designers lead design', sourceDate: '2026-02-02',
+    }] }, [{ researchId: roleId, role: 'Engineering' }, { researchId: otherId, role: 'Design' }], sections);
+    assert(ladders.size === 2 && ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA.properties.ladders.maxItems === 20,
+      'role-family assessment batching must preserve one independently validated ladder per raw section and cap at twenty');
+    const cachedRequest = [{ researchId: roleId, role: 'Engineering', cached: { roleFamily: 'Engineering' } }];
+    const inertCached = validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [{
+      researchId: roleId, roleFamily: 'Engineering', reusedFrom: '', bands: [], sources: [], evidenceQuote: '', sourceDate: '',
+    }] }, cachedRequest, sections);
+    let cachedEvidenceRejected = false;
+    try {
+      validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [{
+        researchId: roleId, roleFamily: 'Engineering', reusedFrom: '',
+        bands: [{ label: 'Early', minYears: 0, maxYears: 99 }], sources: [], evidenceQuote: '', sourceDate: '',
+      }] }, cachedRequest, sections);
+    } catch { cachedEvidenceRejected = true; }
+    assert(inertCached.get(roleId)?.available === false && cachedEvidenceRejected,
+      'partial stable assessment slices retain cached identities only as inert rows, never reconstructed or model-authored provenance');
+
+    const cohortId = 'c'.repeat(24);
+    const cohortOtherId = 'd'.repeat(24);
+    const cohortSections = new Map([
+      [cohortId, 'Salary source says $100,000 to $120,000 base pay. Updated 2026-03-03. https://salary.example.test/engineering'],
+      [cohortOtherId, 'Salary source says $150,000 to $170,000 base pay. Updated 2026-04-04. https://salary.example.test/design'],
+    ]);
+    const requests = [
+      { researchId: cohortId, group: { jobs: [{ marketCurrency: 'USD' }] } },
+      { researchId: cohortOtherId, group: { jobs: [{ marketCurrency: 'USD' }] } },
+    ];
+    let crossSectionRejected = false;
+    let crossSectionDiagnostic = null;
+    try {
+      validateCompensationEvidenceBatchSubmission({ cohorts: [{ researchId: cohortId, assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [{ min: 150000, max: 170000, currency: 'USD', comparable: true, sourceName: 'Design source', sourceUrl: 'https://salary.example.test/design', evidenceQuote: '$150,000 to $170,000 base pay', sourceDate: '2026-04-04' }] }] }, { researchId: cohortOtherId, assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [] }] }] }, requests, cohortSections);
+    } catch (error) {
+      crossSectionRejected = true;
+      crossSectionDiagnostic = error?.validationDiagnostic;
+      assert(error?.code === 'JOB_COMPENSATION_RESPONSE_INVALID',
+        'a compensation semantic rejection must retain its fixed non-API handoff error code');
+    }
+    let coverageDiagnostic = null;
+    try {
+      validateCompensationEvidenceBatchSubmission({ cohorts: [{ researchId: cohortId, assessments: [] }, { researchId: cohortOtherId, assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [] }] }] }, requests, cohortSections);
+    } catch (error) { coverageDiagnostic = error?.validationDiagnostic; }
+    let provenanceDiagnostic = null;
+    try {
+      validateCompensationEvidenceBatchSubmission({ cohorts: [{ researchId: cohortId, assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [{ min: 100000, max: 120000, currency: 'USD', comparable: true, sourceName: 'Engineering source', sourceUrl: 'https://salary.example.test/engineering', evidenceQuote: '$150,000 to $170,000 base pay', sourceDate: '2026-04-04' }] }] }, { researchId: cohortOtherId, assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [] }] }] }, requests, cohortSections);
+    } catch (error) { provenanceDiagnostic = error?.validationDiagnostic; }
+    assert(crossSectionRejected
+      && crossSectionDiagnostic?.stage === 'compensation-assessment'
+      && crossSectionDiagnostic?.reason === 'COMPENSATION_RANGE_INVALID'
+      && coverageDiagnostic?.reason === 'COMPENSATION_ASSESSMENT_COVERAGE_INVALID'
+      && coverageDiagnostic?.expectedCount === 1
+      && coverageDiagnostic?.receivedCount === 0
+      && provenanceDiagnostic?.reason === 'COMPENSATION_EVIDENCE_NOT_GROUNDED'
+      && JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA.properties.cohorts.maxItems === 6,
+    'salary contract rejections stay fail-closed while carrying only fixed, correction-safe diagnostics through the manual handoff');
+
+    let outsideSectionRejected = false;
+    let nestedMarkerRejected = false;
+    let foreignSourceLinkAccepted = false;
+    try { parseCompensationResearchSections(`Preface must not be accepted\n${raw}`, [roleId, otherId]); } catch { outsideSectionRejected = true; }
+    try {
+      parseCompensationResearchSections(
+        `BEGIN COMPENSATION RESEARCH ${roleId}\nfirst\nBEGIN COMPENSATION RESEARCH ${otherId}\nsecond\nEND COMPENSATION RESEARCH ${otherId}\nEND COMPENSATION RESEARCH ${roleId}`,
+        [roleId, otherId],
+      );
+    } catch { nestedMarkerRejected = true; }
+    try {
+      const accepted = validateCompensationEvidenceBatchSubmission({ cohorts: [{
+        researchId: cohortId,
+        assessments: [{ index: 0, justification: 'x', sourceLinks: ['https://salary.example.test/design'], comparableRanges: [] }],
+      }, {
+        researchId: cohortOtherId,
+        assessments: [{ index: 0, justification: 'x', sourceLinks: [], comparableRanges: [] }],
+      }] }, requests, cohortSections);
+      foreignSourceLinkAccepted = accepted.get(cohortId)?.[0]?.sourceLinks?.[0] === 'https://salary.example.test/design';
+    } catch { foreignSourceLinkAccepted = false; }
+    const jobsSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const normalizerStart = jobsSource.indexOf('function applyCompensationEvidenceToGroup(');
+    const normalizerEnd = jobsSource.indexOf('\nasync function processCompensationCohortBatches(', normalizerStart);
+    const normalizer = jobsSource.slice(normalizerStart, normalizerEnd);
+    assert(outsideSectionRejected && nestedMarkerRejected && foreignSourceLinkAccepted
+      && normalizerStart >= 0 && normalizerEnd > normalizerStart
+      && normalizer.includes('const links = comparable.map(')
+      && !normalizer.includes('answer?.sourceLinks'),
+    'raw compensation sections remain identity-bound while optional display-only sourceLinks cannot reject, display, or persist from a valid cohort batch');
+    return { roleSections: ladders.size, crossSectionRejected, outsideSectionRejected, nestedMarkerRejected, foreignSourceLinkAccepted, cachedEvidenceRejected };
+  },
+}, {
+  name: 'Role-family v2 cache batch commits valid rows in one atomic Settings write',
+  run: () => {
+    const store = tryGetStore();
+    assert(store, 'the test Settings store must be available');
+    const cachePath = 'jobs.roleFamilyExperienceBands';
+    const before = store.get(cachePath);
+    const originalSet = store.set;
+    let cacheWrites = 0;
+    store.set = function countedSet(key, value) {
+      if (key === cachePath) cacheWrites++;
+      return originalSet.call(this, key, value);
+    };
+    const ladder = (roleFamily) => ({
+      roleFamily,
+      bands: [{ label: 'Early', minYears: 0, maxYears: 2 }, { label: 'Senior', minYears: 3, maxYears: 99 }],
+      sources: [{ name: 'Framework', url: `https://roles.example.test/${encodeURIComponent(roleFamily)}` }],
+      verifiedDate: '2026-09-18T00:00:00.000Z',
+    });
+    try {
+      const saved = saveRoleFamilyExperienceBandsBatch([
+        { roleFamily: '__proto__', value: ladder('__proto__') },
+        { roleFamily: 'Fresh V2 Role', value: ladder('Fresh V2 Role') },
+        { roleFamily: 'Unavailable Role', value: { bands: [], sources: [] } },
+      ]);
+      const cache = getRoleFamilyExperienceBandCache();
+      assert(cacheWrites === 1 && saved.length === 2
+        && Object.hasOwn(cache, '__proto__')
+        && Object.hasOwn(cache, 'fresh v2 role')
+        && !Object.hasOwn(cache, 'unavailable role'),
+      'one v2 assessment writes every valid prototype-safe ladder together while unavailable rows remain uncached');
+    } finally {
+      store.set = originalSet;
+      if (before === undefined) store.delete(cachePath);
+      else store.set(cachePath, before);
+    }
+    return { atomicWrites: cacheWrites };
+  },
+}, {
+  name: 'Compensation assessment phases pack independently of their smaller raw-research phases',
+  run: () => {
+    const roles = Array.from({ length: 21 }, (_, index) => ({ key: `role-${index}`, role: `Role ${index}`, researchId: `id-${index}`, cached: null }));
+    const rolePlan = planRoleFamilyAssessmentBatches(roles);
+    const cohorts = Array.from({ length: 6 }, (_, index) => ({ researchKey: `market-${index}`, researchId: `cohort-${index}`, group: { jobs: [{}] } }));
+    const rawPlan = packCompensationResearchBatches(cohorts);
+    const assessmentPlan = packCompensationAssessmentBatches(cohorts);
+    assert(rolePlan.length === 2 && rolePlan[0].batch.length === 20 && rolePlan[1].batch.length === 1
+      && roleFamilyAssessmentMaxTokens(20) === 15024,
+    'twenty compact role ladders fit one 15,024-token assessment even though raw research remains seven at a time');
+    assert(rawPlan.length === 2 && rawPlan[0].length === 4 && assessmentPlan.length === 1 && assessmentPlan[0].length === 6,
+      'six one-row salary assessments share one prompt while raw market research remains four cohorts per prompt');
+    return { roleAssessment: rolePlan[0].batch.length, cohortAssessment: assessmentPlan[0].length };
+  },
+}, {
+  name: 'Role-family cache preserves later durable batch membership and ordinal after restart',
+  run: () => {
+    const roles = Array.from({ length: 9 }, (_, index) => ({
+      key: `role-${index + 1}`,
+      role: `Role ${index + 1}`,
+      researchId: `role-id-${index + 1}`,
+      // Model an app restart after batch one was accepted and persisted:
+      // its seven ladders are cache hits while batch two remains pending.
+      cached: index < 7 ? { roleFamily: `Role ${index + 1}`, cacheHit: true } : null,
+    }));
+    const plan = planRoleFamilyResearchBatches(roles);
+    const first = plan[0];
+    const pendingSecond = plan[1];
+    assert(plan.length === 2 && first.batchNumber === 1 && first.batchTotal === 2
+      && first.missingEntries.length === 0,
+    'the accepted first role-family slice may be skipped only as a whole');
+    assert(pendingSecond.batchNumber === 2 && pendingSecond.batchTotal === 2
+      && pendingSecond.batch.map(entry => entry.researchId).join(',') === 'role-id-8,role-id-9'
+      && pendingSecond.missingEntries.length === 2,
+    'the formerly pending second slice must keep its original batch=2/total=2 prompt metadata and exact membership');
+    const beforeRestartPrompt = buildRoleFamilyBatchResearchPrompt(pendingSecond.batch.map(entry => ({ ...entry, cached: null })));
+    const afterRestartPrompt = buildRoleFamilyBatchResearchPrompt(pendingSecond.batch.map((entry, index) => ({
+      ...entry,
+      // Simulate a cache that changed while an earlier slice completed; the
+      // role prompt must remain a function of only this stable slice's ids.
+      cached: index === 0 ? { roleFamily: entry.role, cacheHit: true } : null,
+    })));
+    assert(canonicalizeGeneratedUntrustedBoundaryNonces(beforeRestartPrompt) === canonicalizeGeneratedUntrustedBoundaryNonces(afterRestartPrompt)
+      && !afterRestartPrompt.includes('known-role-family-ladders'),
+      'a newly cached first slice must not alter the literal raw prompt/hash of the pending second role-family handoff');
+
+    const partial = planRoleFamilyResearchBatches(roles.map((entry, index) => ({ ...entry, cached: index < 2 ? entry.cached : null })))[0];
+    assert(partial.batch.length === 7 && partial.cachedEntries.length === 2 && partial.missingEntries.length === 5,
+      'a partial stable slice must be reissued intact while retaining its cached rows for non-overwriting merge');
+    return { preservedBatch: `${pendingSecond.batchNumber}/${pendingSecond.batchTotal}`, partialCachedRows: partial.cachedEntries.length };
+  },
+}, {
+  name: 'Compensation raw and assessment plans keep later handoff membership when earlier slices become cached',
+  run: () => {
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      researchKey: `market-${index + 1}`,
+      researchId: `cohort-${index + 1}`,
+      group: { jobs: [{}] },
+    }));
+    const rawPlan = packCompensationResearchBatches(entries);
+    const assessmentPlan = packCompensationAssessmentBatches(entries);
+    // Cache state is deliberately not an input to either plan. The pipeline
+    // marks completed entries only after these exact slices have been derived.
+    const cacheAfterFirstRaw = new Set(rawPlan[0].map(entry => entry.researchKey));
+    const rawLater = rawPlan.slice(1).flat().map(entry => entry.researchId).join(',');
+    const assessmentLater = assessmentPlan.slice(1).flat().map(entry => entry.researchId).join(',');
+    assert(rawPlan.length === 3 && rawPlan[1].map(entry => entry.researchId).join(',') === 'cohort-5,cohort-6,cohort-7,cohort-8'
+      && cacheAfterFirstRaw.size === 4
+      && rawLater === 'cohort-5,cohort-6,cohort-7,cohort-8,cohort-9'
+      && assessmentLater === 'cohort-7,cohort-8,cohort-9',
+    'later raw and assessment handoff identities are derived from the full ordered plan, not a cache-filtered remainder');
+    return { rawBatches: rawPlan.length, assessmentBatches: assessmentPlan.length };
+  },
+}, {
+  name: 'Oversized compensation cohort researches its market once, then reuses it across bounded assessment batches',
+  run: () => {
+    // 39 rows become [19, 19, 1] assessment parts.  The fresh raw planner
+    // deliberately keeps a researchKey unique within each batch; after the
+    // first accepted part, the remaining parts read its raw cache and issue
+    // only their JSON assessment handoffs.
+    const parts = [19, 19, 1].map((count, index) => ({
+      researchKey: 'same-market-cohort',
+      researchId: `part-${index + 1}`,
+      group: { jobs: Array.from({ length: count }, () => ({})) },
+    }));
+    const rawPlan = packCompensationResearchBatches(parts);
+    const assessmentPlan = packCompensationAssessmentBatches(parts);
+    const cachedRaw = new Set();
+    const rawResearchCalls = rawPlan.flatMap(batch => batch.filter(entry => {
+      if (cachedRaw.has(entry.researchKey)) return false;
+      cachedRaw.add(entry.researchKey);
+      return true;
+    }));
+    assert(rawResearchCalls.length === 1 && rawResearchCalls[0].researchId === 'part-1',
+      'all row parts of one original cohort must issue one raw market-research section, not duplicate lookups');
+    assert(assessmentPlan.length === 3 && assessmentPlan.flat().length === 3,
+      'the same oversized cohort must still retain separately bounded exact-index assessment batches');
+    return { rawResearchCalls: rawResearchCalls.length, assessmentBatches: assessmentPlan.length };
+  },
+}, {
+  name: 'Compensation batching uses bounded multi-batch task IDs while exact legacy prompts retain only their own one-item IDs',
+  run: () => {
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    assert(source.includes('ROLE_FAMILY_HANDOFF_BATCH_SIZE = 7')
+      && source.includes('COMPENSATION_COHORT_HANDOFF_BATCH_SIZE = 4')
+      && source.includes("task: 'job-compensation-research-batch'")
+      && source.includes("task: 'job-compensation-assessment-batch'"),
+      'raw research remains bounded while its downstream assessment phase has separate deterministic batches');
+    assert(source.includes('legacyResearchStepProbe')
+      && source.includes('legacyAssessmentStepProbe')
+      && source.includes('hasExactDurableRawHandoff(prompt')
+      && source.includes('hasExactDurableTextHandoff(prompt')
+      && source.includes('buildLegacyRoleFamilyResearchPrompt')
+      && source.includes('buildLegacyCompensationResearchPrompt')
+      && source.includes('const legacyCompleteKeys = new Set(prepared')
+      && source.includes("mode === 'v1-complete'")
+      && source.includes('const legacyRawV2Keys = new Set(prepared')
+      && source.includes("mode === 'raw-v2'")
+      && source.includes('recallRunMigration(manualAiRunId')
+      && source.includes('rememberRunMigration(manualAiRunId')
+      && source.includes('hints: { itemCount: group.jobs.length }')
+      && source.includes("const rawDescriptors = [")
+      && source.includes("...legacyRawCandidates.map(candidate => ({ kind: 'legacy', ...candidate }))")
+      && source.includes("...freshRawPlans.map(rawBatch => ({ kind: 'fresh', rawBatch }))")
+      && source.includes('const rawPhase = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
+      && source.includes('const legacyAssessmentCandidates = []')
+      && source.includes('await mapWithConcurrency(legacyAssessmentCandidates, MANUAL_HANDOFF_CONCURRENCY')
+      && source.includes('const completedRawDescriptors = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
+      && source.includes('const legacyAssessmentDescriptors = completedRawDescriptors')
+      && !source.includes('getExperienceBandsForRoleFamily(')
+      && !source.includes('useLegacyIndividualCompensation'),
+    'exact legacy and fresh raw prompts are collected into mixed fixed waves, then their dependent legacy/current extractions run in separate fixed-wave phases');
+    assert(source.includes('MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT')
+      && source.includes('compensationCohortAssessmentFits(nextCohorts, nextRows)')
+      && source.includes('const rawFirstParts = []')
+      && source.includes('const stableRawBatches = packCompensationResearchBatches(rawFirstParts)')
+      && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(freshAll)')
+      && source.includes('propagate its exact section to later parts below'),
+    'boundary-size and oversized cohorts must use the shared 15,360 assessment formula and reuse their completed raw research');
+    assert(source.includes('mapWithConcurrency(roleResearchBatches, MANUAL_HANDOFF_CONCURRENCY,')
+      && source.includes('mapWithConcurrency(roleAssessmentBatches, MANUAL_HANDOFF_CONCURRENCY,')
+      && source.includes('mapWithConcurrency(assessmentBatchPlans, MANUAL_HANDOFF_CONCURRENCY,'),
+    'independent role-family, salary-research, and salary-assessment batches fill fixed ten-handoff waves while later row parts reuse their first market lookup');
+    assert(compensationCohortAssessmentMaxTokens(4, 13) === 15074
+      && compensationCohortAssessmentFits(4, 13)
+      && !compensationCohortAssessmentFits(4, 14),
+    'the shared compensation cap must match the batcher boundary exactly');
+    const restartLayout = Array.from({ length: 8 }, (_, index) => ({ key: `role-${index}`, legacy: index === 0, cached: index === 0 }));
+    const firstPassV2 = restartLayout.filter(entry => !entry.legacy).map(entry => entry.key);
+    const restartedV2 = restartLayout.filter(entry => !(entry.cached && entry.legacy)).map(entry => entry.key);
+    assert(firstPassV2.join(',') === restartedV2.join(','),
+      'a completed legacy role must remain outside the v2 layout after restart rather than inserting a newly cached identity before a pending batch');
+    // A raw-only v1 role can be one member of an accepted v2 twenty-role
+    // extraction.  On restart it is now cached, just like its fresh-v2
+    // siblings, so the whole completed slice disappears rather than issuing a
+    // different prompt with nineteen CACHED markers and one raw legacy row.
+    const mixedAcceptedRestart = Array.from({ length: 21 }, (_, index) => ({
+      key: `mixed-role-${index}`,
+      researchId: `mixed-id-${index}`,
+      legacyRawV2: index === 0,
+      cached: index < 20 ? { roleFamily: `Mixed Role ${index}` } : null,
+    }));
+    const mixedRestartPlan = planRoleFamilyAssessmentBatches(mixedAcceptedRestart);
+    assert(mixedRestartPlan.length === 2
+      && mixedRestartPlan[0].missingEntries.length === 0
+      && mixedRestartPlan[1].batchNumber === 2
+      && mixedRestartPlan[1].batchTotal === 2
+      && mixedRestartPlan[1].batch.map(entry => entry.researchId).join(',') === 'mixed-id-20',
+    'an accepted mixed raw-v1 + fresh-v2 assessment slice must be skipped as a whole while the later pending slice keeps its ordinal and membership');
+    assert(source.includes('const legacyCachedRawV2 = new Map(prepared')
+      && source.includes('if (!missing.length) return results;')
+      && source.includes('!legacyCachedRawV2.has(entry.key)')
+      && source.includes("if (entry.legacyRawResearch && !entry.cached)")
+      && source.includes('saveRoleFamilyExperienceBandsBatch(validEntries.map')
+      && source.includes('saveRoleFamilyExperienceBandsBatch,'),
+    'a cached raw-only v1 role stays a cached annotated v2-plan member, and all valid rows from an accepted v2 slice are persisted in one Settings write');
+    return { roleRawBatch: 7, roleAssessmentBatch: 20, cohortRawBatch: 4, cohortAssessmentBatch: 6, exactLegacyMigration: true, restartLayoutStable: true, mixedAcceptedSliceSkipped: true, atomicV2CacheSave: true, maxRowsSingleCohort: 19 };
+  },
+}, {
   name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
     const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
@@ -53,51 +374,74 @@ export default [{
     return { threshold: COMPENSATION_MIN_FIT_SCORE };
   },
 }, {
-  name: 'Compensation skips fit-qualified jobs with no established experience before any role-band lookup',
+  name: 'A JD-derived experience band produces a salary verdict from researched cash evidence',
+  run: () => {
+    const job = {
+      location: 'Toronto, Ontario, Canada',
+      salary: 'C$120,000 per year',
+      description: 'This role requires at least 5 years of relevant experience.',
+    };
+    const estimate = estimateCompensationExperienceYearsFromDescription(job);
+    const band = selectCompensationExperienceBand([
+      { label: 'Early', minYears: 0, maxYears: 2 },
+      { label: 'Experienced', minYears: 3, maxYears: 6 },
+      { label: 'Senior+', minYears: 7, maxYears: 99 },
+    ], estimate.years);
+    const offer = parseGuaranteedCashOffer(job);
+    const result = compensationAssessment({
+      offer,
+      competitiveRanges: [{ min: 100_000, max: 110_000, currency: 'CAD' }],
+      marketCurrency: 'CAD',
+      comparisonLocation: job.location,
+      justification: 'Comparable current market ranges were researched.',
+    });
+    assert(estimate.years === 5 && estimate.basis === 'description-stated-minimum'
+      && band?.label === 'Experienced' && result.status === 'competitive',
+    'a listing-only experience estimate must select a real research band, and a compatible researched range must still yield the normal cash-pay verdict');
+    return { estimate: estimate.years, band: band.label, verdict: result.status };
+  },
+}, {
+  name: 'Salary research derives seniority from the listing title before an untrusted scoring context',
+  run: () => {
+    const junior = compensationContextForSalary({ title: 'Junior Engineer' }, { seniority: 'senior' });
+    const seniorManager = compensationContextForSalary({ title: 'Senior Engineering Manager' }, { seniority: 'senior' });
+    const principal = compensationContextForSalary({ title: 'Principal Engineer' }, { seniority: 'junior' });
+    assert(junior.seniority === 'entry'
+      && seniorManager.seniority === 'manager'
+      && principal.seniority === 'director',
+    'the title must set the salary-market seniority so a stale or ungrounded scoring context cannot move a listing into the wrong pay market');
+    return { junior: junior.seniority, seniorManager: seniorManager.seniority, principal: principal.seniority };
+  },
+}, {
+  name: 'Compensation sends no-numeric-years listings through JD-derived role-band and market analysis',
   run: async () => {
     const progress = [];
-    const jobs = [
-      {
-        title: 'Senior Platform Engineer',
-        location: 'Toronto, Ontario, Canada',
-        salary: 'C$130,000 per year',
-        matchScore: 88,
-        compensationContext: { roleFamily: 'Platform Engineering', seniority: 'senior', employmentType: 'full-time' },
-        experienceAssessment: { categorySpecificExperience: [{ category: 'Platform', requiredMinimumYears: '', reportedYears: '' }] },
-      },
-      {
-        title: 'Product Designer',
-        location: 'Austin, Texas, USA',
-        salary: '$120,000 per year',
-        matchScore: 91,
-        compensationContext: { roleFamily: 'Product Design', seniority: 'senior', employmentType: 'full-time' },
-        experienceAssessment: { categorySpecificExperience: [] },
-      },
-    ];
+    const jobs = [{
+      title: 'Product Designer',
+      location: 'Toronto, Ontario, Canada',
+      salary: 'C$120,000 per year',
+      matchScore: 91,
+      description: 'Work with product and engineering partners to improve a well-established customer experience.',
+      compensationContext: { roleFamily: 'Product Design', seniority: 'unspecified', employmentType: 'full-time' },
+      experienceAssessment: { categorySpecificExperience: [] },
+    }];
     const event = { sender: { isDestroyed: () => false, send: (_channel, payload) => progress.push(payload) } };
-
-    await researchCompensationAssessments(jobs, { event, nodeId: 'no-years-regression' });
-
-    assert(jobs.every(job => job.compensationAssessment?.reasonCode === 'experience_band_unavailable'),
-      'fit-qualified jobs with no established years must receive the explicit experience-band fallback');
-    assert(progress.at(-1)?.processed === jobs.length && progress.at(-1)?.total === jobs.length,
-      'each early no-years fallback must advance compensation progress exactly once');
-
-    // getJobsTelemetry is intentionally imported through test-dependencies,
-    // which shares the same already-loaded jobs.js module instance as the
-    // exported pipeline function above.
+    await researchCompensationAssessments(jobs, {
+      event,
+      nodeId: 'jd-estimate-abort-regression',
+      signal: { aborted: true },
+    });
     const { getJobsTelemetry } = await import('../test-dependencies.js');
     const telemetry = getJobsTelemetry().compensation;
-    assert(telemetry?.eligible === 2 && telemetry?.skippedNoExperience === 2
-      && telemetry?.preResearchCandidates === 0 && telemetry?.cohorts === 0,
-    'no-years jobs must leave no candidate or final market cohort behind');
-    assert(telemetry?.roleBandLookups === 0 && telemetry?.roleBandResearches === 0
-      && telemetry?.roleBandCacheHits === 0 && telemetry?.roleBandFailures === 0,
-    'no-years jobs must not consult either a cached or a newly researched role-family ladder');
-    assert(telemetry?.skippedNoExperienceBand === 0 && telemetry?.failedCohorts === 0
-      && telemetry?.assessed === 0,
-    'the early no-years branch is distinct from a resolved ladder that cannot place an established number');
-    return { skipped: telemetry.skippedNoExperience, roleBandLookups: telemetry.roleBandLookups };
+    assert(jobs[0].compensationAssessment?.reasonCode === 'research_interrupted',
+      'a JD-derived estimate must enter the role-band stage; an aborted run reports interruption rather than experience_band_unavailable');
+    assert(telemetry?.eligible === 1 && telemetry?.preResearchCandidates === 1
+      && telemetry?.roleBandInterruptedJobs === 1 && telemetry?.skippedNoExperience === 0
+      && telemetry?.marketCandidates === 0 && telemetry?.cohorts === 0,
+    `a fit-qualified listing with no numeric years must reach the role-band prerequisite through its JD estimate, got ${JSON.stringify(telemetry)}`);
+    assert(progress.at(-1)?.processed === 1 && progress.at(-1)?.total === 1,
+      'the interrupted JD-estimate path must complete the card progress exactly once');
+    return { preResearchCandidates: telemetry.preResearchCandidates, interrupted: telemetry.roleBandInterruptedJobs };
   },
 }, {
   name: 'Compensation early abort keeps role-band interruption distinct from failed lookup and market cohorts',
@@ -185,13 +529,15 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   name: 'Role-family experience-band lookup keeps grounded research separate from schema extraction',
   run: () => {
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    const start = source.indexOf('async function getExperienceBandsForRoleFamily');
+    const start = source.indexOf('async function getExperienceBandsForRoleFamilies');
     const end = source.indexOf('\n/**\n * Research cash salary', start);
     const resolver = source.slice(start, end);
     assert(start >= 0 && end > start, 'the role-family experience-band resolver must remain a distinct audited path');
     assert(/callLLMRaw\([\s\S]*?grounding:\s*true/.test(resolver),
       'experience-band research must use the raw grounded path; structured calls cannot activate Claude web search');
-    assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA/.test(resolver),
+    assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA/.test(resolver)
+      && resolver.includes('const rawPhase = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
+      && resolver.includes('await mapWithConcurrency(legacyAssessmentCandidates, MANUAL_HANDOFF_CONCURRENCY'),
       'grounded role-family prose must still go through schema-constrained extraction before persistence');
     return { grounded: true };
   },

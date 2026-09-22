@@ -551,22 +551,122 @@ function positiveFiniteNumber(value) {
  * the candidate's highest documented years among the assessed material
  * categories—not total career tenure, which can be unrelated to the role.
  */
-export function selectCompensationExperienceYears(experienceAssessment = {}) {
+export function selectCompensationExperienceYears(experienceAssessment = {}, context = {}) {
   const categories = Array.isArray(experienceAssessment?.categorySpecificExperience)
     ? experienceAssessment.categorySpecificExperience
     : [];
+  // The scorer emits this listing requirement even when it cannot safely tie
+  // it to a candidate work-history role. Compensation needs the former fact;
+  // fit claims still use the stricter category evidence above it.
+  const rawJob = context?.job;
+  const hasRawJob = Boolean(rawJob && typeof rawJob === 'object');
   const required = categories
+    .filter(category => category?.jobEvidenceGrounded !== false)
     .map(category => positiveFiniteNumber(category?.requiredMinimumYears))
-    .filter(Boolean);
+    .filter(years => years && (!hasRawJob || requiredYearsIsCorroboratedByDescription(rawJob, years)));
+  // `requiredYears` is model-produced context. It can price a cohort as a
+  // stated listing requirement only when the same number occurs in the raw
+  // listing text; otherwise the description estimator below remains explicit.
+  if (requiredYearsIsCorroboratedByDescription(context?.job, context?.requiredYears)) {
+    required.push(positiveFiniteNumber(context.requiredYears));
+  }
   if (required.length) {
     return { years: Math.max(...required), basis: 'job-stated-minimum' };
   }
   const reported = categories
+    .filter(category => category?.candidateEvidenceGrounded !== false)
     .map(category => positiveFiniteNumber(category?.reportedYears))
     .filter(Boolean);
   if (reported.length) {
     return { years: Math.max(...reported), basis: 'candidate-reported-material-category' };
   }
+  return { years: null, basis: 'not-established' };
+}
+
+function jobDescriptionText(job = {}) {
+  return [job?.description, job?.snippet]
+    .map(value => String(value || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function statedExperienceYearsInDescription(description) {
+  return [...String(description || '').matchAll(
+    /\b(?:at\s+least|minimum(?:\s+of)?|more\s+than|over)?\s*(\d{1,2})(?:\s*\+|\s+or\s+more)?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:(?:[a-z]+[-\s]){0,4})?experience\b/gi,
+  )]
+    .map(match => Number(match[1]))
+    .filter(years => Number.isInteger(years) && years >= 0 && years <= 40);
+}
+
+function hasExplicitTitleSeniority(job = {}) {
+  return /\b(?:junior|jr\.?|entry(?:[-\s]?level)?|graduate|intern|mid(?:[-\s]?level)?|intermediate|senior|sr\.?|staff|lead|manager|principal|distinguished|fellow|director|head\s+of)\b/i.test(String(job?.title || ''));
+}
+
+export function requiredYearsIsCorroboratedByDescription(job = {}, requiredYears) {
+  const required = positiveFiniteNumber(requiredYears);
+  // Full external pages can contain several listings. An un-attributed years
+  // phrase on one must not override this row's explicit title level.
+  if (job?.descriptionCapture === 'external-page-full-text' && hasExplicitTitleSeniority(job)) return false;
+  return Number.isFinite(required) && statedExperienceYearsInDescription(jobDescriptionText(job)).includes(required);
+}
+
+/**
+ * The fit assessment intentionally withholds a numeric requirement unless it
+ * can also connect that requirement to documented candidate experience. That
+ * is the right standard for a fit claim, but it must not prevent a salary
+ * comparison for an otherwise qualified listing. Read the listing separately
+ * here and mark this as an estimate, so compensation can use the best
+ * available seniority signal without presenting it as candidate evidence.
+ */
+export function estimateCompensationExperienceYearsFromDescription(job = {}, context = {}) {
+  const description = jobDescriptionText(job);
+  const statedYears = statedExperienceYearsInDescription(description);
+  const externalPageWithExplicitTitleLevel = job?.descriptionCapture === 'external-page-full-text'
+    && hasExplicitTitleSeniority(job);
+  if (statedYears.length && !externalPageWithExplicitTitleLevel) return { years: Math.max(...statedYears), basis: 'description-stated-minimum' };
+
+  // A posted level still carries useful market information when it gives no
+  // numeric requirement. These anchors intentionally land near the middle of
+  // conventional broad bands, rather than claiming an exact number of years.
+  const title = String(job?.title || '').toLowerCase();
+  const contextSeniority = String(context?.seniority || '').toLowerCase();
+  const estimates = [
+    [/\b(?:junior|jr\.?|entry(?:[-\s]?level)?|graduate|intern)\b/, 1],
+    [/\b(?:mid(?:[-\s]?level)?|intermediate)\b/, 3],
+    [/\b(?:principal|distinguished|fellow|director|head\s+of)\b/, 10],
+    [/\b(?:staff|lead|manager)\b/, 8],
+    [/\b(?:senior|sr\.?|specialist)\b/, 5],
+  ];
+  for (const [pattern, years] of estimates) {
+    if (pattern.test(title)) return { years, basis: 'description-seniority-estimate' };
+  }
+  // Body prose can mention a director, manager, or staff engineer whom the
+  // role reports to. Accept level words from it only when they form a role
+  // phrase, such as “senior backend engineer”, rather than a stray reference.
+  const roleWord = '(?:engineer|developer|designer|analyst|scientist|architect|consultant|administrator|manager|specialist|coordinator|researcher|writer)';
+  const descriptionEstimates = [
+    [new RegExp(`\\b(?:principal|distinguished|fellow)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 10],
+    [new RegExp(`\\b(?:staff|lead)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 8],
+    [new RegExp(`\\b(?:senior|sr\\.?)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 5],
+    [new RegExp(`\\b(?:mid(?:[-\\s]?level)?|intermediate)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 3],
+    [new RegExp(`\\b(?:junior|jr\\.?|entry(?:[-\\s]?level)?|graduate|intern)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 1],
+  ];
+  for (const sentence of description.split(/[.!?]+/)) {
+    if (/\breport(?:s|ing)?\s+to\b/i.test(sentence)) continue;
+    for (const [pattern, years] of descriptionEstimates) {
+      if (pattern.test(sentence)) return { years, basis: 'description-seniority-estimate' };
+    }
+  }
+  // This context is derived from the listing by the scorer, not candidate
+  // tenure. It is only a disclosed estimate and comes after literal title/JD
+  // signals, so an erroneous model label cannot override either source.
+  for (const [pattern, years] of estimates) {
+    if (pattern.test(contextSeniority)) return { years, basis: 'description-seniority-estimate' };
+  }
+  // A real job description with no explicit level still describes a concrete
+  // role. Use a conservative early-career anchor rather than abandoning the
+  // entire market comparison; this is deliberately disclosed to the card.
+  if (description || String(job?.title || '').trim()) return { years: 2, basis: 'description-unspecified-estimate' };
   return { years: null, basis: 'not-established' };
 }
 

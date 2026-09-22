@@ -57,6 +57,15 @@ function textFence(value) {
   return `${fence}text\n${source}\n${fence}`;
 }
 
+// The heading the posting body sits under, and the note that takes its place
+// when the source returned no body at all. The paste contract has to tell the
+// responder which of those two it is looking at — a quote is validated as a
+// raw substring of this companion, so "the posting text" is a lie when the
+// only quotable strings are these scaffolding lines. Exported so that contract
+// interpolates them instead of hand-copying text that can drift.
+export const ORIGINAL_JOB_LISTING_BODY_HEADING = '## Original scraped listing';
+export const EMPTY_JOB_LISTING_BODY_NOTE = '_No listing text was returned by the source._';
+
 /** Pretty-print exactly the source-side information supplied for a job card. */
 export function formatOriginalJobListingMarkdown(job = {}) {
   const title = markdownInlineText(job.title) || 'Untitled role';
@@ -82,10 +91,10 @@ export function formatOriginalJobListingMarkdown(job = {}) {
   }
   const url = safeHttpUrl(job.url);
   if (url) lines.push(`**Listing URL:** <${url}>`);
-  lines.push('', '---', '', '## Original scraped listing', '');
+  lines.push('', '---', '', ORIGINAL_JOB_LISTING_BODY_HEADING, '');
   if (description) lines.push(textFence(description));
   else if (snippet) lines.push(textFence(snippet));
-  else lines.push('_No listing text was returned by the source._');
+  else lines.push(EMPTY_JOB_LISTING_BODY_NOTE);
   lines.push('');
   return lines.join('\n');
 }

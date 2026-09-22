@@ -517,6 +517,154 @@ export default [
     },
   },
   {
+    name: 'Application Sync: a stale same-generation autosave cannot mask a newer saved panel and remains recoverable offline',
+    run: async () => {
+      const docId = 'same-generation-stale-autosave';
+      const token = 'a'.repeat(64);
+      let source = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Saved Application revision.</p></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+      });
+      const config = applicationSyncConfig(token, { html: source });
+      source = embedApplicationSyncConfig(source, config);
+      const fingerprint = /var RESUME_MARKUP_FINGERPRINT = "([^"]+)"/.exec(source)?.[1] || '';
+      const storageKey = `ic-edit:${docId}`;
+      const staleMarkup = '<h1 class="name">Maya Chen</h1><p>Older browser-only revision.</p>';
+      const dom = new JSDOM(source, {
+        runScripts: 'dangerously', url: 'https://same-generation-stale.local/',
+        beforeParse(window) {
+          window.localStorage.setItem(storageKey, staleMarkup);
+          window.localStorage.setItem(`${storageKey}:fingerprint`, fingerprint);
+          // Same generator run, but typed over the earlier on-disk panel.
+          window.localStorage.setItem(`${storageKey}:base-html-sha256`, 'b'.repeat(64));
+          window.fetch = async () => { throw new TypeError('Failed to fetch'); };
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        const mainText = dom.window.document.querySelector('[data-ic-document-panel="resume"] main')?.textContent || '';
+        const note = dom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
+        assert(mainText.includes('Saved Application revision.') && !mainText.includes('Older browser-only revision.'),
+          'a same-generation draft stamped against an older saved panel must not replace newer Application.html content');
+        assert(dom.window.localStorage.getItem(storageKey) === null
+          && dom.window.localStorage.getItem(`${storageKey}:fingerprint`) === null
+          && dom.window.localStorage.getItem(`${storageKey}:base-html-sha256`) === null
+          && dom.window.localStorage.getItem(`${storageKey}:superseded`) === staleMarkup,
+        'a displaced stale draft must be removed from the active autosave slot and retained for recovery');
+        assert(/could not reach Infinite Canvas/i.test(note),
+          'the stale-revision guard must still protect the saved file when opening offline');
+        return { staleAutosaveQuarantined: true, offlineVisible: true };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
+    name: 'Application Sync: an offline open preserves a revision-matched browser draft',
+    run: async () => {
+      const docId = 'offline-current-autosave';
+      const token = 'c'.repeat(64);
+      let source = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Saved baseline.</p></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+      });
+      const config = applicationSyncConfig(token, { html: source });
+      source = embedApplicationSyncConfig(source, config);
+      const fingerprint = /var RESUME_MARKUP_FINGERPRINT = "([^"]+)"/.exec(source)?.[1] || '';
+      const storageKey = `ic-edit:${docId}`;
+      const draftMarkup = '<h1 class="name">Maya Chen</h1><p>Unsynced but current browser draft.</p>';
+      const dom = new JSDOM(source, {
+        runScripts: 'dangerously', url: 'https://offline-current.local/',
+        beforeParse(window) {
+          window.localStorage.setItem(storageKey, draftMarkup);
+          window.localStorage.setItem(`${storageKey}:fingerprint`, fingerprint);
+          window.localStorage.setItem(`${storageKey}:base-html-sha256`, config.documents.resume.htmlSha256);
+          window.fetch = async () => { throw new TypeError('Failed to fetch'); };
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        const mainText = dom.window.document.querySelector('[data-ic-document-panel="resume"] main')?.textContent || '';
+        assert(mainText.includes('Unsynced but current browser draft.')
+          && dom.window.localStorage.getItem(storageKey) === draftMarkup
+          && dom.window.localStorage.getItem(`${storageKey}:superseded`) === null,
+        'an offline open must retain an autosave that is stamped against the current saved panel');
+        return { matchedDraftRestoredOffline: true };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
+    name: 'Application Sync: an edit during Sync and later same-session autosaves retain the returned panel revision',
+    run: async () => {
+      const docId = 'sync-in-flight-autosave';
+      const token = 'd'.repeat(64);
+      const syncedRevision = 'e'.repeat(64);
+      let source = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Saved baseline.</p></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+      });
+      const config = applicationSyncConfig(token, { html: source });
+      source = embedApplicationSyncConfig(source, config);
+      let resolveSync;
+      const dom = new JSDOM(source, {
+        runScripts: 'dangerously', url: 'https://sync-in-flight.local/',
+        beforeParse(window) {
+          window.fetch = async (_endpoint, options) => {
+            const payload = JSON.parse(options.body);
+            if (payload.action === 'reconcile') {
+              return { ok: true, json: async () => ({ success: true, importedDocuments: [], staleDocuments: [], conflicts: [], variantMismatches: [] }) };
+            }
+            return new Promise(resolve => {
+              resolveSync = () => resolve({ ok: true, json: async () => ({ success: true, htmlSha256: syncedRevision }) });
+            });
+          };
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        const main = dom.window.document.querySelector('[data-ic-document-panel="resume"] main');
+        const syncButton = dom.window.document.getElementById('ic-sync-btn');
+        assert(main && syncButton, 'fixture requires the résumé editor and Sync control');
+        main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Snapshot submitted to Sync.</p>';
+        main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        syncButton.click();
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        assert(typeof resolveSync === 'function', 'Sync click must issue a pending Sync request');
+        main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Edit made while Sync was rendering.</p>';
+        main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        dom.window.document.getElementById('ic-cover-tab').click();
+        await new Promise(resolve => dom.window.setTimeout(resolve, 550));
+        resolveSync();
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        const storageKey = `ic-edit:${docId}`;
+        const inFlightSaved = dom.window.localStorage.getItem(storageKey) || '';
+        const note = dom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
+        assert(inFlightSaved.includes('Edit made while Sync was rendering.')
+          && dom.window.localStorage.getItem(`${storageKey}:base-html-sha256`) === syncedRevision
+          && /Newer edits still need Sync/i.test(note),
+        'a Sync response must not overwrite an edit made while it was rendering or after a tab switch, and must re-stamp that edit against the returned revision');
+        main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Later same-session autosave.</p>';
+        main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        await new Promise(resolve => dom.window.setTimeout(resolve, 550));
+        assert((dom.window.localStorage.getItem(storageKey) || '').includes('Later same-session autosave.')
+          && dom.window.localStorage.getItem(`${storageKey}:base-html-sha256`) === syncedRevision,
+        'an autosave after a successful Sync must continue using the returned saved-panel revision');
+        return { inFlightEditPreserved: true, postSyncAutosaveContinuous: true };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
     name: 'Application PDF reconcile: ordered geometry and cover update preserve the trusted shell',
     run: async () => {
       const pdfBytes = await textPdf([

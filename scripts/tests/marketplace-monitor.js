@@ -1,4 +1,5 @@
 import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, fs, normalizeMarketplaceWatchUrls, path, prepareHubPages, resolveAttentionSourceUrls, scanPreparedHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes, withStatusCheckLock } from '../test-dependencies.js';
+import { mergePreparedHubScanSections, packPreparedHubScans, scanPreparedHubPageBatch } from '../../electron/ipc/listingStatusCheck.js';
 
 // Runs the real two-stage production sequence — prepareHubPages (scrape +
 // transport-outcome classification, no LLM call) then scanPreparedHubPages
@@ -199,7 +200,7 @@ export default [
     // an inline per-platform prepare-then-scan loop is caught even though the
     // full check-marketplace-status handler (browser automation + IPC) is out
     // of reach for a unit test.
-    name: 'Marketplace hub scan: prepare-then-scan split completes every platform\'s page fetch before any AI handoff is issued',
+    name: 'Marketplace hub scan: prepare-then-batch split completes every platform\'s page fetch before a packed AI handoff is issued',
     run: async () => {
       const order = [];
       // Three simulated platforms with deliberately uneven fetch latency —
@@ -235,23 +236,115 @@ export default [
         pendingScans.push({ platformId: platform.id, prepared });
       }
 
-      // Pass 2 — mirrors marketplace.js's Promise.all(pendingScans.map(...)):
-      // every remaining platform's manual handoff is issued together, only
-      // after pass 1 has finished for ALL platforms.
-      await Promise.all(pendingScans.map(({ platformId, prepared }) => scanPreparedHubPages({
-        ...prepared,
-        llmText: async () => {
-          order.push(`llm:${platformId}`);
-          return { summary: '', attention: [] };
+      // Pass 2 — mirrors marketplace.js: the three independent platforms are
+      // packed into one identity-bound handoff only after pass 1 has completed
+      // for ALL platforms. The result map must bind each answer back to its own
+      // platform, rather than to whichever result arrives first.
+      const scanBatches = packPreparedHubScans(pendingScans);
+      assert(scanBatches.length === 1 && scanBatches[0].length === 3,
+        'three ordinary one-page platforms should share one conservative manual handoff');
+      const denseScans = ['dense-a', 'dense-b', 'dense-c', 'dense-d'].map((platformId, platformIndex) => ({
+        platformId,
+        prepared: {
+          llmInputs: Array.from({ length: platformIndex < 3 ? 3 : 1 }, (_, pageIndex) => ({
+            spec: { url: `https://example.com/${platformId}/${pageIndex}`, urlLabel: 'hub' },
+          })),
+        },
+      }));
+      const denseBatches = packPreparedHubScans(denseScans);
+      assert(denseBatches.length === 2 && denseBatches[0].length === 3 && denseBatches[1].length === 1,
+        'the packer reserves the batch envelope so mixed multi-page hubs never exceed 15,360 output tokens');
+      const oversized = packPreparedHubScans([{
+        platformId: 'oversized-platform',
+        prepared: {
+          sources: [{ url: 'https://example.com/terminal', status: 'unknown' }],
+          readState: { read: 9, unread: 3 },
+          llmInputs: Array.from({ length: 27 }, (_, index) => ({
+            spec: { url: `https://example.com/oversized/${index}`, urlLabel: 'hub' }, status: 200, snippet: 'page',
+          })),
+        },
+      }]);
+      const oversizedEntries = oversized.flat();
+      const boundaryEntries = packPreparedHubScans([{
+        platformId: 'boundary-platform',
+        prepared: { llmInputs: oversizedEntries[0].prepared.llmInputs, sources: [], readState: { read: 0, unread: 0 } },
+      }]).flat();
+      assert(boundaryEntries.length === 1 && !boundaryEntries[0].isPageGroup && boundaryEntries[0].prepared.llmInputs.length === 26,
+        'the exact 26-page ceiling remains a normal singleton and retains its legacy scan path');
+      assert(oversizedEntries.length === 2 && oversizedEntries[0].prepared.llmInputs.length === 26 && oversizedEntries[1].prepared.llmInputs.length === 1,
+        'an oversized single platform splits into page groups below the 15,360-token batch ceiling');
+      assert(oversizedEntries[0].isPageGroup && oversizedEntries[1].isPageGroup
+        && oversizedEntries[0].parentScanId === oversizedEntries[1].parentScanId
+        && oversizedEntries[0].scanId !== oversizedEntries[1].scanId,
+      'page groups retain one stable opaque platform parent plus distinct opaque section identities');
+      const mergedOversized = mergePreparedHubScanSections(oversizedEntries.map((entry, index) => ({
+        entry,
+        scan: {
+          status: 'ok', summary: `group ${index + 1}`,
+          attention: [{ headline: `item ${index + 1}`, sourceUrl: entry.prepared.llmInputs[0].spec.url }],
+          sources: index === 0 ? [{ url: 'https://example.com/terminal', status: 'unknown' }] : [],
+          readState: entry.prepared.readState,
         },
       })));
+      assert(mergedOversized.attention.length === 2 && mergedOversized.readState.read === 9 && mergedOversized.readState.unread === 3,
+        'split groups merge deterministically without duplicating read-state or dropping later-page attention');
+      const scans = await scanPreparedHubPageBatch({
+        scans: scanBatches[0],
+        batch: 1,
+        batchTotal: 1,
+        itemsDone: 0,
+        itemsTotal: 3,
+        llmText: async (prompt, options) => {
+          order.push('llm:batch');
+          assert(options.task === 'marketplace-hub-scan-batch', 'combined platforms use the versioned batch task');
+          assert(options.hints.platformCount === 3 && options.hints.urlCount === 3,
+            'combined handoff reports deterministic platform/url cardinality');
+          for (const entry of scanBatches[0]) {
+            assert(prompt.includes(`=== PLATFORM SCAN ${entry.scanId}`), 'every platform prompt section carries its opaque identity');
+          }
+          return {
+            // Deliberately reverse output order: binding must use scanId, not
+            // position, to keep a durable replay from crossing platforms.
+            platforms: [...scanBatches[0]].reverse().map(entry => ({
+              scanId: entry.scanId,
+              summary: `Quiet ${entry.platformId}`,
+              attention: [{
+                urgency: 'low', category: 'other', headline: `Info for ${entry.platformId}`,
+                evidence: `Quiet ${entry.platformId}`,
+                sourceUrl: entry.prepared.llmInputs[0].spec.url,
+              }],
+            })),
+          };
+        },
+      });
 
       const lastFetchIndex = Math.max(...order.map((entry, i) => entry.startsWith('fetch:') ? i : -1));
       const firstLlmIndex = order.findIndex(entry => entry.startsWith('llm:'));
-      assert(order.filter(e => e.startsWith('fetch:')).length === 3 && order.filter(e => e.startsWith('llm:')).length === 3,
-        `every platform must both fetch and get scanned exactly once, got: ${order.join(', ')}`);
+      assert(order.filter(e => e.startsWith('fetch:')).length === 3 && order.filter(e => e.startsWith('llm:')).length === 1,
+        `every platform must fetch and one packed handoff must scan all of them, got: ${order.join(', ')}`);
       assert(firstLlmIndex > lastFetchIndex,
         `no AI handoff may be issued before every platform's page fetch has completed, got order: ${order.join(', ')}`);
+      for (const platform of platforms) {
+        const entry = scanBatches[0].find(candidate => candidate.platformId === platform.id);
+        const result = scans.get(entry.scanId);
+        assert(result?.attention?.[0]?.sourceUrl === urlFor(platform.id),
+          `batch result for ${platform.id} must retain only its own source URL`);
+      }
+      const crossed = await scanPreparedHubPageBatch({
+        scans: scanBatches[0].slice(0, 2),
+        llmText: async () => ({
+          platforms: scanBatches[0].slice(0, 2).map((entry, index) => ({
+            scanId: entry.scanId,
+            summary: '',
+            attention: [{
+              urgency: 'low', category: 'other', headline: 'Crossed evidence', evidence: 'x',
+              sourceUrl: scanBatches[0][index ? 0 : 1].prepared.llmInputs[0].spec.url,
+            }],
+          })),
+        }),
+      });
+      assert(crossed.get(scanBatches[0][0].scanId)?.status === 'error' && crossed.get(scanBatches[0][1].scanId)?.status === 'error',
+        'a cross-platform source URL must fail the entire batch rather than leak evidence between platform cards');
 
       // Guard the composition itself: marketplace.js must call prepareHubPages
       // inside its per-platform loop (never scanPreparedHubPages there) and
@@ -261,9 +354,9 @@ export default [
       const handlerStart = marketplaceSource.indexOf("handleSafe('check-marketplace-status'");
       assert(handlerStart >= 0, 'check-marketplace-status handler must still exist in marketplace.js');
       const loopStart = marketplaceSource.indexOf('const pendingScans = [];', handlerStart);
-      const pass2Start = marketplaceSource.indexOf('await Promise.all(pendingScans.map(', handlerStart);
+      const pass2Start = marketplaceSource.indexOf('const scanBatches = packPreparedHubScans(pendingScans);', handlerStart);
       assert(loopStart > handlerStart && pass2Start > loopStart,
-        'the handler must declare a pendingScans collector before batching every platform\'s AI handoff in one Promise.all');
+        'the handler must declare a pendingScans collector before deterministically packing every platform\'s AI handoff');
       const perPlatformLoop = marketplaceSource.slice(loopStart, pass2Start);
       // The loop may finalize a platform inline ONLY when prepareHubPages found
       // no LLM-eligible page (every hub page already hit a terminal transport
@@ -277,7 +370,11 @@ export default [
       const pendingPushIndex = perPlatformLoop.indexOf('pendingScans.push(');
       assert(inlineFinalizeIndex >= 0 && pendingPushIndex > inlineFinalizeIndex,
         'a platform may only be scanned inline (no queued handoff) when its prepared payload has zero llm-eligible pages; every other platform must be queued onto pendingScans instead');
-      return { fetches: 3, handoffs: 3, orderedAfterAllFetches: true };
+      assert(marketplaceSource.includes('scanPreparedHubPageBatch({'),
+        'the handler must use the identity-bound batch scanner for multi-platform handoffs');
+      assert(marketplaceSource.includes("scanPreparedHubPages({ ...prepared, signal })"),
+        'singleton batches preserve the established one-platform scanner');
+      return { fetches: 3, handoffs: 1, platformsBoundByOpaqueId: true, orderedAfterAllFetches: true };
     },
   },
 {
@@ -375,10 +472,10 @@ export default [
         && resultsDeclIndex < lockCallIndex && pendingScansDeclIndex < lockCallIndex,
         'results/pendingScans must be declared OUTSIDE (before) the withStatusCheckLock callback so pass 2 can still use them after release');
       const releaseMarkerIndex = marketplaceSource.indexOf('statusCheckLock released above', lockCallIndex);
-      const pass2Index = marketplaceSource.indexOf('await Promise.all(pendingScans.map(', lockCallIndex);
+      const pass2Index = marketplaceSource.indexOf('await mapWithConcurrency(', releaseMarkerIndex);
       const returnResultsIndex = marketplaceSource.lastIndexOf('return { results };');
       assert(releaseMarkerIndex > lockCallIndex && pass2Index > releaseMarkerIndex && returnResultsIndex > pass2Index,
-        'pass 2 (the AI handoff Promise.all) and the final return must sit textually AFTER the lock is released, never inside the withStatusCheckLock callback');
+        'pass 2 (the bounded AI handoff pool) and the final return must sit textually AFTER the lock is released, never inside the withStatusCheckLock callback');
       return { order: order.length, structuralGuardOk: true };
     },
   },

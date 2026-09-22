@@ -9,7 +9,7 @@ import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTe
 
 export default [
   {
-    name: 'career-file extraction fans out independent manual handoffs, joins in drop order, and aborts siblings atomically',
+    name: 'career-file extraction uses fixed ten-handoff waves, joins in drop order, and aborts siblings atomically',
     run: async () => {
       const calls = [];
       const resolvers = new Map();
@@ -40,6 +40,44 @@ export default [
           '===== FILE: third.docx =====\nTHIRD TEXT',
         ].join('\n---\n'),
       'parallel handoff settlements are rejoined into the exact original file order with accurate direct/transcribed telemetry');
+
+      const widePaths = Array.from({ length: 11 }, (_, index) => `/tmp/wide-${index + 1}.pdf`);
+      const wideCalls = [];
+      let activeWide = 0;
+      let peakWide = 0;
+      const wide = __extractCareerFileSectionsForTests(widePaths, {
+        readPlainText: async () => null,
+        callDocument: (filePath) => new Promise((resolve) => {
+          activeWide += 1;
+          peakWide = Math.max(peakWide, activeWide);
+          wideCalls.push({
+            filePath,
+            release: () => {
+              activeWide -= 1;
+              resolve({ text: `TEXT ${filePath}` });
+            },
+          });
+        }),
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(wideCalls.length === 10 && activeWide === 10 && peakWide === 10,
+        `career documents must fill, but never exceed, ten handoff slots; got ${JSON.stringify({ issued: wideCalls.length, activeWide, peakWide })}`);
+      wideCalls[0].release();
+      for (let attempt = 0; attempt < 20 && wideCalls.length < 11; attempt += 1) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert(wideCalls.length === 10 && activeWide === 9 && peakWide === 10,
+        'the eleventh career document must wait for the full fixed ten-document wave');
+      wideCalls.slice(1).forEach(call => call.release());
+      for (let attempt = 0; attempt < 20 && wideCalls.length < 11; attempt += 1) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert(wideCalls.length === 11 && activeWide === 1 && peakWide === 10,
+        'the next career-document wave begins only after its first ten prompts settle');
+      wideCalls[10].release();
+      const wideResult = await wide;
+      assert(wideResult.transcribedFiles === 11 && wideResult.sections.length === 11,
+        'the bounded career-document pool still returns every file in the original order');
 
       let siblingAbortObserved = false;
       let siblingStarted = false;
@@ -89,7 +127,7 @@ export default [
       try { await cancelled; } catch (error) { cancellation = error; }
       assert(parentAbortCount === 2 && cancellation?.message === 'drop cancelled',
         'cancelling the parent parse task propagates to every issued extraction handoff and waits for their cleanup');
-      return { parallelHandoffs: calls.length, orderedSections: extracted.sections.length, siblingAbortObserved, parentAbortCount };
+      return { parallelHandoffs: calls.length, maxParallelDocuments: peakWide, orderedSections: extracted.sections.length, siblingAbortObserved, parentAbortCount };
     },
   },
   {

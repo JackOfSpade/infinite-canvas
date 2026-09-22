@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"2a8eb9c5e1c1","build/synthesis-scope-gate-doc-test.js":"e10b5335ff9c","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"2cfa1ec99be5","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"48a64f933b8f","build/parallelism-gate-doc-test.js":"2a8eb9c5e1c1","build/synthesis-scope-gate-doc-test.js":"84af32e22dab","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -1766,6 +1766,10 @@ console.log('\nRule 6 — one antecedent at paragraph boundaries');
 assert(/paragraph boundar/i.test(rule6), 'Rule 6 covers paragraph boundaries explicitly', 'no paragraph-boundary language found');
 assert(/exactly one/i.test(rule6) && /antecedent/i.test(rule6), 'Rule 6 requires exactly one plausible antecedent for a backward reference', 'no "exactly one … antecedent" requirement found');
 assert(/repeat the precise noun phrase/i.test(rule6), 'Rule 6 prescribes repeating the precise noun phrase when antecedents are ambiguous', 'no noun-phrase-repetition repair found');
+console.log('\nRule 6 — prior-employer continuity');
+assert(/Prior-employer reference/i.test(rule6), 'Rule 6 gives prior-employer references their own continuity guidance', 'no prior-employer continuity guidance found');
+assert(/Within the same paragraph, let the candidate continue naturally/i.test(rule6) && /At a new paragraph, use a short cue such as/i.test(rule6), 'Rule 6 distinguishes natural same-paragraph continuation from an optional new-paragraph cue', 'paragraph-boundary employer-reference guidance is missing');
+assert(/Repeat the employer name when multiple\s+employers or roles could otherwise be the antecedent/i.test(rule6), 'Rule 6 preserves full employer names when ambiguity requires them', 'employer-reference ambiguity repair is missing');
 console.log('\nRule 6 — repairs, and what is not a repair');
 assert(/[Rr]ewrite it as a concrete, evidence-scoped conclusion/.test(rule6), 'Rule 6 offers the evidence-scoped rewrite as repair 1', 'rewrite repair missing');
 assert(/\*\*Delete it\.\*\*/.test(rule6), 'Rule 6 offers deletion as repair 2 for synthesis that adds no supported reasoning', 'delete repair missing');
@@ -1784,12 +1788,14 @@ assert(/no unearned generalization/i.test(skill), 'SKILL.md résumé content rul
 assert(/no conclusion wider\s+than the evidence/i.test(skill), 'SKILL.md prose-fields paragraph scopes conclusions to their evidence', 'prose-fields paragraph does not cover generalization');
 assert(/most of my work\|throughout my career/.test(skill), 'SKILL.md ships a triage grep for breadth past the evidence', 'breadth-escalation triage grep missing');
 assert(/plausible\s+antecedent/i.test(skill), 'SKILL.md gate step names the one-antecedent check', 'no antecedent check in the pipeline gate');
+assert(/Do not repeat a prior employer’s full name merely from\s+habit/i.test(skill), 'SKILL.md avoids mechanical prior-employer repetition', 'no prior-employer repetition guidance in the pipeline');
 assert(/never by\s+inserting a filler transition/i.test(skill), 'SKILL.md forbids the filler-transition non-repair', 'no filler-transition prohibition in SKILL.md');
 assert(/synthesis-scope-gate-doc-test\.js/.test(skill), 'SKILL.md files table lists this test', 'test not listed in the SKILL.md files table');
 console.log('\nreadme.md coverage');
 assert(/unearned generalization/i.test(readme), 'readme.md documents the generalization rule alongside the other prose-shape rules', 'no "unearned generalization" language in readme.md');
 assert(/Five prose failures/i.test(readme), 'readme.md prose-shape section counts five banned shapes', 'readme.md still counts four prose failures');
 assert(/exactly one plausible antecedent/i.test(readme), 'readme.md states the one-antecedent rule for paragraph transitions', 'no antecedent rule in readme.md');
+assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme), 'readme.md documents natural prior-employer reference', 'no natural prior-employer reference guidance in readme.md');
 assert(/repeat the\s+precise noun phrase instead/i.test(readme) && /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme), 'readme.md defines the explicit-transition repair without prescribing copy', 'semantic transition repair missing in readme.md');
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering), 'ENGINEERING.md automated-suites index lists this test', 'test not listed in the ENGINEERING.md automated-suites index');

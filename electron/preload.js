@@ -138,10 +138,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   discardJobAnalysisSnapshot: (args) => ipcRenderer.invoke('discard-job-analysis-snapshot', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
-  // Local AI is intentionally a manual, file-based handoff. These handlers
-  // never invoke or automate a local coding agent; the user runs the documented
-  // provider-neutral routine and returns here to validate/import result.json.
+  // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
+  // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
+  // Application paste-back handoffs are app-owned and resumable. The local AI
+  // only returns structured JSON; it never receives filesystem authority.
+  getLocalApplicationHandoff: (args) => ipcRenderer.invoke('get-local-application-handoff', args),
+  submitLocalApplicationHandoff: (args) => ipcRenderer.invoke('submit-local-application-handoff', args),
+  updateLocalApplicationDraft: (args) => ipcRenderer.invoke('update-local-application-draft', args),
   discardLocalApplication: (args) => ipcRenderer.invoke('discard-local-application', args),
   getLocalApplicationStatus: (args) => ipcRenderer.invoke('get-local-application-status', args),
   discoverLocalApplications: (args) => ipcRenderer.invoke('discover-local-applications', args),
@@ -195,6 +199,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scrapePriceComps: (args) => ipcRenderer.invoke('scrape-price-comps', args),
   rescrapeSource: (args) => ipcRenderer.invoke('rescrape-source', args),
   synthesizePrice: (args) => ipcRenderer.invoke('synthesize-price', args),
+  synthesizePricesBatch: (args) => ipcRenderer.invoke('synthesize-prices-batch', args),
   synthesizeBundlePrice: (args) => ipcRenderer.invoke('synthesize-bundle-price', args),
   assessPlatformFit: (args) => ipcRenderer.invoke('assess-platform-fit', args),
   resolveCaptcha: (args) => ipcRenderer.invoke('resolve-captcha', args),

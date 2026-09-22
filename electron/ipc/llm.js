@@ -1,7 +1,18 @@
 import { isSensitivePath } from '../utils/pathSafety.js';
 import path from 'path';
-import { priceSynthesisMaxTokens, listingEvaluationMaxTokens } from './resultCaps.js';
-import { NON_API_AI_TRANSPORT, requestNonApiAi } from './nonApiAi.js';
+import {
+  compensationCohortAssessmentMaxTokens,
+  jobPreferenceResearchAssessmentMaxTokens,
+  jobPreferenceResearchMaxTokens,
+  jobScoringMaxTokens,
+  listingEvaluationMaxTokens,
+  MANUAL_AI_USABLE_OUTPUT_TOKENS,
+  marketplaceHubScanBatchMaxTokens,
+  priceSynthesisBatchMaxTokens,
+  priceSynthesisMaxTokens,
+  roleFamilyAssessmentMaxTokens,
+} from './resultCaps.js';
+import { NON_API_AI_TRANSPORT, durableRunExactStepStatus, durableRunHasExactStep, materializeNonApiPrompt, requestNonApiAi } from './nonApiAi.js';
 import { logger } from '../logger.js';
 
 /**
@@ -27,23 +38,31 @@ import { logger } from '../logger.js';
 const KNOWN_TASKS = new Set([
   'vision-product-analysis',
   'price-synthesis',
+  'price-synthesis-batch',
   'bundle-price-synthesis',
   'platform-fit-assessment',
   'marketplace-hub-scan',
+  'marketplace-hub-scan-batch',
   'resume-parse',
   'career-file-extract',
   'job-query-generation',
   'job-scoring',
   'job-taxonomy-plan',
   'job-taxonomy-classify',
+  'job-taxonomy-classify-batch',
   'job-compensation-research',
   'job-compensation-assessment',
+  'job-compensation-research-batch',
+  'job-compensation-assessment-batch',
   'job-preference-interpretation',
   'job-preference-evaluation',
   'job-preference-research',
   'job-preference-research-assessment',
+  'job-preference-research-batch',
+  'job-preference-research-batch-assessment',
   'job-role-audit',
   'job-role-screen',
+  'job-role-screen-batch',
   // The fallback bucket resolveTask() lands on for an unmapped/absent task.
   // It is a real member here so that passing task:'default' explicitly is not
   // itself reported as "unmapped"; getKnownTaskIds() filters it back out
@@ -78,10 +97,16 @@ const TASK_MAX_TOKENS = {
   // ~200 tokens of reasoning per comp plus ~600 tokens of visible output; a
   // formula seed of 7000 was measured to truncate a 40-comp batch at 8383
   // tokens, so the floor moved well above that. 40 items → 11000 (headroom
-  // above the observed 8648-token need); capped at 24576. Formula lives in
-  // resultCaps.priceSynthesisMaxTokens so the comp-count ceiling that
-  // compsForPricing() feeds is derived from the SAME shape (can't truncate).
+  // above the observed 8648-token need). The 24,576 historical formula remains
+  // here only so an exact already-issued singleton handoff can be reconstructed;
+  // taskMaxTokensFor hard-clamps every fresh request and marketplace.js routes
+  // fresh pricing through the <=15,360 v2 batch contract.
   'price-synthesis':           ({ itemCount } = {}) => priceSynthesisMaxTokens(itemCount),
+  // Versioned item-keyed batches are packed by this exact formula in
+  // marketplace.js. One Ki-token is reserved for the response envelope; each
+  // independent pricing result gets 900 tokens plus 200 per supplied comp.
+  'price-synthesis-batch':     ({ itemCount = 1, totalCompCount = 0 } = {}) =>
+    priceSynthesisBatchMaxTokens(itemCount, totalCompCount),
   // Reasoning-heavy models can consume ~1460 thinking + ~50-230 visible
   // tokens for this task — real-world p95 is 1374, max 1510. 2048 sits above
   // the observed max so the cap is adequate on the first attempt (this
@@ -96,6 +121,10 @@ const TASK_MAX_TOKENS = {
   // scanned (one consolidated call covers all of a platform's watch URLs).
   'marketplace-hub-scan':      ({ urlCount = 1 } = {}) =>
     Math.min(4096, 1536 + Math.max(0, urlCount - 1) * 512),
+  // Combined platform scans are packed by the same conservative estimate in
+  // marketplace.js: per-platform JSON/reasoning plus each attached hub page.
+  'marketplace-hub-scan-batch': ({ platformCount = 1, urlCount = 1 } = {}) =>
+    marketplaceHubScanBatchMaxTokens(platformCount, urlCount),
   // Full structured profile. Sized off the merged career-data corpus rather than
   // pinned flat: the profile grows with the number of roles, skills and
   // workHistory rows the corpus contains, and a multi-file drop (resume +
@@ -111,19 +140,17 @@ const TASK_MAX_TOKENS = {
   // silently DROPS the candidate's career history and weakens everything
   // downstream (queries, scoring, the generated résumé). Caps are billed on
   // actual output, so the headroom is free insurance, not a cost.
-  'career-file-extract':       16384,
+  'career-file-extract':       MANUAL_AI_USABLE_OUTPUT_TOKENS,
   // Reasoning can consume the same cap as visible output on some models —
   // real-world: thoughts=979, visible=31 at cap=1024 truncated the JSON
   // mid-output. 4096 matches resume-parse and gives ~3000 headroom over
   // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
   // Manual scoring returns a bounded decisive-evidence audit (not a complete,
-  // duplicated JD transcription). The former 32K cap invited external chats
-  // to produce 140K-character pastes for a 15-job batch. This still leaves
-  // ample room for four grounded requirements/job while keeping the handoff
-  // practical to review and paste.
+  // duplicated JD transcription). Fresh batches contain at most 22 jobs:
+  // 1,600 + 22*600 = 14,800, safely below the 15,360 usable output ceiling.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
-    Math.min(12000, 1600 + itemCount * 600),
+    jobScoringMaxTokens(itemCount),
   // Taxonomy planning is fed only bounded aggregate statistics and returns a
   // tiny role/range/mapping object. Large manual caps made this otherwise
   // mechanical step look like it was hanging.
@@ -131,6 +158,10 @@ const TASK_MAX_TOKENS = {
   // Fallback classification emits only integer role indexes. The planner now
   // handles common directions directly, so this is both rare and compact.
   'job-taxonomy-classify':     () => 1024,
+  // One integer per compact title row. The v2 batcher uses 448 rows, which
+  // exactly fills 1,024 + 32*448 = 15,360 without crossing the usable ceiling.
+  'job-taxonomy-classify-batch': ({ itemCount = 1 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(1, itemCount) * 32),
   // One grounded search is shared by a role/seniority/location cohort.
   'job-compensation-research': 4096,
   // Location-based cohort consolidation makes this per-job structured output
@@ -138,16 +169,46 @@ const TASK_MAX_TOKENS = {
   // headroom through roughly 17 normal rows before the ceiling applies.
   'job-compensation-assessment': ({ itemCount = 5 } = {}) =>
     Math.min(12288, 2048 + itemCount * 600),
+  'job-compensation-research-batch': ({ roleFamilyCount = 0, cohortCount = 0, itemCount = 1 } = {}) => {
+    const roles = Math.max(0, Number(roleFamilyCount) || 0);
+    const cohorts = Math.max(0, Number(cohortCount) || 0);
+    return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS,
+      2048 + (roles > 0 ? roles * 1800 : Math.max(1, cohorts || itemCount) * 3000));
+  },
+  'job-compensation-assessment-batch': ({ roleFamilyCount = 0, cohortCount = 0, itemCount = 1 } = {}) => {
+    const roles = Math.max(0, Number(roleFamilyCount) || 0);
+    const cohorts = Math.max(0, Number(cohortCount) || 0);
+    const rows = Math.max(1, Number(itemCount) || 1);
+    return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS,
+      roles > 0 ? roleFamilyAssessmentMaxTokens(roles) : compensationCohortAssessmentMaxTokens(Math.max(1, cohorts), rows));
+  },
   'job-preference-interpretation': 4096,
   // Output volume here is listings × preference-plan items — the model writes
   // one match object per pair — so the cap is keyed on that PRODUCT, not on the
   // listing count. resultCaps owns the constants so this cap and the batch size
   // that feeds it are derived from the same numbers. The itemCount fallback
   // assumes an 8-item plan for callers that don't supply matchCount.
-  'job-preference-evaluation': ({ matchCount, itemCount = 10 } = {}) =>
-    listingEvaluationMaxTokens(Number.isFinite(matchCount) ? matchCount : itemCount * 8, itemCount),
+  // `observedTokensPerMatch` rides in on the hints so the DECLARED budget uses
+  // the same measured cost model the batch size was chosen with. When they
+  // disagreed, a verbose model correctly shrank the batch while the prompt
+  // still quoted the old static budget — telling the model to write less than
+  // the answer it was being asked for actually needs.
+  'job-preference-evaluation': ({ matchCount, itemCount = 10, observedTokensPerMatch = null } = {}) =>
+    listingEvaluationMaxTokens(
+      Number.isFinite(matchCount) ? matchCount : itemCount * 8,
+      itemCount,
+      { observedTokensPerMatch },
+    ),
   'job-preference-research': 4096,
   'job-preference-research-assessment': 2048,
+  // A single employer research result was intentionally small enough for the
+  // former one-company handoff. Batched research must instead scale its
+  // declared manual-chat ceiling with the number of employers it contains.
+  // resultCaps owns both formulas so the batcher and its prompt cannot drift.
+  'job-preference-research-batch': ({ itemCount = 1 } = {}) =>
+    jobPreferenceResearchMaxTokens(itemCount),
+  'job-preference-research-batch-assessment': ({ itemCount = 1 } = {}) =>
+    jobPreferenceResearchAssessmentMaxTokens(itemCount),
   // Pass-2 role-resolution audit (JOB_ROLE_AUDIT_SCHEMA, jobPreferences.js's
   // resolveSearchRoles). Visible JSON is small — up to 20 final titles plus
   // up to 20 added/removed titles (worst case ~40 short title strings) and
@@ -161,8 +222,10 @@ const TASK_MAX_TOKENS = {
   // and there is no cap-raise retry on this transport — a truncated paste on
   // the one call that matters most is the worst place to be stingy.
   'job-role-audit': 4096,
-  // The ONLY high-row-count task here: ROLE_SCREEN_BATCH_SIZE is 200, where
-  // every other batched task runs 10-40 rows. It emits one tiny row per job —
+  // The ONLY high-row-count task here. Durable v1 `job-role-screen` prompts
+  // keep their original 200-row layout and may use the historical hard cap;
+  // fresh `job-role-screen-batch` prompts pack up to 298 rows beneath the
+  // shared 15,360-token usable ceiling. Each emits one tiny row per job —
   // `{"index":199,"outcome":"mismatch","reason":"registered nurse role"}` is
   // about 20 tokens, and 'match'/'unclear' rows carry an empty reason and cost
   // ~13 — but 200 of them still far exceed the flat 'default' 2048 this task
@@ -172,9 +235,11 @@ const TASK_MAX_TOKENS = {
   // would invert the entire point of screening on titles (see
   // screenJobRolesByTitle in jobPreferences.js: the batch is large precisely
   // so one handoff covers the pool). Provisioned at roughly double the
-  // all-mismatch worst case; 200 rows → 10624.
+  // all-mismatch worst case; 200 rows → 10,624 and 298 rows → 15,328.
   'job-role-screen':           ({ itemCount = 0 } = {}) =>
     Math.min(16384, 1024 + Math.max(0, itemCount) * 48),
+  'job-role-screen-batch':     ({ itemCount = 0 } = {}) =>
+    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 1024 + Math.max(0, itemCount) * 48),
   'default':                   2048,
 };
 
@@ -197,7 +262,10 @@ export function getKnownTaskIds() {
 export function taskMaxTokensFor(task, hints = {}) {
   const t = resolveTask(task);
   const entry = TASK_MAX_TOKENS[t] ?? TASK_MAX_TOKENS['default'];
-  return typeof entry === 'function' ? entry(hints) : entry;
+  // The handoff is manually pasted into a chat app, but its requested output
+  // must still fit the transport's real 16,384-token ceiling. New packed
+  // workflows target the more conservative 15,360 usable budget themselves.
+  return Math.min(16384, typeof entry === 'function' ? entry(hints) : entry);
 }
 
 // Manual job handoffs do not call, select, or fall back between providers —
@@ -207,12 +275,20 @@ function manualRequestConfig(task, hints = {}, {
   cachedPrefix = null,
   grounding = false,
   requestKind = 'text',
+  // Narrow migration escape hatch: the retired one-item price prompt had
+  // durable keys materialized with its historical 24,576 seed. It is allowed
+  // only while replaying an exact existing step; fresh work must use the v2
+  // packed price-synthesis-batch contract and its 15,360 ceiling.
+  exactLegacyPriceSynthesisHandoff = false,
 } = {}) {
   // The handoff prompt states a suggested output-token ceiling so the human's
   // chat app has some guidance, but nothing here enforces it: there is no
   // cap-raise retry on this transport, so a truncated paste is a failure the
   // user has to notice and re-paste by hand, not a caught and corrected one.
-  const seed = taskMaxTokensFor(resolveTask(task), hints);
+  const resolvedTask = resolveTask(task);
+  const seed = exactLegacyPriceSynthesisHandoff === true && resolvedTask === 'price-synthesis'
+    ? priceSynthesisMaxTokens(hints.itemCount)
+    : taskMaxTokensFor(resolvedTask, hints);
   const maxTokens = seed;
   const handoffSettings = {
     requestKind,
@@ -284,7 +360,7 @@ function assertStructuredResponseSchema(responseSchema, caller) {
  * the human can tell it's the same boilerplate across a run.
  */
 export async function callLLMText(prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, cachedPrefix, retryOnTruncation, responseValidator, manualHandoff } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix, retryOnTruncation, displayOnlyPromptSuffix, responseValidator, legacyReplay, manualHandoff } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMText');
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` for per-stage telemetry. There is only one transport, so
@@ -294,13 +370,16 @@ export async function callLLMText(prompt, opts = {}) {
   const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
   const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
     cachedPrefix, requestKind: 'structured-text',
+    exactLegacyPriceSynthesisHandoff: opts?.exactLegacyPriceSynthesisHandoff === true,
   });
   const result = await requestNonApiAi({
     prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-    requestKind: 'structured-text', retryOnTruncation, responseValidator, signal,
+    requestKind: 'structured-text', retryOnTruncation, displayOnlyPromptSuffix, responseValidator, legacyReplay,
+    measureResponseUnits: opts?.measureResponseUnits, measureProgressUnits: opts?.measureProgressUnits, signal,
     canStepBack: manualHandoff.canStepBack,
     stepBackLabel: manualHandoff.stepBackLabel,
     initialResponse: manualHandoff.initialResponse,
@@ -319,7 +398,17 @@ export async function callLLMText(prompt, opts = {}) {
  * instruction inside the copied prompt (see materializeNonApiPrompt).
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  const { signal, task, hints, grounding, cachedPrefix, manualHandoff } = normalizeOpts(opts);
+  const {
+    signal,
+    task,
+    hints,
+    grounding,
+    cachedPrefix,
+    retryOnTruncation,
+    displayOnlyPromptSuffix,
+    responseValidator,
+    manualHandoff,
+  } = normalizeOpts(opts);
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
   const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
@@ -328,15 +417,111 @@ export async function callLLMRaw(prompt, opts = {}) {
   const result = await requestNonApiAi({
     prompt, cachedPrefix, task, grounding, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-    requestKind: 'raw-text', signal,
+    requestKind: 'raw-text', retryOnTruncation, displayOnlyPromptSuffix, responseValidator,
+    measureProgressUnits: opts?.measureProgressUnits, signal,
     canStepBack: manualHandoff.canStepBack,
     stepBackLabel: manualHandoff.stepBackLabel,
     initialResponse: manualHandoff.initialResponse,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
+}
+
+/**
+ * Ask whether this exact raw-text request already owns a durable handoff.
+ *
+ * This mirrors callLLMRaw's pre-code materialization rather than looking at
+ * task labels. It is intentionally read-only and exists for narrow contract
+ * migrations: an old request in a partially completed run can keep its old
+ * prompt, while fresh siblings move to a newer packed prompt.
+ */
+export async function hasExactDurableRawHandoff(prompt, {
+  manualAiRunId,
+  nodeId = null,
+  ...opts
+} = {}) {
+  return (await exactDurableRawHandoffStatus(prompt, {
+    manualAiRunId,
+    nodeId,
+    ...opts,
+  })) !== null;
+}
+
+/**
+ * Exact raw handoff status for fixed-wave scheduling. `accepted` can be
+ * replayed before a visible wave; `pending` must hold a position in it.
+ */
+export async function exactDurableRawHandoffStatus(prompt, {
+  manualAiRunId,
+  nodeId = null,
+  ...opts
+} = {}) {
+  const { task, hints, grounding, cachedPrefix, retryOnTruncation } = normalizeOpts(opts);
+  const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
+  const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+    cachedPrefix, grounding, requestKind: 'raw-text',
+  });
+  const materializedPrompt = materializeNonApiPrompt({
+    prompt,
+    cachedPrefix,
+    task,
+    grounding,
+    maxOutputTokens: maxTokens,
+    formulaSeed,
+    requestKind: 'raw-text',
+    retryOnTruncation,
+    handoffSettings,
+    // requestNonApiAi hashes this exact pre-code, non-hardened form.
+    hardenTaskPrompt: false,
+    includeStrictJsonSerializationCheck: false,
+  });
+  return durableRunExactStepStatus(manualAiRunId, {
+    materializedPrompt,
+    task,
+    nodeId,
+    batch: hints.batch,
+    batchTotal: hints.batchTotal,
+    itemCount: hints.itemCount,
+  });
+}
+
+/** Read-only exact-step counterpart for callLLMText. */
+export async function hasExactDurableTextHandoff(prompt, {
+  manualAiRunId,
+  nodeId = null,
+  ...opts
+} = {}) {
+  const { task, hints, responseSchema, cachedPrefix, retryOnTruncation } = normalizeOpts(opts);
+  assertStructuredResponseSchema(responseSchema, 'hasExactDurableTextHandoff');
+  const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
+  const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
+    cachedPrefix, requestKind: 'structured-text',
+    exactLegacyPriceSynthesisHandoff: opts?.exactLegacyPriceSynthesisHandoff === true,
+  });
+  const materializedPrompt = materializeNonApiPrompt({
+    prompt,
+    cachedPrefix,
+    task,
+    responseSchema,
+    maxOutputTokens: maxTokens,
+    formulaSeed,
+    requestKind: 'structured-text',
+    retryOnTruncation,
+    handoffSettings,
+    hardenTaskPrompt: false,
+    includeStrictJsonSerializationCheck: false,
+  });
+  return durableRunHasExactStep(manualAiRunId, {
+    materializedPrompt,
+    task,
+    nodeId,
+    batch: hints.batch,
+    batchTotal: hints.batchTotal,
+    itemCount: hints.itemCount,
+  });
 }
 
 /** Vision call — image attachments are Finder-revealed for the human to attach to their chat. */
@@ -366,9 +551,11 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const result = await requestNonApiAi({
     prompt, task, responseSchema, maxOutputTokens: maxTokens, formulaSeed,
     handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-    attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator, signal,
+    attachmentPaths: imagePaths, requestKind: 'structured-vision', responseValidator,
+    measureProgressUnits: opts?.measureProgressUnits, signal,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -393,9 +580,11 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   return requestNonApiAi({
     prompt, task, responseSchema, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
-    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal,
+    itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
+    progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
-    attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator, signal,
+    attachmentPaths: [filePath], requestKind: 'structured-document', responseValidator,
+    measureProgressUnits: opts?.measureProgressUnits, signal,
   });
 }
 
@@ -403,7 +592,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.responseValidator !== undefined || opts.manualHandoff !== undefined || Object.keys(opts).length === 0)) {
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.displayOnlyPromptSuffix !== undefined || opts.responseValidator !== undefined || opts.measureProgressUnits !== undefined || opts.legacyReplay !== undefined || opts.manualHandoff !== undefined || Object.keys(opts).length === 0)) {
     const suppliedManualHandoff = opts.manualHandoff && typeof opts.manualHandoff === 'object'
       ? opts.manualHandoff
       : {};
@@ -412,10 +601,17 @@ function normalizeOpts(opts) {
       stepBackLabel: typeof suppliedManualHandoff.stepBackLabel === 'string' ? suppliedManualHandoff.stepBackLabel : '',
       initialResponse: typeof suppliedManualHandoff.initialResponse === 'string' ? suppliedManualHandoff.initialResponse : '',
     };
-    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, retryOnTruncation: opts.retryOnTruncation !== false, responseValidator: typeof opts.responseValidator === 'function' ? opts.responseValidator : null, manualHandoff };
+    const legacyReplay = opts.legacyReplay && typeof opts.legacyReplay === 'object'
+      && typeof opts.legacyReplay.prompt === 'string'
+      && opts.legacyReplay.responseSchema && typeof opts.legacyReplay.responseSchema === 'object'
+      && !Array.isArray(opts.legacyReplay.responseSchema)
+      && typeof opts.legacyReplay.responseValidator === 'function'
+      ? opts.legacyReplay
+      : null;
+    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding, retryOnTruncation: opts.retryOnTruncation !== false, displayOnlyPromptSuffix: typeof opts.displayOnlyPromptSuffix === 'string' ? opts.displayOnlyPromptSuffix : '', responseValidator: typeof opts.responseValidator === 'function' ? opts.responseValidator : null, legacyReplay, manualHandoff };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.
-  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, retryOnTruncation: true, responseValidator: null, manualHandoff: { canStepBack: false, stepBackLabel: '', initialResponse: '' } };
+  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false, retryOnTruncation: true, displayOnlyPromptSuffix: '', responseValidator: null, legacyReplay: null, manualHandoff: { canStepBack: false, stepBackLabel: '', initialResponse: '' } };
 }
 
 /**

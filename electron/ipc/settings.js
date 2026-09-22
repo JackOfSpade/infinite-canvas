@@ -330,11 +330,9 @@ export function getRoleFamilyExperienceBands(roleFamily) {
   return roleFamilyExperienceBandCacheEntry(getRoleFamilyExperienceBandCache(), roleFamily);
 }
 
-export function saveRoleFamilyExperienceBands(roleFamily, value) {
+function normalizedRoleFamilyExperienceBandCacheEntry(roleFamily, value) {
   const key = roleFamilyExperienceBandCacheKey(roleFamily);
-  if (!key || !value || typeof value !== 'object') return;
-  const store = tryGetStore();
-  if (!store) return;
+  if (!key || !value || typeof value !== 'object') return null;
   const bands = (Array.isArray(value.bands) ? value.bands : [])
     .map((band) => {
       const label = String(band?.label || '').trim().slice(0, 80);
@@ -357,16 +355,42 @@ export function saveRoleFamilyExperienceBands(roleFamily, value) {
     })
     .filter(Boolean)
     .slice(0, 5);
-  if (!isValidCompensationExperienceBandLadder(bands) || !sources.length) return;
-  const map = getRoleFamilyExperienceBandCache();
-  map[key] = {
-    roleFamily: String(value.roleFamily || roleFamily).trim().slice(0, 180),
-    bands,
-    sources,
-    verifiedDate: typeof value.verifiedDate === 'string' ? value.verifiedDate : new Date().toISOString(),
-    ...(value.reusedFrom ? { reusedFrom: String(value.reusedFrom).trim().slice(0, 180) } : {}),
+  if (!isValidCompensationExperienceBandLadder(bands) || !sources.length) return null;
+  return {
+    key,
+    value: {
+      roleFamily: String(value.roleFamily || roleFamily).trim().slice(0, 180),
+      bands,
+      sources,
+      verifiedDate: typeof value.verifiedDate === 'string' ? value.verifiedDate : new Date().toISOString(),
+      ...(value.reusedFrom ? { reusedFrom: String(value.reusedFrom).trim().slice(0, 180) } : {}),
+    },
   };
-  store.set('jobs.roleFamilyExperienceBands', map);
+}
+
+/**
+ * Atomically merge valid ladders from one structured v2 assessment. This
+ * prevents a crash between per-row writes from mutating an accepted stable
+ * slice into a different restart prompt. Unavailable rows remain retryable.
+ */
+export function saveRoleFamilyExperienceBandsBatch(entries) {
+  if (!Array.isArray(entries) || !entries.length) return [];
+  const store = tryGetStore();
+  if (!store) return [];
+  const map = getRoleFamilyExperienceBandCache();
+  const saved = [];
+  for (const item of entries) {
+    const normalized = normalizedRoleFamilyExperienceBandCacheEntry(item?.roleFamily, item?.value);
+    if (!normalized) continue;
+    map[normalized.key] = normalized.value;
+    saved.push(normalized.key);
+  }
+  if (saved.length) store.set('jobs.roleFamilyExperienceBands', map);
+  return saved;
+}
+
+export function saveRoleFamilyExperienceBands(roleFamily, value) {
+  saveRoleFamilyExperienceBandsBatch([{ roleFamily, value }]);
 }
 
 /**

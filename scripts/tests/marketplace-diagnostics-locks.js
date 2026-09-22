@@ -1,6 +1,148 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, routeLegacyPriceSynthesisHandoff, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission } from '../../electron/ipc/marketplace.js';
 
 export default [
+{
+    name: 'legacy singleton price handoff: an exact durable old step alone keeps its 24,576-token replay contract',
+    run: async () => {
+      const legacyPrompt = 'legacy price prompt bytes: sold=[{"title":"old"}]';
+      const legacyHints = { itemCount: 108 };
+      const calls = [];
+      let probe;
+      const result = await routeLegacyPriceSynthesisHandoff({
+        legacyPrompt,
+        legacyHints,
+        manualAiRunId: 'run-exact',
+        nodeId: 'node-exact',
+        batchItem: { itemId: 'price-exact', soldComps: [], activeComps: [] },
+        exactStepProbe: async (prompt, options) => {
+          probe = { prompt, options };
+          return true;
+        },
+        callText: async (prompt, options) => {
+          calls.push({ prompt, options });
+          return { recommended_price: 42, match_quality: 'strong' };
+        },
+      });
+      assert(probe.prompt === legacyPrompt
+        && probe.options.manualAiRunId === 'run-exact'
+        && probe.options.nodeId === 'node-exact'
+        && probe.options.task === 'price-synthesis'
+        && probe.options.exactLegacyPriceSynthesisHandoff === true,
+      'only an exact, run-and-node-scoped durable probe may select the historical singleton handoff');
+      assert(calls.length === 1 && calls[0].prompt === legacyPrompt
+        && calls[0].options.task === 'price-synthesis'
+        && calls[0].options.exactLegacyPriceSynthesisHandoff === true
+        && result.usedLegacyHandoff === true && result.pricing.recommended_price === 42,
+      'the accepted/pending old step replays its prompt unchanged with the identical narrow cap override');
+      assert(taskMaxTokensFor('price-synthesis', legacyHints) === 16384,
+        'the public task cap is hard-clamped; only the exact legacy replay override retains its historical 24,576 seed');
+      return { replayedExactStep: true };
+    },
+  },
+  {
+    name: 'legacy singleton price handoff: a fresh call uses v2 singleton cap, isolation, and provenance instead of the old prompt',
+    run: async () => {
+      const calls = [];
+      const batchItem = {
+        itemId: 'price-v2-singleton',
+        query: 'Widget',
+        condition: 'Used - Good',
+        userPricingNotes: 'Includes original box',
+        soldComps: [{ title: 'Widget sold', price: 100, url: 'https://example.test/sold', source: 'sold-source' }],
+        activeComps: [{ title: 'Widget active', price: 120, url: 'https://example.test/active', source: 'active-source' }],
+      };
+      const pricing = {
+        recommended_price: 105, quick_sell_price: 95, max_profit_price: 125,
+        justification: 'The supplied sold listing anchors the price.', match_quality: 'moderate',
+        comp_breakdown: { anchor_count: 1, adjusted_count: 0, bound_count: 1 },
+        market_summary: { sold_count: 1, active_count: 1 }, recommended_platforms: [],
+      };
+      const result = await routeLegacyPriceSynthesisHandoff({
+        legacyPrompt: 'OLD NAKED SCRAPED COMPS MUST NOT BE SENT',
+        legacyHints: { itemCount: 2 },
+        manualAiRunId: 'fresh-run',
+        nodeId: 'fresh-node',
+        batchItem,
+        exactStepProbe: async () => false,
+        callText: async (prompt, options) => {
+          calls.push({ prompt, options });
+          return { items: [{ itemId: batchItem.itemId, pricing, compSourceUrls: ['https://example.test/sold'], compSources: ['sold-source'] }] };
+        },
+      });
+      assert(calls.length === 1 && calls[0].options.task === 'price-synthesis-batch'
+        && taskMaxTokensFor(calls[0].options.task, calls[0].options.hints) <= 15360
+        && !calls[0].prompt.includes('OLD NAKED SCRAPED COMPS MUST NOT BE SENT')
+        && calls[0].prompt.includes('=== PRICING ITEM price-v2-singleton ===')
+        && calls[0].prompt.includes('DATA scraped from an external source')
+        && calls[0].prompt.includes('<untrusted-price-synthesis-price-v2-singleton-'),
+      'a fresh legacy IPC call issues exactly one capped v2 prompt with item isolation and wrapped untrusted listings');
+      assert(result.usedLegacyHandoff === false && result.pricing === pricing
+        && result.modelItem === batchItem,
+      'the v2 singleton validates source provenance yet returns the historical { pricing } result shape');
+      const marketplaceSource = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
+      assert((marketplaceSource.match(/exactLegacyPriceSynthesisHandoff: true/g) || []).length === 2,
+        'the 24,576 compatibility override is passed only to the exact probe and exact replay, never fresh production work');
+      return { freshTask: calls[0].options.task, provenanceBound: true };
+    },
+  },
+{
+    name: 'bundle price synthesis batches: pack by output ceiling and bind comp provenance to opaque item IDs',
+    run: () => {
+      const makeItem = (itemId, count) => ({
+        itemId,
+        soldComps: Array.from({ length: count }, (_, index) => ({ url: `https://example.test/${itemId}/${index}`, source: 'example' })),
+        activeComps: [],
+      });
+      const items = [makeItem('price-a', 40), makeItem('price-b', 40)];
+      const batches = packBatchPriceSynthesisItems(items);
+      assert(batches.length === 2 && batches[0][0].itemId === 'price-a' && batches[1][0].itemId === 'price-b',
+        'items exceeding 1024 + 900*n + 200*comps <= 15360 split deterministically without reordering');
+      const pricing = {
+        recommended_price: 100, quick_sell_price: 90, max_profit_price: 120,
+        justification: 'Matched the supplied listing.', match_quality: 'moderate',
+        comp_breakdown: { anchor_count: 1, adjusted_count: 0, bound_count: 0 },
+        market_summary: { sold_count: 1, active_count: 0 }, recommended_platforms: [],
+      };
+      validateBatchPriceSynthesisSubmission({ items: [{ itemId: 'price-a', pricing, compSourceUrls: ['https://example.test/price-a/0'], compSources: ['example'] }] }, [items[0]]);
+      let crossed = false;
+      try {
+        validateBatchPriceSynthesisSubmission({ items: [{ itemId: 'price-a', pricing, compSourceUrls: ['https://example.test/price-b/0'], compSources: ['example'] }] }, [items[0]]);
+      } catch {
+        crossed = true;
+      }
+      let crossedSource = false;
+      try {
+        validateBatchPriceSynthesisSubmission({ items: [{ itemId: 'price-a', pricing, compSourceUrls: ['https://example.test/price-a/0'], compSources: ['other-item-source'] }] }, [items[0]]);
+      } catch {
+        crossedSource = true;
+      }
+      assert(crossed && crossedSource, 'a response cannot cite a listing URL or source id from another pricing item');
+      const marketplaceSource = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
+      assert(marketplaceSource.includes('resolved = await mapWithConcurrency(')
+        && marketplaceSource.includes('batchMetadata,\n        MANUAL_HANDOFF_CONCURRENCY,')
+        && marketplaceSource.includes('batchesWithProgress,\n        MANUAL_HANDOFF_CONCURRENCY,'),
+      'pricing and hub-scan batch handoffs must use the shared ten-slot pool instead of launching an unbounded backlog');
+      return { batches: batches.length, provenanceBound: true };
+    },
+  },
+  {
+    name: 'bundle price synthesis: fresh renderer flow reaches the versioned batch IPC endpoint',
+    run: () => {
+      const preload = fs.readFileSync(path.join(process.cwd(), 'electron/preload.js'), 'utf8');
+      const hook = fs.readFileSync(path.join(process.cwd(), 'src/hooks/useListingActions.js'), 'utf8');
+      const hub = fs.readFileSync(path.join(process.cwd(), 'src/nodes/SellHubNode.jsx'), 'utf8');
+      const main = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
+      assert(preload.includes("synthesizePricesBatch: (args) => ipcRenderer.invoke('synthesize-prices-batch', args)")
+        && hook.includes('window.electronAPI.synthesizePricesBatch({')
+        && hub.includes('const synthResults = await synthesizePricesBatch(aiItems);')
+        && !hub.includes('const synthResult = await synthesizePrice(comps, overrides);')
+        && main.includes("handleSafe('synthesize-prices-batch'")
+        && main.includes("handleSafe('synthesize-price'"),
+      'every fresh SellHub pricing request, including a singleton, must traverse the identity-keyed batch endpoint while the legacy handler remains available only for compatibility');
+      return { rendererBatchRoute: true };
+    },
+  },
   {
     name: 'auth polling: async interval ticks never overlap slow CDP/osascript work',
     run: async () => {

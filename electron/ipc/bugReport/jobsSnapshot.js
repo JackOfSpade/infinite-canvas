@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { getCurrentRequestJobAnalysisPaths, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
-import { getNonApiAiHandoffLifecycle } from '../nonApiAi.js';
+import { getNonApiAiHandoffLifecycleSnapshot } from '../nonApiAi.js';
 import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
@@ -3204,6 +3204,15 @@ function boardDiagnosticValue(value, key) {
   catch { return undefined; }
 }
 
+// Numeric report fields must be actual finite numbers. Coercing with Number()
+// turns a missing/null value into zero, which falsely reports a 0-item batch
+// or 0-character response instead of honestly omitting unavailable telemetry.
+function boardDiagnosticNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
+    ? value
+    : null;
+}
+
 function boardDiagnosticArray(value) {
   try { return Array.isArray(value) ? value : null; }
   catch { return null; }
@@ -3797,9 +3806,10 @@ export function manualAiBoardProgressForNode(nodes, nodeId) {
  * handoff completed cleanly without copying career data into the report.
  */
 export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId, nodes = []) {
-  let lifecycles = [];
-  try { lifecycles = getNonApiAiHandoffLifecycle({ windowId: reportWindowId }); }
+  let lifecycleSnapshot = null;
+  try { lifecycleSnapshot = getNonApiAiHandoffLifecycleSnapshot({ windowId: reportWindowId }); }
   catch { return ''; }
+  const lifecycles = lifecycleSnapshot?.lifecycles;
   if (!Array.isArray(lifecycles) || lifecycles.length === 0) return '';
 
   const currentIds = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
@@ -3816,9 +3826,49 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   const lifecycleCode = (value, fallback) => (
     typeof value === 'string' && /^[A-Za-z0-9:_-]{1,80}$/.test(value) ? value : fallback
   );
+  const total = boardDiagnosticNumber(lifecycleSnapshot?.total) ?? lifecycles.length;
+  const omitted = boardDiagnosticNumber(lifecycleSnapshot?.omitted) ?? 0;
+  const limit = boardDiagnosticNumber(lifecycleSnapshot?.limit) ?? lifecycles.length;
+  const sourceLimit = boardDiagnosticNumber(lifecycleSnapshot?.sourceLimit) ?? limit;
+  const retention = omitted > 0
+    ? ` · ${omitted} older request(s) omitted from this report (newest ${limit} of ${total} process receipts shown)`
+    : ` · newest ${limit} of ${total} process receipt(s) shown`;
   const lines = [
-    `- Retained: ${lifecycles.length} request(s) · ${settled} settled · ${pending} pending (newest 20, current Electron process only)`,
+    `- Retained: ${lifecycles.length} request(s) · ${settled} settled · ${pending} pending${retention} · lifecycle source keeps newest ${sourceLimit} request(s) per process`,
   ];
+  const failureSummary = (item) => {
+    const failures = Array.isArray(item?.failures) ? item.failures.slice(-8) : [];
+    const totalRejected = boardDiagnosticNumber(boardDiagnosticValue(item, 'rejected')) ?? 0;
+    const omittedFailures = Math.max(0, totalRejected - failures.length);
+    const safeCodes = new Set(['AI_JSON_INVALID', 'HANDOFF_CODE_MISMATCH', 'HANDOFF_CODE_MISSING', 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID', 'PREFERENCE_RESEARCH_RESPONSE_INVALID', 'JOB_COMPENSATION_RESPONSE_INVALID', 'STRUCTURED_OUTPUT_SCHEMA_INVALID', 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD', 'VALIDATION_FAILED']);
+    const safeStages = new Set(['research-sections', 'research-assessment', 'compensation-assessment', 'transport', 'json', 'schema', 'domain']);
+    // These are deliberately limited to contract categories and bounded
+    // counts. They explain why a compensation assessment was rejected without
+    // exporting a response excerpt, a cohort identity, a schema path, or the
+    // proprietary research it was checked against.
+    const safeReasons = new Set(['MISSING_SECTION', 'EMPTY_SECTION', 'DUPLICATE_SECTION', 'UNKNOWN_SECTION', 'MALFORMED_MARKER', 'NESTED_SECTION', 'OUTSIDE_SECTION_TEXT', 'UNEXPECTED_SECTION_ORDER', 'INVALID_EXPECTED_IDS', 'ASSESSMENT_COVERAGE_INVALID', 'ASSESSMENT_IDENTITY_INVALID', 'ASSESSMENT_QUOTE_NOT_GROUNDED', 'ASSESSMENT_URL_NOT_GROUNDED', 'ASSESSMENT_SOURCE_DATE_NOT_GROUNDED', 'COMPENSATION_COHORT_COVERAGE_INVALID', 'COMPENSATION_COHORT_IDENTITY_INVALID', 'COMPENSATION_ROLE_FAMILY_COVERAGE_INVALID', 'COMPENSATION_ROLE_FAMILY_IDENTITY_INVALID', 'COMPENSATION_ASSESSMENT_COVERAGE_INVALID', 'COMPENSATION_RANGE_INVALID', 'COMPENSATION_EVIDENCE_NOT_GROUNDED', 'COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED', 'HANDOFF_CODE_MISMATCH', 'HANDOFF_CODE_MISSING', 'INVALID_JSON', 'SCHEMA_INVALID', 'SCHEMA_UNSUPPORTED', 'DOMAIN_VALIDATION_FAILED', 'JOB_INTEGRITY_FAULT', 'VALIDATION_FAILED']);
+    const safeCountKeys = ['expectedCount', 'receivedCount', 'sectionCount', 'missingCount', 'duplicateCount', 'unknownCount', 'emptyCount', 'markerCount'];
+    const receipts = failures.flatMap((failure) => {
+      const at = Number(failure?.at);
+      const code = safeCodes.has(failure?.validationCode) ? failure.validationCode : 'VALIDATION_FAILED';
+      const diagnostic = failure?.validationDiagnostic;
+      const stage = safeStages.has(diagnostic?.stage) ? diagnostic.stage : 'domain';
+      const reason = safeReasons.has(diagnostic?.reason) ? diagnostic.reason : 'VALIDATION_FAILED';
+      const counts = safeCountKeys.flatMap((key) => {
+        const value = boardDiagnosticNumber(diagnostic?.counts?.[key], { max: 1_000_000 });
+        return Number.isInteger(value) ? [`${key.replace(/Count$/, '')} ${value}`] : [];
+      });
+      const responseChars = boardDiagnosticNumber(failure?.responseChars, { max: 10_000_000 });
+      const size = Number.isInteger(responseChars) ? ` · ${responseChars} chars` : '';
+      const hash = typeof failure?.responseHash === 'string' && /^[a-f0-9]{8}$/i.test(failure.responseHash) ? ` · receipt tag \`${failure.responseHash}\`` : '';
+      const clock = Number.isFinite(at) && at > 0 ? `${new Date(at).toISOString()} ` : '';
+      return [`${clock}${code} · ${stage}:${reason}${counts.length ? ` (${counts.join(', ')})` : ''}${size}${hash}`];
+    });
+    const omission = omittedFailures > 0
+      ? ` · ${omittedFailures} earlier rejection detail(s) not retained (newest ${failures.length} shown)`
+      : '';
+    return receipts.length ? ` · rejection detail: ${receipts.join(' | ')}${omission}` : omission;
+  };
   for (const item of lifecycles) {
     const nodeId = boardDiagnosticValue(item, 'nodeId');
     const issuedAt = Number(boardDiagnosticValue(item, 'issuedAt')) || 0;
@@ -3827,31 +3877,54 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const node = nodeId
       ? `node \`${lifecycleLabel(nodeId)}\`${currentIds.size > 0 && !currentIds.has(nodeId) ? ' ⚠ not in this report canvas' : ''}`
       : 'node not recorded';
-    const batch = boardDiagnosticValue(item, 'batch') && boardDiagnosticValue(item, 'batchTotal')
-      ? ` · batch ${boardDiagnosticValue(item, 'batch')}/${boardDiagnosticValue(item, 'batchTotal')}`
+    // A batch number with NO total is now normal: a task that sizes its batches
+    // adaptively cannot know the total until the run ends. Requiring both meant
+    // every such handoff lost its number entirely, leaving concurrent prompts
+    // indistinguishable in the report — the one place they most need telling
+    // apart. Degrade the same way the live dialog label does.
+    const batchNumber = boardDiagnosticNumber(boardDiagnosticValue(item, 'batch'));
+    const batchTotal = boardDiagnosticNumber(boardDiagnosticValue(item, 'batchTotal'));
+    const batch = batchNumber != null
+      ? (batchTotal != null ? ` · batch ${batchNumber}/${batchTotal}` : ` · batch ${batchNumber}`)
       : '';
-    const itemCount = boardDiagnosticValue(item, 'itemCount');
-    const count = Number.isFinite(Number(itemCount))
+    const itemCount = boardDiagnosticNumber(boardDiagnosticValue(item, 'itemCount'));
+    const count = itemCount != null
       ? ` · ${itemCount} item(s)`
       : '';
     const attemptKind = boardDiagnosticValue(item, 'attemptKind');
-    const rootBatchSize = boardDiagnosticValue(item, 'rootBatchSize');
+    const rootBatchSize = boardDiagnosticNumber(boardDiagnosticValue(item, 'rootBatchSize'));
     const attempt = attemptKind === 'partial-recovery'
-      ? ` · **partial-row recovery**${Number.isFinite(Number(rootBatchSize)) ? ` from ${rootBatchSize}-item root batch` : ''}`
+      ? ` · **partial-row recovery**${rootBatchSize != null ? ` from ${rootBatchSize}-item root batch` : ''}`
       : attemptKind === 'split'
-        ? ` · split retry${Number.isFinite(Number(rootBatchSize)) ? ` from ${rootBatchSize}-item root batch` : ''}`
+        ? ` · split retry${rootBatchSize != null ? ` from ${rootBatchSize}-item root batch` : ''}`
         : '';
-    const promptChars = boardDiagnosticValue(item, 'promptChars');
-    const promptSize = Number.isFinite(Number(promptChars))
+    const promptChars = boardDiagnosticNumber(boardDiagnosticValue(item, 'promptChars'));
+    const promptSize = promptChars != null
       ? ` · prompt ${promptChars} chars`
       : '';
     // Response SIZE only, never content. Batch sizes are an estimate of the
     // output one handoff needs; this is the observation that can confirm or
     // refute that estimate against the serving model's real output ceiling. A
     // response crowding the ceiling is what precedes a truncated paste.
-    const responseChars = boardDiagnosticValue(item, 'responseChars');
-    const responseSize = Number.isFinite(Number(responseChars))
-      ? ` · response ${responseChars} chars (~${Math.round(Number(responseChars) / 4)} tok est.)`
+    // Pool progress and the preference-plan size. The plan size is what the
+    // batch size is DERIVED from, so a run that produced far more handoffs than
+    // expected cannot be diagnosed without it — that is exactly what happened
+    // to the 690-batch report, where the number had to be reconstructed by
+    // algebra from the observed batch count.
+    const itemsDone = boardDiagnosticNumber(boardDiagnosticValue(item, 'itemsDone'));
+    const itemsTotal = boardDiagnosticNumber(boardDiagnosticValue(item, 'itemsTotal'));
+    const poolProgress = itemsDone != null && itemsTotal != null
+      ? ` · ${itemsDone}/${itemsTotal} of pool done`
+      : '';
+    const planItemCount = boardDiagnosticNumber(boardDiagnosticValue(item, 'planItemCount'));
+    const planSize = planItemCount != null
+      ? ` · ${planItemCount} plan item(s)`
+      : '';
+    const responseChars = boardDiagnosticNumber(boardDiagnosticValue(item, 'responseChars'));
+    const responseHash = boardDiagnosticValue(item, 'responseHash');
+    const hashStr = responseHash ? ` (receipt tag \`${responseHash}\`)` : '';
+    const responseSize = responseChars != null
+      ? ` · response ${responseChars} chars (~${Math.round(Number(responseChars) / 4)} tok est.)${hashStr}`
       : '';
     const channel = lifecycleCode(boardDiagnosticValue(item, 'channel'), 'not retained');
     const origin = channel !== 'not retained'
@@ -3864,11 +3937,15 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     // against the main-process log (UTC) or Event History (renderer-local) —
     // which is precisely what is needed to see the ORDER prompts were issued in.
     const issuedClock = issuedAt
-      ? ` · issued ${new Date(issuedAt).toISOString().slice(11, 23)}Z`
+      ? ` · issued ${new Date(issuedAt).toISOString()}`
       : '';
     const deliveries = `delivered ${Math.max(0, Number(boardDiagnosticValue(item, 'deliveries')) || 0)} time(s)`;
     const retries = [];
-    if (boardDiagnosticValue(item, 'rejected')) retries.push(`${boardDiagnosticValue(item, 'rejected')} paste rejection(s)`);
+    const codeMismatches = Number(boardDiagnosticValue(item, 'codeMismatches')) || 0;
+    const totalRejected = Number(boardDiagnosticValue(item, 'rejected')) || 0;
+    if (codeMismatches > 0) retries.push(`${codeMismatches} code mismatch rejection(s)`);
+    const otherRejections = Math.max(0, totalRejected - codeMismatches);
+    if (otherRejections > 0) retries.push(`${otherRejections} paste rejection(s)`);
     if (boardDiagnosticValue(item, 'reissues')) retries.push(`${boardDiagnosticValue(item, 'reissues')} reissued`);
     if (boardDiagnosticValue(item, 'replays')) retries.push(`${boardDiagnosticValue(item, 'replays')} replayed after dialog remount`);
     const accepted = acceptedAt && issuedAt
@@ -3877,16 +3954,49 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const terminal = settledAt && issuedAt
       ? ` · **${lifecycleCode(boardDiagnosticValue(item, 'outcome'), 'settled')}** in ${handoffElapsed(settledAt - issuedAt)}`
       : ` · **pending** for ${handoffElapsed(Date.now() - issuedAt)}`;
-    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${origin}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${accepted}${terminal}${orchestration}`);
+    // The visible handoff code is derived from the private prompt. Exporting
+    // it would give a report reader a small offline membership oracle for
+    // guessed prompt contents; request/batch labels already provide correlation.
+    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${poolProgress}${planSize}${origin}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${failureSummary(item)}${accepted}${terminal}${orchestration}`);
   }
+
+  // Detect and flag duplicate response body collisions across accepted handoffs
+  const acceptedByHash = new Map();
+  for (const item of lifecycles) {
+    const hash = boardDiagnosticValue(item, 'responseHash');
+    const acceptedAt = boardDiagnosticValue(item, 'acceptedAt');
+    if (hash && (acceptedAt || boardDiagnosticValue(item, 'outcome') === 'accepted')) {
+      if (!acceptedByHash.has(hash)) acceptedByHash.set(hash, []);
+      acceptedByHash.get(hash).push(item);
+    }
+  }
+
+  const collisionWarnings = [];
+  for (const [_, items] of acceptedByHash.entries()) {
+    if (items.length > 1) {
+      const descriptors = items.map(item => {
+        const batchNum = boardDiagnosticValue(item, 'batch');
+        if (batchNum != null) return `batch ${batchNum}`;
+        const reqId = boardDiagnosticValue(item, 'requestId');
+        return reqId ? `request \`${lifecycleLabel(reqId)}\`` : 'unlabelled batch';
+      });
+      collisionWarnings.push(
+        `> ⚠️ ${items.length} handoffs accepted an identical response body (${descriptors.join(', ')}) — the same answer was pasted into both.`
+      );
+    }
+  }
+  const warningText = collisionWarnings.length ? '\n' + collisionWarnings.join('\n') + '\n' : '';
+
   // Top-level `##`, emitted before the Job Search Pipeline section so the
   // receipts that record manual-handoff issue order are easy to locate.
   return `
 ## Non-API AI Handoff Lifecycle
 > Redacted delivery/validation receipts for manual job-AI copy/paste, in the order
 > the prompts were ISSUED. Prompts, pasted responses, attachment paths, and
-> validation-error text are never exported.
-
+> validation-error text are never exported. Prompt-derived handoff codes are
+> withheld; response receipt tags are process-keyed and cannot be reproduced
+> outside this app process.
+${warningText}
 ${lines.join('\n')}
 `;
 }

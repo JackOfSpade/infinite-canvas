@@ -4,22 +4,76 @@ import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependenc
 // Imported at the source: the shared test-dependencies barrel is edited by
 // other areas, and this helper is only exercised here.
 import { normalizeNativeTabQueryError } from '../../electron/ipc/browser/authWindows.js';
+import { getRecentLogs } from '../../electron/logger.js';
 
 export default [
 {
-    name: 'parseAiJson: repairs markdown fences, trailing commas, top-level arrays, stray-bracket prose',
+    name: 'parseAiJson: safely repairs wrappers and structural trailing commas without changing string data',
     run: () => {
       const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       // Plain object, markdown-fenced, and trailing-comma cleanup.
       assert(eq(parseAiJson('{"a":1}'), { a: 1 }), 'parseAiJson: plain object');
       assert(eq(parseAiJson('```json\n{"a":1}\n```'), { a: 1 }), 'parseAiJson: fenced object');
       assert(eq(parseAiJson('{"a":1,}'), { a: 1 }), 'parseAiJson: trailing comma');
+      assert(eq(parseAiJson('```text\nnot the payload {broken}\n```\n```JSON\n{"chosen":true}\n```'), { chosen: true }),
+        'parseAiJson: an explicit case-insensitive JSON fence wins over an earlier non-JSON fence');
       // Top-level arrays must NOT be mangled (guards the fallback against
       // starting the span at the first inner brace).
       assert(eq(parseAiJson('[{"a":1},{"b":2}]'), [{ a: 1 }, { b: 2 }]), 'parseAiJson: top-level array');
+      // Trailing-comma repair must operate on JSON structure, never on the same
+      // character sequence inside a string. The old global regex silently
+      // changed both `,}` and `,]` in otherwise-valid model text.
+      const stringPayload = { text: 'keep literal ,} and ,] markers', quote: '13" display', path: 'C:\\tmp', lines: 'one\ntwo' };
+      assert(eq(parseAiJson(JSON.stringify(stringPayload)), stringPayload),
+        'parseAiJson: punctuation, escapes, and line breaks inside strings survive byte-for-value round trip');
+      assert(eq(
+        parseAiJson('{"outer":{"text":"keep ,} marker",},"items":[{"value":1,},],}'),
+        { outer: { text: 'keep ,} marker' }, items: [{ value: 1 }] },
+      ), 'parseAiJson: nested structural trailing commas are repaired');
+      // ChatGPT can inject content-reference transport annotations while
+      // copying an answer that cites an automatic paste attachment. Its quoted
+      // attributes sit inside a JSON string unescaped, so remove only that
+      // bounded, known artifact after the initial strict parse has failed.
+      const reportShape = '{"evidence":"Role fit is not established. :chatgpt-content-reference{index="0"}","evidenceQuote":"Intermediate Frontend Developer"}';
+      assert(eq(
+        parseAiJson(reportShape),
+        { evidence: 'Role fit is not established. ', evidenceQuote: 'Intermediate Frontend Developer' },
+      ), 'parseAiJson: repairs the exact ChatGPT content-reference form recorded in the bug report');
+      assert(eq(
+        parseAiJson('```json\n{"items":[{"text":"first :chatgpt-content-reference{index="0"}"},{"text":"second :chatgpt-content-reference{index="1"}"}]}\n```'),
+        { items: [{ text: 'first ' }, { text: 'second ' }] },
+      ), 'parseAiJson: repairs multiple bounded ChatGPT content-reference artifacts inside a fenced payload');
+      const validArtifactText = { evidence: ':chatgpt-content-reference{index="0"}' };
+      assert(eq(parseAiJson(JSON.stringify(validArtifactText)), validArtifactText),
+        'parseAiJson: preserves a valid literal that resembles a ChatGPT artifact because strict parsing succeeds first');
+      let structuralArtifact = null;
+      try { parseAiJson('{"x":"broken" :chatgpt-content-reference{index="0"},"y":1}'); } catch (error) { structuralArtifact = error; }
+      assert(structuralArtifact?.code === 'AI_JSON_INVALID',
+        'parseAiJson: an exact-looking artifact outside a JSON string cannot repair unrelated malformed structure');
+      let escapedArtifact = null;
+      try { parseAiJson('{"x":"bad \\:chatgpt-content-reference{index="0"}","y":1}'); } catch (error) { escapedArtifact = error; }
+      assert(escapedArtifact?.code === 'AI_JSON_INVALID',
+        'parseAiJson: an escaped marker prefix is invalid JSON, not a removable ChatGPT transport artifact');
       // Regression: prose containing a stray bracket before the JSON object used
       // to make the first-open/last-close span start at the stray '[' and throw.
       assert(eq(parseAiJson('Use [ ] for arrays: {"status":"ok"}'), { status: 'ok' }), 'parseAiJson: stray bracket in prose');
+
+      let malformed = null;
+      try { parseAiJson('{"description":"13" display"}'); } catch (error) { malformed = error; }
+      assert(malformed?.code === 'AI_JSON_INVALID'
+        && malformed.message.includes('unescaped double quote')
+        && malformed.message.includes('Regenerate the complete response'),
+      'parseAiJson: ambiguous unescaped quotes fail loudly with actionable regeneration guidance');
+      const privateSentinel = 'PRIVATE_RESPONSE_TEXT_MUST_NOT_REACH_REPORTS';
+      try { parseAiJson(`{"description":"${privateSentinel}" unescaped"}`); } catch { /* expected */ }
+      const parseLog = [...getRecentLogs()].reverse()
+        .find(entry => entry.message.includes('[jsonRepair] Failed to parse JSON response:'));
+      assert(parseLog
+        && !parseLog.message.includes(privateSentinel)
+        && /category=expected-structure|category=unexpected-token/.test(parseLog.message)
+        && /position=\d+ line=\d+ column=\d+ length=\d+/.test(parseLog.message)
+        && /chatgptContentReferenceCandidates=0/.test(parseLog.message),
+      'parseAiJson: failure diagnostics retain only safe parse metadata, never pasted response content');
       return { ok: true };
     },
   },

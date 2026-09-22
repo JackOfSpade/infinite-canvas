@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, pasteRejectionChangeDocuments, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -23,14 +23,14 @@ const QUALITY_NOTES = Object.freeze({
   'cover-source-grounding': 'Traced every candidate claim in the letter to supplied evidence without expanding attribution or causality.',
   'cover-single-argument': 'Verified one delivery-focused throughline organizes the opening, proof, and closing without a second thesis.',
   'cover-minimum-evidence': 'Kept only the proof necessary to establish the argument and removed unrelated stack or background inventory.',
-  'cover-priority-alignment': 'Connected the selected proof directly to an emphasized employer need rather than merely naming the job.',
-  'cover-opening': 'Confirmed the first sentence adds a substantive evidence-to-need connection instead of application administration.',
-  'cover-continuity': 'Checked that each paragraph advances the same claim with relevance stated before detail and that each within-paragraph responsibility shift names its shared responsibility, constraint, or outcome.',
+  'cover-priority-alignment': 'Connected a source-supported transferable capability to an emphasized posting responsibility without turning prior-project mechanics into a target requirement.',
+  'cover-opening': 'Confirmed the first sentence states the job-specific evidence-to-need connection before any personal-project or prior-employer proof detail.',
+  'cover-continuity': 'Checked that each paragraph advances the same claim with relevance stated before detail, names the bridge for each within-paragraph responsibility shift, and uses implicit references only when their antecedent is clear.',
   'cover-reference-clarity': 'Named employers, systems, actors, causal links, and time references, used a proximal target-position reference, and attached reporting verbs to source documents.',
   'cover-register': 'Used direct contemporary language, removed generic enthusiasm, bureaucratic phrasing, and advertisement-facing copy, and connected the final invitation to target work.',
   'cover-sentence-craft': 'Reviewed first-read literal clarity, concrete actors, artifacts, and actions, sentence length, grammar, parallel structure, and punctuation without semicolon or dash clause splices.',
   'cover-figure-discipline': 'Confirmed each retained figure is necessary and appears in the selected résumé evidence.',
-  'cover-legal-status': 'Confirmed no application logistics or legal-work-status assertion appears in the letter.',
+  'cover-logistics-exclusion': 'Confirmed no application logistics assertion appears anywhere in the letter.',
   'cover-envelope': 'Verified the host-owned name, contact, salutation, and closing fields contain no inferred envelope facts.',
   'cross-document-consistency': 'Compared résumé, letter, and argument contract for matching identity, terminology, scope, and factual claims.',
   'requirement-coverage': 'Accounted for each high-priority requirement with direct evidence or an honest evidence-bound omission.',
@@ -305,6 +305,13 @@ export default [
         && routineSource.includes('careerDataQuotes')
         && normalizedRoutineSource.includes('final rendered text exactly after ordinary whitespace is normalized'),
       'the writer-facing routine publishes the app-owned canonical checklist and exact source-grounding contract without a divergent duplicate list');
+      assert(normalizedRoutineSource.includes('employer need must come from the posting, not from the mechanics of a prior project')
+        && normalizedRoutineSource.includes('narrow transferable capability supported by career evidence')
+        && normalizedRoutineSource.includes('leaves the transfer unstated')
+        && !normalizedRoutineSource.includes('let the transfer stay implicit')
+        && localSource.includes('${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE}')
+        && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-priority-alignment')?.requirement.includes('actual emphasized responsibility in the posting'),
+      'the initial writer, measured revision, and quality checklist require an explicit transfer to a real posting responsibility');
       assert(normalizedRoutineSource.includes('grammatical parallelism')
         && normalizedRoutineSource.includes('faulty parallelism in coordinated forms such as `from X to/through Y`')
         && normalizedRoutineSource.includes('Pair noun phrases with noun phrases or actions with actions')
@@ -323,13 +330,11 @@ export default [
         && normalizedRoutineSource.includes('Across paragraph boundaries a demonstrative must find its referent in the immediately preceding paragraph')
         && normalizedRoutineSource.includes('never open a paragraph with `That <thing>` or `This <thing>` unless the previous paragraph is about that thing'),
       'Local AI must keep synthesis evidence-scoped and replace ambiguous cross-paragraph references');
-      assert(normalizedRoutineSource.includes('Never state citizenship, work authorization, residency, visa, or any other legal work status anywhere in the letter')
-        && normalizedRoutineSource.includes('legal work status belongs on the application form')
+      assert(!/legal work status|citizenship|work authorization|sponsorship/iu.test(normalizedRoutineSource)
         && normalizedRoutineSource.includes('naming both the origin and destination')
         && normalizedRoutineSource.includes('Name the target role literally and in the singular')
-        && localSource.includes('cover-legal-status')
         && localSource.includes('failed required checks'),
-      'Local AI letters must never state legal work status, and the host rejects a completed result that does');
+      'the routine states no work-authorization rule, and the host still rejects a completed result that fails a check it does enforce');
       assert(localSource.includes('renderLocalResumeWithFit')
         && localSource.includes('renderPdf(buildResumeDocument')
         && localSource.includes('targetPageCount')
@@ -380,10 +385,13 @@ export default [
         && localSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
         && localSource.includes('maintenance or cost rationale can explain an earlier decision')
         && localSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
+        && localSource.includes('use a natural implicit reference such as “it,” “that experience,” or “the system”')
         && localSource.includes('Keep completed experience in a past-tense evidence sentence')
         && localSource.includes('That project prepared/equips me to contribute')
         && localSource.includes('At the target employer, I would apply that experience')
-        && localSource.includes('do not open with organization shorthand such as “The district”')
+        && localSource.includes('Within a paragraph, continue naturally when the candidate remains the subject')
+        && localSource.includes('At a new paragraph, use a concise, unambiguous re-entry cue such as “In that role” when it helps identify the role being continued')
+        && localSource.includes('Do not use bare “There” when a platform, place, or more than one employer could be its antecedent')
         && localSource.includes('Ordinary definite descriptions such as “The system” remain appropriate')
         && localSource.includes('Punctuate introductory phrases')
         && localSource.includes('recruiter seeing it for the first time')
@@ -397,7 +405,7 @@ export default [
         && localSource.includes('sanitizeCoverLetterArgument')
         && localSource.includes('assertCoverLetterReviewAttestsToArgument')
         && localSource.includes('primaryEvidence.relationToThesis')
-        && localSource.includes('coverLetterArgument.secondaryEvidence.narrativeRole is invalid')
+        && localSource.includes('COVER_LETTER_SECONDARY_NARRATIVE_ROLES.includes(narrativeRole)')
         && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
         && localSource.includes("contentUtilization: resumeTypeAreaUtilization(rendered.layout || null)")
         && localSource.includes('type-area utilization is informational only')
@@ -411,6 +419,7 @@ export default [
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('restating a category')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shift between distinct systems or responsibilities')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('shared role or job context alone is not a bridge')
+        && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('natural implicit reference or the shortest clear noun')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('one argumentative job')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-continuity')?.requirement.includes('identifies the branch it develops')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'resume-concision')?.requirement.includes('one principal achievement')
@@ -441,10 +450,13 @@ export default [
         && normalizedRoutineSource.includes('Every evidence block must let a recruiter identify why it matters to the target work')
         && normalizedRoutineSource.includes('maintenance or cost rationale can explain an earlier decision')
         && normalizedRoutineSource.includes('do not repeat the target formulaically when the existing prose already makes it clear')
+        && normalizedRoutineSource.includes('use a natural implicit reference such as `it`, `that experience`, or `the system`')
+        && normalizedRoutineSource.includes('a bare `this` or `that` is not enough')
         && normalizedRoutineSource.includes('Keep completed experience in a past-tense evidence sentence')
         && normalizedRoutineSource.includes('That project prepared me to contribute')
         && normalizedRoutineSource.includes('I would apply that experience')
-        && normalizedRoutineSource.includes('do not open with an organization shorthand such as `The district`')
+        && normalizedRoutineSource.includes('do not repeat its full name merely from habit')
+        && normalizedRoutineSource.includes('At a new paragraph, use a concise re-entry cue such as `In that role` when it helps')
         && normalizedRoutineSource.includes('ordinary definite descriptions such as `The system`')
         && normalizedRoutineSource.includes('must not introduce a new organizing frame')
         && normalizedRoutineSource.includes('ask the employer to choose between products, prototypes, or initiatives')
@@ -500,16 +512,29 @@ export default [
         && routineSource.includes('never use `<b>` or')
         && routineSource.includes('front-load the most relevant')
         && routineSource.includes("Order each role's highlights by interview value")
+        && normalizedRoutineSource.includes('source-supported trigger and scope without turning a prior workflow')
+        && normalizedRoutineSource.includes('without turning a prior workflow')
+        && !normalizedRoutineSource.includes('barcode and device-management mechanics')
         && normalizedRoutineSource.includes('colon-led evidence dumps')
         && normalizedRoutineSource.includes('unsolicited admissions of missing experience')
         && normalizedRoutineSource.includes('never repeat a metaphor across paragraphs')
         && routineSource.includes('<span data-achievement-id="ID">figure</span>')
         && routineSource.includes('Every top-level résumé category is a peer')
         && routineSource.includes('never use it as a peer category heading')
-        && normalizedRoutineSource.includes("first sentence adds information beyond the application context")
-        && normalizedRoutineSource.includes("Never announce that the candidate is applying")
+        && normalizedRoutineSource.includes("opening paragraph adds information beyond the application context")
+        && normalizedRoutineSource.includes("never announce that the candidate is applying")
+        && normalizedRoutineSource.includes('opening paragraph must demonstrate interest implicitly')
+        && normalizedRoutineSource.includes('precise observation about concrete employer, team, or role work')
+        && normalizedRoutineSource.includes('Preview the transferable capability before the first source-specific proof')
+        && normalizedRoutineSource.includes('Develop each body paragraph\'s point, proof, and relevance across as many sentences as clarity requires')
+        && normalizedRoutineSource.includes('one-sentence `roleThesis` records the plan\'s controlling angle')
+        && normalizedRoutineSource.includes('Do not announce interest, motivation, or enthusiasm through first-person emotional declarations')
+        && normalizedRoutineSource.includes("Do not repeat the opening's reason for interest there")
+        && normalizedRoutineSource.includes('role title may appear only when it distinguishes the target responsibility')
         && normalizedRoutineSource.includes("Respect the recruiter's intelligence")
         && !normalizedRoutineSource.includes('Name the target company and role naturally in the opening sentence')
+        && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-opening')?.requirement.includes('opening demonstrates interest implicitly')
+        && APPLICATION_QUALITY_CRITERIA.find(criterion => criterion.id === 'cover-register')?.requirement.includes('does not repeat the opening’s interest rationale')
         && routineSource.includes('SAME local AI agent run active') && !routineSource.includes('6 minutes')
         && !routineSource.includes('six-minute')
         && routineSource.includes('There is no fixed round limit')
@@ -934,7 +959,7 @@ export default [
         coverLetter: normalizedCoverLetter(),
         coverLetterArgument: validCoverLetterArgument(),
         qualityReview: groundedQualityReview(sourceGroundingFor()),
-      }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       assert(good.coverLetter.paragraphs.length === 1
         && good.coverLetterArgument.roleThesis === validCoverLetterArgument().roleThesis,
       'valid structured output preserves the non-rendered controlling-argument contract');
@@ -946,20 +971,20 @@ export default [
         qualityReview: { ...draftedQualityReview(), checklistVersion: 1 },
       };
       let defaultV1Rejected = false;
-      try { validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project')); }
-      catch (error) { defaultV1Rejected = /checklistVersion must be 2/u.test(String(error?.message || error)); }
-      const acceptedLegacyV1 = validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+      try { validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null }); }
+      catch (error) { defaultV1Rejected = /checklistVersion must be 3/u.test(String(error?.message || error)); }
+      const acceptedLegacyV1 = validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null,
         qualityChecklistVersion: 1,
       });
       let unknownExpectedVersionRejected = false;
       try {
-        validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+        validateLocalApplicationResult(legacyV1Result, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null,
           qualityChecklistVersion: 99,
         });
       } catch (error) { unknownExpectedVersionRejected = /unsupported quality checklist version/u.test(String(error?.message || error)); }
       assert(defaultV1Rejected && acceptedLegacyV1.qualityReview.checklistVersion === 1 && unknownExpectedVersionRejected
         && good.qualityReview.checklistVersion === APPLICATION_QUALITY_CHECKLIST_VERSION,
-      'direct validation requires current v2, accepts v1 only with an explicit supported legacy job expectation, preserves that normalized version, and fails closed for unknown versions');
+      'direct validation requires current v3, accepts v1 only with an explicit supported legacy job expectation, preserves that normalized version, and fails closed for unknown versions');
       assert(Array.isArray(APPLICATION_QUALITY_CRITERIA) && APPLICATION_QUALITY_CRITERIA.length > 0
         && APPLICATION_QUALITY_CRITERIA.every(criterion => criterion
           && typeof criterion.id === 'string' && criterion.id
@@ -973,7 +998,7 @@ export default [
             version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
             resumeMainHtml: validResumeMain,
             coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(), qualityReview,
-          }, id, path.join(os.tmpdir(), 'local-ai-project'));
+          }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
         } catch { rejected = true; }
         assert(rejected, `Local AI validation rejects a ${label} quality checklist instead of trusting a self-attestation`);
       };
@@ -1069,6 +1094,7 @@ export default [
           ['Worked across agentic coding and traditional workflows with model delegation and appropriate use cases.'],
           'resumeBullets',
           0,
+          { identityTokens: [] },
         );
       } catch (error) {
         unsupportedSuperiorityRejected = /unsupported comparative superiority/u.test(String(error?.message || error));
@@ -1101,12 +1127,14 @@ export default [
         ['Maintained cron jobs that synced the FAA daily API data into the local database.'],
         'resumeBullets',
         0,
+        { identityTokens: [] },
       );
       assertSourceQuoteLinksFinalText(
         'Outperformed the legacy routing process in controlled tests.',
         ['The revised routing process outperformed the legacy routing process in controlled tests.'],
         'resumeBullets',
         0,
+        { identityTokens: [] },
       );
       let disconnectedSentenceRejected = false;
       try {
@@ -1115,6 +1143,7 @@ export default [
           ['I built supported systems with clear outcomes.'],
           'coverLetterParagraphs',
           0,
+          { identityTokens: [] },
         );
       } catch (error) {
         disconnectedSentenceRejected = /sentence 2/u.test(String(error?.message || error));
@@ -1126,6 +1155,7 @@ export default [
         ['I built supported systems with clear outcomes.'],
         'coverLetterParagraphs',
         0,
+        { identityTokens: [] },
       );
       const oversizedQuote = `${'Built supported systems with clear outcomes and engineering judgment. '.repeat(40)}End.`;
       const oversizedQuoteResult = structuredClone(trustedResult);
@@ -1256,7 +1286,7 @@ export default [
             version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
             resumeMainHtml: `<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>${bullet}</li></ul></article></main>`,
             coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-          }, id, path.join(os.tmpdir(), 'local-ai-project'));
+          }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
         assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
       }
@@ -1264,7 +1294,7 @@ export default [
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
         resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built a medical-data database and exposed that database through Python REST APIs.</li></ul></article></main>',
         coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence('Built a medical-data database and exposed that database through Python REST APIs.'), qualityReview: draftedQualityReview(),
-      }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       assert(withinBulletReference.resumeMainHtml.includes('exposed that database'),
         'the standalone-bullet guard permits a concrete referent introduced earlier in the same bullet');
       for (const [label, paragraph, expected] of [
@@ -1292,7 +1322,7 @@ export default [
             version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
             resumeMainHtml: validResumeMain,
             coverLetter: { ...normalizedCoverLetter(), paragraphs: [paragraph] }, coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-          }, id, path.join(os.tmpdir(), 'local-ai-project'));
+          }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
         } catch (error) { editorialRejected = String(error?.message || error).includes(expected); }
         assert(editorialRejected, `Local AI validation rejects ${label} before rendering`);
       }
@@ -1303,7 +1333,7 @@ export default [
           resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
           coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence('Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.'),
           qualityReview: draftedQualityReview(),
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { topologyTailRejected = /resume-bullet-focus/.test(String(error?.message || error)); }
       assert(topologyTailRejected,
         'Local AI validation rejects a runtime-topology tail appended to an already complete containerization highlight');
@@ -1312,7 +1342,7 @@ export default [
         outputBundleRoot: 'Applied Jobs',
         resumeMainHtml: '<main class="page"><section class="section"><h2><strong>Experience</strong></h2><article class="role"><ul class="highlights"><li>Cut latency <strong data-achievement-id="receipt-1">42%</strong> with <b>Python</b> services.</li></ul></article></section></main>',
         coverLetter: normalizedCoverLetter(), coverLetterArgument: coverLetterArgumentForResumeEvidence('Cut latency 42% with Python services.'), qualityReview: draftedQualityReview(),
-      }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       const normalizedHighlight = /<ul\b[^>]*class="highlights"[^>]*>([\s\S]*?)<\/ul>/i.exec(uniformHighlightText.resumeMainHtml)?.[1] || '';
       assert(!/<(?:b|strong)\b/i.test(normalizedHighlight)
         && uniformHighlightText.resumeMainHtml.includes('<span data-achievement-id="receipt-1">42%</span>')
@@ -1328,7 +1358,7 @@ export default [
           resumeMainHtml: validResumeMain,
           coverLetter: { ...normalizedCoverLetter(), paragraphs: unrestrictedParagraphs }, coverLetterArgument: validCoverLetterArgument(),
           qualityReview: draftedQualityReview(),
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { runawaySentenceRejected = /sentence-length/.test(String(error?.message || error)); }
       assert(runawaySentenceRejected,
         'Local AI validation rejects a runaway sentence before layout fit can make an unchecked draft shippable');
@@ -1349,7 +1379,7 @@ export default [
             resumeMainHtml: validResumeMain,
             coverLetter: { ...normalizedCoverLetter(), paragraphs: [opener] }, coverLetterArgument: validCoverLetterArgument(),
             qualityReview: draftedQualityReview(),
-          }, id, path.join(os.tmpdir(), 'local-ai-project'), { company: 'Acme', title: 'Developer' });
+          }, id, path.join(os.tmpdir(), 'local-ai-project'), { company: 'Acme', title: 'Developer' }, { careerData: null });
         } catch (error) {
           bannedOpenerRejected = /generic-phrases.*banned opener/i.test(String(error?.message || error));
         }
@@ -1366,7 +1396,7 @@ export default [
         },
         coverLetterArgument: validCoverLetterArgument(),
         qualityReview: draftedQualityReview(),
-      }, id, path.join(os.tmpdir(), 'local-ai-project'), { company: 'Acme', title: 'Senior Platform Engineer' });
+      }, id, path.join(os.tmpdir(), 'local-ai-project'), { company: 'Acme', title: 'Senior Platform Engineer' }, { careerData: null });
       assert(canonicalEnvelope.coverLetter.name === 'Maya Chen'
         && JSON.stringify(canonicalEnvelope.coverLetter.contact) === JSON.stringify(['maya@example.test', 'Toronto, ON'])
         && canonicalEnvelope.coverLetter.tagline === 'Senior Engineer · B.S. Computer Science, Example University'
@@ -1400,7 +1430,7 @@ export default [
           outputBundleRoot: 'Applied Jobs',
           resumeMainHtml: '<main class="page"><article class="role"><span class="title">Software Engineer</span><span class="company">FliteX</span><p class="role-summary">Built flight-routing automation.</p></article></main>',
           coverLetter: normalizedCoverLetter(), coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { summaryOnlyRejected = true; }
       assert(summaryOnlyRejected,
         'the Local AI import path must reject a summary-only role instead of copying raw notes into a bullet');
@@ -1410,7 +1440,7 @@ export default [
           version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
           resumeMainHtml: validResumeMain,
           coverLetter: normalizedCoverLetter(), qualityReview: draftedQualityReview(),
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { missingArgumentRejected = /coverLetterArgument object/i.test(String(error?.message || error)); }
       assert(missingArgumentRejected,
         'Local AI import rejects a result without the non-rendered controlling-argument contract');
@@ -1427,7 +1457,7 @@ export default [
               evidenceRole: validCoverLetterArgument().primaryEvidence.evidenceRole,
             },
           },
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { missingPrimaryRelationRejected = /primaryEvidence\.relationToThesis/i.test(String(error?.message || error)); }
       assert(missingPrimaryRelationRejected,
         'Local AI import requires the primary proof to state how it establishes the thesis');
@@ -1446,10 +1476,40 @@ export default [
               relationToPrimary: 'Unspecified',
             },
           },
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
-      } catch (error) { invalidSecondaryRejected = /narrativeRole is invalid/i.test(String(error?.message || error)); }
-      assert(invalidSecondaryRejected,
-        'Local AI import rejects an optional secondary proof without a permitted narrative role');
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
+      } catch (error) { invalidSecondaryRejected = String(error?.message || error); }
+      // "narrativeRole is invalid" named neither the value received nor the
+      // set it had to come from, so the only way to find the legal words was
+      // to guess one at a time. Both halves are stated now, and the set is
+      // interpolated from the enum the gate tests membership against rather
+      // than hand-copied beside it.
+      assert(invalidSecondaryRejected
+        && invalidSecondaryRejected.includes('narrativeRole reads "primary"')
+        && COVER_LETTER_SECONDARY_NARRATIVE_ROLES.every(role => invalidSecondaryRejected.includes(JSON.stringify(role)))
+        && !invalidSecondaryRejected.includes('narrativeRole is invalid'),
+      `the rejection names the value received and every value the enum allows (message=${JSON.stringify(invalidSecondaryRejected)})`);
+      // Following the message literally — take one of the values it names —
+      // is accepted in one round, so the gate fires only where a repair
+      // exists.
+      let repairedSecondary = '';
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: validResumeMain,
+          coverLetter: normalizedCoverLetter(), qualityReview: draftedQualityReview(),
+          coverLetterArgument: {
+            ...validCoverLetterArgument(),
+            secondaryEvidence: {
+              evidence: 'Another supported example with no declared relationship.',
+              evidenceRole: 'Earlier engineering role',
+              narrativeRole: COVER_LETTER_SECONDARY_NARRATIVE_ROLES[0],
+              relationToPrimary: 'It supplies the earlier delivery work the primary proof builds on.',
+            },
+          },
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
+      } catch (error) { repairedSecondary = String(error?.message || error); }
+      assert(!repairedSecondary.includes('narrativeRole'),
+        `the repair the message names is accepted by the same gate (message=${JSON.stringify(repairedSecondary)})`);
       let missingArgumentAttestationRejected = false;
       try {
         validateLocalApplicationResult({
@@ -1461,28 +1521,28 @@ export default [
             resume: draftedQualityReview().resume,
             coverLetter: { decision: 'drafted', rationale: 'The cover letter is relevant, factual, and concise.' },
           },
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch (error) { missingArgumentAttestationRejected = /controlling argument and minimum-sufficient evidence/i.test(String(error?.message || error)); }
       assert(missingArgumentAttestationRejected,
         'Local AI import requires the cover-letter quality review to attest to the controlling argument and minimum-sufficient evidence');
       let rejected = false;
       try {
-        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><script>alert(1)</script></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><script>alert(1)</script></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { rejected = true; }
       assert(rejected, 'scripts in a Local AI result cannot enter the built application workspace');
       let emDashRejected = false;
       try {
-        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Led the migration — reducing latency.</li></ul></article></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Led the migration — reducing latency.</li></ul></article></main>' }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { emDashRejected = true; }
       assert(emDashRejected, 'an em dash in candidate copy cannot enter a Local AI application');
       let rangeAccepted = true;
       try {
-        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Led a 3–5 engineer team from Mar 2022 – Present.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Led a 3–5 engineer team from Mar 2022 – Present.') }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Led a 3–5 engineer team from Mar 2022 – Present.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Led a 3–5 engineer team from Mar 2022 – Present.') }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { rangeAccepted = false; }
       assert(rangeAccepted, 'date and numeric en-dash ranges remain valid candidate copy');
       let monthToMonthDateRangeAccepted = true;
       try {
-        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Software Engineer, May 2023 – June 2026.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Software Engineer, May 2023 – June 2026.') }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        validateLocalApplicationResult({ ...good, version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs', resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Software Engineer, May 2023 – June 2026.</li></ul></article></main>', coverLetterArgument: coverLetterArgumentForResumeEvidence('Software Engineer, May 2023 – June 2026.') }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { monthToMonthDateRangeAccepted = false; }
       assert(monthToMonthDateRangeAccepted, 'month-to-month date ranges remain valid candidate copy');
       let missingReviewRejected = false;
@@ -1492,7 +1552,7 @@ export default [
           resumeMainHtml: validResumeMain,
           coverLetter: normalizedCoverLetter(),
           coverLetterArgument: validCoverLetterArgument(),
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { missingReviewRejected = true; }
       assert(missingReviewRejected, 'every Local AI result must record a quality disposition for both documents');
       let fitOnlyRationaleRejected = false;
@@ -1507,7 +1567,7 @@ export default [
             resume: { decision: 'drafted', rationale: 'The résumé fits on the required one-page target.' },
             coverLetter: draftedQualityReview().coverLetter,
           },
-        }, id, path.join(os.tmpdir(), 'local-ai-project'));
+        }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       } catch { fitOnlyRationaleRejected = true; }
       assert(fitOnlyRationaleRejected, 'page fit alone cannot serve as a quality-completion rationale');
       const structuralOverflowReview = validateLocalApplicationResult({
@@ -1520,7 +1580,7 @@ export default [
           resume: { decision: 'drafted', rationale: 'Structural reduction after the résumé remained at 2 pages: dropped the weakest role and redundant bullets while retaining the most relevant backend evidence.' },
           coverLetter: draftedQualityReview().coverLetter,
         },
-      }, id, path.join(os.tmpdir(), 'local-ai-project'));
+      }, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null });
       assert(structuralOverflowReview.qualityReview.resume.decision === 'drafted',
         'a concrete structural rationale remains valid when it truthfully mentions the measured overflow that prompted the revision');
       return { rejected, emDashRejected, rangeAccepted, monthToMonthDateRangeAccepted, missingReviewRejected, fitOnlyRationaleRejected, structuralOverflowAccepted: true, summaryOnlyRejected: true };
@@ -1545,7 +1605,7 @@ export default [
         resumeMainHtml,
         coverLetter,
         coverLetterArgument,
-        qualityReview: draftedQualityReview(),
+        qualityReview: { ...draftedQualityReview(), checklistVersion: 2 },
         generationAudit: generationAuditFor({
           paragraphs,
           controllingThesis: coverLetterArgument.roleThesis,
@@ -1556,7 +1616,7 @@ export default [
         id,
         path.join(os.tmpdir(), 'local-ai-project'),
         {},
-        { generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION },
+        { careerData: null, evidencePlan: null, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION, qualityChecklistVersion: 2 },
       );
       const clone = value => JSON.parse(JSON.stringify(value));
       const accepted = validate(base);
@@ -1564,6 +1624,79 @@ export default [
         && accepted.generationAudit.coverLetterPlan.paragraphs.length === paragraphs.length
         && accepted.generationAudit.coverLetterPlan.paragraphs[0].sentences.length === 2,
       'a new-job audit preserves bounded final-state decisions and exact paragraph/sentence bindings');
+      for (const proof of [
+        'At Acme, I have built supported systems for internal users.',
+        'At Acme, I updated supported systems for internal users.',
+      ]) {
+        const proofWithRole = proof.replace('At Acme,', 'In my engineering role at Acme,');
+        const proofParagraph = `My experience delivering supported systems is a relevant capability. ${proofWithRole} I would apply my experience delivering supported systems to reliable system delivery this role requires.`;
+        const v3 = clone(base);
+        v3.coverLetter.paragraphs = [proofParagraph];
+        v3.generationAudit = generationAuditFor({
+          paragraphs: [proofParagraph],
+          controllingThesis: coverLetterArgument.roleThesis,
+        });
+        v3.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping = {
+          claim: 'My experience delivering supported systems is a relevant capability.',
+          proof: proofWithRole,
+          relevance: 'I would apply my experience delivering supported systems to reliable system delivery this role requires.',
+          jobNeedQuote: 'reliable system delivery',
+        };
+        v3.qualityReview = draftedQualityReview();
+        const v3Validate = value => validateLocalApplicationResult(value, id,
+          path.join(os.tmpdir(), 'local-ai-project'),
+          { title: 'Engineer', company: 'Acme', description: 'This role requires reliable system delivery.' },
+          { careerData: null, evidencePlan: null, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION, qualityChecklistVersion: 3 });
+        assert(v3Validate(v3).generationAudit.coverLetterPlan.paragraphs[0].argumentMapping.proof === proofWithRole,
+          `a v3 argument mapping accepts the shared proof detector's supported form: ${proof}`);
+        delete v3.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping;
+        let missingMapping = '';
+        try { v3Validate(v3); } catch (error) { missingMapping = String(error?.message || error); }
+        assert(/paragraph-argument-links: .*candidate past action.*no argumentMapping/iu.test(missingMapping),
+          `a v3 ${proof.includes('have built') ? 'present-perfect' : 'updated'} proof cannot omit its argument mapping: ${missingMapping}`);
+      }
+      // One response, one round. An audit that fails its shape somewhere other
+      // than the paragraph binding still binds those paragraphs, so the
+      // mappings it recorded are graded in the SAME verdict. Reporting only
+      // the shape failure made the mapping defect cost a second manual round.
+      const batchJob = { title: 'Engineer', company: 'Acme', description: 'This role requires reliable system delivery.' };
+      const batchOptions = { careerData: null, evidencePlan: null, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION, qualityChecklistVersion: 3 };
+      const batchValidate = value => validateLocalApplicationResult(value, id, path.join(os.tmpdir(), 'local-ai-project'), batchJob, batchOptions);
+      const batchParagraph = 'My experience delivering supported systems is a relevant capability. In my engineering role at Acme, I built supported systems for internal users. I would apply my experience delivering supported systems to reliable system delivery this role requires.';
+      const batchFixture = (mutate) => {
+        const candidate = clone(base);
+        candidate.coverLetter.paragraphs = [batchParagraph];
+        candidate.generationAudit = generationAuditFor({ paragraphs: [batchParagraph], controllingThesis: coverLetterArgument.roleThesis });
+        candidate.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping = {
+          claim: 'My experience delivering supported systems is a relevant capability.',
+          proof: 'In my engineering role at Acme, I built supported systems for internal users.',
+          relevance: 'I would apply my experience delivering supported systems to reliable system delivery this role requires.',
+          jobNeedQuote: 'reliable system delivery',
+        };
+        candidate.qualityReview = draftedQualityReview();
+        mutate(candidate);
+        let errorText = '';
+        try { batchValidate(candidate); } catch (error) { errorText = String(error?.message || error); }
+        return errorText;
+      };
+      assert(batchFixture(() => {}) === '', 'the batching fixture is accepted before either defect is introduced');
+      const batched = batchFixture((candidate) => {
+        candidate.generationAudit.coverLetterPlan.paragraphs[0].argumentativeJob = 'Too short.';
+        candidate.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping.relevance = 'I would carry that judgment wherever it is needed next.';
+      });
+      assert(/argumentativeJob must be specific/u.test(batched) && /paragraph-argument-links/u.test(batched)
+        && /relevance is not an exact normalized span/u.test(batched),
+      `an audit shape failure and an argument-mapping defect are reported in one round: ${batched}`);
+      // The exception, and the reason this is a recovery rather than a reorder:
+      // when the PARAGRAPH BINDING is what failed, the spans have no paragraph
+      // to be measured against, and an observation made against the wrong
+      // paragraph would name a repair that does not exist.
+      const staleBinding = batchFixture((candidate) => {
+        candidate.generationAudit.coverLetterPlan.paragraphs[0].paragraph = 'Stale paragraph text from an earlier draft.';
+        candidate.generationAudit.coverLetterPlan.paragraphs[0].argumentMapping.relevance = 'I would carry that judgment wherever it is needed next.';
+      });
+      assert(/exact normalized final paragraph/u.test(staleBinding) && !/paragraph-argument-links/u.test(staleBinding),
+        `a failed paragraph binding reports itself alone, not spans measured against a paragraph the audit does not bind: ${staleBinding}`);
       const technicalCopy = clone(base);
       technicalCopy.coverLetter.paragraphs = ['I logged tool calls to trace supported system behavior.'];
       technicalCopy.generationAudit = generationAuditFor({
@@ -1616,12 +1749,14 @@ export default [
         legacy,
         id,
         path.join(os.tmpdir(), 'local-ai-project'),
+        {},
+        { careerData: null, qualityChecklistVersion: 2 },
       );
       assert(acceptedLegacy.generationAudit === null,
         'a legacy queued job with no app-owned audit contract remains compatible');
       let unsupportedExpected = '';
       try {
-        validateLocalApplicationResult(base, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
+        validateLocalApplicationResult(base, id, path.join(os.tmpdir(), 'local-ai-project'), {}, { careerData: null,
           generationAuditVersion: 99,
         });
       } catch (error) { unsupportedExpected = String(error?.message || error); }
@@ -1879,10 +2014,13 @@ export default [
         // verdict. importLocalApplicationJobUnlocked did exactly that, which let
         // a Retry-import click walk past assertLocalAiQualityReviewConsistency on
         // a result the status poll had just rejected. Both consumers must gate on
-        // the measured-status allow-list, not on the hash match alone.
+        // the measured-status allow-list, not on the hash match alone. The assert
+        // runs inside gradeOrRecordRejection because its throw rejects an already
+        // completed package: an unrecorded rejection there cannot be reopened as
+        // a handoff.
         const importSource = await fs.promises.readFile(path.join(process.cwd(), 'electron', 'ipc', 'localAiApplication.js'), 'utf8');
         assert(/const measuredPriorFeedback = matchingPriorFeedback\s*\n?\s*&& \['revision-required', 'revision-exhausted'\]\.includes\(priorFeedback\?\.status\)/.test(importSource)
-          && /const documentSha256 = assertLocalAiQualityReviewConsistency\(result, priorFeedback\)/.test(importSource)
+          && /const documentSha256 = await gradeOrRecordRejection\(\(\) => assertLocalAiQualityReviewConsistency\(result, priorFeedback\)\)/.test(importSource)
           && !/const documentSha256 = matchingPriorFeedback/.test(importSource),
           'the import path gates the quality-review assert on a MEASURED prior verdict, so an invalid rejection record cannot skip it');
         assert(rejection.status === 'invalid' && rejection.measured === false
@@ -3826,7 +3964,7 @@ export default [
           resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
           coverLetter: { ...normalizedCoverLetter(), paragraphs: ['I would welcome the chance to talk about that work.'] },
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-        }, id, root);
+        }, id, root, {}, { careerData: null });
       } catch (error) { message = String(error?.message || error); }
       assert(message.includes('independent validation failures'),
         `two independent families must be reported together, got ${JSON.stringify(message.slice(0, 400))}`);
@@ -3904,7 +4042,7 @@ export default [
           resumeMainHtml: validResumeMain,
           coverLetter: { ...normalizedCoverLetter(), paragraphs: ['A letter \u2014 with one dash.'] },
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-        }, id, root);
+        }, id, root, {}, { careerData: null });
       } catch (error) { dashCount = String(error?.message || error); }
       assert(!/independent validation failures/.test(dashCount)
         && !/Cover-letter copy contains an em dash/.test(dashCount),
@@ -3917,7 +4055,7 @@ export default [
           resumeMainHtml: '<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Containerized the internal-tools hub with Docker Compose, running Django under Gunicorn behind Nginx.</li></ul></article></main>',
           coverLetter: { ...normalizedCoverLetter(), paragraphs: [] },
           coverLetterArgument: validCoverLetterArgument(), qualityReview: draftedQualityReview(),
-        }, id, root);
+        }, id, root, {}, { careerData: null });
       } catch (error) { structural = String(error?.message || error); }
       assert(/failed editorial checks/.test(structural),
         `a structural throw must carry the already-measured résumé defect, got ${JSON.stringify(structural.slice(0, 300))}`);
@@ -4080,6 +4218,17 @@ export default [
       const midToken = extractResumeEvidence(role('<li>Cut <b data-achievement-id="a1">p99</b>-latency on the district ingest path.</li>'));
       assert(midToken.roles[0].bullets[0].budgetText.includes('p99-latency'),
         'the budget measurement must not insert a space at a mid-token tag boundary');
+      // Every over-budget bullet is collected, and the printed list is
+      // bounded — so what the bound left out has to be stated, or a résumé
+      // with ten of them reads as a résumé with eight and the round that
+      // fixes those eight discovers the rest.
+      const ten = checkResumeBulletLength(role(Array.from({ length: 10 }, () => `<li>${over}</li>`).join('')));
+      assert(!ten.passed && (ten.detail.match(/visible characters \(budget 180\)/gu) || []).length === 8,
+        `the printed list of over-budget bullets stays bounded, got ${JSON.stringify(ten.detail)}`);
+      assert(/; 2 additional observation\(s\) omitted$/u.test(ten.detail),
+        `the over-budget bullets this list left out are disclosed as a count, got ${JSON.stringify(ten.detail)}`);
+      assert(!/additional observation/u.test(rejected.detail),
+        'a list that printed every observation says nothing about omissions');
       return { enforced: true };
     },
   },
@@ -4476,7 +4625,7 @@ export default [
       // Without trusted career data there is no stated location, so the gate
       // must stay silent rather than demand one it cannot source.
       let untrustedError = null;
-      try { validateLocalApplicationResult(result(''), 'job-1', process.cwd(), {}); } catch (error) { untrustedError = error; }
+      try { validateLocalApplicationResult(result(''), 'job-1', process.cwd(), {}, { careerData: null }); } catch (error) { untrustedError = error; }
       assert(!untrustedError || !/work location/.test(String(untrustedError.message)),
         `a caller supplying no career data must never be told a location is missing, got ${untrustedError && untrustedError.message}`);
 
@@ -4636,6 +4785,489 @@ export default [
         && style.includes('source-labelled "Personal Projects" stays exactly "Personal Projects"'),
       'the design references must preserve explicit personal-project provenance instead of steering the writer to a generic heading');
       return { documented: true };
+    },
+  },
+  {
+    name: 'Local AI result validation states its strictness arguments instead of quietly grading with less',
+    run: () => {
+      const id = LOCAL_AI_TEST_JOB_ID;
+      const projectRoot = path.join(os.tmpdir(), 'local-ai-project');
+      const careerData = 'Built supported systems. A concise factual letter.';
+      const result = () => ({
+        version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+      });
+      const failure = (run) => { try { run(); return null; } catch (error) { return error; } };
+
+      // Each of these bytes-identical calls used to reach a DIFFERENT verdict,
+      // and the weaker one looked exactly like a pass.
+      const noOptions = failure(() => validateLocalApplicationResult(result(), id, projectRoot, {}));
+      const noJob = failure(() => validateLocalApplicationResult(result(), id, projectRoot, undefined, { careerData }));
+      const blankCorpus = failure(() => validateLocalApplicationResult(result(), id, projectRoot, {}, { careerData: '   ' }));
+      assert(noOptions?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION' && /careerData/u.test(noOptions.message),
+        `a caller that names no career corpus must fail loudly instead of grading without grounding, got ${noOptions?.message || 'acceptance'}`);
+      assert(noJob?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION' && /job record/u.test(noJob.message),
+        `a caller that passes no job must fail loudly instead of grading the letter against an empty posting, got ${noJob?.message || 'acceptance'}`);
+      assert(blankCorpus?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION',
+        `a blank corpus fails every quote it is compared against, so it must be refused rather than graded, got ${blankCorpus?.message || 'acceptance'}`);
+      // A host fault must never be collected into the writer-facing findings:
+      // no revision can supply an argument this app did not pass.
+      assert(!Array.isArray(noOptions.failures) && !/independent validation failures/u.test(noOptions.message),
+        'a configuration fault is reported as a host defect, not as a numbered correction list for the responder');
+
+      // Correctly-invoked callers keep their exact verdicts.
+      const declaredNoCorpus = validateLocalApplicationResult(result(), id, projectRoot, {}, { careerData: null });
+      assert(!declaredNoCorpus.qualityReview.sourceGrounding
+        && declaredNoCorpus.hostValidation.resumeRoleLocations.detail.includes('Skipped'),
+        'a caller that declares it has no corpus still gets the documented unground-able verdict');
+      const grounded = validateLocalApplicationResult(result(), id, projectRoot, { title: 'Engineer', company: 'Acme' }, { careerData });
+      assert(grounded.qualityReview.sourceGrounding.resumeBullets.length === 1,
+        'a caller that supplies the corpus still gets the full source-grounding verdict');
+      const ungrounded = failure(() => validateLocalApplicationResult(
+        { ...result(), qualityReview: draftedQualityReview() }, id, projectRoot, {}, { careerData },
+      ));
+      assert(/sourceGrounding/u.test(String(ungrounded?.message || '')),
+        `the grounding requirement itself still rejects a review without it, got ${ungrounded?.message || 'acceptance'}`);
+
+      // The original wedge: the audit is graded against the accepted plan, and
+      // an options object that never mentions the plan used to fall back to a
+      // weaker count cap instead of saying so.
+      const noPlan = failure(() => validateLocalApplicationResult(result(), id, projectRoot, {}, {
+        careerData, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION,
+      }));
+      assert(noPlan?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION' && /evidence plan/u.test(noPlan.message),
+        `an audit graded with no stated evidence plan must fail loudly, got ${noPlan?.message || 'acceptance'}`);
+      return { faultsRaised: 4 };
+    },
+  },
+  {
+    name: 'Local AI quality review refuses an unstated grounding context and an unstated checklist version',
+    run: () => {
+      const careerData = 'Built supported systems. A concise factual letter.';
+      const resumeEvidence = extractResumeEvidence('<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>');
+      const context = {
+        required: true,
+        careerData,
+        resumeEvidence,
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument: validCoverLetterArgument(),
+        frozenSourceQuotes: true,
+      };
+      const review = () => groundedQualityReview(sourceGroundingFor());
+      const failure = (run) => { try { run(); return null; } catch (error) { return error; } };
+
+      // Both of these produced a quietly weaker review: a null context skipped
+      // the entire source-grounding arm, and a defaulted version graded the job
+      // against a checklist it was never issued.
+      const noContext = failure(() => sanitizeQualityReview(review(), null, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const noVersion = failure(() => sanitizeQualityReview(review(), context));
+      // The third silent default, and the one that changes the CLASS rather
+      // than the strictness: whether the career-data quotes in these bindings
+      // were written by the responder or projected by this app out of a frozen
+      // evidence plan. Defaulted to "the responder wrote them", a defect in a
+      // quote no response ever wrote is reported as a document to rewrite.
+      const { frozenSourceQuotes: _stated, ...unstatedProjection } = context;
+      const noProjection = failure(() => sanitizeQualityReview(review(), unstatedProjection, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      assert(noContext?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION'
+        && noVersion?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION'
+        && noProjection?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION',
+      `an unstated grounding context, checklist version or quote provenance must fail loudly, got ${noContext?.message || 'acceptance'}, ${noVersion?.message || 'acceptance'} and ${noProjection?.message || 'acceptance'}`);
+
+      const graded = sanitizeQualityReview(review(), context, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      assert(graded.sourceGrounding.resumeBullets.length === 1 && graded.checklistVersion === APPLICATION_QUALITY_CHECKLIST_VERSION,
+        'a stated context still grades the full source-grounding arm');
+      const unrequired = sanitizeQualityReview(draftedQualityReview(), { ...context, required: false }, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      assert(!unrequired.sourceGrounding,
+        'a context that states grounding is not required still skips that arm, which is why the state has to be stated');
+      return { gradedVersion: graded.checklistVersion };
+    },
+  },
+  {
+    name: 'Source-quote grounding requires the identity tokens that decide which sentences it compares',
+    run: () => {
+      const quote = 'Built the nightly extract for care teams.';
+      // Sentence two is third-person career prose whose only link to the
+      // paragraph's bound quote is the employer name it states.
+      const paragraph = 'Built the nightly extract for care teams. Acme cultivated rare orchids for regional shows.';
+      const failure = (run) => { try { run(); return null; } catch (error) { return error; } };
+
+      const unstated = failure(() => assertSourceQuoteLinksFinalText(paragraph, [quote], 'coverLetterParagraphs', 0));
+      assert(unstated?.code === 'LOCAL_AI_VALIDATION_CONFIGURATION',
+        `grading with no stated identity tokens must fail loudly rather than skip every third-person sentence, got ${unstated?.message || 'acceptance'}`);
+
+      // The tokens are what put a third-person career sentence in scope, so
+      // the difference between the two calls below is the whole gate.
+      const compared = failure(() => assertSourceQuoteLinksFinalText(paragraph, [quote], 'coverLetterParagraphs', 0,
+        { identityTokens: ['acme'] }));
+      assert(/sentence 2/u.test(String(compared?.message || '')),
+        `a third-person career sentence must be compared to its bound quotes once its employer is named, got ${compared?.message || 'acceptance'}`);
+      assert(!failure(() => assertSourceQuoteLinksFinalText(paragraph, [quote], 'coverLetterParagraphs', 0, { identityTokens: [] })),
+        'an explicitly empty token list keeps the documented narrower scope, which is why it has to be explicit');
+      return { compared: true };
+    },
+  },
+  {
+    name: 'The source-grounding sentence walk reports every unrelated sentence and keeps the single-offender message unchanged',
+    run: () => {
+      const quote = 'Built the nightly extract for care teams.';
+      const failure = (run) => { try { run(); return null; } catch (error) { return String(error?.message || error); } };
+      const grade = text => failure(() => assertSourceQuoteLinksFinalText(text, [quote], 'coverLetterParagraphs', 0, { identityTokens: [] }));
+
+      // Byte-identical, not merely matching: the completion gate, the paste
+      // twin that rewrites this message's head, and the assertions written
+      // against it all read the one-sentence wording.
+      const single = grade('Built the nightly extract for care teams. I cultivated rare orchids for weekend flower shows.');
+      assert(single === 'Local AI qualityReview.sourceGrounding.coverLetterParagraphs[0] (cover-letter paragraph 1, sentence 2) is unrelated to its bound career-data quotes.',
+        `one unrelated sentence keeps the message it always had, byte for byte (message=${JSON.stringify(single)})`);
+
+      const strays = [
+        'I cultivated rare orchids for weekend flower shows.',
+        'I catalogued antique postage stamps for a collectors club.',
+        'I refereed youth basketball tournaments every winter.',
+      ];
+      const three = grade(`Built the nightly extract for care teams. ${strays.join(' ')}`);
+      assert(three.startsWith(single),
+        `the first offender still opens the message, unchanged (message=${JSON.stringify(three)})`);
+      for (const position of ['sentence 2', 'sentence 3', 'sentence 4']) {
+        assert(three.includes(position), `all three unrelated sentences are named in one failure (message=${JSON.stringify(three)})`);
+      }
+      for (const stray of strays.slice(1)) {
+        assert(three.includes(stray), `each named sentence is quoted back (message=${JSON.stringify(three)})`);
+      }
+
+      // A pathological paragraph must not produce an unbounded message: the
+      // correction it feeds clips one item by keeping only its head and tail,
+      // which would lose exactly the sentences listed in the middle.
+      const long = index => `I cultivated rare heirloom orchid varieties, tended the greenhouse humidity logs, and judged weekend flower shows for the number ${index + 1} regional horticultural society.`;
+      const many = grade(`Built the nightly extract for care teams. ${Array.from({ length: 12 }, (_, index) => long(index)).join(' ')}`);
+      assert((many.match(/sentence \d+/gu) || []).length === 5,
+        `the list of named sentences is bounded (message=${JSON.stringify(many)})`);
+      assert(/ 7 further unrelated sentence\(s\) in the same text are not listed here\.$/u.test(many),
+        `the sentences left out are disclosed as a count (message=${JSON.stringify(many)})`);
+      assert(many.includes(long(1).slice(0, 60)) && !many.includes(long(1)),
+        `a listed sentence is quoted clipped rather than whole, so twelve of them cannot spend the item budget (message=${JSON.stringify(many)})`);
+      assert(many.length < single.length * 6,
+        `twelve unrelated sentences stay within a few times the single-offender message (length=${many.length})`);
+      return { reported: 3, listed: 5, boundedChars: many.length };
+    },
+  },
+  {
+    // The paste surface has two failure shapes and one of them must never be
+    // answered with another paste. A correction round says the response was
+    // wrong; a job-integrity failure says the job's own frozen state was, and
+    // asking a person to paste again against it is asking them to keep
+    // answering a rejection that has no answer.
+    name: 'A paste surface tells a broken job apart from a correction round',
+    run() {
+      const brokenSentence = 'This application job cannot be completed, and no pasted response can repair it. Paste application assembly: careerData contains an unsafe control character. Press Generate on the job card to build this application again from current career data and the current listing.';
+      const broken = jobIntegrityFailureMessage({ success: false, error: brokenSentence, errorCode: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE });
+      assert(broken === brokenSentence,
+        `a broken job surfaces the main process's own sentence unchanged (${JSON.stringify(broken)})`);
+      // The regression that would cost more: a repairable rejection read as a
+      // broken job would throw away a correction round that could have worked.
+      const correction = jobIntegrityFailureMessage({
+        success: true, accepted: false,
+        validationErrors: ['Local AI résumé failed editorial checks: resume-bullet-length: bullet 1 is 216 visible characters (budget 180).'],
+        handoff: { handoffCode: 'code', correctionPrompt: 'fix this' },
+      });
+      const otherFailure = jobIntegrityFailureMessage({ success: false, error: 'That handoff code is stale.', errorCode: undefined });
+      const accepted = jobIntegrityFailureMessage({ success: true, accepted: true });
+      assert(correction === '' && otherFailure === '' && accepted === '' && jobIntegrityFailureMessage(null) === '',
+        `only the job-integrity code marks a broken job (${JSON.stringify({ correction, otherFailure, accepted })})`);
+      // A code without its sentence still has to name the action, because a
+      // surface that says only "failed" leaves the person nothing to do.
+      const missingText = jobIntegrityFailureMessage({ success: false, errorCode: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE });
+      assert(/no pasted response can repair it/.test(missingText) && /Press Generate on the job card/.test(missingText),
+        `a broken job without a message still names the action that resolves it (${JSON.stringify(missingText)})`);
+      return { broken: true };
+    },
+  },
+  {
+    // The other half of the same rule, on the surface the person is actually
+    // watching. A status IPC that fails is treated as transient by both
+    // drivers: three failures in a row park the card at 'status-error …
+    // Retrying automatically…', which is in NEITHER driver's idle list. That
+    // is right for a canvas re-save renaming files under the resolver and
+    // wrong for a job whose own manifest or input record can no longer be
+    // read — the same fault every 2.5 seconds, naming no action.
+    name: 'A status poll reporting a broken job parks the card instead of retrying it forever',
+    run: () => {
+      const sentence = 'This application job cannot be completed, and no pasted response can repair it. This job’s manifest is not readable JSON: Unexpected end of JSON input The value it names is held in this job’s own manifest, and no response this job can still take supplies it. Press Generate on the job card to build this application again from current career data and the current listing.';
+      const broken = brokenLocalAiJobDriveState({ success: false, error: sentence, errorCode: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE });
+      assert(broken?.status === 'failed' && broken.message === sentence,
+        `a broken job is parked at the main process's own sentence (${JSON.stringify(broken)})`);
+      // Terminal for BOTH drivers, or the other one keeps the loop alive.
+      assert(LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(broken.status)
+        && LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(broken.status),
+      `the parked status stops the mounted card's poll and the fallback manager's (${broken.status})`);
+      // The regression that would cost more: a transient failure must keep its
+      // retry, because parking on one is how a recoverable handoff is lost.
+      const transient = brokenLocalAiJobDriveState({ success: false, error: 'EBUSY: resource busy or locked' });
+      const healthy = brokenLocalAiJobDriveState({ success: true, localJob: { id: 'job', status: 'queued' } });
+      assert(transient === null && healthy === null && brokenLocalAiJobDriveState(null) === null,
+        `only the job-integrity code parks a card (${JSON.stringify({ transient, healthy })})`);
+
+      // Nothing in this repo renders either driver, so the one thing a unit
+      // test can still prove is that both of them ASK before they fall into
+      // the generic failure throw that feeds the streak.
+      const cardSource = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const fallbackSource = fs.readFileSync(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+      for (const [label, source, throwLine] of [
+        ['JobCardNode', cardSource, "throw new Error(result?.error || 'Could not check Local AI job status.')"],
+        ['useLocalAiFallbackManager', fallbackSource, "throw new Error(statusResult?.error || 'Could not check Local AI job status.')"],
+      ]) {
+        const asked = source.indexOf('brokenLocalAiJobDriveState(');
+        const threw = source.indexOf(throwLine);
+        assert(asked > 0 && threw > 0 && asked < threw,
+          `${label} asks whether the job is broken before it throws a status failure into the retry streak (${JSON.stringify({ asked, threw })})`);
+      }
+      return { parked: broken.status };
+    },
+  },
+  {
+    // The third surface, and the one that was still missing. A status poll
+    // reads the IPC result; an IMPORT has a bundle save after its IPC, so it
+    // rethrows that result as an Error and one catch covers both steps. Both
+    // import catches wrote 'completed' for every failure they did not
+    // recognise — including a job the main process had just ended — which the
+    // card renders as "Local AI result ready" with Generate still disabled,
+    // and which neither driver stops polling on.
+    name: 'An import that ends a broken job parks the card instead of reporting a finished application',
+    run: () => {
+      const sentence = 'This application job cannot be completed, and no pasted response can repair it. This job’s own input record is not readable JSON. The value it names is held in this job’s own input record, and no response this job can still take supplies it. Press Generate on the job card to build this application again from current career data and the current listing.';
+      // Exactly what each catch is handed: the Error the caller rethrew from
+      // the failed IPC result, carrying that result's code and message.
+      const rethrown = Object.assign(new Error(sentence), { code: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE });
+      const fromImport = brokenLocalAiJobDriveState(rethrown);
+      const fromPoll = brokenLocalAiJobDriveState({ success: false, error: sentence, errorCode: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE });
+      assert(fromImport?.status === 'failed' && fromImport.message === sentence,
+        `an import that reports a broken job parks it at the main process's own sentence (${JSON.stringify(fromImport)})`);
+      assert(JSON.stringify(fromImport) === JSON.stringify(fromPoll),
+        `the import and the poll reach the same state from one helper (${JSON.stringify({ fromImport, fromPoll })})`);
+      // A code whose sentence did not survive the rethrow still names the action.
+      const bare = brokenLocalAiJobDriveState(Object.assign(new Error(''), { code: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE }));
+      assert(/no pasted response can repair it/.test(bare?.message) && /Press Generate on the job card/.test(bare?.message),
+        `a broken job whose sentence is missing still names the action that resolves it (${JSON.stringify(bare)})`);
+
+      // The regression that would cost more: the two failures the import
+      // catches already answer are waits, not endings, and parking either one
+      // abandons a bundle that was about to be saved.
+      const transient = [
+        ['a newer result settled', Object.assign(new Error('Local AI saved a newer result.'), { code: 'LOCAL_AI_RESULT_CHANGED' })],
+        ['another import holds the lock', Object.assign(new Error('An import is already running.'), { code: 'LOCAL_AI_IMPORT_IN_FLIGHT' })],
+        ['an unclassified filesystem error', new Error('EBUSY: resource busy or locked')],
+        // The widening must not let a SUCCESSFUL result be read through the
+        // Error shape: an IPC result always carries `success`, an Error never
+        // does, and that is the whole separation between the two readings.
+        ['a successful status result carrying a code field', { success: true, localJob: { id: 'job', status: 'completed' }, code: LOCAL_AI_JOB_INTEGRITY_ERROR_CODE }],
+      ].filter(([, value]) => brokenLocalAiJobDriveState(value) !== null).map(([label]) => label);
+      assert(!transient.length,
+        `only the job-integrity code ends a job; everything else keeps its retry: ${JSON.stringify(transient)}`);
+
+      // A status that stops the poll but hides the action is the same defect
+      // in a different hat, so assert both halves of "terminal" — and assert
+      // that the status these catches used to write has neither half.
+      assert(LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(fromImport.status)
+        && LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(fromImport.status)
+        && canRegenerateLocalApplication({ status: fromImport.status }),
+      `the parked status stops both drivers AND re-enables the Generate the message names (${fromImport.status})`);
+      assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('completed')
+        && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes('completed')
+        && !canRegenerateLocalApplication({ status: 'completed' }),
+      'the status both import catches wrote for an unrecognised failure keeps polling and keeps Generate disabled');
+
+      // Nothing in this repo renders either driver, so the one thing a unit
+      // test can still prove is that both import catches ASK before they fall
+      // into the branch that parks the job at 'completed'.
+      const cardSource = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const fallbackSource = fs.readFileSync(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
+      for (const [label, source] of [
+        ['JobCardNode', cardSource],
+        ['useLocalAiFallbackManager', fallbackSource],
+      ]) {
+        const asked = source.indexOf('brokenLocalAiJobDriveState(error)');
+        const completed = source.indexOf("status: 'completed', message: error?.message");
+        assert(asked > 0 && completed > 0 && asked < completed,
+          `${label}'s import catch asks whether the job is broken before it parks it at 'completed' (${JSON.stringify({ asked, completed })})`);
+      }
+      return { parked: fromImport.status };
+    },
+  },
+  {
+    // The completion gate, swept the way the assembly before it was swept: for
+    // every defect it can raise, can the responder repair it by changing what
+    // it returns? This gate runs inside the same submit try, immediately after
+    // the assembly, and several of its checks grade values the app wrote —
+    // the job's own format version, the checklist and audit contracts it was
+    // queued with, the canvas folder it recorded. Those reached the host with
+    // no repair attached, fell to the unattributed default, and reopened a
+    // round that forbids only a byte-identical repeat.
+    name: 'Local AI application: the completion gate sorts every defect by whether the responder can repair it',
+    run: () => {
+      const id = '123e4567-e89b-42d3-a456-426614174000';
+      const projectRoot = path.join(os.tmpdir(), 'local-ai-project');
+      const resumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
+      const completedPackage = () => ({
+        version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed',
+        outputBundleRoot: 'Applied Jobs',
+        resumeMainHtml: resumeMain,
+        coverLetter: normalizedCoverLetter(),
+        coverLetterArgument: validCoverLetterArgument(),
+        qualityReview: groundedQualityReview(sourceGroundingFor()),
+      });
+      // A paste job's result is assembled by the app from its input record, so
+      // its envelope is frozen; a legacy filesystem job's result.json is
+      // written by the responder, where the same fields are its own.
+      const paste = { careerData: null, frozenEnvelope: true };
+      const raise = (build) => {
+        const { raw = completedPackage(), root = projectRoot, options = paste } = build();
+        try { validateLocalApplicationResult(raw, id, root, {}, options); return null; }
+        catch (error) { return error; }
+      };
+      // The property that keeps a class out of every correction round: the
+      // collector that turns rejections into repair targets rethrows it
+      // instead of listing it.
+      const attribution = (error) => {
+        try { return { targets: pasteRejectionChangeDocuments(error).targets, rethrown: false }; }
+        catch (rethrown) { return { targets: null, rethrown: rethrown === error }; }
+      };
+
+      // Each case also states WHERE the value it corrupts is held, because a
+      // fault that names the wrong file is an asserted location: the first
+      // five are read out of result.json, and reporting them as "held in this
+      // job's own input record" sent a reader to a record that reads
+      // correctly. The last three are read out of the input record itself.
+      const assembledPackage = 'the completed application package this job already assembled';
+      const inputRecord = "this job's own input record";
+      const unrepairable = [
+        ['the frozen format version', assembledPackage, () => ({ raw: { ...completedPackage(), version: 2 } })],
+        ['the frozen job id', assembledPackage, () => ({ raw: { ...completedPackage(), jobId: '123e4567-e89b-42d3-a456-426614174999' } })],
+        ['the assembled status', assembledPackage, () => ({ raw: { ...completedPackage(), status: 'queued' } })],
+        ['the app-selected bundle location', assembledPackage, () => ({ raw: { ...completedPackage(), outputBundleRoot: 42 } })],
+        ['a bundle location outside the canvas folder', assembledPackage, () => ({ raw: { ...completedPackage(), outputBundleRoot: '../elsewhere' } })],
+        ['the canvas folder the job recorded', inputRecord, () => ({ root: '' })],
+        ['the frozen quality-checklist version', inputRecord, () => ({ options: { ...paste, qualityChecklistVersion: 99 } })],
+        ['the frozen generation-audit version', inputRecord, () => ({ options: { ...paste, generationAuditVersion: 99 } })],
+      ];
+      const misclassified = [];
+      const unnamedAction = [];
+      const attributed = [];
+      for (const [label, subject, build] of unrepairable) {
+        const error = raise(build);
+        if (error?.code !== LOCAL_AI_JOB_INTEGRITY_ERROR_CODE) {
+          misclassified.push(`${label}: ${error?.message || 'accepted'}`);
+          continue;
+        }
+        if (!error.message.includes(error.jobIntegrity.observation)
+          || error.jobIntegrity.subject !== subject
+          || !error.message.includes(subject)
+          || !/no pasted response can repair it/.test(error.message)
+          || !/Press Generate on the job card/.test(error.message)) {
+          unnamedAction.push(`${label}: ${error.message}`);
+        }
+        if (!attribution(error).rethrown) attributed.push(label);
+      }
+      assert(!misclassified.length,
+        `every completion defect about app-owned frozen state is a job-integrity fault: ${JSON.stringify(misclassified)}`);
+      assert(!unnamedAction.length,
+        `each fault states what was observed, that no response repairs it, whose value it is, and the action that does: ${JSON.stringify(unnamedAction)}`);
+      assert(!attributed.length,
+        `a job-integrity fault is rethrown by the attribution collector rather than given a repair target: ${JSON.stringify(attributed)}`);
+
+      // The regression that would cost more than the loop: a defect the next
+      // response CAN repair must keep the concrete target that names it.
+      // Same gate, same frozen-envelope options, repairable defects.
+      const repairable = [
+        ['a role that renders no highlight', ['resume:rendered'], () => ({ raw: { ...completedPackage(), resumeMainHtml: resumeMain.replace('<ul class="highlights"><li>Built supported systems.</li></ul>', '') } })],
+        ['the letter is not a record', ['coverLetter:rendered'], () => ({ raw: { ...completedPackage(), coverLetter: 'a letter' } })],
+        ['the letter carries no argument contract', ['coverLetter:authored'], () => ({ raw: { ...completedPackage(), coverLetterArgument: null } })],
+        ['the review carries no quality review', ['qualityReview'], () => ({ raw: { ...completedPackage(), qualityReview: null } })],
+        ['the review retains no generation audit', ['generationAudit'], () => ({
+          raw: { ...completedPackage(), generationAudit: null },
+          options: { ...paste, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION, evidencePlan: null },
+        })],
+      ];
+      const wrongTarget = [];
+      for (const [label, targets, build] of repairable) {
+        const error = raise(build);
+        const reported = attribution(error);
+        if (error?.code === LOCAL_AI_JOB_INTEGRITY_ERROR_CODE || reported.rethrown
+          || JSON.stringify(reported.targets) !== JSON.stringify(targets)) {
+          wrongTarget.push(`${label}: ${JSON.stringify(reported.targets)} (${error?.message || 'accepted'})`);
+        }
+      }
+      assert(!wrongTarget.length,
+        `a completion defect the next response can repair keeps the target that names it: ${JSON.stringify(wrongTarget)}`);
+
+      // The other half of the classification: the same four envelope fields on
+      // a LEGACY filesystem job are written by the responder into result.json,
+      // where rewriting them is the whole repair. Calling those unrepairable
+      // would throw away a job over an edit its writer can make.
+      const legacy = { careerData: null };
+      const overClassified = [
+        ['format version', { ...completedPackage(), version: 2 }],
+        ['job id', { ...completedPackage(), jobId: '123e4567-e89b-42d3-a456-426614174999' }],
+        ['status', { ...completedPackage(), status: 'queued' }],
+        ['bundle location', { ...completedPackage(), outputBundleRoot: '../elsewhere' }],
+      ].filter(([, raw]) => {
+        const error = raise(() => ({ raw, options: legacy }));
+        return !error || error.code === LOCAL_AI_JOB_INTEGRITY_ERROR_CODE;
+      }).map(([label]) => label);
+      assert(!overClassified.length,
+        `a responder-written result envelope stays repairable in the round that wrote it: ${JSON.stringify(overClassified)}`);
+
+      // And the gate still passes what it accepted before any of this.
+      const accepted = validateLocalApplicationResult(completedPackage(), id, projectRoot, {}, paste);
+      assert(accepted.coverLetterArgument.roleThesis === validCoverLetterArgument().roleThesis,
+        'a valid assembled package is unaffected by the classification');
+      return { unrepairable: unrepairable.length, repairable: repairable.length };
+    },
+  },
+  {
+    name: 'Local AI application: a batched grounding rejection reads as a list, not a chain of conjunctions',
+    run() {
+      // Both batched reporters joined their siblings with '; and ', which put
+      // the conjunction after EVERY separator: "sentence 5 (…); and sentence 6
+      // (…); and sentence 7 (…)". Three equally-measured siblings read as
+      // three afterthoughts, and the reader cannot tell whether the last one
+      // is a fourth item or a summary of the first three.
+      const quotes = ['Built reporting systems that reduced manual work.'];
+      const identityTokens = [];
+      const paragraph = [
+        'I built reporting systems that reduced manual work.',
+        'I migrated the billing ledger.',
+        'I refactored the scheduling queue.',
+        'I audited the vendor catalogue.',
+        'I packaged the installer.',
+      ].join(' ');
+      let sentenceMessage = '';
+      try { assertSourceQuoteLinksFinalText(paragraph, quotes, 'coverLetterParagraphs', 0, { identityTokens }); }
+      catch (error) { sentenceMessage = String(error?.message || error); }
+      const conjunctions = value => (value.match(/; and /gu) || []).length;
+
+      assert(sentenceMessage.includes('sentence 2')
+        && ['sentence 3', 'sentence 4', 'sentence 5'].every(name => sentenceMessage.includes(name)),
+      `the batch still names the first offender and every sibling it lists (message=${JSON.stringify(sentenceMessage)})`);
+      assert(conjunctions(sentenceMessage) === 1 && /”\); sentence \d+ \(“/u.test(sentenceMessage),
+        `three listed sentences are separated, with one conjunction before the last (message=${JSON.stringify(sentenceMessage)})`);
+
+      // The sibling reporter one level down carries the same list, so the fix
+      // is the class and not the one message that was measured.
+      let qualifierMessage = '';
+      try {
+        assertSourceQuoteLinksFinalText('Built daily and weekly production reporting that improved manual review.',
+          quotes, 'resumeBullets', 0, { identityTokens });
+      } catch (error) { qualifierMessage = String(error?.message || error); }
+      assert(qualifierMessage.includes('daily') && qualifierMessage.includes('weekly')
+        && qualifierMessage.includes('production') && qualifierMessage.includes('improv')
+        && conjunctions(qualifierMessage) === 1,
+      `the qualifier batch lists its siblings the same way (message=${JSON.stringify(qualifierMessage)})`);
+      assert(MIN_SHARED_SOURCE_TERMS === 2,
+        'the fixture relies on the shared-term floor the gate applies');
+      return { sentenceConjunctions: conjunctions(sentenceMessage), qualifierConjunctions: conjunctions(qualifierMessage) };
     },
   },
 ];

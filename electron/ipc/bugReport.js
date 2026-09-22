@@ -21,6 +21,7 @@ import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
 import { shortId, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
+import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
@@ -1973,7 +1974,9 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
   return authWindowMarkdown;
 }
 
-function buildRecentMainProcessLogLines() {
+const AIHANDOFF_MAIN_PROCESS_LOG_PATTERN = /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation|jsonrepair/i;
+
+function buildRecentMainProcessLogLines({ filter } = {}) {
   let mainProcessLogLines = [];
     // Keep source order chronological through all collection work; the shared
     // Markdown renderer reverses it at the last possible boundary. Sorting by
@@ -1981,6 +1984,7 @@ function buildRecentMainProcessLogLines() {
     // from becoming an accidental chronology claim in the report.
     const logs = (getRecentLogs(200) || [])
       .filter(l => Number(l?.ts) >= PROCESS_START_MS)
+      .filter(l => typeof filter !== 'function' || filter(l) === true)
       .sort((a, b) => Number(a.ts) - Number(b.ts));
     if (logs.length > 0) {
       mainProcessLogLines = logs.map(l => {
@@ -2283,8 +2287,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // hit stdout (which users never see) are surfaced here. Skip lines older
   // than this process start so we don't drag in stale logs from a previous
   // run that happened to share the ring buffer state.
+  // AIHANDOFF is intentionally a focused lens. Its renderer Event History is
+  // already filtered by the code vocabulary; apply the equivalent predicate to
+  // the otherwise-global main-process ring as well. FULL remains byte-for-byte
+  // global even when combined with AIHANDOFF.
+  const mainProcessLogFilter = !isFullReport && reportCodes.has('AIHANDOFF')
+    ? entry => AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(String(entry?.message || ''))
+    : null;
   let mainProcessLogLines = [];
-  try { mainProcessLogLines = buildRecentMainProcessLogLines(); }
+  try { mainProcessLogLines = buildRecentMainProcessLogLines({ filter: mainProcessLogFilter }); }
   catch { /* never break the report on diagnostic failure */ }
   const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
 
@@ -2395,8 +2406,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // and a JOBS report must not silently lose it in the move. TAXONOMY also
   // needs the receipt because its plan/classify steps use this manual handoff.
   let nonApiHandoffMarkdown = '';
-  if (isFullReport || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS') || reportCodes.has('TAXONOMY')) {
+  if (isFullReport || reportCodes.has('AIHANDOFF') || reportCodes.has('JOBHANDOFF') || reportCodes.has('JOBS') || reportCodes.has('TAXONOMY')) {
     try { nonApiHandoffMarkdown = buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWindowId, nodes); }
+    catch { /* never break the report on diagnostic failure */ }
+  }
+
+  let pasteHandoffMarkdown = '';
+  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('HANDOFF')) {
+    try { pasteHandoffMarkdown = buildPasteHandoffDiagnosticsMarkdown(); }
     catch { /* never break the report on diagnostic failure */ }
   }
 
@@ -2617,7 +2634,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];
