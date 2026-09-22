@@ -532,6 +532,34 @@ export default [
     },
   },
   {
+    name: 'application dock: retention is disclosed before a response is pasted',
+    run: () => {
+      // The full-screen modal this replaced said so in its footer. Pasted
+      // answers are written into the private job folder and every accepted
+      // revision is appended to the bundle's Generation Log, so dropping the
+      // sentence would quietly remove the only place the person is told.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert(
+        /Responses are saved privately with this application/.test(dock),
+        'the dock must disclose that pasted responses are retained with the bundle',
+      );
+      assert(
+        /appended to its generation log/i.test(dock),
+        'the dock must disclose that accepted revisions are logged',
+      );
+      // And the log itself must still be written and shipped with the bundle.
+      const main = readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
+      assert(
+        main.includes("const PASTE_APPLICATION_LOG_FILE = 'Generation Log.jsonl';"),
+        'the generation log file must still be defined',
+      );
+      assert(
+        main.includes('PASTE_APPLICATION_LOG_FILE,') || main.includes('PASTE_APPLICATION_LOG_FILE]'),
+        'the generation log must still be listed among the files a bundle keeps',
+      );
+    },
+  },
+  {
     name: 'application dock: every cross-tree event a card raises has a live consumer',
     run: () => {
       // The card owns no dialog any more, so a dispatched event with nobody

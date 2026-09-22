@@ -1390,7 +1390,7 @@ export function NonApiAiDialog() {
               <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 pt-1">
                 <span className="min-w-48 flex-1 text-xs text-white/40" aria-live="polite">
                   {isApplicationRequest
-                    ? (isAccepted ? 'Response accepted — continuing task…' : isDiscarding ? 'Discarding this application bundle…' : 'Discard bundle deletes this application and its private job folder. The job card keeps its listing, and Generate can start a fresh one.')
+                    ? (isAccepted ? 'Response accepted — continuing task…' : isDiscarding ? 'Discarding this application bundle…' : 'Responses are saved privately with this application, and each accepted revision is appended to its generation log. Discard bundle deletes this application and its private job folder; the job card keeps its listing, and Generate can start a fresh one.')
                     : (isAccepted ? 'Response accepted — continuing task…' : isSteppingBack ? 'Returning to the previous AI step…' : isCancelling ? 'Cancelling the owning job operation…' : 'Cancel task stops the owning job operation. Every response you already pasted for this run is discarded. You can retry as many times as needed.')}
                 </span>
                 <div className="flex flex-wrap items-center justify-end gap-2">
