@@ -17,6 +17,12 @@ const SAFE_REASONS = new Set([
   // pasted response did. Collapsing it into VALIDATION_FAILED would hide the
   // one distinction a reader of this report needs: no round was reopened.
   'JOB_INTEGRITY_FAULT',
+  // A reply cut off by the chat's own output-length limit is invalid JSON
+  // for a different reason than a malformed paste, and the fix is different
+  // too -- get a complete reply, not paste more carefully. Keeping it out of
+  // INVALID_JSON lets a reader of this report see that distinction without
+  // re-deriving it from parser positions.
+  'TRUNCATED_JSON',
   'VALIDATION_FAILED',
 ]);
 
@@ -43,12 +49,17 @@ export function recordPasteHandoffDiagnostic({
   syntaxLine,
   syntaxColumn,
   artifactCandidates,
+  truncated,
 } = {}) {
   const item = {
     at: Date.now(),
     stage: SAFE_STAGES.has(stage) ? stage : 'unknown',
     outcome: SAFE_OUTCOMES.has(outcome) ? outcome : 'rejected',
-    reason: SAFE_REASONS.has(reason) ? reason : 'VALIDATION_FAILED',
+    // The parser's own truncation diagnostic decides this regardless of what
+    // the caller passed for `reason`: the caller only ever forwards a rejected
+    // JSON parse as INVALID_JSON, and truncation is a fact the parser found,
+    // not a fact the caller can know without re-deriving it.
+    reason: truncated ? 'TRUNCATED_JSON' : (SAFE_REASONS.has(reason) ? reason : 'VALIDATION_FAILED'),
     responseChars: boundedInteger(responseChars, 10_000_000),
     syntaxLine: boundedInteger(syntaxLine, 1_000_000),
     syntaxColumn: boundedInteger(syntaxColumn, 1_000_000),

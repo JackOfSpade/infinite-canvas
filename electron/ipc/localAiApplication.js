@@ -606,6 +606,58 @@ function pasteHandoffCode() {
   return crypto.randomBytes(18).toString('base64url');
 }
 
+// A brace/bracket/string-quote scan, ignoring quote characters that occur
+// inside an escaped sequence. This is the only way to tell "the document
+// really does end here, unclosed" apart from "JSON.parse merely stopped
+// reading here" -- a position alone cannot distinguish a cut-off reply from
+// one that legitimately ends at that character (a trailing comma right
+// before a would-be final token, for instance, fails at a position near the
+// end too, but closes every brace it opened).
+function hasUnclosedJsonStructure(source) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const char of source) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') depth -= 1;
+  }
+  return inString || depth > 0;
+}
+
+// Distinguishes a chat reply that got cut off by its own output-length limit
+// from a genuinely malformed paste. V8 fails a truncated document either with
+// no position at all ("Unexpected end of JSON input") or with a position that
+// lands exactly at the end of what was pasted -- a syntax error inside an
+// otherwise-complete document always leaves characters unparsed after the
+// offending token, so its position is always short of source.length. Reaching
+// the end is necessary but not sufficient: an empty or whitespace-only paste
+// also fails with no position and nothing left open, and that is a different
+// mistake (nothing was pasted) with a different fix, so an unclosed brace,
+// bracket, or string is required too.
+function isTruncatedJsonPaste(error, source) {
+  // A reply wrapped in a ```json fence that gets cut off keeps its opening
+  // marker but never gets a closing one, so JSON.parse fails on the fence
+  // marker itself at position 0 -- the fence, not the JSON, is what breaks
+  // parsing there, and that position says nothing about where the reply
+  // actually stopped. Judge the fenced body instead.
+  const openFence = source.match(/^```(?:json)?[ \t]*\r?\n/i);
+  if (openFence && !/```\s*$/.test(source)) {
+    return hasUnclosedJsonStructure(source.slice(openFence[0].length));
+  }
+  const message = String(error?.message || '');
+  const offset = /unexpected end of json input/i.test(message)
+    ? source.length
+    : Number(message.match(/position\s+(\d+)/i)?.[1] ?? NaN);
+  return Number.isFinite(offset) && offset >= source.length && hasUnclosedJsonStructure(source);
+}
+
 function pasteJsonSyntaxError(error, source, contentReferenceCount = 0) {
   const position = String(error?.message || '').match(/(?:at\s+)?position\s+(\d+)/i);
   const offset = position ? Math.max(0, Math.min(Number(position[1]), source.length)) : null;
@@ -615,9 +667,27 @@ function pasteJsonSyntaxError(error, source, contentReferenceCount = 0) {
   const artifactHint = contentReferenceCount > 0
     ? ' A ChatGPT content-reference annotation was removed, but the remaining JSON is still invalid.'
     : '';
-  const location = line === null ? '' : ` JSON parsing stopped near line ${line}, column ${column}.`;
-  const failure = new Error(`Paste one valid JSON object (a single JSON code fence is also accepted).${location}${artifactHint}`);
-  failure.pasteDiagnostic = { syntaxLine: line, syntaxColumn: column, artifactCandidates: contentReferenceCount };
+  const truncated = isTruncatedJsonPaste(error, source);
+  // A cut-off reply is not a malformed paste, and telling the person to
+  // "paste one valid JSON object" again sends them back to re-paste the same
+  // incomplete answer. Name what actually happened -- the chat's own
+  // incomplete rather than malformed -- and both actions that resolve it,
+  // without dictating the words to put back into the chat: that string would
+  // otherwise get copied verbatim into the next reply instead of solving what
+  // it names, the same failure host gates that name literal strings produce
+  // elsewhere in this app.
+  //
+  // It deliberately does NOT assert WHY the answer is short. This detector
+  // sees one thing: the parser ran out of input with a brace, bracket or
+  // string still open. A chat that hit its output ceiling and a person who
+  // copied only part of a complete reply produce byte-identical parser
+  // output, so naming either as the cause would state as fact something
+  // nothing here observed, and send someone looking in the wrong place.
+  const message = truncated
+    ? `This paste stops before the JSON object closes, so what arrived is incomplete rather than malformed. Either the reply ran into its own output-length limit, or only part of it was copied — the two look identical here. Check the reply in the chat: if it is complete, copy the whole of it again; if it stopped early, ask it to continue until the JSON object closes, or to answer more concisely so the whole object fits in one reply.${artifactHint}`
+    : `Paste one valid JSON object (a single JSON code fence is also accepted).${line === null ? '' : ` JSON parsing stopped near line ${line}, column ${column}.`}${artifactHint}`;
+  const failure = new Error(message);
+  failure.pasteDiagnostic = { syntaxLine: line, syntaxColumn: column, artifactCandidates: contentReferenceCount, truncated };
   return failure;
 }
 

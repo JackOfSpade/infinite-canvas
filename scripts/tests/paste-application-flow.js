@@ -1738,6 +1738,73 @@ export default [
     },
   },
   {
+    name: "A JSON paste cut off by the chat UI's own output-length limit is diagnosed as a cutoff, not a malformed paste",
+    async run() {
+      _resetPasteHandoffDiagnostics();
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Reporting Engineer', company: 'Acme' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
+        });
+        const handoff = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const wholeReply = JSON.stringify(reply(handoff.handoff, {
+          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Software Engineer', credential: '' },
+          evidence: [
+            { id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.', requirement: 'Reporting systems', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: '# Reporting Engineer', requirement: 'Reporting systems', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reporting systems', priority: 'highest', evidenceIds: ['career-proof', 'job-proof'] }],
+        }));
+        // A chat UI that hits its own output-length limit stops writing
+        // mid-token; dropping the tail of an otherwise well-formed reply
+        // reproduces that exact failure shape without depending on any one
+        // model's wording.
+        const cutBareJson = wholeReply.slice(0, wholeReply.length - 40);
+        const bare = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: cutBareJson });
+        assert(!bare.accepted && bare.handoff?.stage === 'evidence-plan'
+          && /output-length limit/i.test(bare.validationErrors[0])
+          && !/paste one valid json object/i.test(bare.validationErrors[0]),
+        `a reply cut off mid-object is diagnosed as a cutoff, not told to paste one valid JSON object again (errors=${JSON.stringify(bare.validationErrors)})`);
+        // All this detector observes is that the parser ran out of input with
+        // something still open. A chat that hit its ceiling and a person who
+        // copied half a complete reply produce byte-identical parser output,
+        // so the message must offer both and assert neither -- naming one as
+        // the cause sends someone looking in the wrong place.
+        assert(/only part of it was copied/i.test(bare.validationErrors[0])
+          && !/that is what happens when/i.test(bare.validationErrors[0]),
+        `the cutoff message states what was observed and offers both causes rather than asserting one (errors=${JSON.stringify(bare.validationErrors)})`);
+
+        // The same cutoff wrapped in a ```json fence never gets its closing
+        // fence either, so the parser's first failure is the dangling fence
+        // marker itself at position 0 -- the fenced body must still read as
+        // truncated rather than as a syntax error at the very start.
+        const fenced = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: `\`\`\`json\n${cutBareJson}` });
+        assert(!fenced.accepted && /output-length limit/i.test(fenced.validationErrors[0]),
+          `a truncated reply wrapped in an unterminated code fence is still diagnosed as a cutoff (errors=${JSON.stringify(fenced.validationErrors)})`);
+
+        // A genuine syntax error near the START of the document (the person
+        // pasted something other than the JSON reply) must keep reading
+        // exactly as it always has -- this is the one message this class of
+        // fix is forbidden from changing.
+        const middle = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoff.handoffCode, response: '{not json' });
+        assert(!middle.accepted
+          && middle.validationErrors[0] === 'Paste one valid JSON object (a single JSON code fence is also accepted). JSON parsing stopped near line 1, column 2.',
+        `a malformed paste keeps its exact original message, unaffected by the truncation check (errors=${JSON.stringify(middle.validationErrors)})`);
+
+        const receipts = getPasteHandoffDiagnosticsSnapshot().receipts;
+        assert(receipts.length === 3
+          && receipts[0].reason === 'TRUNCATED_JSON' && receipts[1].reason === 'TRUNCATED_JSON' && receipts[2].reason === 'INVALID_JSON',
+        `a cutoff paste is recorded under its own reason code, apart from a malformed paste (reasons=${JSON.stringify(receipts.map(item => item.reason))})`);
+        return { bareTruncated: true, fencedTruncated: true, middleUnaffected: true };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Résumé contract discloses the enforced skill-group vocabulary and its rejection names the labels that pass',
     async run() {
       const project = await createCanvasProject();
