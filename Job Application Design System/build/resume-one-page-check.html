@@ -1,13 +1,15 @@
 <!doctype html>
 <!--
   build/resume-one-page-check.html — renderer-verified regression:
-  the shipped resume.html sample must render as ONE page, 90–100% of
-  one measured type area, at DEFAULT density, regardless of the
-  candidate's title (STYLE.md §6, SKILL.md §The pipeline step 5).
-  Fetches the real ../resume.html, mounts its real main.page under the
-  real stylesheets, and measures actual rendered geometry — the same
-  method used to calibrate the sample. Open in any browser; result
-  prints to the page and console.
+  the shipped resume.html sample must render as ONE page, at DEFAULT
+  density, regardless of the candidate's title (STYLE.md §6, SKILL.md
+  §The pipeline step 5). There is no fill minimum — fill is whatever
+  the evidence supports, not a threshold this check enforces — so this
+  reports the utilization reading and only fails if the content overflows the
+  one measured type area. Fetches the real ../resume.html, mounts its
+  real main.page under the real stylesheets, and measures actual
+  rendered geometry — the same method used to calibrate the sample.
+  Open in any browser; result prints to the page and console.
 -->
 <html lang="en">
 <head>
@@ -57,12 +59,12 @@
     var util = contentHeightPx / pageHeightPx;
     line('pageHeightPx=' + pageHeightPx.toFixed(1));
     line('contentHeightPx=' + contentHeightPx.toFixed(1));
-    line('utilization=' + (util * 100).toFixed(1) + '%  (target: 90–100%, one page)');
-    var ok = util > 0.90 && util <= 1.0;
+    line('utilization=' + (util * 100).toFixed(1) + '%  (one page required; no fill minimum)');
+    var ok = util > 0 && util <= 1.0;
     result.className = ok ? 'ok' : 'bad';
     result.textContent = ok
       ? 'PASS — one page, ' + (util * 100).toFixed(1) + '% utilized.'
-      : 'FAIL — utilization ' + (util * 100).toFixed(1) + '% is outside the 90–100% one-page target.';
+      : 'FAIL — utilization ' + (util * 100).toFixed(1) + '% overflows the one-page target.';
     console[ok ? 'log' : 'error'](result.textContent);
   } catch (e) {
     result.className = 'bad';

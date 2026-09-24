@@ -2411,6 +2411,12 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     catch { /* never break the report on diagnostic failure */ }
   }
 
+  // FULL already carried this section; a live deadlock still went unread from
+  // it because the receipt collapsed two different stale-handoff gates into
+  // one reason and reported no envelope-echo detail. That is a field-
+  // granularity gap inside buildPasteHandoffDiagnosticsMarkdown, not a
+  // section-availability one, so no new report code belongs here — only the
+  // receipt itself needed more to say.
   let pasteHandoffMarkdown = '';
   if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('HANDOFF')) {
     try { pasteHandoffMarkdown = buildPasteHandoffDiagnosticsMarkdown(); }

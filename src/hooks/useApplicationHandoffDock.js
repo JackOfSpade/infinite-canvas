@@ -4,8 +4,10 @@ import { LOCAL_AI_POLL_INTERVAL_MS, jobIntegrityFailureMessage } from '../utils/
 import {
   APPLICATION_HANDOFF_LIMIT,
   selectApplicationHandoffCandidates,
+  applicationDockItemState,
   applicationDockRequest,
   brokenApplicationDockRequest,
+  workingApplicationDockRequest,
   publishApplicationHandoffs,
   getApplicationHandoffs,
   retainUnreadableApplicationItems,
@@ -132,10 +134,47 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
             if (integrityMessage) {
               return [local.id, brokenApplicationDockRequest({ node, message: integrityMessage, canvasFilePath })];
             }
-            // Any other failed read, and a job past the paste phase, both
-            // contribute no item — the same outcome as a job that was never a
-            // candidate at all.
-            if (!result?.success || result.completed || !result.handoff) return [local.id, null];
+            // A genuinely failed read (the IPC resolved but reported no
+            // success) is not evidence the bundle finished or changed state —
+            // it contributes no item this pass, exactly as before. This is
+            // distinct from a thrown IPC call, which the catch below flags
+            // `unreadable` and carries the previous item forward instead.
+            if (!result?.success) return [local.id, null];
+            // The read succeeded but there is no prompt in it: either the
+            // app's own post-accept work is running, or the result is
+            // blocked on a card-side retry. Both are still candidates (this
+            // job's own status was not idle), so both must keep occupying
+            // their slot and their ordinal — a working item, not nothing —
+            // or the number a person is watching for would come free the
+            // instant a save started, mid-render, and could be handed to a
+            // different bundle before this one is actually done.
+            if (result.completed || !result.handoff) {
+              // Classify on the status the MAIN PROCESS just read, never on
+              // node.data's copy. That copy is written by a 2.5s card poll
+              // that accepting a response does not trigger — so the refresh a
+              // submit fires arrives while it still reads the PRE-submit
+              // status, lands on 'waiting', and drops the chip for a whole
+              // discovery interval. That is the exact disappearance this
+              // branch exists to stop, and reading the stale copy would
+              // reintroduce it while looking correct. `localJob.status` is
+              // manifest.status, read from disk inside this same call.
+              const freshStatus = result.localJob?.status || local.status;
+              const workingState = applicationDockItemState(freshStatus);
+              if (workingState === 'working' || workingState === 'blocked') {
+                return [local.id, workingApplicationDockRequest({ node, canvasFilePath, status: freshStatus })];
+              }
+              // Past the paste phase with no prompt, and a status that has
+              // not caught up even in the manifest: the paste machine has
+              // already said there is nothing left to paste, so the app is
+              // working on it. Only an explicitly idle status ends the entry.
+              if (result.completed && workingState !== 'idle') {
+                return [local.id, workingApplicationDockRequest({ node, canvasFilePath, status: 'paste-completed' })];
+              }
+              // Idle: the job settled between the candidate scan above and
+              // this read. Contributes nothing — the same outcome as a job
+              // that was never a candidate at all.
+              return [local.id, null];
+            }
             return [local.id, applicationDockRequest({ node, handoff: result.handoff, canvasFilePath })];
           } catch (error) {
             EventLogger.log(`[ApplicationDock] discovery read failed job=${local.id}: ${error?.message || error}`);
@@ -155,9 +194,10 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
           if (fetchedByJobId.has(jobId)) {
             const item = fetchedByJobId.get(jobId);
             if (item) nextItems.push(item);
-            // else: this pass actually read the job and it has no prompt to
-            // offer right now (completed, or an unrecoverable first-ever
-            // read) — contributes nothing, deliberately.
+            // else: this pass actually read the job and found it genuinely
+            // settled to idle (not merely working or blocked), or hit an
+            // unrecoverable first-ever read with no stale item to carry
+            // forward — contributes nothing, deliberately.
           } else {
             // Not part of this pass's fetch (a single-job refresh skipped
             // it, or the fan-out cap dropped it) — keep its last item as-is.

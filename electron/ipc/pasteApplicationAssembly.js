@@ -7,7 +7,7 @@
  * only structured copy and its editorial notes; it never provides markup,
  * output locations, source-grounding quotes, or invented checklist evidence.
  */
-import { assertTrustedSourceRoles, isUnsafeControlCharacter, renderStructuredResume } from './structuredResume.js';
+import { assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
 
 const DEFAULT_OUTPUT_BUNDLE_ROOT = 'Applied Jobs';
 
@@ -397,9 +397,13 @@ function normalizedCoverLetter(raw, trustedIdentity = null) {
     return { id, text: text(paragraph?.text, `coverLetter.paragraphs[${index}].text`), evidenceIds: paragraph.evidenceIds };
   });
   const name = typeof letter.name === 'string' ? text(letter.name, 'coverLetter.name') : '';
-  const contact = Array.isArray(letter.contact)
+  // Projected on both sides of the comparison below and in what renders. The
+  // frozen identity is already projected, so a responder that repeated it
+  // matches unchanged; one that carried an application-logistics value anyway
+  // is not failed here for something the letterhead was never going to show.
+  const contact = projectContactChannels(Array.isArray(letter.contact)
     ? letter.contact.map((value, index) => text(value, `coverLetter.contact[${index}]`))
-    : [];
+    : []);
   if (trustedIdentity) {
     // Reading the frozen identity and comparing the letter against it are two
     // different questions. The letter answers the comparison by changing its
@@ -411,7 +415,7 @@ function normalizedCoverLetter(raw, trustedIdentity = null) {
       return {
         trustedName: text(trusted.name, 'trustedIdentity.name'),
         trustedContact: Array.isArray(trusted.contact)
-          ? trusted.contact.map((value, index) => text(value, `trustedIdentity.contact[${index}]`))
+          ? projectContactChannels(trusted.contact.map((value, index) => text(value, `trustedIdentity.contact[${index}]`)))
           : fail('trustedIdentity.contact must be an array.'),
       };
     });
@@ -478,10 +482,11 @@ export function assemblePasteApplicationResult({
     assertTrustedSourceRoles(jobInput.sourceRoles);
     return jobInput.sourceRoles;
   });
-  // A backend-projected identity is preferred because it prevents an AI from
-  // choosing which contact fragments to expose. Until every queue has that
-  // snapshot, exact career-data membership still rejects arbitrary values.
-  const trustedIdentity = jobInput.trustedIdentity ?? state.trustedIdentity ?? null;
+  // A backend-projected identity prevents an AI from choosing which contact
+  // fragments to expose, and this is where that projection is applied: the row
+  // is narrowed to values that are ways to reach the candidate. Exact
+  // career-data membership still rejects arbitrary values on top of it.
+  const trustedIdentity = projectTrustedIdentity(jobInput.trustedIdentity ?? state.trustedIdentity ?? null);
   // Graded here, before the renderer and the letter envelope grade it again,
   // because both of those reach it through a document and would report a
   // malformed frozen identity as that document's defect. The same call runs at

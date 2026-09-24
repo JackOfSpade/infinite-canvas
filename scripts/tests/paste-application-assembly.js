@@ -2,10 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assert, validateLocalApplicationResult } from '../test-dependencies.js';
+import { assert, extractResumeEvidence, projectContactChannels, projectTrustedIdentity, resumeRoleLocationFailures, validateLocalApplicationResult } from '../test-dependencies.js';
 import { FROZEN_COMPLETED_PACKAGE, LOCAL_AI_JOB_INTEGRITY_CODE, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, isJobIntegrityFault, normalizeBoundDocumentText } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, LOCAL_AI_GENERATION_AUDIT_VERSION, pasteRejectionChangeDocuments, queueLocalApplicationJob, sanitizeQualityReview, stampPasteQualityReviewFromFit } from '../../electron/ipc/localAiApplication.js';
-import { renderStructuredApplicationResume, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION } from '../../electron/ipc/structuredResume.js';
+import { NEUTRAL_SKILL_GROUP_LABELS, renderStructuredApplicationResume, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_LIMITS, STRUCTURED_RESUME_SCHEMA_VERSION, STRUCTURED_RESUME_SKILLS_BUDGET, validateStructuredApplicationResume } from '../../electron/ipc/structuredResume.js';
 import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jobApplication.js';
 
 const careerData = 'Ada Lovelace\nada@example.test\nSoftware Engineer\nBuilt reporting systems that reduced manual work.';
@@ -327,6 +327,348 @@ Personal Projects`;
       assert(html.includes('Analytics reporting') && html.includes('Personal Projects') && rejectedListingOnlyProject && rejectedShortSubstringSkill,
         'project display copy retains its source provenance heading, while neutral editorial headings remain usable and listing-only or substring-only evidence is rejected');
       return { projectRendered: true, rejectedListingOnlyProject, rejectedShortSubstringSkill };
+    },
+  },
+  {
+    // THE DEFECT this covers, rendered by a real generation:
+    //   <dl class="skills"><dt>technologies</dt><dd>React · Typescript ·
+    //   Next.js · Django · Nginx · Gunicorn · Docker Compose · MCP ·
+    //   connectors · prompt harnessing · model delegation</dd></dl>
+    // One lowercase row labelled with a synonym of its own section head, 11
+    // terms, three of them concepts, in a 131-character `dd`. Nothing refused
+    // any of it: the structural ceilings are 8x looser than the design system
+    // (24 groups of 48 items), and the only skills check that existed —
+    // build/fit-estimate-test.js — reads `dd` text and never runs against
+    // generated output. The design system's shape is 3 Title Case domain rows,
+    // 16-20 filterable nouns, no `dd` over 64 characters.
+    name: 'The rendered skills block is held to the design system’s shape, not to the structural ceilings',
+    run() {
+      const skillsCareer = [
+        'Ada Lovelace', 'ada@example.test', 'Software Engineer',
+        'Built React and Typescript interfaces on a Django service.',
+        'Ran Nginx, Gunicorn and Docker Compose for the reporting deployment.',
+        'Wired MCP connectors with prompt harnessing and model delegation.',
+        'Shipped Go, Rust, Ruby, Swift, Scala, Kotlin, Elixir, Python, Flask, Redis, Kafka, Docker, Next.js, Vite, Babel, Jest, Sass, PostgreSQL and Elasticsearch tooling.',
+      ].join('\n');
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        evidenceCatalog: ['career-proof'],
+        careerData: skillsCareer,
+      };
+      const resume = (skills) => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and Typescript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        skills,
+      });
+      const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
+      const rejection = (skills) => {
+        try { renderStructuredApplicationResume(resume(skills), context); return ''; } catch (error) { return String(error?.message || error); }
+      };
+
+      // The shipped block itself: one rejection round names the label, the
+      // unsplit row, the row's length and all three concepts, because every
+      // repair costs the user the same manual copy/paste round.
+      const shippedItems = ['React', 'Typescript', 'Next.js', 'Django', 'Nginx', 'Gunicorn', 'Docker Compose', 'MCP', 'connectors', 'prompt harnessing', 'model delegation'];
+      const shipped = rejection([group(0, 'technologies', shippedItems)]);
+      assert(shipped.includes('skills[0].group "technologies" must be a neutral category label')
+        && shipped.includes(`skills[0].group "technologies" carries all ${shippedItems.length} items of this block under one label`)
+        && shipped.includes(`skills[0].items renders a row of ${shippedItems.join(' · ').length} characters`)
+        && ['connectors', 'prompt harnessing', 'model delegation'].every(item => shipped.includes(`skills[0] item "${item}"`)),
+      `the whole shipped skills defect is reported in one round (got ${shipped})`);
+
+      // Each budget gate alone, on a block that breaks only that one, so a
+      // later edit cannot pass this case by rejecting everything.
+      const fourRows = rejection([
+        group(0, 'languages', ['Go', 'Rust']),
+        group(1, 'frameworks', ['React', 'Django']),
+        group(2, 'infrastructure', ['Nginx', 'Gunicorn']),
+        group(3, 'databases', ['Redis', 'Kafka']),
+      ]);
+      assert(fourRows.includes(`skills renders 4 rows but this block carries at most ${STRUCTURED_RESUME_SKILLS_BUDGET.groups}`)
+        && !fourRows.includes('item "') && !fourRows.includes('renders a row of'),
+      `a fourth row is rejected on the row budget alone (got ${fourRows})`);
+
+      const overTerms = rejection([
+        group(0, 'languages', ['Go', 'Rust', 'Ruby', 'Swift', 'Scala', 'Kotlin', 'Elixir']),
+        group(1, 'frameworks', ['Python', 'Django', 'Flask', 'Redis', 'Kafka', 'Nginx', 'Docker']),
+        group(2, 'platforms', ['React', 'Next.js', 'Vite', 'Babel', 'Jest', 'Sass', 'MCP']),
+      ]);
+      assert(overTerms.includes(`skills lists 21 items but this block carries at most ${STRUCTURED_RESUME_SKILLS_BUDGET.items} in total`)
+        && !overTerms.includes('renders a row of') && !overTerms.includes('rows but this block'),
+      `21 terms inside 3 short rows are rejected on the term budget alone (got ${overTerms})`);
+
+      // Five items, so the split gate stands down and only the rendered row's
+      // own length is at issue. The gate measures the string the renderer
+      // emits, separators included.
+      const longRow = ['Docker Compose', 'Elasticsearch', 'Typescript', 'Gunicorn', 'PostgreSQL'];
+      const overRow = rejection([group(0, 'infrastructure', longRow)]);
+      assert(overRow.includes(`skills[0].items renders a row of ${longRow.join(' · ').length} characters but a row holds at most ${STRUCTURED_RESUME_SKILLS_BUDGET.rowChars}`)
+        && !overRow.includes('carries all') && !overRow.includes('item "'),
+      `a row past the character budget is rejected on its own, measured on what renders (got ${overRow})`);
+
+      const unsplit = ['Go', 'Rust', 'Ruby', 'Swift', 'Scala', 'Kotlin'];
+      const oneBigRow = rejection([group(0, 'languages', unsplit)]);
+      assert(oneBigRow.includes(`skills[0].group "languages" carries all ${unsplit.length} items of this block under one label`)
+        && oneBigRow.includes(`must name at least ${STRUCTURED_RESUME_SKILLS_BUDGET.splitIntoGroups} groups`)
+        && !oneBigRow.includes('renders a row of'),
+      `a block that has reached the split threshold must be split even when its row fits (got ${oneBigRow})`);
+      assert(rejection([group(0, 'languages', unsplit.slice(0, STRUCTURED_RESUME_SKILLS_BUDGET.splitAtItems - 1))]) === '',
+        'one row below the split threshold is still a real answer and is accepted');
+
+      // The concept rule, batched: three lowercase phrases across two groups
+      // come back as one message, and the named products beside them are never
+      // mentioned.
+      const concepts = rejection([
+        group(0, 'integration', ['Docker Compose', 'connectors', 'model delegation']),
+        group(1, 'platforms', ['MCP', 'prompt harnessing']),
+      ]);
+      assert(['skills[0] item "connectors"', 'skills[0] item "model delegation"', 'skills[1] item "prompt harnessing"'].every(fragment => concepts.includes(fragment))
+        && !concepts.includes('Docker Compose') && !concepts.includes('"MCP"')
+        && concepts.split('Fix all of them before resubmitting.').length === 2,
+      `every concept phrase is reported once in one round while the filterable names beside them pass (got ${concepts})`);
+
+      const clean = [
+        group(0, 'languages', ['Typescript', 'Python']),
+        group(1, 'frameworks', ['React', 'Django']),
+        group(2, 'infrastructure', ['Nginx', 'Gunicorn', 'Docker Compose']),
+      ];
+      const html = renderStructuredApplicationResume(resume(clean), context);
+      assert(html.includes('<dt>Languages</dt><dd>Typescript · Python</dd>')
+        && html.includes('<dt>Frameworks</dt><dd>React · Django</dd>')
+        && html.includes('<dt>Infrastructure</dt><dd>Nginx · Gunicorn · Docker Compose</dd>'),
+      `a three-row block inside every budget renders the design system's own shape (got ${html})`);
+      return { gates: 5, cleanRows: clean.length, shippedTerms: shippedItems.length };
+    },
+  },
+  {
+    // `.skills dt` has no text-transform (resume.css:568-574), so whatever a
+    // response wrote printed. Every `<dt>` the design system ships is Title
+    // Case and no prose rule anywhere said so, which is how a lowercase label
+    // reached a PDF.
+    name: 'A skills-group label renders in Title Case without changing the text it was graded as',
+    run() {
+      const labelCareer = [
+        'Ada Lovelace', 'ada@example.test', 'Software Engineer',
+        'Built React and Typescript interfaces on a Django service.',
+        'Ran Nginx and Gunicorn for the reporting deployment.',
+        'AI/ML delivery ran MCP for the reporting model.',
+      ].join('\n');
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        evidenceCatalog: ['career-proof'],
+        careerData: labelCareer,
+      };
+      const resume = (skills) => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and Typescript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        skills,
+      });
+      const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
+      const rejection = (skills) => {
+        try { renderStructuredApplicationResume(resume(skills), context); return ''; } catch (error) { return String(error?.message || error); }
+      };
+
+      const cased = [
+        group(0, 'languages and frameworks', ['Typescript', 'React']),
+        group(1, 'infrastructure & integration', ['Nginx', 'Gunicorn']),
+        group(2, 'AI/ML', ['MCP']),
+      ];
+      const html = renderStructuredApplicationResume(resume(cased), context);
+      assert(html.includes('<dt>Languages and Frameworks</dt>')
+        && html.includes('<dt>Infrastructure &amp; Integration</dt>')
+        && html.includes('<dt>AI/ML</dt>'),
+      `a lowercase label renders Title Case, its connectors survive, a connecting "and" stays lowercase, and a label that already carries uppercase is left exactly as written (got ${html})`);
+
+      // Casing is display only: the validated draft every later stage reads,
+      // echoes and patches still carries the text the response actually sent.
+      const draft = validateStructuredApplicationResume(resume(cased), context);
+      assert(draft.skills.map(entry => entry.group).join('|') === 'languages and frameworks|infrastructure & integration|AI/ML',
+        'the validated draft keeps the responder’s own label text, so the careerData and neutral-vocabulary comparisons read what was sent');
+
+      // A2: the three section-head synonyms are gone from the vocabulary. A row
+      // labelled with one of them restates the <h2>Skills</h2> above it and
+      // gives a parser no category axis it did not already have.
+      const sectionHeadSynonyms = ['skills', 'technical skills', 'technologies'];
+      assert(sectionHeadSynonyms.every(label => !NEUTRAL_SKILL_GROUP_LABELS.includes(label)),
+        'the neutral vocabulary no longer offers a label that only names the section');
+      for (const label of sectionHeadSynonyms) {
+        const message = rejection([group(0, label, ['Typescript', 'React'])]);
+        assert(message.includes(`skills[0].group "${label}" must be a neutral category label`)
+          && sectionHeadSynonyms.every(synonym => !message.includes(`, ${synonym},`)),
+        `"${label}" is rejected and the vocabulary the rejection prints never offers it back (got ${message})`);
+      }
+      // 'tools' stays: it is a real domain beside Languages and Frameworks.
+      assert(NEUTRAL_SKILL_GROUP_LABELS.includes('tools')
+        && renderStructuredApplicationResume(resume([group(0, 'tools', ['MCP'])]), context).includes('<dt>Tools</dt>'),
+      'a label naming a kind of skill rather than the section is still accepted, and renders Title Case');
+      return { labels: cased.length, rejectedSynonyms: sectionHeadSynonyms.length };
+    },
+  },
+  {
+    // THE DEFECT: the app could not emit the design system's OWN exemplar
+    // labels. "Data & Storage" (the shipped sample's middle row), "Web & Data"
+    // and "Infrastructure & AI" (both whole-Application fixtures, which are
+    // real generated output) were every one of them REJECTED, because 'data',
+    // 'storage', 'web' and 'ai' were not in the neutral vocabulary. With a
+    // career file carrying no skills section the "occurs verbatim in career
+    // data" escape hatch is empty, so that vocabulary is the whole set of
+    // labels a responder may write, and single nouns were the only shape it
+    // could express — not the shape the design system publishes.
+    //
+    // This case harvests the labels from the design system's own files rather
+    // than restating them, which is what ties this app's vocabulary to the
+    // published examples: an exemplar row this app cannot emit fails here
+    // instead of costing the user a manual correction round.
+    name: 'Every skills-row label the design system ships is a label this app can emit, in its published casing',
+    run() {
+      // Each file publishes an exemplar skills block: the shipped sample, the
+      // component preview, the in-context multi-page check, the line-yield
+      // measurement harness, and the two whole-Application fixtures.
+      const exemplarFiles = ['resume.html', 'preview/component-skills.html', 'build/multi-page-fragmentation-check.html', 'build/line-yield-check.html', 'uploads/Application.html', 'handoff/Application-paginated-example.html'];
+      const shippedLabels = new Map();
+      for (const file of exemplarFiles) {
+        const markup = fs.readFileSync(new URL(`../../Job Application Design System/${file}`, import.meta.url), 'utf8');
+        const labels = [...markup.matchAll(/<dt[^>]*>([^<]*)<\/dt>/gu)].map(match => match[1].replace(/&amp;/gu, '&').trim()).filter(Boolean);
+        assert(labels.length > 0, `the design system still publishes skills-row labels in ${file}`);
+        for (const label of labels) shippedLabels.set(label, [...(shippedLabels.get(label) || []), file]);
+      }
+      // The survey the vocabulary was widened from. Pinning it means a design
+      // system file that DROPS a label cannot silently shrink what this case
+      // proves, while a file that ADDS one still has to pass the drive below.
+      const surveyed = ['Languages', 'Data & Storage', 'Infrastructure', 'Web & Data', 'Infrastructure & AI'];
+      assert(surveyed.every(label => shippedLabels.has(label)),
+        `the surveyed exemplar labels are still the ones the design system ships (harvested ${[...shippedLabels.keys()].join(' | ')})`);
+      // STYLE.md §5.6 and SKILL.md's Skills-block section document one further
+      // label inside the `dt`-casing rule itself without shipping a row for it,
+      // and it is the reason 'ml' is in the vocabulary beside 'ai'.
+      const styleMd = fs.readFileSync(new URL('../../Job Application Design System/STYLE.md', import.meta.url), 'utf8');
+      const skillMd = fs.readFileSync(new URL('../../Job Application Design System/SKILL.md', import.meta.url), 'utf8');
+      assert(styleMd.includes('`AI/ML`') && skillMd.includes('`AI/ML`'),
+        'both design-system documents still name AI/ML as a skills-row label that keeps its own spelling');
+      const exemplars = [...shippedLabels.keys(), 'AI/ML'];
+
+      // This corpus states no exemplar label, so the escape hatch cannot pass
+      // any case below — the neutral vocabulary has to. It carries no skills
+      // section either, which is the candidate shape that made the gap acute.
+      const labelCareer = ['Ada Lovelace', 'ada@example.test', 'Software Engineer', 'Shipped Typescript on a Django service with Postgres behind Nginx.'].join('\n');
+      assert(exemplars.every(label => !labelCareer.toLocaleLowerCase().includes(label.toLocaleLowerCase())),
+        'the frozen corpus states no exemplar label, so only the neutral vocabulary can accept one');
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        evidenceCatalog: ['career-proof'],
+        careerData: labelCareer,
+      };
+      const resume = (label) => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Shipped Typescript on a Django service with Postgres behind Nginx.', evidenceIds: ['career-proof'] }] }],
+        skills: [{ id: 'skills-1', group: label, items: ['Typescript', 'Postgres'], evidenceIds: ['career-proof'] }],
+      });
+      const rendered = (label) => {
+        try { return renderStructuredApplicationResume(resume(label), context); } catch (error) { return `REJECTED: ${String(error?.message || error)}`; }
+      };
+      const skillsBlock = (html) => /<dl class="skills">.*?<\/dl>/su.exec(html)?.[0] || html;
+
+      for (const label of exemplars) {
+        const printed = `<dt>${label.replace(/&/gu, '&amp;')}</dt>`;
+        // Both spellings a responder can plausibly send have to reach the
+        // published casing: the label as the design system prints it, and the
+        // all-lowercase form the prompt's own vocabulary offers it in. The
+        // second is what rendered "Infrastructure & Ai" beside a design system
+        // that ships "Infrastructure & AI".
+        for (const sent of [label, label.toLocaleLowerCase()]) {
+          const html = rendered(sent);
+          assert(html.includes(printed),
+            `${shippedLabels.get(label)?.join(', ') || 'STYLE.md §5.6'} publishes "${label}"; sent as "${sent}" it must be accepted and render as ${printed} (got ${skillsBlock(html)})`);
+        }
+      }
+
+      // Widening the nouns did not widen the gate: an editorializing word
+      // beside a shipped domain is still refused on the same rule.
+      const editorialized = rendered('Advanced Data & Storage');
+      assert(editorialized.startsWith('REJECTED:')
+        && editorialized.includes('skills[0].group "Advanced Data & Storage" must be a neutral category label'),
+      `a compound built on an editorializing word is still rejected (got ${editorialized})`);
+      return { exemplars: exemplars.length, files: exemplarFiles.length, casings: 2 };
+    },
+  },
+  {
+    name: 'The skills budget this app enforces is the budget the design system publishes',
+    run() {
+      // structuredResume.js restates these three numbers because
+      // build/fit-estimate-test.js is a CommonJS build script that runs its
+      // whole suite on load and exports nothing, so it cannot be imported by
+      // the validator. This case is what keeps the restatement honest: both
+      // published sources are read here, and a drift on either side fails.
+      const fitGate = fs.readFileSync(new URL('../../Job Application Design System/build/fit-estimate-test.js', import.meta.url), 'utf8');
+      const published = /skillsRow:\s+(\d+),[^\n]*\n\s*skillsRows:\s+(\d+)/u.exec(fitGate);
+      assert(published, 'the design system still publishes its skills row budget in build/fit-estimate-test.js');
+      const skillMd = fs.readFileSync(new URL('../../Job Application Design System/SKILL.md', import.meta.url), 'utf8');
+      const negativeSpace = /No skills block over (\d+) rows \/ (\d+) terms/u.exec(skillMd);
+      assert(negativeSpace, 'SKILL.md still states the whole-block ceiling in its negative-space list');
+      assert(STRUCTURED_RESUME_SKILLS_BUDGET.rowChars === Number(published[1])
+        && STRUCTURED_RESUME_SKILLS_BUDGET.groups === Number(published[2])
+        && STRUCTURED_RESUME_SKILLS_BUDGET.groups === Number(negativeSpace[1])
+        && STRUCTURED_RESUME_SKILLS_BUDGET.items === Number(negativeSpace[2]),
+      `the enforced budget equals the published one (enforced=${JSON.stringify(STRUCTURED_RESUME_SKILLS_BUDGET)}, fit gate=${published.slice(1, 3)}, SKILL.md=${negativeSpace.slice(1, 3)})`);
+      // The sentence a responder is given is interpolated from the same
+      // constants the gates read, so it can never state a budget the gates do
+      // not enforce.
+      assert(SKILLS_BLOCK_BUDGET_RULE.includes(`at most ${STRUCTURED_RESUME_SKILLS_BUDGET.groups} groups and ${STRUCTURED_RESUME_SKILLS_BUDGET.items} items`)
+        && SKILLS_BLOCK_BUDGET_RULE.includes(`at most ${STRUCTURED_RESUME_SKILLS_BUDGET.rowChars} characters`)
+        && SKILLS_BLOCK_BUDGET_RULE.includes(`${STRUCTURED_RESUME_SKILLS_BUDGET.splitAtItems} items or more is sorted into at least ${STRUCTURED_RESUME_SKILLS_BUDGET.splitIntoGroups} groups`),
+      `the stated budget is interpolated from the constants the gates read (got ${SKILLS_BLOCK_BUDGET_RULE})`);
+      // The structural ceilings stay far looser on purpose: they bound a
+      // pathological paste, they are not the design budget.
+      assert(STRUCTURED_RESUME_LIMITS.skillGroups > STRUCTURED_RESUME_SKILLS_BUDGET.groups
+        && STRUCTURED_RESUME_LIMITS.skillItemsPerGroup > STRUCTURED_RESUME_SKILLS_BUDGET.items,
+      'the structural ceilings remain the outer bound on a pathological response, above the design budget');
+      return { rowChars: STRUCTURED_RESUME_SKILLS_BUDGET.rowChars, rows: STRUCTURED_RESUME_SKILLS_BUDGET.groups, terms: STRUCTURED_RESUME_SKILLS_BUDGET.items };
+    },
+  },
+  {
+    name: 'A project earns its place on one résumé rather than on every résumé alike',
+    run() {
+      // Career grounding says a project is true of the candidate. It never
+      // said the project belongs on THIS résumé, so a true one rendered for
+      // every posting alike — the one thing a tailored résumé is not.
+      const career = { id: 'career-proof', sourceId: 'career-data', quote: 'Built analytics reporting dashboards that reduced manual work.' };
+      const project = { id: 'project-1', name: 'Analytics reporting', description: 'Built analytics reporting dashboards that reduced manual work.', evidenceIds: ['career-proof'] };
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: 'Built analytics reporting dashboards.', evidenceIds: ['career-proof'] }] }],
+        projects: [project],
+      };
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '' }],
+        careerData: 'Ada Lovelace\nada@example.test\n# Personal Projects\n## Dashboards\n- Analytics reporting dashboards\nBuilt analytics reporting dashboards that reduced manual work.',
+      };
+      const posting = { id: 'job-analytics', sourceId: 'job-listing', quote: 'analytics reporting ownership' };
+      const unrelated = { id: 'job-unrelated', sourceId: 'job-listing', quote: 'warehouse logistics scheduling' };
+      const render = (projects, evidenceCatalog) => {
+        try {
+          renderStructuredApplicationResume({ ...resume, projects }, { ...context, evidenceCatalog });
+          return '';
+        } catch (error) { return String(error?.message || error); }
+      };
+
+      const careerOnly = render([project], [career, posting]);
+      const citedButUnrelated = render([{ ...project, evidenceIds: ['career-proof', 'job-unrelated'] }], [career, posting, unrelated]);
+      const answersThePosting = render([{ ...project, evidenceIds: ['career-proof', 'job-analytics'] }], [career, posting]);
+      assert(/cites no job-listing evidence/.test(careerOnly)
+        && /share at least two distinct meaningful terms with a job-listing quote/.test(citedButUnrelated)
+        && answersThePosting === '',
+      'a project is carried only when it cites a posting quote and shares that quote’s words, so citing one it answers nothing of does not save it');
+
+      // The same standdown the career-evidence rule takes: a plan that named
+      // no posting evidence cannot be graded on posting relevance, and a rule
+      // that cannot read its input must not invent a verdict.
+      assert(render([project], [career]) === '',
+        'a catalog carrying no job-listing evidence at all grades no project against the posting');
+      return { careerOnlyRejected: true, unrelatedCitationRejected: true };
     },
   },
   {
@@ -723,30 +1065,30 @@ Personal Projects`;
   {
     name: 'Paste application assembly produces a clean first-import result for the legacy validator',
     run() {
-      const cleanCareerData = 'Ada Lovelace\nada@example.test\nEngineer\nBuilt supported systems.\nA concise factual letter.';
+      const cleanCareerData = 'Ada Lovelace\nada@example.test\nEngineer\nBuilt supported systems.\nI built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.';
       const sourceRoles = [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '' }];
-      const paragraphs = ['A concise factual letter.'];
+      const paragraphs = ['I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.'];
       const audit = {
         version: LOCAL_AI_GENERATION_AUDIT_VERSION,
         jobPriorities: [{ requirement: 'Reliable supported systems', priority: 'highest', disposition: 'addressed-both', justification: 'The selected supported-systems evidence directly addresses the stated delivery requirement.' }],
         resumePlan: { strategy: 'Lead with the strongest supported systems evidence for the role.', selectionRationale: 'The retained role preserves direct factual support and concise relevance.' },
-        coverLetterPlan: { controllingThesis: 'Reliable system delivery is the supported capability this engineering role needs.', paragraphs: [{ paragraph: paragraphs[0], argumentativeJob: 'Establish the controlling evidence-to-need connection.', relationToThesis: 'Connect the source-supported proof to reliable system delivery.', relationToPreviousParagraph: 'opening', sentences: [{ sentence: paragraphs[0], function: 'Establishes this paragraph’s argumentative direction.', relationToPreviousSentence: 'opening' }] }] },
+        coverLetterPlan: { controllingThesis: 'Reliable system delivery is the supported capability this engineering role needs.', paragraphs: [{ paragraph: paragraphs[0], argumentativeJob: 'Establish the controlling evidence-to-need connection.', relationToThesis: 'Connect the source-supported proof to reliable system delivery.', relationToPreviousParagraph: 'opening', sentences: [{ sentence: 'I built supported systems for the teams that depend on them.', function: 'Establishes this paragraph’s argumentative direction.', relationToPreviousSentence: 'opening' }, { sentence: 'The engineering was in matching the constraints those teams set rather than my own preferences.', function: 'Abstracts the completed work into the problem shape it required.', relationToPreviousSentence: 'Generalizes the preceding proof without adding a new fact.' }, { sentence: 'I would apply that delivery work to the reliable supported systems this role needs.', function: 'States the transfer to the responsibility this posting names.', relationToPreviousSentence: 'Applies the abstracted capability to the target responsibility.' }], argumentMapping: { claim: 'The engineering was in matching the constraints those teams set rather than my own preferences.', proof: 'I built supported systems for the teams that depend on them.', relevance: 'I would apply that delivery work to the reliable supported systems this role needs.', jobNeedQuote: 'reliable supported systems' } }] },
         finalDecisionSummary: 'The final documents use the strongest supported evidence without introducing a second cover-letter argument.',
       };
       const criteria = APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement }));
       const result = assemblePasteApplicationResult({
-        input: { version: 1, jobId: '123e4567-e89b-42d3-a456-426614174000', sourceRoles, qualityChecklist: { version: APPLICATION_QUALITY_CHECKLIST_VERSION }, generationAudit: { version: LOCAL_AI_GENERATION_AUDIT_VERSION, required: true }, job: { title: 'Engineer', company: 'Acme' } },
+        input: { version: 1, jobId: '123e4567-e89b-42d3-a456-426614174000', sourceRoles, qualityChecklist: { version: APPLICATION_QUALITY_CHECKLIST_VERSION }, generationAudit: { version: LOCAL_AI_GENERATION_AUDIT_VERSION, required: true }, job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable supported systems.' } },
         careerData: cleanCareerData,
         jobListing: 'Engineer role focused on reliable supported systems.',
         paste: {
           trustedIdentity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' },
-          evidencePlan: { evidence: [{ id: 'resume-proof', sourceId: 'career-data', quote: 'Built supported systems.' }, { id: 'letter-proof', sourceId: 'career-data', quote: 'A concise factual letter.' }] },
+          evidencePlan: { evidence: [{ id: 'resume-proof', sourceId: 'career-data', quote: 'Built supported systems.' }, { id: 'letter-proof', sourceId: 'career-data', quote: 'I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable supported systems this role needs.' }] },
           resume: { schemaVersion: 'structured-resume.v1', identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' }, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: 'Built supported systems.', evidenceIds: ['resume-proof'] }] }] },
           coverLetter: { name: 'Ada Lovelace', contact: ['ada@example.test'], paragraphs: [{ id: 'paragraph-1', text: paragraphs[0], evidenceIds: ['letter-proof'] }], roleThesis: audit.coverLetterPlan.controllingThesis, coverLetterArgument: { primaryEvidence: { evidence: 'Built supported systems.', evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' } }, generationAudit: audit },
           finalReview: { decision: 'pass', findings: [], checklist: APPLICATION_QUALITY_CRITERIA.map(({ id }) => ({ id, status: 'pass', detail: `Reviewed ${id} against the final documents.` })), qualityReview: { checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION, criteria, resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' }, coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' } }, generationAudit: audit },
         },
       });
-      const validated = validateLocalApplicationResult(result, result.jobId, '/tmp', { title: 'Engineer', company: 'Acme' }, { careerData: cleanCareerData, evidencePlan: null, qualityChecklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION });
+      const validated = validateLocalApplicationResult(result, result.jobId, '/tmp', { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable supported systems.' }, { careerData: cleanCareerData, evidencePlan: null, qualityChecklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION, generationAuditVersion: LOCAL_AI_GENERATION_AUDIT_VERSION });
       assert(validated.resumeMainHtml.includes('Built supported systems.') && validated.qualityReview.resume.decision === 'drafted',
         'the structured paste result passes the existing validator as the initial measured-import snapshot');
       return { validated: true };
@@ -1177,6 +1519,178 @@ Personal Projects`;
       assert(!rejection,
         `queue-written frozen state assembles instead of ending the job: ${rejection?.message || ''}`);
       return { frozenChars: frozenCareerData.length, roleChars: frozenRole.title.length };
+    },
+  },
+  {
+    name: 'A lone role location folds into the dates cell with no separate role-meta row',
+    run() {
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2023-05 – 2026-06', location: 'Loveland, Colorado', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+      };
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2023-05 – 2026-06', location: '' }],
+        evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' }],
+        careerData: `${careerData}\nLoveland, Colorado`,
+      };
+      const html = renderStructuredApplicationResume(resume, context);
+      assert(!html.includes('role-meta') && !html.includes('role-location'),
+        `a lone location renders no .role-meta row and no .role-location cell (html=${html})`);
+      assert(html.includes('<p class="role-dates">2023-05 – 2026-06<span class="sep" aria-hidden="true">·</span>Loveland, Colorado</p>'),
+        `the dates cell carries the folded location after the standard separator (html=${html})`);
+      return { folded: true };
+    },
+  },
+  {
+    name: 'Structured résumé role-dates fold round-trips through the evidence extractor and the location gate',
+    run() {
+      // STYLE.md §5.2b's whole justification is that the fold is READABLE, not
+      // only that it renders — a fold this reader could not split back into
+      // dates and location would satisfy the writer's budget while starving
+      // the gate that requires the location, which is why this is the
+      // assertion that matters most here, not the render alone.
+      const roundTripCareerData = 'Thomson School District — Loveland, Colorado\nSoftware Engineer\nBuilt attendance reporting for district staff.';
+      const roundTripRoles = [{ id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06', location: '' }];
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06', location: 'Loveland, Colorado', bullets: [{ id: 'bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['career-proof'] }] }],
+      };
+      const context = {
+        sourceRoles: roundTripRoles,
+        evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' }],
+        careerData: roundTripCareerData,
+      };
+      const html = renderStructuredApplicationResume(resume, context);
+      assert(!html.includes('role-location'),
+        `the fold actually happened, so no separate .role-location cell exists to read instead (html=${html})`);
+      const evidence = extractResumeEvidence(html);
+      assert(evidence.roles[0].dates === '2023-05 – 2026-06' && evidence.roles[0].location === 'Loveland, Colorado',
+        `the extractor splits the folded dates cell back into its own dates and location (got dates="${evidence.roles[0].dates}" location="${evidence.roles[0].location}")`);
+      const failures = resumeRoleLocationFailures(evidence.roles, roundTripCareerData);
+      assert(!failures.length,
+        `the gate that requires a shown location reads the folded shape as satisfied, not missing (${JSON.stringify(failures)})`);
+      return { dates: evidence.roles[0].dates, location: evidence.roles[0].location };
+    },
+  },
+  {
+    name: 'A location naming a bare four-digit year keeps its own role-meta row instead of folding',
+    run() {
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: 'Site 2020, Springfield', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+      };
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' }],
+        careerData: `${careerData}\nSite 2020, Springfield`,
+      };
+      const html = renderStructuredApplicationResume(resume, context);
+      assert(html.includes('<div class="role-meta meta-row"><p class="role-location">Site 2020, Springfield</p></div>'),
+        `a location naming a bare four-digit year keeps its own .role-meta/.role-location row, because folding it would read as a second date range (html=${html})`);
+      assert(html.includes('<p class="role-dates">2020 – 2024</p>'),
+        'the dates cell stays unfolded');
+      return { folded: false };
+    },
+  },
+  {
+    name: 'A role with a location but no dates keeps its own role-location row since there is no dates cell to fold into',
+    run() {
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '', location: 'London, UK', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+      };
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '', location: '' }],
+        evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' }],
+        careerData: `${careerData}\nLondon, UK`,
+      };
+      const html = renderStructuredApplicationResume(resume, context);
+      assert(!html.includes('<p class="role-dates">'),
+        `a role with no dates renders no role-dates cell at all (html=${html})`);
+      assert(html.includes('<div class="role-meta meta-row"><p class="role-location">London, UK</p></div>'),
+        `a role with a location but no dates keeps its own .role-location row (html=${html})`);
+      return { folded: false };
+    },
+  },
+  {
+    name: 'projectContactChannels drops application-logistics values that carry no channel, exactly the shipped letterhead defect',
+    run() {
+      const contact = ['Email: jacksterwu@gmail.com', 'Phone: (716) 305-8819', 'Canadian citizenship', 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.'];
+      const projected = projectContactChannels(contact);
+      assert(JSON.stringify(projected) === JSON.stringify(['Email: jacksterwu@gmail.com', 'Phone: (716) 305-8819']),
+        `the projection keeps only the email and phone, in order, and drops the citizenship and visa lines (got ${JSON.stringify(projected)})`);
+      return { projected };
+    },
+  },
+  {
+    name: 'A real contact channel survives projection even when it contains a logistics-sounding word',
+    run() {
+      const contact = ['github.com/visacard', 'Relocation Services Inc — hire@relocation.io'];
+      const projected = projectContactChannels(contact);
+      assert(projected.includes('github.com/visacard') && projected.includes('Relocation Services Inc — hire@relocation.io'),
+        `a value that carries a channel is never dropped, whatever else it says (got ${JSON.stringify(projected)})`);
+      return { projected };
+    },
+  },
+  {
+    name: 'An ordinary city and a profile link survive contact projection untouched',
+    run() {
+      const contact = ['Toronto, Ontario', 'linkedin.com/in/jackwu'];
+      const projected = projectContactChannels(contact);
+      assert(JSON.stringify(projected) === JSON.stringify(contact),
+        `neither value states application logistics, so both are kept unchanged (got ${JSON.stringify(projected)})`);
+      return { projected };
+    },
+  },
+  {
+    name: 'projectContactChannels fails open when every value is application logistics, because a contact row is required',
+    run() {
+      const contact = ['Canadian citizenship', 'Willing to relocate anywhere', 'Available immediately, no notice period'];
+      const projected = projectContactChannels(contact);
+      assert(projected === contact,
+        `a contact list with no reachable channel at all is returned unchanged rather than emptied (got ${JSON.stringify(projected)})`);
+      return { projected };
+    },
+  },
+  {
+    name: 'projectTrustedIdentity projects only the contact array and is idempotent',
+    run() {
+      const identity = { name: 'Ada Lovelace', subtitleRole: 'Software Engineer', credential: 'B.S. Computer Science', contact: ['ada@example.test', 'Canadian citizenship'] };
+      const once = projectTrustedIdentity(identity);
+      const twice = projectTrustedIdentity(once);
+      assert(once.name === identity.name && once.subtitleRole === identity.subtitleRole && once.credential === identity.credential,
+        'projecting the identity leaves name, subtitleRole and credential untouched');
+      assert(JSON.stringify(once.contact) === JSON.stringify(['ada@example.test']),
+        `the identity's own contact array is projected the same way the bare list is (got ${JSON.stringify(once.contact)})`);
+      assert(JSON.stringify(twice) === JSON.stringify(once),
+        `projecting an already-projected identity is a no-op (once=${JSON.stringify(once)}, twice=${JSON.stringify(twice)})`);
+      return { once, twice };
+    },
+  },
+  {
+    name: 'A rendered résumé contact row excludes application logistics even when the trusted identity supplied them',
+    run() {
+      const contact = ['ada@example.test', 'Canadian citizenship', 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.'];
+      const resume = {
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact },
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built reporting systems that reduced manual work.', evidenceIds: ['career-proof'] }] }],
+      };
+      const context = {
+        sourceRoles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '' }],
+        evidenceCatalog: [{ id: 'career-proof', sourceId: 'career-data', quote: 'Built reporting systems that reduced manual work.' }],
+        careerData,
+        trustedIdentity: { name: 'Ada Lovelace', contact },
+      };
+      const html = renderStructuredApplicationResume(resume, context);
+      const contactRow = /<p class="contact"[^>]*>([\s\S]*?)<\/p>/.exec(html)?.[1] || '';
+      assert(contactRow.includes('ada@example.test') && !/citizenship/i.test(contactRow) && !/visa/i.test(contactRow) && !/sponsorship/i.test(contactRow),
+        `the rendered contact row keeps the reachable channel and drops the application-logistics values (contactRow=${contactRow})`);
+      return { contactRow };
     },
   },
 ];

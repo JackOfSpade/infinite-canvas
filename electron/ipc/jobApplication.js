@@ -117,6 +117,11 @@ export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }
   };
 }
 
+// A generated-PDF mismatch that a fresh render from the same HTML reproduces
+// exactly. Exported so the Local AI job folder's response can say so instead
+// of prescribing a retry that is already known to reach the same answer.
+export const APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC = 'APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC';
+
 async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
   if (pdf == null) return null;
   const inspection = await inspectGeneratedApplicationPdf({ html, pdf, documentKind });
@@ -137,9 +142,55 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
   if (isDualMode(extractVariantAttrs(html))) repaired = await applyDualPdf(repaired);
   const repairedInspection = await inspectGeneratedApplicationPdf({ html, pdf: repaired, documentKind });
   if (!repairedInspection.valid) {
-    throw new Error(`Could not produce a ${documentKind} PDF consistent with Application.html: ${repairedInspection.reason}`);
+    // A PDF rendered fresh from this exact HTML, rejected for the exact same
+    // reason as the one it replaced, did not fail because of its bytes — so
+    // pressing the card's retry runs this same comparison to this same
+    // answer. Say that here: the card's standing guidance is to retry the
+    // app-side save, and on 2026-09-23 that cost three identical attempts
+    // against a deterministic mismatch.
+    const unchangedByRerender = repairedInspection.reason === inspection.reason;
+    const error = new Error(`Could not produce a ${documentKind} PDF consistent with Application.html: ${repairedInspection.reason}`
+      + (unchangedByRerender
+        ? ' A freshly rendered PDF was rejected for the same reason, so retrying this save reproduces it.'
+        : ''));
+    // Carry that verdict as a code, not only as a sentence. Everything
+    // downstream — the IPC envelope, the card, and the hash-bound response
+    // written back into the job folder — otherwise has to re-derive it by
+    // matching on this message, and the one that mattered went on telling the
+    // candidate to retry while the message beside it said a retry reproduces.
+    if (unchangedByRerender) error.code = APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC;
+    throw error;
   }
   return Buffer.from(repaired);
+}
+
+/**
+ * Remove destination directories this attempt created but never populated.
+ *
+ * The `Company/Location/Role` tree is created before the generated artifacts
+ * are read and validated, so a save that fails after that point leaves an
+ * empty folder in "Applied Jobs" that reads exactly like an application the
+ * candidate already sent — the folder tree IS the durable record of what was
+ * applied to. Only an empty directory is removed, and only below the
+ * registered output root, so a real bundle, a previous generation being
+ * replaced, or any folder the user put something in is never touched.
+ */
+async function pruneEmptyExportDirectories(outputRoot, exportDir) {
+  if (typeof outputRoot !== 'string' || !outputRoot || typeof exportDir !== 'string' || !exportDir) return;
+  const root = path.resolve(outputRoot);
+  let current = path.resolve(exportDir);
+  while (current !== root && isWithinDirectory(root, current)) {
+    try {
+      if ((await fs.promises.readdir(current)).length) return;
+      await fs.promises.rmdir(current);
+    } catch (error) {
+      // Best-effort: ENOENT is nothing to prune, and anything else (a
+      // concurrent writer winning the directory, a permission change) means
+      // this cleanup stops rather than competing with it.
+      if (error?.code !== 'ENOENT') return;
+    }
+    current = path.dirname(current);
+  }
 }
 
 /**
@@ -556,26 +607,14 @@ export function applicationVariantAttrsForJob(job = {}) {
  * @param {number} [args.revisionAttempts] number of prior length revisions
  * @param {boolean} [args.fontsLoaded=true] whether the render window actually loaded the design
  *   system's web fonts (renderPdf reports this)
- * @returns {{action: 'ship'|'compact'|'revise'|'enrich', reason: string}}
+ * @returns {{action: 'ship'|'compact'|'revise', reason: string}}
  */
-// A one-page résumé should use the page as evidence space, not as an empty
-// template. This is deliberately measured from the first to last text line,
-// rather than an element box: it captures real trailing whitespace while
-// ignoring harmless collapsed margins and decorative rules. The threshold
-// leaves a modest visual tail, but catches the kind of aggressive post-fit
-// pruning that strands several supported bullets off the page.
-const MIN_RESUME_TYPE_AREA_UTILIZATION = 0.90;
-
-// Underfill is a strict inequality. Round at display precision, but cap a
-// sub-minimum measurement that would otherwise display at the minimum.
-export function formatUnderfilledTypeAreaUtilization(utilization) {
+// Plain percentage formatter. There is no minimum utilization to compare
+// against, so this only rounds for display.
+export function formatTypeAreaUtilization(utilization) {
   if (!Number.isFinite(utilization)) return null;
   const roundedPercent = Math.round(utilization * 10_000) / 100;
-  const minimumPercent = MIN_RESUME_TYPE_AREA_UTILIZATION * 100;
-  const displayedPercent = utilization < MIN_RESUME_TYPE_AREA_UTILIZATION && roundedPercent >= minimumPercent
-    ? minimumPercent - 0.01
-    : roundedPercent;
-  return `${displayedPercent}%`;
+  return `${roundedPercent}%`;
 }
 
 // Deliberately UNBOUNDED above. A value over 1 is the overflow MAGNITUDE —
@@ -585,23 +624,15 @@ export function formatUnderfilledTypeAreaUtilization(utilization) {
 // overflowing résumé report exactly 100% and threw that signal away.
 // It is a text-span ratio, NOT a page count: the screen preview flows
 // continuously, so it omits the @page margins a real second page adds and
-// therefore UNDERSTATES the printed overrun. The only comparison this value
-// is defined for is the underfill test against
-// MIN_RESUME_TYPE_AREA_UTILIZATION (always < 1) — never derive pages from it.
+// therefore UNDERSTATES the printed overrun. This is a pure, reported
+// measurement — it gates nothing; there is no minimum utilization for either
+// document.
 export function resumeTypeAreaUtilization(layout) {
   const contentHeight = Number(layout?.contentHeightPx);
   const typeAreaHeight = Number(layout?.typeAreaHeightPx);
   if (!Number.isFinite(contentHeight) || !Number.isFinite(typeAreaHeight)
     || contentHeight <= 0 || typeAreaHeight <= 0) return null;
   return contentHeight / typeAreaHeight;
-}
-
-export function resumeIsMateriallyUnderfilled({ pageCount, targetPageCount, layout }) {
-  // Multi-page documents should not be artificially filled; this is a
-  // one-page presentation-quality check, separate from the page maximum.
-  if (pageCount !== 1 || targetPageCount !== 1) return false;
-  const utilization = resumeTypeAreaUtilization(layout);
-  return utilization != null && utilization < MIN_RESUME_TYPE_AREA_UTILIZATION;
 }
 
 // The generator returns a raw design-system <main>, not a built document.
@@ -1358,6 +1389,34 @@ export function checkResumeBulletLength(mainHtml) {
     : { id: 'resume-bullet-length', passed: true, detail: `${evidence.bulletTexts.length} résumé bullet(s) fit the ${RESUME_BULLET_CHARACTER_BUDGET}-character budget` };
 }
 
+// STYLE.md §5.3 / SKILL.md: "3–6 bullets per role. Fewer reads thin; more
+// reads as a list." Nothing in this pipeline read bullet COUNT before now, so
+// a role a starved evidence plan could not fill honestly had no ceiling
+// stopping it from being padded past six — a shipped résumé once carried nine
+// bullets in one role by splitting four real accomplishments apart
+// (structuredResume.js's ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE is the other
+// half of that same fix, catching the citation reuse a bullet COUNT ceiling
+// alone cannot see). Only the ceiling is enforced here: the documented
+// emergency fitting move (STYLE.md) allows cutting a role to a single bullet
+// when a page must shed a line, and a floor in this battery would deadlock
+// that move against the very check meant to let it through.
+export const RESUME_ROLE_BULLET_CEILING = 6;
+
+export function checkResumeRoleBulletBudget(mainHtml) {
+  const evidence = extractResumeEvidence(mainHtml);
+  const observations = [];
+  evidence.roles.forEach((role, roleIndex) => {
+    const label = role.company || role.title || `role ${roleIndex + 1}`;
+    const count = Array.isArray(role.bullets) ? role.bullets.length : 0;
+    if (count > RESUME_ROLE_BULLET_CEILING) {
+      observations.push(`${label} carries ${count} bullets (ceiling ${RESUME_ROLE_BULLET_CEILING}); cut it to ${RESUME_ROLE_BULLET_CEILING} or fewer`);
+    }
+  });
+  return observations.length
+    ? { id: 'resume-role-bullet-budget', passed: false, detail: resumeCheckDetail(observations) }
+    : { id: 'resume-role-bullet-budget', passed: true, detail: `${evidence.roles.length} résumé role(s) fit the ${RESUME_ROLE_BULLET_CEILING}-bullet ceiling` };
+}
+
 /** Shared pre-publication prose checks for the résumé's generated copy. */
 export function evaluateResumeProseChecks(mainHtml) {
   const evidence = extractResumeEvidence(mainHtml);
@@ -1369,6 +1428,7 @@ export function evaluateResumeProseChecks(mainHtml) {
     checkResumeBulletSelfContainment(mainHtml),
     checkResumeBulletFocus(mainHtml),
     checkResumeBulletLength(mainHtml),
+    checkResumeRoleBulletBudget(mainHtml),
     checkCompoundHyphenation(prose),
     checkParallelStructure(prose),
     checkReferenceClarity(prose),
@@ -1808,6 +1868,7 @@ export function registerJobApplicationHandlers() {
     const company = pending.company;
     let exportPhase = 'validating generated sources';
     let exportDir = null;
+    let exportRoot = null;
     try {
     // Local-AI workspaces bind this one-shot save capability to the exact
     // result bytes that were rendered. Recheck after the synchronous claim and
@@ -1853,6 +1914,7 @@ export function registerJobApplicationHandlers() {
     }
     const dir = path.join(applicationOutputRoot, where, whereLocation, role);
     exportDir = dir;
+    exportRoot = applicationOutputRoot;
     await ensureDirectoryWithinRoot(applicationOutputRoot, dir, {
       mode: 0o700,
       label: 'Application destination',
@@ -2078,6 +2140,10 @@ export function registerJobApplicationHandlers() {
         },
       });
       logger.error(`[JobApplication] save-application failed during "${exportPhase}": ${error?.stack || error?.message || error}`);
+      // Telemetry above has already recorded the destination this attempt
+      // chose, so the empty tree has nothing left to report and a retry
+      // recreates it deterministically.
+      await pruneEmptyExportDirectories(exportRoot, exportDir);
       // A Local-AI import has already consumed and measured one exact result
       // hash before this follow-up save begins. Give that trusted producer a
       // best-effort failure hook so it can publish hash-bound retry evidence;

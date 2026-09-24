@@ -19,8 +19,8 @@ import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_
 import { hubCardFilter } from '../utils/jobCardFilters';
 import { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
-  APPLICATION_DOCK_IDLE_STATUSES,
   APPLICATION_HANDOFF_LIMIT,
+  applicationAwaitsPaste,
   applicationLimitMessage,
   countActiveApplicationHandoffs,
   getDismissedApplicationBundles,
@@ -344,10 +344,36 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // ensures a completed local result is imported exactly once.
   const localImportingRef = useRef(new Set());
   const localResultSettlingRef = useRef(new Map());
+  // jobId → the exact resultSha256 whose bundle save already failed once this
+  // session. On 2026-09-23 one Local AI job ran its ENTIRE render+save
+  // pipeline TWICE for byte-identical input, 8.15 seconds apart, against a
+  // failure that was already proven deterministic: a 'result-imported' event
+  // at 17:38:54.199, a 'bundle-save-retry-required' event for that SAME hash
+  // 0.8s later (the save failing), then — 7.3s after that — a second
+  // 'result-imported' for the IDENTICAL hash and a second identical
+  // 'bundle-save-retry-required'. The settle logic below arms a fresh
+  // LOCAL_AI_RESULT_SETTLE_MS countdown on any 'completed' observation whose
+  // resultSha256 it doesn't already hold in localResultSettlingRef — and that
+  // ref is deleted in the import attempt's own `finally`, so it has no memory
+  // of "this exact hash already failed to save" once the failed attempt ends.
+  // This ref is that missing memory. It is intentionally per-session (not
+  // persisted to disk) and keyed by jobId so a genuinely NEW result (a
+  // different resultSha256 for the same job) clears the entry and imports
+  // normally — see the 'completed' branch below, and
+  // importCompletedLocalApplication's catch, which is what populates it.
+  const localSaveFailedHashesRef = useRef(new Map());
   // jobId → consecutive status-poll failures. The visible `status-error`
   // state remains pollable, so a transient filesystem/IPC issue cannot orphan
   // a pending handoff.
   const localStatusErrorStreakRef = useRef(new Map());
+  // jobId currently awaiting a getLocalApplicationStatus round trip started by
+  // the poll below. check() has no other in-flight guard (only the IMPORT
+  // step does, via localImportingRef), so a slow round trip plus the next
+  // 2.5s interval tick — or an effect re-run triggered by a status-driven
+  // state change — could otherwise start a second overlapping status request
+  // for the same job, and whichever response lands last would win the
+  // setLocalApplication call even if it was the stale one.
+  const localStatusCheckInFlightRef = useRef(new Set());
   // jobId → already asked main to open this saved bundle's output folder.
   // A poll tick keeps re-observing 'saved' long after the one save that
   // earned it, so this guards the one-time reveal the same way the fallback
@@ -397,7 +423,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const openJobUrl = useCallback(async () => {
     const url = normalizeJobListingExternalUrl(data);
     const diagnostic = summarizeJobListingUrl(data, url);
-    EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} raw=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} target=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
+    // `summarizeJobListingUrl` deliberately redacts every non-vocabulary path
+    // segment to `:segment`, so these are route SHAPES, never the URL. Naming
+    // them `raw`/`target` read as the literal link and made a redacted
+    // `ca.linkedin.com/jobs/view/:segment` look like a placeholder the card had
+    // actually dispatched. The names now say what the value is.
+    EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} rawRoute=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} targetRoute=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
     if (!url || !window.electronAPI?.openExternal) {
       EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`);
       addToast({
@@ -414,10 +445,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // as dispatched.
       const result = await window.electronAPI.openExternal(url);
       if (!result?.success) throw new Error(result?.error || 'Could not open the job listing.');
-      EventLogger.log(`[JobCard] external-link dispatched id=${id} target=${diagnostic.targetRoute}`);
+      EventLogger.log(`[JobCard] external-link dispatched id=${id} targetRoute=${diagnostic.targetRoute}`);
     } catch (error) {
       const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
-      EventLogger.log(`[JobCard] external-link failed id=${id} target=${diagnostic.targetRoute} reason=${reason}`);
+      EventLogger.log(`[JobCard] external-link failed id=${id} targetRoute=${diagnostic.targetRoute} reason=${reason}`);
       addToast({
         title: 'Cannot Open Listing',
         description: 'Could not open the job listing. Please try again.',
@@ -506,6 +537,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               ? (local.fitMessage || 'The measured layout check requested another review. Reopen the AI handoff to review and edit the structured documents.')
               : (local.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.'),
           } : current);
+          // A measured fit failure on a paste job reopens the round with a
+          // ROTATED handoffCode (see rotatePasteHandoffCode) even though the
+          // documents are unchanged — the dock's CONTENT gate compares the
+          // AI's echoed code against this new one, so without this refresh
+          // the dock kept showing the pre-rotation prompt and every paste of
+          // an otherwise-correct answer was rejected as a stale handoff with
+          // no path back except the 20s unconditional poll noticing on its own.
+          if (pasteRevision && local.handoff) requestApplicationHandoffRefresh(jobId);
           addToast({
             title: pasteRevision ? 'Application Review and Edit Needed' : 'Local AI Document Revision Needed',
             description: pasteRevision
@@ -644,7 +683,39 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: 'Another import of this result is already running — waiting for it to finish.' } : current);
         return;
       }
-      setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
+      // Generic tail: an unrecognised failure, most often saveApplication
+      // throwing after import already validated the result. On 2026-09-23
+      // this branch parked the job at a placeholder 'completed' — a status
+      // the card renders as a finished result, that keeps neither driver's
+      // idle list stopping the poll below — while the main process had
+      // already fully awaited recordLocalAiSaveFailure and written the job's
+      // REAL durable verdict (render-retry-required, matched to this exact
+      // hash) before this catch ever ran. The very next poll tick re-armed a
+      // fresh settle window against that placeholder and reran the entire
+      // render+save pipeline a second time for byte-identical input, only to
+      // reproduce the identical failure 7.3 seconds later. Remember this
+      // hash as a known save failure regardless of what happens next, so the
+      // poll's 'completed' branch refuses to retry it even if the status
+      // probe below cannot be reached; then ask the main process for the
+      // real verdict once and adopt it instead of guessing.
+      if (expectedResultSha256) localSaveFailedHashesRef.current.set(jobId, expectedResultSha256);
+      let adoptedStatus = null;
+      try {
+        const statusResult = await window.electronAPI?.getLocalApplicationStatus?.({ jobId, canvasFilePath });
+        if (statusResult?.success && statusResult.localJob?.status) adoptedStatus = statusResult.localJob;
+      } catch {
+        // Best-effort probe only — the placeholder below still applies.
+      }
+      // The status probe above is itself an await; a card can unmount while
+      // it is in flight, and only isMountedRef (not the `cancelled` flag —
+      // that belongs to the status-poll effect below, not this function)
+      // guards setState here, exactly as the rest of this catch already does.
+      if (!isMountedRef.current) return;
+      if (adoptedStatus) {
+        setLocalApplication((current) => current?.id === jobId ? { ...current, ...adoptedStatus } : current);
+      } else {
+        setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'completed', message: error?.message || String(error) } : current);
+      }
       addToast({ title: 'Local AI Import Failed', description: error?.message || String(error), type: 'error' });
     }
   }, [nav, data.title, data.location, localApplication?.canvasFilePath, addToast, getLiveNode, isMountedRef]);
@@ -659,6 +730,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;
     const check = async () => {
+      // check() had no in-flight guard of its own (only the IMPORT step does,
+      // via localImportingRef): a slow getLocalApplicationStatus round trip
+      // plus the next 2.5s interval tick — or an effect re-run triggered by
+      // this very function's own status-driven setLocalApplication call —
+      // could start a second overlapping request for the same jobId, and
+      // whichever response landed last would win, even if it was the stale
+      // one. No-op while a prior call for this job is still unresolved.
+      if (localStatusCheckInFlightRef.current.has(jobId)) return;
+      localStatusCheckInFlightRef.current.add(jobId);
       try {
         const result = await window.electronAPI.getLocalApplicationStatus({ jobId, canvasFilePath });
         if (cancelled || !isMountedRef.current) return;
@@ -691,6 +771,38 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           // safe ready state instead of treating an unknown snapshot as final.
           if (!resultSha256) {
             setLocalApplication((current) => current?.id === jobId ? { ...current, ...next, status: 'completed', message: 'Local AI result found — waiting for a stable file snapshot…' } : current);
+            return;
+          }
+          const failedHash = localSaveFailedHashesRef.current.get(jobId);
+          if (failedHash && failedHash !== resultSha256) {
+            // A genuinely new result (a different resultSha256) superseded
+            // the one whose save failed — drop the stale memory so this new
+            // hash gets a normal settle/import cycle below.
+            localSaveFailedHashesRef.current.delete(jobId);
+          } else if (failedHash === resultSha256) {
+            // This exact hash's bundle save already failed once this session
+            // (see localSaveFailedHashesRef's declaration above, and the
+            // 2026-09-23 double-cycle it exists to prevent). The main
+            // process's own durable status should already read
+            // 'render-retry-required' for this hash by now — the same
+            // recordLocalAiSaveFailure write that populated this memory — but
+            // this local memory is kept independently of that round trip so
+            // that a poll which still observes 'completed' here, for
+            // whatever reason, cannot rearm the settle window and reimport a
+            // save already proven to fail. Adopt 'render-retry-required'
+            // directly: it renders the "Retry layout check" button (the
+            // correct affordance), and this effect is idle on that status
+            // (LOCAL_AI_CARD_POLL_IDLE_STATUSES), so it also stops polling.
+            localResultSettlingRef.current.delete(jobId);
+            setLocalApplication((current) => current?.id === jobId ? {
+              ...current, ...next,
+              status: 'render-retry-required',
+              // next.message describes the 'completed' verdict this poll
+              // response actually carries ("Validated result.json is ready
+              // to import.") — not the save failure this branch is acting
+              // on — so it is deliberately not reused here.
+              message: 'This result already failed to save this session. Use Retry layout check to try again.',
+            } : current);
             return;
           }
           const settled = localResultSettlingRef.current.get(jobId);
@@ -734,6 +846,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (streak < LOCAL_AI_STATUS_ERROR_STREAK_LIMIT) return;
         localStatusErrorStreakRef.current.delete(jobId);
         setLocalApplication((current) => current?.id === jobId ? { ...current, status: 'status-error', message: `${error?.message || String(error)} Retrying automatically…` } : current);
+      } finally {
+        localStatusCheckInFlightRef.current.delete(jobId);
       }
     };
     check();
@@ -1285,7 +1399,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 : '')}</div>
             </div>
           </div>
-          {(localApplication.mode === 'paste' || localApplication.transport === 'paste') && !APPLICATION_DOCK_IDLE_STATUSES.includes(localApplication.status) && (
+          {(localApplication.mode === 'paste' || localApplication.transport === 'paste') && applicationAwaitsPaste(localApplication.status) && (
             <button
               onClick={(e) => { e.stopPropagation(); requestApplicationHandoffFocus(localApplication.id); }}
               className="mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"

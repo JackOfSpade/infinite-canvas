@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
 import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, pasteRejectionChangeDocuments, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC } from '../../electron/ipc/jobApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 
 async function createCanvasProject() {
@@ -70,7 +71,7 @@ const coverLetterArgumentForResumeEvidence = (evidence, evidenceRole = 'Engineer
 
 const normalizedCoverLetter = () => ({
   name: '', contact: [], salutation: '', recipient: '',
-  paragraphs: ['A concise factual letter.'], closing: '', signatureTitle: '',
+  paragraphs: ['I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.'], closing: '', signatureTitle: '',
 });
 
 const auditSentences = (paragraph) => {
@@ -80,6 +81,18 @@ const auditSentences = (paragraph) => {
     ? [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(normalized)]
       .map(part => part.segment.replace(/\s+/g, ' ').trim()).filter(Boolean)
     : (normalized.match(/[^.!?]+(?:[.!?]+|$)/gu) || [normalized]).map(value => value.trim()).filter(Boolean);
+};
+
+// A proof-bearing paragraph owes an argumentMapping, so fixtures that state a
+// first-person completed action must supply one or the import rejects them.
+const argumentMappingFor = (paragraph) => {
+  const parts = auditSentences(paragraph);
+  const proof = parts.find(sentence => /\b(?:i|we)\s+(?:built|created|developed|designed|implemented|delivered|maintained|improved|led|owned|supported|integrated|migrated|automated|reworked|updated|configured|deployed|tested|resolved|reduced|increased|wrote)\b/iu.test(sentence));
+  if (!proof) return null;
+  const claim = parts.find(sentence => sentence !== proof && /\bthe\s+engineering\s+was\s+in\b/iu.test(sentence));
+  const relevance = parts.find(sentence => sentence !== proof && /\bi\s+would\s+apply\b/iu.test(sentence));
+  if (!claim || !relevance) return null;
+  return { claim, proof, relevance, jobNeedQuote: 'reliable system delivery' };
 };
 
 const generationAuditFor = ({
@@ -108,6 +121,7 @@ const generationAuditFor = ({
       relationToPreviousParagraph: paragraphIndex === 0
         ? 'opening'
         : 'Develops the previous paragraph by adding a distinct supporting mechanism.',
+      argumentMapping: argumentMappingFor(paragraph),
       sentences: auditSentences(paragraph).map((sentence, sentenceIndex) => ({
         sentence,
         function: sentenceIndex === 0
@@ -127,7 +141,7 @@ const generationAuditFor = ({
 // the same exact-text and exact-quote binding as production.
 const sourceGroundingFor = ({
   resumeBullets = ['Built supported systems.'],
-  coverLetterParagraphs = ['A concise factual letter.'],
+  coverLetterParagraphs = ['I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.'],
   resumeQuotes = resumeBullets,
   coverLetterQuotes = coverLetterParagraphs,
 } = {}) => ({
@@ -293,6 +307,12 @@ export default [
         && normalizedRoutineSource.includes('Never add an unrecorded outcome, improvement, scale, duration, ownership level, production use, adoption, or causal result')
         && normalizedRoutineSource.includes('never move a fact between employers or projects'),
       'Local AI résumé generation must apply the same bounded compressed-evidence synthesis rule as API generation');
+      assert(normalizedRoutineSource.includes('State completed work with yourself as the grammatical subject of the action')
+        && normalizedRoutineSource.includes('graded by none of the argument rules and ships unexamined')
+        && normalizedRoutineSource.includes('state what the described work required, one level of abstraction above the artifact')
+        && normalizedRoutineSource.includes('introduces no fact the evidence did not already contain')
+        && normalizedRoutineSource.includes('must not announce that a generalization follows'),
+      'the routine must require first-person agency for completed work and the abstraction beat between evidence and transfer');
       const checklistBlock = new RegExp(`Canonical checklist, version ${APPLICATION_QUALITY_CHECKLIST_VERSION}:\\s*([\\s\\S]*?)\\n\\s*Use the full requirements`).exec(routineSource)?.[1] || '';
       const routineChecklistIds = [...checklistBlock.matchAll(/`([^`]+)`/g)].map(match => match[1]);
       const compactReviewStart = localSource.indexOf('function compactLocalAiQualityReview');
@@ -359,10 +379,24 @@ export default [
         && !compactReviewSource.includes('sourceGrounding')
         && !compactReviewSource.includes('evidence: cleanText')
         && localSource.includes('LOCAL_AI_RESULT_CHANGED')
-        && localSource.includes('resumeIsMateriallyUnderfilled')
-        && localSource.includes('below the 90% minimum')
         && localSource.includes('For a cover letter that already fits, improve it')
         && localSource.includes('COVER_LETTER_COHESION_REVISION_RULE')
+        && localSource.includes('COVER_LETTER_CANDIDATE_AGENCY_RULE')
+        && localSource.includes('COVER_LETTER_WARRANT_RULE')
+        && localSource.includes('grammatical subject of the action')
+        && localSource.includes('graded by none of the argument rules and ships unexamined')
+        && localSource.includes('one level of abstraction above the artifact')
+        && localSource.includes('introduces no fact the evidence did not already contain')
+        // The warrant rule used to be satisfied by a category name: "The work
+        // lay mainly in coordinating dependent activities during validation and
+        // transition" assigns a class of activity and states no dependency, and
+        // it shipped. The rule now demands the relation itself, and there is no
+        // gate to pin instead — see the comment above the constant for why one
+        // cannot exist — so this assertion is the only guard on that demand.
+        && localSource.includes('name it as a relation between the things the work had to hold together')
+        && localSource.includes('what depended on what, what had to stay fixed while something else moved')
+        && localSource.includes('assigns the work to a category and says nothing about what made it hard')
+        && localSource.includes('stay true if a different project of the same shape were substituted')
         && localSource.includes('one controlling throughline')
         && localSource.includes('minimum-sufficient evidence')
         && localSource.includes('résumé owns breadth')
@@ -408,9 +442,10 @@ export default [
         && localSource.includes('COVER_LETTER_SECONDARY_NARRATIVE_ROLES.includes(narrativeRole)')
         && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
         && localSource.includes("contentUtilization: resumeTypeAreaUtilization(rendered.layout || null)")
-        && localSource.includes('type-area utilization is informational only')
+        && localSource.includes("Both documents' reported type-area utilization is informational only")
+        && localSource.includes('neither has a minimum utilization')
         && localSource.includes('missingArtifacts.length === 0'),
-      'Local AI measures both final documents, keeps revisions argument-led and fact-bounded, requests evidence-led revision for a materially underfilled one-page résumé, records every handoff event without a queue/history cap, keeps unresolved work revision-required, and never saves when layout verification is unavailable');
+      'Local AI measures both final documents, keeps revisions argument-led and fact-bounded, states that neither document has a minimum utilization, records every handoff event without a queue/history cap, keeps unresolved work revision-required, and never saves when layout verification is unavailable');
       assert(APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('selected position is referenced proximally')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('target scope is stated as this role or the work itself')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
@@ -560,7 +595,7 @@ export default [
       try {
         const jobsRoot = path.join(project.root, '.local-ai', 'jobs');
         const sparseCareerError = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: 'Experience.', canvasFilePath: project.canvasFilePath,
         }).then(() => null, error => error);
         const sparseJobEntries = await fs.promises.readdir(jobsRoot, { withFileTypes: true }).catch(error => error?.code === 'ENOENT' ? [] : Promise.reject(error));
         assert(sparseCareerError && sparseJobEntries.filter(entry => entry.isDirectory()).length === 0,
@@ -632,14 +667,20 @@ export default [
         const legacyManifest = { ...parsedManifest };
         delete legacyManifest.generationAudit;
         const legacyEvidence = 'Built reliable systems with measurable outcomes.';
+        // The résumé bullet cannot open in the first person, so the letter
+        // paragraph is its own string: candidate-agency reads the letter. Its
+        // verb sits outside PAST_PROOF_VERBS on purpose — this legacy v1
+        // fixture states agency without owing an argumentMapping, which is the
+        // exact gap between the two cues.
+        const legacyLetterParagraph = 'I ran the reliable systems that produced those measurable outcomes.';
         const legacyResult = {
           version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
           resumeMainHtml: `<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>${legacyEvidence}</li></ul></article></section></main>`,
-          coverLetter: { ...normalizedCoverLetter(), paragraphs: [legacyEvidence] },
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: [legacyLetterParagraph] },
           coverLetterArgument: coverLetterArgumentForResumeEvidence(legacyEvidence, 'Developer at Acme'),
           qualityReview: {
             ...groundedQualityReview(sourceGroundingFor({
-              resumeBullets: [legacyEvidence], coverLetterParagraphs: [legacyEvidence],
+              resumeBullets: [legacyEvidence], coverLetterParagraphs: [legacyLetterParagraph], coverLetterQuotes: [legacyEvidence],
             })),
             checklistVersion: 1,
           },
@@ -746,7 +787,7 @@ export default [
         'the queued pointer is committed to global node data before the mounted-only UI state update, so hidden cards remain discoverable');
 
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const crossCanvas = await discardLocalApplicationJob(queued.id, otherProject.canvasFilePath);
         assert(crossCanvas.discarded && !crossCanvas.removedJob && fs.existsSync(queued.folder),
@@ -763,7 +804,7 @@ export default [
         let aborted = false;
         try {
           await queueLocalApplicationJob({
-            job: { title: 'Cancelled', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+            job: { title: 'Cancelled', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
           }, controller.signal);
         } catch (error) { aborted = /Node deleted/.test(String(error?.message || error)); }
         assert(aborted, 'a cancelled queue task rejects before materializing a Local AI job folder');
@@ -883,7 +924,7 @@ export default [
         let rejected = false;
         try {
           await queueLocalApplicationJob({
-            job: { title: 'Developer', company: 'Acme' },
+            job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
             careerData: TRUSTED_QUEUE_CAREER_DATA,
             canvasFilePath: canvasProject.canvasFilePath,
           });
@@ -907,14 +948,14 @@ export default [
       const project = await createCanvasProject();
       try {
         const stale = await queueLocalApplicationJob({
-          job: { title: 'Old Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Old Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const manifestPath = path.join(stale.folder, 'manifest.json');
         const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
         manifest.createdAt = '2000-01-01T00:00:00.000Z';
         await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, 'utf8');
         const staleImported = await queueLocalApplicationJob({
-          job: { title: 'Imported Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Imported Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const importedManifestPath = path.join(staleImported.folder, 'manifest.json');
         const importedManifest = JSON.parse(await fs.promises.readFile(importedManifestPath, 'utf8'));
@@ -922,7 +963,7 @@ export default [
           ...importedManifest, status: 'imported', createdAt: '2000-01-01T00:00:00.000Z',
         })}\n`, 'utf8');
         const settlingImported = await queueLocalApplicationJob({
-          job: { title: 'Settling Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Settling Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const settlingManifestPath = path.join(settlingImported.folder, 'manifest.json');
         const settlingManifest = JSON.parse(await fs.promises.readFile(settlingManifestPath, 'utf8'));
@@ -933,7 +974,7 @@ export default [
           importedAt: new Date().toISOString(),
         })}\n`, 'utf8');
         await queueLocalApplicationJob({
-          job: { title: 'New Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'New Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         assert(fs.existsSync(stale.folder),
           'an old queued job remains available because an active authoring or revision session has no retention-based regeneration cap');
@@ -1032,7 +1073,7 @@ export default [
       const missingChecklistVersion = draftedQualityReview();
       delete missingChecklistVersion.checklistVersion;
       assertChecklistRejected('unversioned', missingChecklistVersion);
-      const trustedCareerData = 'Built supported systems. A concise factual letter. I am available to start in June.';
+      const trustedCareerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires. I am available to start in June.';
       const sourceGrounding = sourceGroundingFor();
       const trustedResult = {
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
@@ -1115,7 +1156,7 @@ export default [
       let importerSuperiorityRejected = false;
       try {
         validateLocalApplicationResult(unsupportedSuperiorityResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
-          careerData: 'Worked across agentic coding and traditional workflows with model delegation and appropriate use cases. A concise factual letter.',
+          careerData: 'Worked across agentic coding and traditional workflows with model delegation and appropriate use cases. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
         });
       } catch (error) {
         importerSuperiorityRejected = /unsupported comparative superiority/u.test(String(error?.message || error));
@@ -1163,7 +1204,7 @@ export default [
       let oversizedQuoteRejected = false;
       try {
         validateLocalApplicationResult(oversizedQuoteResult, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
-          careerData: `${oversizedQuote} A concise factual letter.`,
+          careerData: `${oversizedQuote} I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`,
         });
       } catch (error) {
         oversizedQuoteRejected = /exceeds 2000 characters/u.test(String(error?.message || error));
@@ -1187,7 +1228,7 @@ export default [
       let thirdBulletOrdinalRejected = false;
       try {
         validateLocalApplicationResult(thirdBulletWrongQuote, id, path.join(os.tmpdir(), 'local-ai-project'), {}, {
-          careerData: `${threeBulletTexts.join(' ')} A concise factual letter. Unrelated horticulture volunteer event.`,
+          careerData: `${threeBulletTexts.join(' ')} I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires. Unrelated horticulture volunteer event.`,
         });
       } catch (error) {
         thirdBulletOrdinalRejected = /sourceGrounding\.resumeBullets\[2\] \(résumé bullet 3\)/u.test(String(error?.message || error));
@@ -1239,11 +1280,11 @@ export default [
         id,
         path.join(os.tmpdir(), 'local-ai-project'),
         {},
-        { careerData: 'Built a native macOS overlay for precise on-screen guidance. A concise factual letter.' },
+        { careerData: 'Built a native macOS overlay for precise on-screen guidance. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.' },
       );
       assert(groundedProjectWithoutCompany.coverLetterArgument.primaryEvidence.evidenceRole === 'AI-Chalkboard project',
         'argument evidence can identify a company-less project by its résumé title without inventing an employer label');
-      const logisticsParagraph = 'A concise factual letter. I am available to start in June.';
+      const logisticsParagraph = 'I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires. I am available to start in June.';
       const logisticsResult = {
         ...trustedResult,
         coverLetter: { ...normalizedCoverLetter(), paragraphs: [logisticsParagraph] },
@@ -1592,7 +1633,7 @@ export default [
       const id = LOCAL_AI_TEST_JOB_ID;
       const resumeMainHtml = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
       const paragraphs = [
-        'Reliable system delivery connects my supported systems work to this role. The implementation evidence explains how I make those delivery decisions.',
+        'Reliable system delivery connects my supported systems work to this role. I made those delivery decisions against the constraints the internal users set.',
         'Concrete implementation decisions extend the same delivery responsibility. Their role is to connect system choices to reliable operation.',
       ];
       const coverLetter = { ...normalizedCoverLetter(), paragraphs };
@@ -1769,7 +1810,7 @@ export default [
     name: 'Local AI application: durable generation audit composes projected decisions, grounding, host checks, fit, and handoff history',
     run: () => {
       const coverLetterArgument = validCoverLetterArgument();
-      const paragraphs = ['A concise factual letter.'];
+      const paragraphs = ['I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.'];
       const result = {
         resumeMainHtml: '<main class="page">Resume</main>',
         coverLetter: { ...normalizedCoverLetter(), paragraphs },
@@ -1955,7 +1996,7 @@ export default [
       try {
         const build = generationAuditRequired => buildLocalGenerationAuditArtifact({
           jobId: LOCAL_AI_TEST_JOB_ID,
-          input: { job: { title: 'Developer', company: 'Acme' } },
+          input: { job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' } },
           result,
           generationAuditRequired,
           createdAt: '2026-09-05T12:06:00.000Z',
@@ -1999,8 +2040,8 @@ export default [
     run: async () => {
       const project = await createCanvasProject();
       try {
-        const trustedCareerData = 'Built supported systems. More relevant evidence. A concise factual letter.';
-        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: trustedCareerData, canvasFilePath: project.canvasFilePath });
+        const trustedCareerData = 'Built supported systems. More relevant evidence. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: trustedCareerData, canvasFilePath: project.canvasFilePath });
         await fs.promises.writeFile(path.join(queued.folder, 'result.json'), '{bad json', 'utf8');
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         // A hard rejection must leave a trace in the ONE job-folder file the
@@ -2020,7 +2061,7 @@ export default [
         // a handoff.
         const importSource = await fs.promises.readFile(path.join(process.cwd(), 'electron', 'ipc', 'localAiApplication.js'), 'utf8');
         assert(/const measuredPriorFeedback = matchingPriorFeedback\s*\n?\s*&& \['revision-required', 'revision-exhausted'\]\.includes\(priorFeedback\?\.status\)/.test(importSource)
-          && /const documentSha256 = await gradeOrRecordRejection\(\(\) => assertLocalAiQualityReviewConsistency\(result, priorFeedback\)\)/.test(importSource)
+          && /const documentSha256 = await gradeOrRecordRejection\(\(\) => assertLocalAiQualityReviewConsistency\(raw, priorFeedback\)\)/.test(importSource)
           && !/const documentSha256 = matchingPriorFeedback/.test(importSource),
           'the import path gates the quality-review assert on a MEASURED prior verdict, so an invalid rejection record cannot skip it');
         assert(rejection.status === 'invalid' && rejection.measured === false
@@ -2067,7 +2108,7 @@ export default [
     run: async () => {
       const project = await createCanvasProject();
       try {
-        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath });
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath });
         await fs.promises.rm(queued.folder, { recursive: true, force: true });
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(status.status === 'failed' && /no longer available|cleaned up/i.test(status.message),
@@ -2106,8 +2147,8 @@ export default [
     run: async () => {
       const project = await createCanvasProject();
       try {
-        const trustedCareerData = 'Built supported systems. More relevant evidence. A concise factual letter.';
-        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme' }, careerData: trustedCareerData, canvasFilePath: project.canvasFilePath });
+        const trustedCareerData = 'Built supported systems. More relevant evidence. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
+        const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: trustedCareerData, canvasFilePath: project.canvasFilePath });
         const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
         const result = {
           version: LOCAL_AI_APPLICATION_VERSION, jobId: queued.id, status: 'completed', outputBundleRoot: 'Applied Jobs',
@@ -2118,7 +2159,11 @@ export default [
           qualityReview: groundedQualityReview(sourceGroundingFor()),
         };
         const resultText = `${JSON.stringify(result)}\n`;
-        const canonicalResult = validateLocalApplicationResult(
+        // Validated for well-formedness only. assertLocalAiQualityReviewConsistency
+        // hashes the RAW stored fields (see its own comment) — never this
+        // validated/enveloped return value — so documentSha256 below must
+        // match that, not validateLocalApplicationResult's reprocessed shape.
+        validateLocalApplicationResult(
           result,
           queued.id,
           project.root,
@@ -2126,8 +2171,8 @@ export default [
           { careerData: trustedCareerData },
         );
         const documentSha256 = {
-          resume: sha256(canonicalResult.resumeMainHtml),
-          coverLetter: sha256(JSON.stringify(canonicalResult.coverLetter)),
+          resume: sha256(result.resumeMainHtml),
+          coverLetter: sha256(JSON.stringify(result.coverLetter)),
         };
         await fs.promises.writeFile(path.join(queued.folder, 'result.json'), resultText, 'utf8');
         const ready = await localApplicationStatus(queued.id, project.canvasFilePath);
@@ -2201,10 +2246,10 @@ export default [
       const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
       const initialBullet = 'Built supported systems.';
       const revisedBullet = 'More relevant evidence.';
-      const careerData = `${overlongBullet} ${initialBullet} ${revisedBullet} A concise factual letter.`;
+      const careerData = `${overlongBullet} ${initialBullet} ${revisedBullet} I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData,
           canvasFilePath: project.canvasFilePath,
         });
         const resultPath = path.join(queued.folder, 'result.json');
@@ -2247,12 +2292,15 @@ export default [
         const statusB = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(statusB.status === 'completed' && statusB.resultSha256 === resultB.sha256,
           'corrected hash B must be detected after invalid feedback');
-        const canonicalB = validateLocalApplicationResult(
+        // Validated for well-formedness only — see the comment on the earlier
+        // 'measured overflow' test's identical pattern for why documentSha256
+        // below must hash resultBValue directly, not this return value.
+        validateLocalApplicationResult(
           resultBValue, queued.id, project.root, { title: 'Developer', company: 'Acme' }, { careerData },
         );
         const documentSha256B = {
-          resume: sha256(canonicalB.resumeMainHtml),
-          coverLetter: sha256(JSON.stringify(canonicalB.coverLetter)),
+          resume: sha256(resultBValue.resumeMainHtml),
+          coverLetter: sha256(JSON.stringify(resultBValue.coverLetter)),
         };
         await atomicReplaceJson(feedbackPath, {
           version: 1,
@@ -2461,8 +2509,16 @@ export default [
           && handoffD.outcome === 'render-retry-required'
           && staleCAfterResponse.outcome === 'waiting'
           && LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(afterFailure.status)
-          && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(afterFailure.status),
-        'a consumed D must receive exact non-measured retry feedback that parks automatic import while keeping the fallback manager alive to expose explicit recovery; stale C remains nonterminal');
+          && !LOCAL_AI_FALLBACK_IDLE_STATUSES.includes(afterFailure.status)
+          // This is an ordinary (non-deterministic) save failure — a blocked
+          // destination directory, not a PDF re-render that reproduced its own
+          // mismatch — so retryReproducesFailure must stay false and the
+          // response must keep telling the responder to retry, exactly as
+          // before APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC existed.
+          && feedbackD.retryReproducesFailure === false
+          && /Retry the app-side layout\/save step without rewriting result\.json/.test(feedbackD.message)
+          && /Retry the measured import and final bundle save/.test(feedbackD.instruction),
+        'a consumed D must receive exact non-measured retry feedback that parks automatic import while keeping the fallback manager alive to expose explicit recovery; stale C remains nonterminal; an ordinary failure keeps retryReproducesFailure false with retry-instructing wording');
         assert(renderedDocumentsD.length === 2
           && await fs.promises.lstat(importedD.workDir).then(stat => stat.isDirectory()),
         'D must have exactly one admitted import (one render per document) and one admitted save; its retryable workspace remains recoverable');
@@ -2483,6 +2539,133 @@ export default [
     },
   },
   {
+    name: 'Local AI import: a save failure carrying the deterministic PDF-mismatch code tells the responder to stop, not retry',
+    run: async () => {
+      const project = await createCanvasProject();
+      const originalOpen = fs.promises.open;
+      try {
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultPath = path.join(queued.folder, 'result.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const result = await atomicReplaceJson(resultPath, {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        });
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => ({
+          bytes: Buffer.from(fixturePdfBytes),
+          pageCount: 1,
+          fontsLoaded: true,
+          missingFontFaces: [],
+          layout: { contentHeightPx: 760, typeAreaHeightPx: 800 },
+        }));
+
+        const imported = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9131,
+          expectedResultSha256: result.sha256,
+        });
+
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const sender = {
+          id: 9131,
+          isDestroyed: () => false,
+          once: () => {},
+          on: () => {},
+          removeListener: () => {},
+        };
+        // The plain-Node test runner has no Chromium BrowserWindow (see the
+        // render-substitution comment above), so the real PDF-vs-HTML
+        // re-render `ensureGeneratedApplicationPdf` performs on a mismatch
+        // cannot run here. Reproduce only its observable contract instead:
+        // mirror how the sibling tests above force a save failure by
+        // intercepting one fs primitive the real save-application handler
+        // calls, except here the injected Error carries the exact code
+        // `ensureGeneratedApplicationPdf` sets when a freshly rendered PDF is
+        // rejected for the identical reason as the one it replaced. Everything
+        // downstream of that thrown error — save-application's catch block,
+        // its onSaveFailure callback, and recordLocalAiSaveFailureUnlocked's
+        // branch on error.code — is real, unstubbed production code.
+        fs.promises.open = async function deterministicMismatchOpen(target, ...args) {
+          if (path.resolve(String(target)) === path.resolve(imported.resumePdfPath)) {
+            const error = new Error('Could not produce a resume PDF consistent with Application.html: PDF text does not match its HTML panel. A freshly rendered PDF was rejected for the same reason, so retrying this save reproduces it.');
+            error.code = APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC;
+            throw error;
+          }
+          return originalOpen.call(this, target, ...args);
+        };
+
+        const saveArgs = {
+          resumeHtmlPath: imported.resumeHtmlPath,
+          resumePdfPath: imported.resumePdfPath,
+          coverLetterPdfPath: imported.coverLetterPdfPath,
+          jobListingPath: imported.jobListingPath,
+          generationAuditPath: imported.generationAuditPath,
+          workDir: imported.workDir,
+          jobTitle: 'Developer',
+          location: '',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        };
+        const failedSave = await saveApplication({ sender }, saveArgs);
+        fs.promises.open = originalOpen;
+
+        const feedback = JSON.parse(await fs.promises.readFile(feedbackPath, 'utf8'));
+        assert(failedSave?.success === false
+          && failedSave.errorCode === APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC
+          && feedback.status === 'render-retry-required'
+          && feedback.measured === false
+          && feedback.resultSha256 === result.sha256
+          && feedback.retryReproducesFailure === true
+          && !/Retry the app-side layout\/save step/.test(feedback.message)
+          && /reproduces the same failure/i.test(feedback.message)
+          && /Do not retry this save/i.test(feedback.instruction)
+          && /do not rewrite result\.json/i.test(feedback.instruction),
+        `a save failure whose error carries the deterministic PDF-mismatch code must be answered with stop-not-retry feedback instead of the ordinary retry wording, got ${JSON.stringify({ failedSave, feedback })}`);
+
+        // 2026-09-23 bug report: this exact failure landed on manifest.json
+        // (feedback.json above proves that much) but never reached the live
+        // telemetry a bug report reads — recordLocalAiSaveFailureUnlocked was
+        // the one handoff-event writer in the file that appended to disk
+        // without also re-syncing getApplicationTelemetry()'s snapshot. A
+        // report generated after this failure showed the trace ending on the
+        // import's own "completed" event, one event short of what actually
+        // happened. `status` must stay 'completed': it names the import
+        // phase specifically and a later save failure does not revise it —
+        // only the trace array should have moved.
+        const telemetryAfterFailure = getApplicationTelemetry();
+        const historyTypes = telemetryAfterFailure?.localAi?.handoffHistory?.map(event => event?.type);
+        assert(telemetryAfterFailure?.attemptId === `local-${queued.id}`
+          && telemetryAfterFailure.status === 'completed'
+          && Array.isArray(historyTypes)
+          && historyTypes.length === 2
+          && historyTypes[0] === 'result-imported'
+          && historyTypes.at(-1) === 'bundle-save-retry-required',
+        `a save failure must advance the live handoff trace a bug report reads, without revising the already-completed generation's own status, got ${JSON.stringify({ attemptId: telemetryAfterFailure?.attemptId, status: telemetryAfterFailure?.status, historyTypes })}`);
+        return { retryReproducesFailure: feedback.retryReproducesFailure, errorCode: failedSave.errorCode };
+      } finally {
+        fs.promises.open = originalOpen;
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Local AI import: a held stale rejection cannot roll back a newer imported manifest',
     run: async () => {
       const project = await createCanvasProject();
@@ -2493,9 +2676,9 @@ export default [
       let renderCalls = 0;
       try {
         const overlongBullet = 'Built supported systems with clear outcomes, sustained ownership, concrete engineering judgment, careful operational validation, reliable release controls, documented decisions, and durable support practices across the full delivery lifecycle.';
-        const careerData = `${overlongBullet} Built supported systems. A concise factual letter.`;
+        const careerData = `${overlongBullet} Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.`;
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData,
           canvasFilePath: project.canvasFilePath,
         });
@@ -2604,8 +2787,8 @@ export default [
       let renderCalls = 0;
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
-          careerData: 'Built supported systems. A concise factual letter.',
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
           canvasFilePath: project.canvasFilePath,
         });
         const blockedOutputRoot = path.join(project.root, 'Blocked');
@@ -2684,8 +2867,8 @@ export default [
       let blockedImportedManifestWrites = 0;
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
-          careerData: 'Built supported systems. A concise factual letter.',
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
           canvasFilePath: project.canvasFilePath,
         });
         const resultPath = path.join(queued.folder, 'result.json');
@@ -2760,9 +2943,9 @@ export default [
       let importPromise = null;
       let renderCalls = 0;
       try {
-        const careerData = 'Built supported systems. A concise factual letter.';
+        const careerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData,
           canvasFilePath: project.canvasFilePath,
         });
@@ -2840,9 +3023,9 @@ export default [
     run: async () => {
       const project = await createCanvasProject();
       try {
-        const careerData = 'Built supported systems. A concise factual letter.';
+        const careerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData,
           canvasFilePath: project.canvasFilePath,
         });
@@ -3253,6 +3436,117 @@ export default [
     },
   },
   {
+    name: 'A failed application save leaves no empty "already applied" folder behind, and never removes a populated one',
+    run: async () => {
+      const project = await createCanvasProject();
+      const orphanWorkDir = path.join(project.root, 'prune-orphan-workspace');
+      const populatedWorkDir = path.join(project.root, 'prune-populated-workspace');
+      const orphanResumeHtmlPath = path.join(orphanWorkDir, 'Application.html');
+      const orphanJobListingPath = path.join(orphanWorkDir, 'Original Job Listing.md');
+      const populatedResumeHtmlPath = path.join(populatedWorkDir, 'Application.html');
+      const populatedJobListingPath = path.join(populatedWorkDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html><body><main>Fixture</main></body></html>';
+      const tamperedResumeHtml = '<!doctype html><html><body><main>Tampered</main></body></html>';
+      const jobListing = '# Fixture listing\n';
+      const senderId = 9420;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      try {
+        // --- Half (a): the destination Company/Location/Role tree is created
+        // BEFORE the registered artifacts are read and validated (jobApplication.js's
+        // own ordering, around "exportPhase = 'reading generated artifacts'").
+        // Tampering with the artifact's on-disk bytes after registration — so its
+        // sha256 no longer matches what readRegisteredApplicationArtifact recorded —
+        // forces a failure squarely inside that phase, after the tree already exists.
+        // A failed save must not leave that empty tree behind reading like an
+        // application that was already sent.
+        await fs.promises.mkdir(orphanWorkDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(orphanResumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(orphanJobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir: orphanWorkDir,
+          senderId,
+          company: 'Acme',
+          resumeHtmlPath: orphanResumeHtmlPath,
+          jobListingPath: orphanJobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+        });
+        await fs.promises.writeFile(orphanResumeHtmlPath, tamperedResumeHtml, 'utf8');
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const outputRoot = path.join(project.root, 'Applied Jobs');
+        const companyDir = path.join(outputRoot, 'Acme');
+        const locationDir = path.join(companyDir, 'Testville');
+        const roleDir = path.join(locationDir, 'Engineer');
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath: orphanResumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath: orphanJobListingPath,
+          generationAuditPath: null,
+          workDir: orphanWorkDir,
+          jobTitle: 'Engineer',
+          location: 'Testville',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        assert(saved?.success === false && /changed after it was registered/i.test(saved.error || ''),
+          `the tampered artifact must fail save-application during artifact reading, got ${JSON.stringify(saved)}`);
+        assert(!fs.existsSync(roleDir) && !fs.existsSync(locationDir) && !fs.existsSync(companyDir),
+          `a failed save must prune the empty Company/Location/Role tree it created, got ${JSON.stringify({ roleDir: fs.existsSync(roleDir), locationDir: fs.existsSync(locationDir), companyDir: fs.existsSync(companyDir) })}`);
+        assert(fs.existsSync(outputRoot) && (await fs.promises.readdir(outputRoot)).length === 0,
+          'pruning must stop at the registered output root itself, which this attempt did not create and must not remove');
+
+        // --- Half (b): a destination directory that already contains a file —
+        // a real prior bundle, or anything the user put there — must never be
+        // removed by the same failure path, no matter how it fails.
+        await fs.promises.mkdir(populatedWorkDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(populatedResumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(populatedJobListingPath, jobListing, 'utf8'),
+        ]);
+        const populatedRoleDir = path.join(outputRoot, 'Beta', 'Remoteville', 'Manager');
+        await fs.promises.mkdir(populatedRoleDir, { recursive: true });
+        const keepFile = path.join(populatedRoleDir, 'Keep.txt');
+        await fs.promises.writeFile(keepFile, 'a real prior bundle lives here', 'utf8');
+        registerPendingApplicationWorkspace({
+          workDir: populatedWorkDir,
+          senderId,
+          company: 'Beta',
+          resumeHtmlPath: populatedResumeHtmlPath,
+          jobListingPath: populatedJobListingPath,
+          cleanupOnDiscard: false,
+          cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+        });
+        await fs.promises.writeFile(populatedResumeHtmlPath, tamperedResumeHtml, 'utf8');
+        const savedPopulated = await saveApplication({ sender }, {
+          resumeHtmlPath: populatedResumeHtmlPath,
+          resumePdfPath: null,
+          coverLetterPdfPath: null,
+          jobListingPath: populatedJobListingPath,
+          generationAuditPath: null,
+          workDir: populatedWorkDir,
+          jobTitle: 'Manager',
+          location: 'Remoteville',
+          canvasFilePath: project.canvasFilePath,
+          suppressReveal: true,
+        });
+        assert(savedPopulated?.success === false && /changed after it was registered/i.test(savedPopulated.error || ''),
+          `the tampered artifact must fail the populated-destination save the same way, got ${JSON.stringify(savedPopulated)}`);
+        assert(fs.existsSync(populatedRoleDir)
+          && (await fs.promises.readFile(keepFile, 'utf8')) === 'a real prior bundle lives here',
+        'a destination directory that already held a file must survive the failure path with its contents untouched');
+        return { orphanPruned: true, populatedPreserved: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Local AI retention: prune claims serialize against workspace registration',
     run: async () => {
       const project = await createCanvasProject();
@@ -3331,7 +3625,7 @@ export default [
       let heldPrunePromise = null;
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
@@ -3402,7 +3696,7 @@ export default [
       let admittedSavePromise = null;
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' },
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
@@ -3475,7 +3769,7 @@ export default [
         await fs.promises.utimes(receiptPath, expiredReceiptTime, expiredReceiptTime);
 
         const queuedDuringSave = await queueLocalApplicationJob({
-          job: { title: 'Parallel Developer', company: 'Acme' },
+          job: { title: 'Parallel Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
           careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
@@ -3555,7 +3849,7 @@ export default [
       const project = await createCanvasProject();
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
         // No result.json exists, so the winning import fails on the missing
@@ -3727,7 +4021,7 @@ export default [
       const project = await createCanvasProject();
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
         const manifestPath = path.join(queued.folder, 'manifest.json');
@@ -3799,7 +4093,7 @@ export default [
       const project = await createCanvasProject();
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const receiptsRoot = path.join(project.root, '.local-ai', 'handoff-receipts');
         await fs.promises.mkdir(receiptsRoot, { recursive: true });
@@ -3828,7 +4122,7 @@ export default [
           `a valid terminal receipt must distinguish a completed-save cleanup from a failed/missing job, got ${JSON.stringify(status)}`);
 
         const retained = await queueLocalApplicationJob({
-          job: { title: 'Retained Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+          job: { title: 'Retained Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
         });
         const retainedResultRaw = '{"fixture":"durably saved"}\n';
         await fs.promises.writeFile(path.join(retained.folder, 'result.json'), retainedResultRaw, 'utf8');
@@ -3896,7 +4190,7 @@ export default [
       const project = await createCanvasProject();
       try {
         const queued = await queueLocalApplicationJob({
-          job: { title: 'Developer', company: 'Acme' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA,
           canvasFilePath: project.canvasFilePath,
         });
         // A real save's onSuccessfulSave callback writes exactly this shape
@@ -4098,7 +4392,7 @@ export default [
       'source-grounding entries must be graded independently rather than failing on the first one');
       // Aggregation happens at three depths, so the record must still read as
       // ONE flat numbered list: a nested prefix produced two “(1)” markers.
-      const trustedCareerData = 'Built supported systems. A concise factual letter.';
+      const trustedCareerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
       const validResumeMain = '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>';
       const fabricated = {
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
@@ -4326,6 +4620,133 @@ export default [
       assert(!/additional observation/u.test(rejected.detail),
         'a list that printed every observation says nothing about omissions');
       return { enforced: true };
+    },
+  },
+  {
+    name: `Local AI résumé: the STYLE.md §5.3 ${RESUME_ROLE_BULLET_CEILING}-bullet-per-role ceiling is enforced by the app, not only by prose`,
+    async run() {
+      // A shipped résumé once padded a starved role to nine bullets by
+      // splitting four real accomplishments apart. structuredResume.js's
+      // evidence-exclusivity rule catches the citation reuse that caused it;
+      // this is the other half — a bullet-COUNT ceiling nothing read before.
+      const roleWithBullets = count => `<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights">${
+        Array.from({ length: count }, (_, i) => `<li>Delivered reporting improvement number ${i + 1} for the district office nightly extract.</li>`).join('')
+      }</ul></article></main>`;
+      assert(checkResumeRoleBulletBudget(roleWithBullets(RESUME_ROLE_BULLET_CEILING)).passed,
+        `a role at the ${RESUME_ROLE_BULLET_CEILING}-bullet ceiling must pass`);
+      const rejected = checkResumeRoleBulletBudget(roleWithBullets(RESUME_ROLE_BULLET_CEILING + 1));
+      assert(!rejected.passed
+        && rejected.detail.includes(`Acme carries ${RESUME_ROLE_BULLET_CEILING + 1} bullets (ceiling ${RESUME_ROLE_BULLET_CEILING})`),
+      `a role over the ceiling must be named with its measured count, got ${JSON.stringify(rejected.detail)}`);
+      assert(evaluateResumeProseChecks(roleWithBullets(RESUME_ROLE_BULLET_CEILING + 1)).some(check => check.id === 'resume-role-bullet-budget' && !check.passed),
+        'the role-bullet ceiling must run inside the shared pre-publication résumé prose checks');
+      assert(evaluateResumeProseChecks(roleWithBullets(RESUME_ROLE_BULLET_CEILING)).some(check => check.id === 'resume-role-bullet-budget' && check.passed),
+        'a role within the ceiling must pass inside the same shared battery');
+      return { enforced: true };
+    },
+  },
+  {
+    name: 'Structured résumé rejects a later bullet whose career-data evidence ids are already all cited by an earlier bullet in the same role, but not the same id reused across roles or a bullet that adds a new one',
+    run() {
+      // Root cause: a shipped résumé's structured-résumé JSON showed nine
+      // bullets in one role citing only four distinct evidenceIds — one id
+      // backed three bullets at once. Every bullet, read alone, was properly
+      // grounded; only comparing a role's bullets against each other catches
+      // the reuse, which is exactly what this rejects.
+      const fragCareerData = `Work Done from Past Jobs
+
+Software Engineer
+
+Thomson School District — Loveland, Colorado
+*May 2023 – June 2026*
+- Built attendance reporting for district staff.
+- Automated the nightly grade-sync job between two student information systems.
+- Wrote the onboarding guide new teachers use to request account access.
+- Mentored two junior engineers on code review practices.
+
+Data Engineer
+
+Horizon Health Alliance — Denver, Colorado
+*January 2020 – April 2023*
+- Built clinical data pipelines for care teams.
+- Mentored two junior engineers on code review practices.
+
+---
+Personal Projects`;
+      const fragRoles = [
+        { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: '' },
+        { id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: '' },
+      ];
+      const fragContext = {
+        sourceRoles: fragRoles,
+        careerData: fragCareerData,
+        evidenceCatalog: [
+          { id: 'thomson-q1', sourceId: 'career-data', quote: 'Built attendance reporting for district staff.' },
+          { id: 'thomson-q2', sourceId: 'career-data', quote: 'Automated the nightly grade-sync job between two student information systems.' },
+          { id: 'thomson-q3', sourceId: 'career-data', quote: 'Wrote the onboarding guide new teachers use to request account access.' },
+          { id: 'shared-mentor', sourceId: 'career-data', quote: 'Mentored two junior engineers on code review practices.' },
+          { id: 'horizon-q1', sourceId: 'career-data', quote: 'Built clinical data pipelines for care teams.' },
+        ],
+      };
+      const fragResume = thomsonBullets => ({
+        schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+        identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
+        roles: [
+          { id: 'thomson', title: 'Software Engineer', company: 'Thomson School District', dates: 'May 2023 – June 2026', location: 'Loveland, Colorado', bullets: thomsonBullets },
+          {
+            id: 'horizon', title: 'Data Engineer', company: 'Horizon Health Alliance', dates: 'January 2020 – April 2023', location: 'Denver, Colorado',
+            bullets: [
+              { id: 'horizon-bullet-1', text: 'Built clinical data pipelines for care teams.', evidenceIds: ['horizon-q1'] },
+              { id: 'horizon-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
+            ],
+          },
+        ],
+      });
+
+      // A={thomson-q1}, B={thomson-q1}: an identical single-id repeat.
+      let fragmentedMessage = '';
+      try {
+        renderStructuredApplicationResume(fragResume([
+          { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
+          { id: 'thomson-bullet-2', text: 'Built a second attendance view for the same district staff.', evidenceIds: ['thomson-q1'] },
+        ]), fragContext);
+      } catch (error) { fragmentedMessage = error.message; }
+      assert(fragmentedMessage.includes('roles[0]') && fragmentedMessage.includes('"thomson-bullet-1"') && fragmentedMessage.includes('"thomson-bullet-2"') && fragmentedMessage.includes('"thomson-q1"'),
+        `two bullets citing the same single evidence id must be rejected naming the role and both bullet ids, got ${JSON.stringify(fragmentedMessage)}`);
+      assert(!fragmentedMessage.includes('Built a second attendance view'),
+        'the rejection must not echo suggested replacement bullet wording');
+
+      // A={thomson-q1,thomson-q2}, B={thomson-q1}: B is still a strict subset.
+      let subsetMessage = '';
+      try {
+        renderStructuredApplicationResume(fragResume([
+          { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['thomson-q1', 'thomson-q2'] },
+          { id: 'thomson-bullet-2', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
+        ]), fragContext);
+      } catch (error) { subsetMessage = error.message; }
+      assert(subsetMessage.includes('"thomson-q1"') && !subsetMessage.includes('"thomson-q2"'),
+        `a later bullet whose evidence ids are a strict subset of an earlier bullet's must be rejected naming only the actually-shared id, got ${JSON.stringify(subsetMessage)}`);
+
+      // A={thomson-q1,thomson-q2}, B={thomson-q1,thomson-q3}: B adds an id A
+      // never cited, so it is accepted even though it repeats thomson-q1.
+      const disjointHtml = renderStructuredApplicationResume(fragResume([
+        { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff and automated the nightly grade-sync job.', evidenceIds: ['thomson-q1', 'thomson-q2'] },
+        { id: 'thomson-bullet-2', text: 'Built attendance reporting for district staff and wrote the new-teacher onboarding guide.', evidenceIds: ['thomson-q1', 'thomson-q3'] },
+      ]), fragContext);
+      assert(disjointHtml.includes('automated the nightly grade-sync job') && disjointHtml.includes('onboarding guide'),
+        'a later bullet that adds a career-data id no earlier bullet cited is accepted even though it repeats one shared id');
+
+      // The same evidence id ("shared-mentor") cited once in Thomson's role
+      // and once in Horizon's role is not fragmentation: the rule is scoped to
+      // one role's own bullets, never compared across roles.
+      const crossRoleHtml = renderStructuredApplicationResume(fragResume([
+        { id: 'thomson-bullet-1', text: 'Built attendance reporting for district staff.', evidenceIds: ['thomson-q1'] },
+        { id: 'thomson-bullet-2', text: 'Mentored two junior engineers on code review practices.', evidenceIds: ['shared-mentor'] },
+      ]), fragContext);
+      assert(crossRoleHtml.includes('Mentored two junior engineers'),
+        'the same career-data evidence id cited once per role, in two different roles, is not treated as fragmentation');
+
+      return { fragmentedRejected: true, subsetRejected: true, disjointAccepted: true, crossRoleAccepted: true };
     },
   },
   {
@@ -4577,7 +4998,7 @@ export default [
     run() {
       const careerData = [
         'Built supported systems.',
-        'A concise factual letter.',
+        'I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.',
         '',
         '## Personal Projects',
         '',
@@ -4888,7 +5309,7 @@ export default [
     run: () => {
       const id = LOCAL_AI_TEST_JOB_ID;
       const projectRoot = path.join(os.tmpdir(), 'local-ai-project');
-      const careerData = 'Built supported systems. A concise factual letter.';
+      const careerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
       const result = () => ({
         version: LOCAL_AI_APPLICATION_VERSION, jobId: id, status: 'completed', outputBundleRoot: 'Applied Jobs',
         resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
@@ -4942,7 +5363,7 @@ export default [
   {
     name: 'Local AI quality review refuses an unstated grounding context and an unstated checklist version',
     run: () => {
-      const careerData = 'Built supported systems. A concise factual letter.';
+      const careerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
       const resumeEvidence = extractResumeEvidence('<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>');
       const context = {
         required: true,

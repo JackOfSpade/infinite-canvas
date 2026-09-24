@@ -69,6 +69,27 @@ const handoffLifecycles = [];
 // test guessed private responses offline. This key never leaves memory and is
 // never persisted; lifecycle correlation is process-local already.
 const RESPONSE_RECEIPT_HMAC_KEY = crypto.randomBytes(32);
+// A durable step restored from a saved run that predates handoff-code
+// enforcement (`handoffCodeVerificationVersion` null) accepts a response
+// carrying no code at all — that is the exact compatibility gap that let one
+// 29,559-char answer be accepted into two different batches of the same run
+// on 2026-09-17, because nothing compared what was actually accepted against
+// what a DIFFERENT step had already accepted. This registry closes that hole
+// without needing any cooperation from the person pasting or the model: it
+// compares accepted text, not text the paste claims about itself. Keyed on
+// the LOGICAL step identity (`runId` + `stepKey`), never `requestId`, so a
+// re-issued or stepped-back request for the SAME step can still legitimately
+// re-accept identical text.
+const acceptedResponseFingerprints = new Map();
+// Far more than one run's realistic accepted-step count. This just bounds the
+// worst case for a long-lived process rather than trying to be a precise
+// cache.
+const ACCEPTED_RESPONSE_FINGERPRINT_MAX = 200;
+// Short answers can legitimately repeat across steps (two batches that both
+// happen to get a short "no material findings" reply); only a long response
+// repeating verbatim across two DIFFERENT steps is evidence of a cross-batch
+// paste. Exported so the test can pin this floor instead of duplicating it.
+export const DUPLICATE_RESPONSE_MIN_LENGTH = 400;
 const NON_API_AI_HANDLER_CHANNELS = [
   'replay-pending-non-api-ai-requests',
   'submit-non-api-ai-response',
@@ -85,8 +106,9 @@ const NON_API_AI_HANDLER_CHANNELS = [
 // can correct a paste. They can include an untrusted response property name or
 // task-specific prompt data, so the main-process ring must record only one of
 // these fixed classifications instead of the error text.
-const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
+export const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
   'AI_JSON_INVALID',
+  'DUPLICATE_RESPONSE',
   'HANDOFF_CODE_MISMATCH',
   'HANDOFF_CODE_MISSING',
   'JOB_COMPENSATION_RESPONSE_INVALID',
@@ -102,6 +124,10 @@ const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
 function nonApiAiLogErrorCode(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
   return SAFE_NON_API_AI_LOG_ERROR_CODES.has(code) ? code : 'VALIDATION_FAILED';
+}
+
+export function __nonApiAiLogErrorCodeForTests(error) {
+  return nonApiAiLogErrorCode(error);
 }
 
 // Typed task validators may attach `error.validationDiagnostic` (or the older
@@ -147,12 +173,13 @@ const SAFE_COMPENSATION_ASSESSMENT_REASONS = new Set([
   'COMPENSATION_ROLE_FAMILY_IDENTITY_INVALID',
   'COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED',
 ]);
-const SAFE_VALIDATION_DIAGNOSTIC_REASONS = new Set([
+export const SAFE_VALIDATION_DIAGNOSTIC_REASONS = new Set([
   ...SAFE_RESEARCH_SECTION_REASONS,
   ...SAFE_RESEARCH_ASSESSMENT_REASONS,
   ...SAFE_COMPENSATION_ASSESSMENT_REASONS,
   'HANDOFF_CODE_MISMATCH',
   'HANDOFF_CODE_MISSING',
+  'DUPLICATE_RESPONSE',
   'INVALID_JSON',
   'SCHEMA_INVALID',
   'SCHEMA_UNSUPPORTED',
@@ -205,6 +232,7 @@ function defaultSafeValidationDiagnostic(error, validationCode) {
   switch (validationCode) {
     case 'HANDOFF_CODE_MISMATCH': return { stage: 'transport', reason: 'HANDOFF_CODE_MISMATCH', counts: {} };
     case 'HANDOFF_CODE_MISSING': return { stage: 'transport', reason: 'HANDOFF_CODE_MISSING', counts: {} };
+    case 'DUPLICATE_RESPONSE': return { stage: 'transport', reason: 'DUPLICATE_RESPONSE', counts: {} };
     case 'AI_JSON_INVALID': return { stage: 'json', reason: 'INVALID_JSON', counts: {} };
     case 'STRUCTURED_OUTPUT_SCHEMA_INVALID': return { stage: 'schema', reason: 'SCHEMA_INVALID', counts: {} };
     case 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD': return { stage: 'schema', reason: 'SCHEMA_UNSUPPORTED', counts: {} };
@@ -212,6 +240,10 @@ function defaultSafeValidationDiagnostic(error, validationCode) {
     case 'PREFERENCE_RESEARCH_RESPONSE_INVALID': return { stage: 'domain', reason: 'DOMAIN_VALIDATION_FAILED', counts: {} };
     default: return { stage: 'domain', reason: 'VALIDATION_FAILED', counts: {} };
   }
+}
+
+export function __defaultSafeValidationDiagnosticForTests(error, validationCode) {
+  return defaultSafeValidationDiagnostic(error, validationCode);
 }
 
 function safeResponseReceipt(response) {
@@ -225,6 +257,76 @@ function safeResponseReceipt(response) {
 function responseReceiptHash(response) {
   if (typeof response !== 'string' || !response) return null;
   return crypto.createHmac('sha256', RESPONSE_RECEIPT_HMAC_KEY).update(response).digest('hex').slice(0, 8);
+}
+
+// "Normalized" here means only trimmed, matching validateNonApiAiSubmission's
+// own trimmed-length handling below — incidental leading or trailing paste
+// whitespace should not by itself push a short answer over the floor.
+// The hash above is deliberately truncated to 8 hex characters so a bug
+// report can never become an offline oracle for guessing a private response;
+// that narrowness alone makes a coincidental collision between two UNRELATED
+// long responses possible, so fold in the raw length too — a false match
+// would then also have to reproduce the exact character count, not just an
+// 8-character digest.
+function acceptedResponseFingerprint(response) {
+  if (typeof response !== 'string' || response.trim().length < DUPLICATE_RESPONSE_MIN_LENGTH) return null;
+  const hash = responseReceiptHash(response);
+  return hash ? `${hash}:${response.length}` : null;
+}
+
+/**
+ * Claim `response`'s fingerprint for the logical step identified by
+ * `record.stepKey`, or throw NonApiAiDuplicateResponseError when a DIFFERENT
+ * step already claimed it. Check-then-claim happens synchronously in this one
+ * call — like the handoff-code reservation in requestNonApiAi below — so two
+ * concurrent submissions for two different steps can never both observe the
+ * fingerprint as free.
+ *
+ * KEYED ON stepKey ALONE, NEVER ON runId, and that is the whole correctness
+ * argument. `durableStepKey` above hashes the canonicalized PROMPT together
+ * with task/batch/itemCount/attachments — so an identical stepKey means an
+ * identical question, and an identical question has an identical valid
+ * answer. Folding runId in would have made the commonest frugal move a dead
+ * end: cancelling a run discards every response pasted for it and invites a
+ * retry ("You can retry as many times as needed"), and the retry re-asks the
+ * very same prompts. Someone who still has those answers in their chat and
+ * re-pastes them would have been told their own correct answer already
+ * belonged to a different prompt, with no way past it.
+ *
+ * What still blocks is what should: two batches of one run are different
+ * prompts, so different stepKeys, so one answer can never be accepted into
+ * both. That is the 2026-09-17 corruption exactly.
+ *
+ * Residual, stated rather than engineered around: stepKey also hashes nodeId,
+ * so two hubs asking a byte-identical question are two steps here. Reusing
+ * one answer across them would be refused. It needs a pre-enforcement legacy
+ * step (any current step's handoff code already forces distinct answers), two
+ * hubs, and the same batch on both — and the way out, retrying the prompt,
+ * is the same one every other rejection offers.
+ *
+ * A record with no stepKey (a one-off handoff outside any tracked run) has
+ * nothing for this guard to key on and is left alone; the handoff-code checks
+ * above remain that step's only protection.
+ */
+function claimAcceptedResponseFingerprint(record, response) {
+  if (!record?.stepKey) return;
+  const fingerprint = acceptedResponseFingerprint(response);
+  if (!fingerprint) return;
+  const claimant = acceptedResponseFingerprints.get(fingerprint);
+  if (claimant && claimant.stepKey !== record.stepKey) {
+    throw new NonApiAiDuplicateResponseError(record.handoffCode);
+  }
+  // FIFO eviction only when this fingerprint is genuinely new: re-claiming an
+  // already-present entry (the same step re-accepting its own text) must not
+  // spend a slot bounding a long-lived process's worst case.
+  if (!claimant && acceptedResponseFingerprints.size >= ACCEPTED_RESPONSE_FINGERPRINT_MAX) {
+    acceptedResponseFingerprints.delete(acceptedResponseFingerprints.keys().next().value);
+  }
+  acceptedResponseFingerprints.set(fingerprint, { stepKey: record.stepKey });
+}
+
+export function __claimAcceptedResponseFingerprintForTests(record, response) {
+  return claimAcceptedResponseFingerprint(record, response);
 }
 
 function cleanRunId(value) {
@@ -435,6 +537,23 @@ export class NonApiAiCodeMissingError extends Error {
     super(`This response is missing the required ${expectedCode} handoff code. Nothing was saved. Paste the complete response from the chat whose prompt header reads ${expectedCode}; its first line must be "Handoff: ${expectedCode}" (or, for JSON, include the matching handoffCode property).`);
     this.name = 'NonApiAiCodeMissingError';
     this.code = 'HANDOFF_CODE_MISSING';
+    this.expectedCode = expectedCode;
+  }
+}
+
+// Unlike the two errors above, this needs no code in the paste to compare
+// against: it fires when the exact same accepted TEXT resurfaces for a
+// different logical step, which (see acceptedResponseFingerprints above) is
+// only reachable at all through the pre-enforcement compatibility path those
+// two errors cannot cover. Naming the OTHER step's code here would be
+// unsafe — that step, and its code, may belong to an entirely different
+// run — so this only ever names the code of the prompt currently open.
+export class NonApiAiDuplicateResponseError extends Error {
+  constructor(expectedCode) {
+    super(`This exact response was already accepted for a different prompt. Nothing was saved. Open the chat whose prompt header reads ${expectedCode} and paste that answer here. (The same pasted answer can never be valid for two different prompts — that already let one batch's answers silently overwrite another's.)`);
+    this.name = 'NonApiAiDuplicateResponseError';
+    this.isDuplicateResponse = true;
+    this.code = 'DUPLICATE_RESPONSE';
     this.expectedCode = expectedCode;
   }
 }
@@ -1029,6 +1148,10 @@ export function _resetNonApiAiHandoffLifecycle() {
   // Pending records remain their own source of truth in `pendingRequests`.
   handoffCodeReservations.clear();
   handoffProgressScopes.clear();
+  // Same reasoning as handoffCodeReservations above: process-local, in-memory
+  // bookkeeping, not part of the durable run this simulated restart is
+  // otherwise trying to preserve.
+  acceptedResponseFingerprints.clear();
 }
 
 function cleanAttachmentPaths(paths) {
@@ -1660,7 +1783,12 @@ function safeCorrectionGuidance(diagnostic, validationCode) {
 
 function promptForRetry(record, validationError) {
   const basePrompt = record.materializedPrompt;
-  if (!validationError || record.validationCode === 'HANDOFF_CODE_MISMATCH') {
+  // A duplicate-response rejection is not a flaw in the ANSWER — the paste is
+  // schema-valid and was already accepted somewhere, just not here. Asking
+  // for a "CORRECTION REQUIRED" regeneration below would send the model to
+  // redo work that was never wrong, so reissue the exact original prompt
+  // unchanged, exactly like a code mismatch does.
+  if (!validationError || record.validationCode === 'HANDOFF_CODE_MISMATCH' || record.validationCode === 'DUPLICATE_RESPONSE') {
     return { prompt: basePrompt, isCorrection: false };
   }
 
@@ -1686,6 +1814,10 @@ function promptForRetry(record, validationError) {
         'Regenerate and return the complete answer again. Do not return only a patch or an explanation of the mistake.',
       ].join('\n');
   return { prompt: `${basePrompt}\n\n${correction}`, isCorrection: true };
+}
+
+export function __promptForRetryForTests(record, validationError) {
+  return promptForRetry(record, validationError);
 }
 
 function publicRequest(record, validationError = record.validationError || null) {
@@ -2267,6 +2399,14 @@ export function registerNonApiAiHandlers() {
         expectedHandoffCode: record.handoffCode,
         requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
       });
+      // A legacy step restored before handoff-code enforcement existed has no
+      // code in the paste for the check above to compare against, so this is
+      // the remaining guard against the same pasted answer being accepted
+      // into two different steps (see acceptedResponseFingerprints near the
+      // top of this file). Must run before any durable write or resolution
+      // below — a rejection here must leave this request exactly as pending
+      // as a code-mismatch rejection does.
+      claimAcceptedResponseFingerprint(record, args.response);
       record.validationError = null;
       record.validationCode = null;
       record.settling = true;

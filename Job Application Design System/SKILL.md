@@ -33,6 +33,7 @@ post-processes it into the right print variant for the recipient.
 | `build/bullet-length-check.html`       | **Manual** browser check behind that budget: renders worst-case bullet text at 180/100 characters in the real page structure (Letter/A4 × default/compact) and asserts each holds ≤ 2 wrapped lines (STYLE.md §5.4). Open it in a browser — nothing runs it for you. |
 | `build/parallelism-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 5 parallel-construction gate: fails if the failure-mode count reverts to four or five, the coordination shapes (`from X through Y`, `both`/`either`/`not only`) or the general same-form repair are dropped from `STYLE.md`, or the résumé-facing enumerations in `SKILL.md`/`readme.md` regress to covering only colon-dumps/overloaded-sentences/metaphors. No browser needed. |
 | `build/synthesis-scope-gate-doc-test.js` | Static doc regression for the §11.2.3 Rule 6 earned-generalization gate: fails if the failure-mode count reverts, or if `STYLE.md`/`SKILL.md`/`readme.md` drop the evidence-scope requirement, the named-connector requirement, the bridge-noun clause, the one-antecedent rule at paragraph boundaries, the rewrite-or-delete repair, or the "filler is not a repair" prohibition. No browser needed. |
+| `build/bullet-redundancy-gate-doc-test.js` | Static doc regression for the one-accomplishment-one-bullet rule: fails if `STYLE.md §5.3`, `SKILL.md`'s "Do not let one bullet restate another" section and its negative-space line, or `readme.md`'s "Bullet ordering" section drop the combine-into-one-bullet repair, the cross-reference to "Do not let a project section restate the bullets," the "subject is the previous bullet's object" tell, or the never-split-to-fill-a-page rule. No browser needed. |
 | `build/ats-parse-test.js`     | Parse-safety gate (STYLE.md §8.1): fails on tables, imagery in `<main>`, absolute positioning, CSS columns, hidden text, tabular figures, `&nbsp;` in copy, contact outside `<main>`, and reading-order inversions. Takes file paths; defaults to the shipped samples. |
 | `build/education-placement-test.js` | Static regression: no Education section anywhere, and the degree rides in the header subtitle (STYLE.md §5.8). Wired into `npm test`. |
 | `build/page-policy-doc-test.js` | Static doc regression for the one-page default and its explicit-override language (STYLE.md §6 · pipeline step 5). Wired into `npm test`. |
@@ -76,10 +77,13 @@ End-to-end, given candidate data + job description:
    whenever the source data states a location for that role** — reading
    it off that role's own entry is not an inference, so this rule never
    licenses the candidate-contact location above. Extract it alongside
-   the title, company and dates in step 1. Render it in the role's
-   `.role-meta` row, or fold it into `.role-dates` when the role has no
-   summary to share that row with (`STYLE.md §5.2b`); a location is
-   never dropped to buy a line.
+   the title, company and dates in step 1. Fold it into `.role-dates`
+   by default (`STYLE.md §5.2b`) — a role with no summary to share the
+   second row costs a full line for nothing by giving the location its
+   own `.role-meta` row instead. Keep the `.role-meta` row only where
+   the fold doesn't apply: a summary shares the row, or the location
+   can't parse back out of the dates cell. A location is never dropped
+   to buy a line.
 
 2. **Read the job description.** Identify:
    - Company name and the *kind* of company (see decision table below)
@@ -321,6 +325,7 @@ End-to-end, given candidate data + job description:
    | `node build/education-placement-test.js` | no — the no-Education rule |
    | `node build/page-policy-doc-test.js` | no — the one-page default |
    | `node build/parallelism-gate-doc-test.js` · `node build/synthesis-scope-gate-doc-test.js` | no — the §11.2.3 prose rules |
+   | `node build/bullet-redundancy-gate-doc-test.js` | no — the one-accomplishment-one-bullet rule |
 
    The `build/*-check.html` fixtures are **manual** browser checks, not
    gates — see `build/MANUAL-CHECKS.md`. Nothing runs them for you.
@@ -344,15 +349,12 @@ End-to-end, given candidate data + job description:
    Default density is what you render first, always. After that first
    render, measure the result against the one-page target:
 
-   - **One page, 90–100% of the measured type area used.** This is the
-     desired default outcome. Ship as-is.
-   - **One page, under 90% utilized.** Don't pad it. Look for
-     genuinely distinct, source-supported evidence — a real bullet,
-     project, or skill the candidate has that isn't on the page yet
-     and would improve interview odds — and add only that. If there is
-     nothing true and distinct left to add, ship the page under 90%; a
-     shorter honest page beats a padded one. Never add adjectives,
-     restated metrics, or filler to reach the target.
+   - **One page.** Look for genuinely distinct, source-supported
+     evidence — a real bullet, project, or skill the candidate has
+     that isn't on the page yet and would improve interview odds —
+     and add only that if it exists. Otherwise ship the page as it
+     is; a shorter honest page beats a padded one. Never add
+     adjectives, restated metrics, or filler to fill space.
    - **Overflows one page, and the overflow is small** (roughly 1–9
      lines, or the excess would occupy less than ~30% of a second
      page): apply the existing measured `data-density="compact"`
@@ -687,6 +689,15 @@ What goes in it:
   unlabelled keyword line: the category labels are part of what the
   parser's section classifier keys on, and the space saved is a
   fraction of one line.
+- **Title Case the `dt`, and label the domain, not the section.**
+  `Languages`, `Data & Storage`, `Infrastructure`. Nothing uppercases
+  this label for you, so `technologies` prints lowercase beside them;
+  leave a label that already carries an uppercase letter as written
+  (`AI/ML`, `iOS`) and keep a connecting `and` lowercase. A row
+  labelled `Skills`, `Technical Skills` or `Technologies` names the
+  section head above it rather than a kind of skill, so it gives the
+  parser no category the `Skills` header did not already give it, and
+  the host validator rejects it. Name the domain the row holds.
 - **Do not delete the section.** Its value is the terms that appear
   nowhere else — in the shipped sample, **12 of the 16 terms appear
   only in Skills** (Go, Postgres, Kafka, and Elasticsearch are the
@@ -727,6 +738,62 @@ open-source work, or an architecture whose shape needs a sentence the
 role bullets have no room for. If every metric in the block already
 appears above it, **cut the whole section** — it is the single largest
 free space recovery available, and it costs zero searchable terms.
+
+## A project is carried for one posting, not for every posting
+
+Not restating the bullets is necessary and not sufficient. The second
+question is whether this posting gives the entry a reason to be read at
+all, and it is a different question: a project can be entirely true of
+the candidate, prove something no bullet proves, and still belong on no
+résumé for this job. Personal projects are not a standing section that
+every résumé carries by default — carry one where the posting asks for
+what it shows, and omit it where the posting does not, even though
+nothing about the project changed between the two applications.
+
+So a project earns its place by answering something the posting
+actually says: it cites a job-listing quote beside its career-data
+evidence, and its name and description share that quote's own
+vocabulary. A project with no listing quote it can honestly cite is
+telling you it answers nothing this employer asked for. Omit it — and
+do not reach for a loosely related quote to keep it, which only spends
+the reader's attention on work this role has no use for.
+
+## Do not let one bullet restate another
+
+The same failure this file already guards against in `## Do not let a
+project section restate the bullets` shows up one level in: a role
+whose bullets restate each other instead of restating a project. A
+shipped résumé once reported one accomplishment — a full-stack
+internal-tools hub — as three separate `<li>`s: one that built it, one
+that containerized it for deployment, one that added a fee-tracking
+feature to it. Every one of the three was individually self-contained,
+individually under the 180-character budget (`STYLE.md §5.4`), and
+individually grounded — so every rule already in this file passed it —
+while the role carried 9 bullets for 4 real accomplishments, past the
+3–6 ceiling above.
+
+**One accomplishment, one bullet.** A bullet earns its place in a role
+only by carrying something no other bullet in that role carries — a
+distinct system, outcome, or judgment call — the same
+carries-something-no-other-entry-carries test `## Do not let a project
+section restate the bullets` applies to a project entry against the
+bullet corpus, applied here bullet-to-bullet within one role. Where two
+or three bullets report the same system's build, its deployment, and
+one of its features, combine them into a single bullet whose trailing
+clause carries the supporting mechanism, constraint, or result — not
+three `<li>`s. A quick check for the pattern: a bullet whose subject is
+the previous bullet's object — "Containerized **the internal-tools
+hub**…" right after the bullet that built it — is almost always the
+second half of one accomplishment, not a second one.
+
+**Splitting a bullet is never the repair for a short page.** A page
+that runs short calls for source-supported evidence the résumé hasn't
+used yet — a different accomplishment, project, or skill — never a
+second bullet about an accomplishment already on the page. The case
+above measured 74.1% of the type area and split rather than reach for
+unused evidence; the repair was the unused career data, not a second
+and third bullet about a system the page already covered.
+
 ## Negative space — what the system does NOT do
 
 - No icons, no skill bars, no progress dots, no photos
@@ -737,6 +804,8 @@ free space recovery available, and it costs zero searchable terms.
   the contact line only. A role's own stated work location is a
   required employment fact — see step 1 and `STYLE.md §5.2`.)
 - No `Selected Systems` entry whose metrics already appear in a bullet
+- No bullet whose accomplishment already appears, in whole or in
+  part, in another bullet in the same role
 - No coloured ranges, no gradients, no rounded cards
 - No emoji
 - No em dash anywhere in candidate copy, and no en dash outside a

@@ -50,6 +50,13 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { logger } from '../logger.js';
 import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger.js';
+// One definition of the `<dt>` casing rule, shared with the structured-résumé
+// renderer: a created row here sits in the same `<dl class="skills">` as the
+// rows that module rendered, so a second spelling of the rule would show up as
+// two casings in one list. The rule lives in its own import-free module
+// because importing structuredResume.js from here closes a cycle back through
+// jobApplication.js → resumeRender.js → this file.
+import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 
 const { app } = electronPkg;
 
@@ -1457,6 +1464,12 @@ function skillLabelKey(raw) {
 // as markup and never interpolated unescaped, and — like every inferred
 // skill/separator/created label/group — everything it produces still carries
 // ` hidden` unless `showAllVerifySkills` is true.
+//
+// The DISPLAY label is title-cased on the way out (every shipped `<dt>` is
+// Title Case and `.skills dt` has no text-transform), while the match key is
+// still computed from the raw text: skillLabelKey() lowercases and strips
+// every non-alphanumeric character, so casing the label cannot move a group
+// off the row it should have merged into.
 function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   const verify = insights.filter(item => item.kind === 'verify');
   if (!verify.length) return mainHtml;
@@ -1488,7 +1501,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   }
 
   const createdEntry = (group) =>
-    `<dt data-ic-inferred-label${hiddenAttr}>${escapeHtml(group.label)}</dt>\n  <dd data-ic-inferred-group${hiddenAttr}>${createdSkillsMarkup(group.items)}</dd>`;
+    `<dt data-ic-inferred-label${hiddenAttr}>${escapeHtml(titleCaseSkillGroupLabel(group.label))}</dt>\n  <dd data-ic-inferred-group${hiddenAttr}>${createdSkillsMarkup(group.items)}</dd>`;
 
   // NOTE: the boundary check after the bare (unquoted) `skills` alternative is
   // a LOOKAHEAD, not a consuming match. A consuming `(?:\s|>|\/)` here (as

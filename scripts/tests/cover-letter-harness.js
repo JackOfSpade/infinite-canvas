@@ -43,11 +43,13 @@ import {
   ARGUMENT_RELEVANCE_ANAPHORA_RULE,
   ARGUMENT_RELEVANCE_MECHANISM_RULE,
   paragraphArgumentSpanGaps,
+  checkCandidateAgency,
   paragraphHasCandidatePastProof,
   checkPlainRegister,
   checkPlanGate,
   checkPostingReference,
   checkPriorEmployerOpening,
+  checkRepeatedPhrase,
   checkRepeatedSentenceShape,
   checkPunctuationStyle,
   checkProspectiveContributionTense,
@@ -74,6 +76,8 @@ import {
   MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS,
   MAX_SENTENCE_WORDS,
   MIN_ANCHOR_RELEVANCE_CORPUS_WORDS,
+  MIN_CROSS_PARAGRAPH_REPEAT_WORDS,
+  MIN_SAME_PARAGRAPH_REPEAT_WORDS,
   MIN_SHARED_SHAPE_PARAGRAPHS,
   SENTENCE_SHAPE_FRAME_WORDS,
   path,
@@ -82,6 +86,14 @@ import {
   sentences,
   STACK_TOOL_LEXICON,
 } from '../test-dependencies.js';
+// Read at the source rather than through scripts/test-dependencies.js: that
+// barrel is shared with every other test group and sits outside this task's file
+// scope, and these three bindings are exactly what the repeated-run assertions
+// below have to compare against the code that prints them — the rule text the
+// letter contract carries, the content-word floor that text must state, and the
+// relevance-span rule whose CHOICE of carriers settles the one apparent
+// contradiction in this pair of checks.
+import { ARGUMENT_RELEVANCE_SPAN_RULE, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE } from '../../electron/ipc/coverLetterChecks.js';
 
 function loadFixture(name) {
   const file = path.resolve('scripts/fixtures/cover-letter', `${name}.json`);
@@ -210,6 +222,82 @@ const PROXIMAL_AND_ORDINARY_ROLE_PROSE = [
   'The second role I held there is the one that taught me SQL.',
   'The work sits closer to the role than my title suggests.',
   'I have never left a position without documenting the handover.',
+];
+
+// The letter of 2026-09-23, verbatim. It cleared the whole battery: no check in
+// coverLetterChecks.js compared a paragraph to itself or to another paragraph.
+// checkRedundancy and checkSalientPhraseEcho measure the letter against the
+// RESUME, checkRepeatedSentenceShape erased every content word before it
+// compared, and every other n-gram site takes its needle from the resume, the
+// plan or a fixed list. So the same six words appeared twice in paragraph 1 and
+// nothing said anything. Three tests read it, from three sides: the runs it
+// repeats, the shapes its consecutive paragraphs share, and the one place those
+// two checks answer differently about the same sentences.
+const LETTER_THAT_RESTATES_ITSELF = [
+  "AWS Workflow Experience's cross-stack work joins intuitive front-end experiences with the services and APIs that power them. My full-stack experience includes scalability across the UI and backend. At Thomson School District, as a Software Engineer, I developed a web app for internal tools with scalability across the UI and backend. The engineering challenge was planning for scalability as future additions changed the application. I would apply that scalability approach across UI and backend to feature design spanning front-end experiences and the services that power them.",
+  "In that role, my application experience includes connected systems, device management platforms, and scan-triggered features. I developed the district's device check-in/check-out web app to work with a physical barcode scanner and device management platforms. The engineering challenge was coordinating connected features when one action triggered another. I would apply that connected-system experience to designing intuitive front-end behavior together with the services that power it.",
+  'Operational handoffs add another layer to full-stack engineering. In that Software Engineer role, my migration experience spans integrations, data migration workflows, automation, validation, and operational tooling. I migrated ticketing and repair-tracking systems and associated data to third-party platforms. The work lay mainly in coordinating dependent activities during validation and transition. I can apply that operational transition approach to implementation, deployment, and ongoing operational health.',
+  "I welcome a conversation about how my migration work with integrations and operational tooling could support your team's work designing, building, and operating features across front-end experiences, services, and APIs.",
+];
+
+// The letter paragraph every pipeline fixture in this repo writes, and the one
+// the targeted exclusion has to stay silent on. Its transfer sentence re-names
+// the capability its claim sentence named, because
+// ARGUMENT_RELEVANCE_ANAPHORA_RULE permits a bare back-reference in six fixed
+// phrases only, and it names the responsibility it reaches, because
+// relevanceNamesNeed grades that span for its job need's own words. Both
+// re-namings are mandated and both land inside one paragraph: comparing the whole
+// sentence reported this paragraph at 38 of the 39 test sites in this repo that
+// assert a contract-following letter is accepted.
+const LETTER_WITH_MANDATED_RE_NAMINGS = 'My experience delivering supported systems is a relevant capability.'
+  + ' In my engineering role at Acme, I updated supported systems for internal users.'
+  + ' I would apply my experience delivering supported systems to reliable system delivery this role requires.';
+
+// Paragraph 1 of the design system's own fixture letter, verbatim
+// (Job Application Design System/uploads/Application.html). It names one
+// artifact twice in one paragraph, in lowercase and in full, and says something
+// different about it each time — which is why the old message, "the same
+// statement made twice", was untrue of it, and why the run is still a defect.
+const DESIGN_SYSTEM_ARTIFACT_PARAGRAPH = 'Most of what I built at Thomson School District eventually had to keep working'
+  + ' against a third-party platform, which is the condition this role puts on every brand-specific feature delivered'
+  + " over a shared core. I built the district's device check-in and check-out system from scratch, covering the laptops"
+  + ' and iPads issued to staff and students. The tools we kept in house ran on a web hub I built full stack, with a'
+  + ' React front end and a Django back end, containerized so it could be deployed on any VM the district had. When'
+  + ' ticketing, device check-in and check-out, and repair tracking moved onto third-party solutions, I owned that'
+  + ' transfer and the Python ETL that keeps the district information system and those platforms in agreement in both'
+  + ' directions.';
+
+// Ordinary prose whose only repeats are the syntax English hands a sentence. It
+// is a negative control against a live cost: the first build of
+// checkRepeatedPhrase had no content-word test, and a sweep of what it reported
+// found every run listed below, each announced as "the same statement made
+// twice" and each worth one manual handoff round. Nothing here is the letter
+// restating itself, and the prose is deliberately dull rather than clean: it
+// says a different thing in every sentence while reaching for the same
+// function-word scaffolding, which is what ordinary writing does.
+//
+// Each run sits in two DIFFERENT sentences, because the check compares sentence
+// against sentence and a run repeated inside one sentence is never compared at
+// all, and the test measures that placement rather than trusting it.
+const ORDINARY_SYNTAX_REPEATED_PROSE = [
+  'The scan queue was one of the places a record could go missing. The nightly export was one of the others, and there was no audit trail behind it. In order to see where, I timed each step of the write path. There was no owner for the older records, so in order to reassign them I built a small review screen. Every reversal was a change that had to be logged, as well as the reason behind it. A refund was an entry that had to be approved, as well as the note a clerk left on it. I worked on the scanner path first. Then I worked on the ledger, which nobody had touched in a year.',
+  'Reporting was the second half of the job. I was able to move the aggregation into a nightly job once the timings were in hand. At the same time the clerks wanted a weekly view, so the work had to fit around their Monday deadline. Coordination was one of the things nobody had budgeted for.',
+  'The migration was the last piece. I was able to take the older records across without a freeze. At the same time two teams were editing the same records, so the work had to be reversible at every step. Sequencing was one of the things that decided the order.',
+];
+// The runs above, with the distance each one is repeated at, so the assertion
+// can check every one against the floor its own distance uses instead of
+// against a single number. Reported live, all ten of them.
+const ORDINARY_SYNTAX_REPEATED_RUNS = [
+  { run: 'one of the', distance: 'inside' },
+  { run: 'in order to', distance: 'inside' },
+  { run: 'there was no', distance: 'inside' },
+  { run: 'that had to be', distance: 'inside' },
+  { run: 'as well as the', distance: 'inside' },
+  { run: 'i worked on the', distance: 'inside' },
+  { run: 'i was able to', distance: 'across' },
+  { run: 'at the same time', distance: 'across' },
+  { run: 'the work had to', distance: 'across' },
+  { run: 'was one of the things', distance: 'across' },
 ];
 
 export default [
@@ -1322,6 +1410,9 @@ export default [
       // clause outright reaches the reader unflagged, and no check in the
       // evaluated set is named for that subject.
       const workStatusProse = [
+        // A proof paragraph carries the letter: candidate-agency reads the
+        // whole letter, and these status lines state no completed work.
+        'I built the incident triage interface the dispatch team uses.',
         'I am a Canadian citizen and hold a U.S. work permit.',
         'I am authorized to work in Canada and hold permanent residency there.',
         'I would not require visa sponsorship for this position.',
@@ -1419,12 +1510,30 @@ export default [
       'a new paragraph cannot replace a just-named prior employer with organization shorthand');
       assert(explicitEmployer.passed && ordinaryDefiniteDescription.passed && unanchoredDistrict.passed,
         `an explicit employer bridge, ordinary definite description, and a district with no prior named-employer antecedent remain allowed: ${explicitEmployer.detail}; ${ordinaryDefiniteDescription.detail}; ${unanchoredDistrict.detail}`);
-      assert(shorthandEmployer.detail.includes('continue naturally with “I …” or use “In that role”')
-        && shorthandEmployer.detail.includes('repeat Thomson School District if another employer or role makes the reference ambiguous'),
-      `employer-shorthand feedback favors a natural candidate continuation and preserves names for ambiguity: ${shorthandEmployer.detail}`);
-      assert(!repeatedEmployer.passed && repeatedEmployer.detail.includes('use “In that role” when a cross-paragraph re-entry cue helps')
+      // Both messages used to hand over a literal re-entry cue as the repair,
+      // and the live letter of 2026-09-23 opened two of its four paragraphs
+      // with exactly that cue. They now describe what the opening should be
+      // about, name the employer because that is what makes the observation
+      // locatable, and quote nothing else: the only quoted span in either
+      // message is the offending opening itself.
+      const employerMessages = [shorthandEmployer.detail, repeatedEmployer.detail];
+      assert(shorthandEmployer.detail.includes('open instead on whatever this paragraph is actually about')
+        && shorthandEmployer.detail.includes('Thomson School District named in full where another employer or role could be the referent'),
+      `employer-shorthand feedback describes the repair and preserves names for ambiguity: ${shorthandEmployer.detail}`);
+      assert(!repeatedEmployer.passed
+        && repeatedEmployer.detail.includes('one established employer needs no re-introduction')
+        && repeatedEmployer.detail.includes("let the opening start from this paragraph's own subject")
         && conciseRoleReference.passed && disambiguatedEmployers.passed,
       `a needless adjacent employer-name repeat is flagged, while a concise cue and necessary disambiguation remain allowed: ${repeatedEmployer.detail}; ${conciseRoleReference.detail}; ${disambiguatedEmployers.detail}`);
+      // The offending opening is the one span either message may quote. Every
+      // other quoted run would be wording the letter can adopt, which is the
+      // rule stated beside checkRepeatedSentenceShape in coverLetterChecks.js
+      // and the mechanism that put one cue in two paragraphs.
+      const quotedSpans = employerMessages.flatMap(detail => [...detail.matchAll(/“([^”]*)”/gu)].map(([, span]) => span));
+      assert(quotedSpans.length === 1 && quotedSpans[0] === 'The district chose …',
+        `neither employer message quotes a phrase the letter could paste (quoted=${JSON.stringify(quotedSpans)})`);
+      assert(!employerMessages.some(detail => /\bin that role\b/iu.test(detail)),
+        `and neither one names the re-entry cue the shipped letter copied twice (messages=${JSON.stringify(employerMessages)})`);
       const evaluatedEmployerShorthand = evaluateCoverLetterChecks({
         plan: { mappings: [{}], companyHook: { detail: '' } },
         paragraphs: [
@@ -1869,6 +1978,47 @@ This specific position within AWS Identity Center team represents an opportunity
     },
   },
   {
+    name: 'cover letter harness: artifact-as-actor prose silently escapes the argument battery, and the abstraction beat is a legal claim span',
+    run: () => {
+      // A shipped letter that named the artifact as the actor in every
+      // paragraph. Nothing rejected it: no paragraph trips the past-proof cue,
+      // so none owes an argumentMapping and claim/proof/relevance went
+      // ungraded. The gap was invisible because every gate downstream is
+      // conditioned on that same cue.
+      const artifactActor = [
+        'At Stripe, Connect pairs end-to-end product experiences with integration work that reduces complexity for platforms. As a Software Engineer at Thomson School District, my device check-in/check-out web app connected barcode scanning with native device management platforms. I would apply that integration practice to Connect experiences that reduce integration lift and complexity.',
+        'A separate project moved ticketing and repair tracking into third-party platforms, combining data migration workflows with integrations, automation, validation, and operational tooling.',
+        'ETL pipelines handled medical data, and REST APIs opened the local database through controlled access.',
+      ];
+      const escaped = artifactActor.every(paragraph => !paragraphArgumentSpanGaps(paragraph, 'reducing integration lift').length);
+      const agency = checkCandidateAgency(artifactActor);
+      assert(escaped && !agency.passed && agency.detail.includes('argumentMapping'),
+        `artifact-as-actor paragraphs owe no span and must be caught by the agency check instead: ${agency.detail}`);
+
+      // The same evidence in the first person now owes a mapping, and the
+      // paragraph is reported until it carries the abstraction beat.
+      const posting = 'Make it easy for Connect platforms to scale their business while reducing integration lift and complexity.';
+      const evidence = 'As a Software Engineer at Thomson School District, I built a district-wide device check-in/check-out web app that identified devices by barcode scan and acted on them through the district\u2019s device-management platforms.';
+      const transfer = 'I would apply that consolidation work to Connect\u2019s dashboard surfaces, so platforms adding Instant Payouts, Issuing, or Capital carry less of the integration lift.';
+      const warrant = 'The engineering was in absorbing those platforms\u2019 differences into one surface, so the staff member at the counter acted on a single screen instead of learning which system owned which action.';
+      const withoutWarrant = paragraphArgumentSpanGaps(`${evidence} ${transfer}`, posting);
+      const withWarrant = paragraphArgumentSpanGaps(`${evidence} ${warrant} ${transfer}`, posting);
+      assert(withoutWarrant.length === 1 && withoutWarrant[0].field === 'claim' && !withWarrant.length,
+        `the abstraction beat is the span that closes the claim gap: ${JSON.stringify(withoutWarrant)} then ${JSON.stringify(withWarrant)}`);
+      assert(checkCandidateAgency([`${evidence} ${warrant} ${transfer}`]).passed,
+        'a first-person proof satisfies the agency check');
+
+      // A bare -ing mood is not an abstraction of the work. The gerund has to
+      // take an object, or "the work was mostly rewarding" would read as a
+      // capability claim.
+      const mood = paragraphArgumentSpanGaps(`${evidence} The work was mostly rewarding and challenging. ${transfer}`, posting);
+      assert(mood.length === 1 && mood[0].field === 'claim',
+        `an adjectival -ing cannot stand in for the abstraction beat: ${JSON.stringify(mood)}`);
+
+      return { agency: agency.detail, withoutWarrant: withoutWarrant.length, withWarrant: withWarrant.length };
+    },
+  },
+  {
     name: 'cover letter harness: a clean synthetic letter clears every register and style check',
     run: () => {
       const groundedRange = 'Led a district intake rebuild from 2019–2022 so every permission form carried one named owner.';
@@ -2117,9 +2267,9 @@ This specific position within AWS Identity Center team represents an opportunity
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 41, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 43, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,artifact-action-completeness,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,artifact-action-completeness,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -2191,22 +2341,28 @@ This specific position within AWS Identity Center team represents an opportunity
       // Deliberate parallelism is not a template. Three of five paragraphs
       // closing alike is epistrophe a writer chose; rejecting it would cost a
       // handoff round for a non-defect, so the ceiling is all but two.
+      // The triad is spread across paragraphs 1, 3 and 5 rather than run
+      // together. That placement is the whole allowance now: the count ceiling
+      // permits parallelism a reader meets with a paragraph in between, and the
+      // adjacency branch reports the same triad back-to-back, because what a
+      // reader registers as one template filled three times is consecutive.
       const parallel = [
-        'Training software for people who are not at a desk has to be boring in the right places.',
-        'I containerized an internal tools hub so any VM configuration produced one stack. That is the kind of problem I like.',
+        'Training software for people who are not at a desk has to be boring in the right places. That is the kind of problem I like.',
+        'I containerized an internal tools hub so any VM configuration produced one stack.',
         'I restricted the district ticketing system by staff role in React and TypeScript. That is the kind of problem I like.',
-        'My SQL automations surfaced patients whose prescribed treatment appointments were missing. That is the kind of problem I like.',
-        'None of it was glamorous, and none of it broke quietly. The code is available whenever it is useful.',
+        'My SQL automations surfaced patients whose prescribed treatment appointments were missing.',
+        'None of it was glamorous, and none of it broke quietly. That is the kind of problem I like.',
       ];
       assert(checkRepeatedSentenceShape(parallel).passed,
-        `a deliberate parallel triad inside a five-paragraph letter is not a template (detail=${checkRepeatedSentenceShape(parallel).detail})`);
+        `a deliberate parallel triad spread through a five-paragraph letter is not a template (detail=${checkRepeatedSentenceShape(parallel).detail})`);
       assert(sharedSentenceShapeCeiling(3) === 2 && sharedSentenceShapeCeiling(4) === 2
         && sharedSentenceShapeCeiling(5) === 3 && sharedSentenceShapeCeiling(6) === 4,
       'the ceiling is all but two paragraphs, and never below two');
       // One more paragraph on the same shape is the template again, so the
       // rule has a repair target rather than an open-ended instruction.
-      assert(!checkRepeatedSentenceShape([...parallel.slice(0, 4),
-        'The clinic acted on that list the week it existed. That is the kind of problem I like.']).passed,
+      assert(!checkRepeatedSentenceShape([parallel[0],
+        'I containerized an internal tools hub so any VM configuration produced one stack. That is the kind of problem I like.',
+        ...parallel.slice(2)]).passed,
       'four of five paragraphs closing alike is past the ceiling');
 
       // A letter too short to have a template is never reported: there is no
@@ -2255,15 +2411,26 @@ This specific position within AWS Identity Center team represents an opportunity
       assert(!moved.passed && moved.detail.includes('“as a * at *”')
         && moved.detail.includes('paragraph 1 sentence 3, paragraph 2 sentence 2, paragraph 3 sentence 2 and paragraph 4 sentence 2'),
       `the shape is reported wherever it sits, with the sentence that carries it in each paragraph (detail=${moved.detail})`);
+      // The same letter also signposts two consecutive paragraphs with one
+      // shape, which the count of two out of four never reached. That is now
+      // its own item in the same message, so the writer is told about both in
+      // the round that reports either.
+      assert(moved.detail.includes('“on the * my *”')
+        && moved.detail.includes('paragraph 2 sentence 1 and paragraph 3 sentence 1 carry the same sentence shape'),
+      `the back-to-back signpost is named alongside the count defect (detail=${moved.detail})`);
 
-      // The repair the message names, applied literally: two of those four
-      // sentences rewritten to a different shape, and the two rewritten are
+      // The repair the message names, applied literally: two of the four
+      // sentences on the counted shape rewritten, and the two rewritten are
       // the paragraphs that re-enter an employer already introduced, so the
-      // role stays attached where each employer is first named.
+      // role stays attached where each employer is first named; plus the one
+      // sentence the adjacency item names.
       const repaired = [...movedTemplate];
       repaired[1] = repaired[1].replace(
         'As a Software Engineer at Thomson School District, I enhanced an in-house ticketing system by restricting access for internal staff by role, using React and TypeScript.',
         'The in-house ticketing system I enhanced at Thomson School District restricted access for internal staff by role, using React and TypeScript.');
+      repaired[2] = repaired[2].replace(
+        'On the backend side, my background includes Python APIs and SQL automations.',
+        'Python APIs and SQL automations are where my background sits.');
       repaired[3] = repaired[3].replace(
         'As a Software Engineer at Thomson School District, my engineering practice included traditional and AI-assisted software development workflows.',
         'My engineering practice at Thomson School District included traditional and AI-assisted software development workflows.');
@@ -2304,10 +2471,13 @@ This specific position within AWS Identity Center team represents an opportunity
           'At Corvid Retail I owned the weekly demand forecast for nine hundred SKUs. Returns were being counted as sales in the warehouse feed, which inflated every fast mover until I traced it to a status code the vendor had reused.',
           'Once the feed was honest, the model got simpler. I dropped two features the noise had been propping up and the error fell.',
           'Buyers still needed a number they could argue with, so the weekly note said which SKUs the model was least sure about. That is the part I would bring here.'],
-        ['technical writer, deliberate opening pair',
+        // The second half used to open on the same signpost as the first. That
+        // pair is the adjacency defect now, so the letter that stays inside
+        // every rule signposts its second half some other way.
+        ['technical writer, two halves signposted differently',
           'Documentation that nobody opens is a support cost wearing a wiki.',
           'On the API side, my work has been the reference nobody reads until something breaks. I rewrote the error tables for a payments API so each code named the caller mistake that produced it, and the tickets that quoted a code dropped.',
-          'On the release side, my work has been the note that ships with the change. I moved the changelog into the pull request template so it was written while the author still remembered why.',
+          'Release notes were the other half of it. I moved the changelog into the pull request template so it was written while the author still remembered why.',
           'Both habits came from watching support queues rather than from a style guide, and I would apply that to your developer portal.'],
         ['security engineer, five paragraphs',
           'Access reviews are where a security program either becomes real work or becomes a spreadsheet.',
@@ -2522,6 +2692,484 @@ This specific position within AWS Identity Center team represents an opportunity
       assert(!paragraphArgumentSpanGaps(mappable, posting).length,
         'and the reporter stays silent on the paragraph the gate accepts spans of');
       return { tried, accepted, midWordDetail: midWordVerdict.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: a letter that restates itself is reported run by run, and the runs its own rules require are not',
+    run() {
+      // The letter of 2026-09-23, verbatim, and why it is the fixture:
+      // LETTER_THAT_RESTATES_ITSELF above.
+      const restated = LETTER_THAT_RESTATES_ITSELF;
+      const reported = checkRepeatedPhrase(restated);
+      assert(!reported.passed && reported.id === 'repeated-phrase',
+        `the letter that restates itself is reported (detail=${reported.detail})`);
+      // The user's own complaint first: one noun phrase, stated twice, two
+      // sentences apart. Then the two the same paragraph and the next one
+      // carry. Each is named with the run and with both sentences that hold it.
+      assert(reported.detail.includes('paragraph 1 sentence 2 and paragraph 1 sentence 3 repeat one run of 6 words, “scalability across the ui and backend”'),
+        `the six-word run stated twice in one paragraph is named with both of its sentences (detail=${reported.detail})`);
+      // The complaint was three occurrences, not two: the paragraph's transfer
+      // sentence reached back for part of the same run on top of the re-naming
+      // its own rules mandate. See the transfer-sentence test below for what is
+      // blanked there and what is not.
+      assert(reported.detail.includes('paragraph 1 sentence 2, paragraph 1 sentence 3 and paragraph 1 sentence 5 repeat one run of 3 words, “ui and backend”'),
+        `the third occurrence, inside the transfer sentence, is named with the two it echoes (detail=${reported.detail})`);
+      assert(reported.detail.includes('paragraph 2 sentence 1 and paragraph 2 sentence 2 repeat one run of 3 words, “device management platforms”'),
+        `a three-word run repeated inside one paragraph is reported (detail=${reported.detail})`);
+      assert(reported.detail.includes('paragraph 1 sentence 4 and paragraph 2 sentence 3 repeat one run of 4 words, “the engineering challenge was”'),
+        `a four-word run carried into the next paragraph is reported (detail=${reported.detail})`);
+      // The argument contract REQUIRES the transfer carrier in every
+      // proof-bearing paragraph, so the four words two paragraphs share here
+      // are compliance. Reporting them would make two rules contradict each
+      // other, and it would spend a handoff round asking for a repair the
+      // other rule forbids.
+      assert(!reported.detail.includes('i would apply that'),
+        `the mandated transfer carrier is not charged to the writer (detail=${reported.detail})`);
+      // Same-paragraph repeats lead: they are the ones a reader hits hardest
+      // and the ones repaired without touching another paragraph.
+      assert(reported.detail.indexOf('inside paragraph 2') < reported.detail.indexOf('across paragraphs'),
+        `same-paragraph repeats are reported before cross-paragraph ones (detail=${reported.detail})`);
+      assert(!/[—–]/u.test(reported.detail),
+        `the observation hands the writer no dash it could copy into the letter (detail=${reported.detail})`);
+      // No replacement wording. The only quoted spans are the offending runs
+      // themselves, which is naming the offense rather than writing the
+      // repair, the rule stated beside checkRepeatedSentenceShape.
+      const quoted = [...reported.detail.matchAll(/“([^”]*)”/gu)].map(([, run]) => run);
+      assert(quoted.length > 0 && quoted.every(run => restated.some(paragraph => paragraph.toLowerCase().includes(run))),
+        `every quoted span is a run the letter already contains (quoted=${JSON.stringify(quoted)})`);
+
+      // The two floors, measured against each other. The same three words sit
+      // in one paragraph in the first letter and in two paragraphs in the
+      // second; only the first is reported, because inside one paragraph the
+      // first statement is still in the reader's head when the echo arrives.
+      const withinOne = [
+        'The district office ran three systems that never spoke to each other. I rebuilt the check-in workflow at the district office so a barcode scan updated the asset record directly.',
+        'Reporting was the other problem, and moving it was the harder half.',
+        'I welcome a conversation about either.',
+      ];
+      const acrossTwo = [
+        'The district office ran three systems that never spoke to each other.',
+        'I rebuilt the check-in workflow at the district office so a barcode scan updated the asset record directly.',
+        'I welcome a conversation about either.',
+      ];
+      assert(!checkRepeatedPhrase(withinOne).passed && checkRepeatedPhrase(acrossTwo).passed,
+        `a ${MIN_SAME_PARAGRAPH_REPEAT_WORDS}-word run is a repeat inside one paragraph and is not one across two`
+        + ` (within=${checkRepeatedPhrase(withinOne).detail}; across=${checkRepeatedPhrase(acrossTwo).detail})`);
+
+      // A name is supposed to recur, and how often it may is already
+      // checkPriorEmployerOpening's and checkAdjacentEmployerRepetition's
+      // business. Measured against the twin above rather than argued: the two
+      // letters differ only in whether the three words are a proper name.
+      const named = withinOne.map(paragraph => paragraph.replaceAll('the district office', 'Thomson School District'));
+      assert(checkRepeatedPhrase(named).passed,
+        `a run of nothing but a proper name is not this check's to report (detail=${checkRepeatedPhrase(named).detail})`);
+
+      // The carrier exclusion, measured the same way: the run two transfer
+      // sentences share is long enough to report and is not reported, and the
+      // clean letter beside it shows the check is not simply silent.
+      const runWordsOf = value => (String(value).toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) || []);
+      const longestVerbatimRun = (left, right) => {
+        const leftWords = runWordsOf(left);
+        const rightWords = runWordsOf(right);
+        let longest = 0;
+        for (let start = 0; start < leftWords.length; start++) {
+          for (let other = 0; other < rightWords.length; other++) {
+            let length = 0;
+            while (leftWords[start + length] && leftWords[start + length] === rightWords[other + length]) length++;
+            longest = Math.max(longest, length);
+          }
+        }
+        return longest;
+      };
+      const carrierLetter = [
+        'Dispatch reliability is what this role is written around, and it is what my last three years were about.',
+        'At Northstar Dispatch the incident queue lost its ordering whenever two supervisors edited a shift at once. I rebuilt the write path so the later edit had to read the earlier one first. I would apply that experience to the ordering guarantees your queue needs.',
+        'Reporting was the other problem. Supervisors wanted Monday numbers and the export ran until Tuesday, so I moved the aggregation into a nightly job. I would apply that practice to the weekly figures your operations team publishes.',
+        'I welcome a conversation about either.',
+      ];
+      const sharedCarrier = longestVerbatimRun(sentences(carrierLetter[1]).slice(-1)[0], sentences(carrierLetter[2]).slice(-1)[0]);
+      assert(sharedCarrier >= MIN_CROSS_PARAGRAPH_REPEAT_WORDS && checkRepeatedPhrase(carrierLetter).passed,
+        `the ${sharedCarrier}-word run two mandated transfers share is past the cross-paragraph floor and is still not reported`
+        + ` (detail=${checkRepeatedPhrase(carrierLetter).detail})`);
+
+      // False positives are the cost that matters: a fired check spends a
+      // handoff round on good writing. A letter that says each thing once is
+      // silent.
+      const clean = [
+        'Dispatch software fails in the minutes nobody is watching it, which is the part of the job this posting describes. Three years at Northstar Dispatch taught me where those minutes are.',
+        'The incident queue there lost its ordering whenever two supervisors edited a shift at once. I rebuilt the write path so the later edit had to read the earlier one first, and the duplicate dispatches stopped.',
+        'Reporting was the second problem. Supervisors wanted the weekly numbers on Monday morning, and the export took until Tuesday, so I moved the aggregation into a nightly job and the Monday meeting got its numbers.',
+        'Neither fix was clever. Both came from sitting with the dispatchers for a week before writing anything, and I would start the same way on a queue I did not build.',
+      ];
+      const passing = checkRepeatedPhrase(clean);
+      assert(passing.passed && passing.detail.includes(`${clean.length} paragraph(s)`)
+        && passing.detail.includes(`${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words inside one paragraph`)
+        && passing.detail.includes(`${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words across paragraphs`),
+      `a letter that says each thing once passes, and says which two floors it cleared (detail=${passing.detail})`);
+      assert(checkRepeatedPhrase([]).passed && checkRepeatedPhrase().passed && checkRepeatedPhrase([null, '']).passed,
+        'an absent or empty letter reports nothing');
+      const throughHelper = evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } },
+        paragraphs: restated, evidence, researchText: '',
+      }).find(check => check.id === 'repeated-phrase');
+      assert(throughHelper && !throughHelper.passed,
+        'the check is registered in the prose battery the paste validator runs, not only callable on its own');
+      return { reported: (reported.detail.match(/repeat one run of/gu) || []).length, sharedCarrier };
+    },
+  },
+  {
+    name: 'cover letter harness: one shape in back-to-back paragraphs is a filled template the count ceiling never reached',
+    run() {
+      // Measured on the same letter. Two of its four paragraphs entered their
+      // evidence on one frame, "In that role, my application experience
+      // includes" and "In that Software Engineer role, my migration experience
+      // spans", and two of four is exactly the ceiling, so the count said
+      // nothing. The ceiling was built to permit deliberate parallelism; what a
+      // reader registers as one template filled twice is consecutive.
+      const template = [
+        'Full-stack work joins the interface with the services behind it.',
+        'In that role, my application experience includes connected systems and scan-triggered features. I developed the check-in web app that drove a physical barcode scanner.',
+        'In that Software Engineer role, my migration experience spans integrations, automation and validation. I moved the ticketing system and its data onto a third-party platform.',
+        'I welcome a conversation about either.',
+      ];
+      const shape = checkRepeatedSentenceShape(template);
+      assert(!shape.passed && shape.id === 'repeated-sentence-shape'
+        && shape.detail.includes('paragraph 2 sentence 1 and paragraph 3 sentence 1 carry the same sentence shape “in that * my *” in back-to-back paragraphs'),
+      `a frame two consecutive paragraphs carry is reported with both of its sentences (detail=${shape.detail})`);
+      // It is reported at a count the ceiling passes, which is the whole point
+      // of the branch, and the message does the subtraction rather than leaving
+      // the writer to work out that breaking a pair costs one rewrite.
+      assert(shape.detail.includes(`the ${sharedSentenceShapeCeiling(template.length)} paragraphs the count allows one shape`)
+        && shape.detail.includes('so at least 1 of those 2 sentences must be rewritten to a different shape'),
+      `the report names the ceiling it is below and how many sentences have to move (detail=${shape.detail})`);
+      assert(!/[—–]/u.test(shape.detail),
+        `the adjacency observation carries no dash the letter could copy (detail=${shape.detail})`);
+
+      // Adjacency is what fires, measured rather than argued: the same two
+      // sentences with one paragraph between them are the same count and are
+      // not reported.
+      const spread = [template[0], template[1], template[3], template[2]];
+      const spreadShape = checkRepeatedSentenceShape(spread);
+      assert(spreadShape.passed,
+        `the same frame with a paragraph between its two carriers is the parallelism the ceiling permits (detail=${spreadShape.detail})`);
+      // And a rewrite of one of the two clears it, so the message has a repair
+      // target rather than an open-ended instruction.
+      const repairedTemplate = [...template];
+      repairedTemplate[2] = repairedTemplate[2].replace(
+        'In that Software Engineer role, my migration experience spans integrations, automation and validation.',
+        'Migration was the other half of that Software Engineer role, and it spanned integrations, automation and validation.');
+      assert(checkRepeatedSentenceShape(repairedTemplate).passed,
+        `rewriting the one sentence the message names clears the check (detail=${checkRepeatedSentenceShape(repairedTemplate).detail})`);
+      return { ceiling: sharedSentenceShapeCeiling(template.length) };
+    },
+  },
+  {
+    name: 'cover letter harness: a repeated run of nothing but English syntax is excused, and one content word more is reported',
+    run() {
+      // Latent rather than live, which is the reason it gets a test rather than
+      // a wait: none of the real prose fixtures in this file trips it, and the
+      // first letter that reaches for "in order to" in two sentences of one
+      // paragraph pays a manual handoff round for restating nothing, reading a
+      // message that says it made the same statement twice.
+      const passing = checkRepeatedPhrase(ORDINARY_SYNTAX_REPEATED_PROSE);
+      assert(passing.passed,
+        `prose whose only repeats are syntax says each thing once (detail=${passing.detail})`);
+
+      // A negative control proves nothing unless the check had to reach the
+      // exclusion to stay silent, so each run is measured where it sits rather
+      // than assumed to be there: at or past the floor its own distance uses,
+      // and repeated at that distance in two different sentences.
+      const runSites = run => {
+        const found = [];
+        ORDINARY_SYNTAX_REPEATED_PROSE.forEach((paragraph, paragraphIndex) => {
+          sentences(paragraph).forEach((sentence, sentenceIndex) => {
+            if (sentence.toLowerCase().includes(run)) found.push({ paragraph: paragraphIndex + 1, sentence: sentenceIndex + 1 });
+          });
+        });
+        return found;
+      };
+      const unmeasured = ORDINARY_SYNTAX_REPEATED_RUNS.filter(({ run, distance }) => {
+        const inside = distance === 'inside';
+        const floor = inside ? MIN_SAME_PARAGRAPH_REPEAT_WORDS : MIN_CROSS_PARAGRAPH_REPEAT_WORDS;
+        const found = runSites(run);
+        const repeatedAtDistance = found.some(left => found.some(right => (inside
+          ? left.paragraph === right.paragraph && left.sentence !== right.sentence
+          : left.paragraph !== right.paragraph)));
+        return run.split(' ').length < floor || !repeatedAtDistance;
+      });
+      assert(!unmeasured.length,
+        `every excused run is past its own floor and repeated at its own distance: unmeasured=${JSON.stringify(unmeasured)}`);
+
+      // The boundary itself, measured rather than argued, because the cheaper
+      // rule was available and is wrong: "every word is a function word" would
+      // still report seven of the ten runs above, each of which carries exactly
+      // one content word (order, well, worked, able, time, work, things), while
+      // the real repeats in the letter of 2026-09-23 carry two and three. So the
+      // line sits at MIN_REPEAT_CONTENT_WORDS content words, and one word of the
+      // same run is the entire distance between excused and reported.
+      const twin = [...ORDINARY_SYNTAX_REPEATED_PROSE];
+      twin[0] = twin[0].replace('Then I worked on the ledger,', 'Then I worked on the scanner ledger,');
+      const twinReported = checkRepeatedPhrase(twin);
+      assert(!twinReported.passed && twinReported.detail.includes('“i worked on the scanner”'),
+        `one content word added to an excused run makes that run a repeat (detail=${twinReported.detail})`);
+
+      // And the contract prints the exclusion from the same constant, or a
+      // writer over-corrects around a rule that never reached the sentence.
+      assert(REPEATED_PHRASE_RULE.includes(`fewer than ${MIN_REPEAT_CONTENT_WORDS} content words`),
+        `the printed rule states the content-word exclusion from the check's own floor (rule=${REPEATED_PHRASE_RULE})`);
+      return { excused: ORDINARY_SYNTAX_REPEATED_RUNS.length, twinRun: 'i worked on the scanner' };
+    },
+  },
+  {
+    name: 'cover letter harness: the syntax exclusion leaves every defect measured on the letter of 2026-09-23 reported',
+    run() {
+      // What the exclusion cost, paid on the letter that produced both checks.
+      // Four defects were real in it, three runs and one shape, and an exclusion
+      // that reached any of them would have bought its silence with the
+      // rejection the user asked for in the first place.
+      const repeats = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF);
+      const shape = checkRepeatedSentenceShape(LETTER_THAT_RESTATES_ITSELF);
+      const unreported = [
+        ['the six-word run stated twice inside paragraph 1', repeats,
+          'paragraph 1 sentence 2 and paragraph 1 sentence 3 repeat one run of 6 words, “scalability across the ui and backend”'],
+        ['the three-word run stated twice inside paragraph 2', repeats,
+          'paragraph 2 sentence 1 and paragraph 2 sentence 2 repeat one run of 3 words, “device management platforms”'],
+        ['the four-word run carried from paragraph 1 into paragraph 2', repeats,
+          'paragraph 1 sentence 4 and paragraph 2 sentence 3 repeat one run of 4 words, “the engineering challenge was”'],
+        ['the frame paragraphs 2 and 3 enter their evidence on', shape,
+          'paragraph 2 sentence 1 and paragraph 3 sentence 2 carry the same sentence shape “in that * my *” in back-to-back paragraphs'],
+      ].filter(([, check, printed]) => check.passed || !check.detail.includes(printed));
+      assert(!unreported.length,
+        `every real defect in that letter is still named: unreported=${JSON.stringify(unreported.map(([label]) => label))}`
+        + ` (repeats=${repeats.detail}; shape=${shape.detail})`);
+      // Each of the three runs carries at least the content the exclusion asks
+      // for, which is why they survive it, and the shortest of them is the
+      // measurement that put MIN_REPEAT_CONTENT_WORDS where it is: "the
+      // engineering challenge was" is four words carrying exactly two.
+      const shortest = 'the engineering challenge was'.split(' ')
+        .filter(word => !['the', 'was'].includes(word)).length;
+      assert(shortest === MIN_REPEAT_CONTENT_WORDS,
+        `the thinnest real repeat sits exactly on the content floor (content=${shortest}, floor=${MIN_REPEAT_CONTENT_WORDS})`);
+      return { runs: (repeats.detail.match(/repeat one run of/gu) || []).length, shortest };
+    },
+  },
+  {
+    name: 'cover letter harness: the mandated transfer carrier is excused by its words and charged by its shape, and the rule that mandates it offers the repair',
+    run() {
+      // Read as one rule these two look like a contradiction, and the next
+      // reader is the one likely to "fix" it: checkRepeatedPhrase blanks the
+      // mandated carrier out of its comparison while the adjacency branch of
+      // checkRepeatedSentenceShape reports two consecutive paragraphs for
+      // carrying that carrier's shape, both on the same two sentences of the
+      // same letter. This pins the asymmetry as deliberate.
+      const repeats = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF);
+      const shape = checkRepeatedSentenceShape(LETTER_THAT_RESTATES_ITSELF);
+      assert(!repeats.passed && !repeats.detail.includes('i would apply that'),
+        `the carrier's words are never charged to the writer (detail=${repeats.detail})`);
+      assert(!shape.passed
+        && shape.detail.includes('paragraph 1 sentence 5 and paragraph 2 sentence 4 carry the same sentence shape “i would * that *” in back-to-back paragraphs'),
+      `that same carrier's shape in back-to-back paragraphs is charged (detail=${shape.detail})`);
+
+      // Why the two answers differ: they read different levels, and what the
+      // rule left to the writer differs at each. ARGUMENT_RELEVANCE_SPAN_RULE
+      // mandates a transfer carrier and offers a CHOICE of shapes to carry it
+      // in, so the words of the chosen one are compliance while the choice of
+      // shape is the writer's. Measured on the letter's own paragraphs: 2 and 3
+      // transferred on two different offered shapes and the span gate accepts
+      // both, and strip the carrier out of 3 and that gate reports the paragraph
+      // has no relevance span at all, which is what makes the carrier mandated
+      // rather than merely usual.
+      const [, withWould, withCan] = LETTER_THAT_RESTATES_ITSELF;
+      const carrierless = withCan.replace(
+        ' I can apply that operational transition approach to implementation, deployment, and ongoing operational health.', '');
+      const gapFields = paragraph => paragraphArgumentSpanGaps(paragraph).map(gap => gap.field);
+      assert(!gapFields(withWould).includes('relevance') && !gapFields(withCan).includes('relevance')
+        && gapFields(carrierless).includes('relevance'),
+      'the span gate mandates a carrier and takes either shape of it'
+        + ` (would=${JSON.stringify(gapFields(withWould))}, can=${JSON.stringify(gapFields(withCan))},`
+        + ` stripped=${JSON.stringify(gapFields(carrierless))})`);
+      assert(ARGUMENT_RELEVANCE_SPAN_RULE.includes('I would apply') && ARGUMENT_RELEVANCE_SPAN_RULE.includes('I can apply'),
+        `the rule the letter obeys enumerates both shapes (rule=${ARGUMENT_RELEVANCE_SPAN_RULE})`);
+
+      // So the repair the shape report asks for lies inside the rule the carrier
+      // obeys: rotate one of the two paragraphs onto another shape the same rule
+      // offers, and the carrier report is gone with the paragraph's relevance
+      // span intact and its new carrier still uncharged as words. The other
+      // frame those paragraphs share is a different defect and stays reported,
+      // so this measures the one report rather than the check's verdict.
+      const rotated = [...LETTER_THAT_RESTATES_ITSELF];
+      rotated[0] = rotated[0].replace('I would apply that scalability approach', 'I can bring that scalability approach');
+      const afterRotation = checkRepeatedSentenceShape(rotated);
+      assert(!afterRotation.detail.includes('i would * that *')
+        && !gapFields(rotated[0]).includes('relevance')
+        && !checkRepeatedPhrase(rotated).detail.includes('i can bring that'),
+      'rotating onto another offered shape clears the carrier report and stays compliant'
+        + ` (shape=${afterRotation.detail}; gaps=${JSON.stringify(gapFields(rotated[0]))})`);
+      return { chargedShape: 'i would * that *', rotatedTo: 'i can bring that' };
+    },
+  },
+  {
+    name: 'cover letter harness: inside its own paragraph a transfer sentence is compared with only its mandated words blanked',
+    run() {
+      // The first build of this exclusion took the WHOLE transfer sentence out
+      // of the comparison against its own paragraph, and the letter of
+      // 2026-09-23 is what that cost. The user counted three occurrences of one
+      // phrase in paragraph 1; the check reported two, because the third sat in
+      // the sentence the exemption blanked entirely.
+      const repeats = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF);
+      assert(!repeats.passed
+        && repeats.detail.includes('paragraph 1 sentence 2, paragraph 1 sentence 3 and paragraph 1 sentence 5 repeat one run of 3 words, “ui and backend”'),
+      `the transfer sentence's own echo of its paragraph is reported (detail=${repeats.detail})`);
+      // Both runs are named, because the two repairs differ: sentence 5 drops
+      // three words it hung off a mandated phrase, sentences 2 and 3 share six.
+      // A filter that dropped the shorter run for sitting inside the longer one
+      // is what hid sentence 5 even once it was compared.
+      assert(repeats.detail.includes('paragraph 1 sentence 2 and paragraph 1 sentence 3 repeat one run of 6 words, “scalability across the ui and backend”'),
+        `the longer run the echo sits inside keeps its own two sentences (detail=${repeats.detail})`);
+      // Nothing the rules dictate is charged: not the carrier, and not the
+      // capability phrase the carrier hands over.
+      for (const mandated of ['i would apply that', 'that scalability approach']) {
+        assert(!repeats.detail.includes(mandated),
+          `the mandated “${mandated}” is not charged to the writer (detail=${repeats.detail})`);
+      }
+
+      // The exclusion is measured from both sides, because one that never fires
+      // and one that fires on everything both look like a passing test from one
+      // side only. A paragraph carrying nothing but its mandated re-namings is
+      // silent; the same paragraph with one clause copied out of its proof
+      // sentence and hung off the same mandated phrase is reported.
+      const mandatedOnly = checkRepeatedPhrase([LETTER_WITH_MANDATED_RE_NAMINGS]);
+      assert(mandatedOnly.passed,
+        `a transfer sentence carrying only its mandated re-namings is silent (detail=${mandatedOnly.detail})`);
+      const elaborated = checkRepeatedPhrase([LETTER_WITH_MANDATED_RE_NAMINGS.replace(
+        'I would apply my experience delivering supported systems to reliable system delivery',
+        'I would apply my experience delivering supported systems for internal users to reliable system delivery')]);
+      assert(!elaborated.passed && elaborated.detail.includes('“for internal users”'),
+        `one clause carried out of the proof sentence on top of those re-namings is reported (detail=${elaborated.detail})`);
+
+      // The six phrases ARGUMENT_RELEVANCE_ANAPHORA_RULE permits in place of the
+      // re-naming are excused too, read off the same regexes the rule is printed
+      // from rather than a second list.
+      //
+      // The back-reference is placed where NO other exclusion reaches it —
+      // between the capability phrase the carrier hands over and the “to” that
+      // introduces the responsibility — because a phrase sitting in either of
+      // those slots is already blanked by position, and a case that put it there
+      // stayed silent with the anaphora exclusion switched off entirely. Both
+      // controls flip one thing each: drop the carrier and the same words are
+      // reported, and swap “the system” for a back-reference the rule does NOT
+      // permit and they are reported too.
+      const anaphoraSentences = 'Release safety is what the posting is written around.'
+        + ' I rebuilt the system in Django so a failed deploy rolled itself back.'
+        + ' I would apply that rollback practice across the system in Django to the deploy safety this role needs.';
+      const anaphora = checkRepeatedPhrase([anaphoraSentences]);
+      assert(anaphora.passed,
+        `a permitted anaphoric back-reference is not a repeat of its own antecedent (detail=${anaphora.detail})`);
+      const withoutCarrier = checkRepeatedPhrase([anaphoraSentences.replace('I would apply that rollback practice across', 'The rollback practice reached across')]);
+      const unpermitted = checkRepeatedPhrase([anaphoraSentences.replaceAll('the system in Django', 'the platform in Django')]);
+      assert(!withoutCarrier.passed && withoutCarrier.detail.includes('“the system in django”')
+        && !unpermitted.passed && unpermitted.detail.includes('“the platform in django”'),
+      'the same words are reported in a sentence carrying no transfer carrier, and a back-reference the rule does not permit is reported inside one'
+        + ` (noCarrier=${withoutCarrier.detail}; unpermitted=${unpermitted.detail})`);
+
+      // The need's own wording, where a caller holds the quote the paragraph
+      // answers. Both halves are measured: the same letter is reported with no
+      // quote supplied and silent with it, so the parameter is doing the work
+      // rather than sitting unread.
+      const needEcho = ['The listing states reliable system delivery as the first responsibility.'
+        + ' At Acme I rebuilt the release path so a failed deploy rolled itself back.'
+        + ' I would apply that release practice across reliable system delivery and the on-call rotation this team keeps.'];
+      const withoutQuote = checkRepeatedPhrase(needEcho);
+      const withQuote = checkRepeatedPhrase(needEcho, { jobNeedQuotes: ['reliable system delivery'] });
+      assert(!withoutQuote.passed && withoutQuote.detail.includes('“reliable system delivery”') && withQuote.passed,
+        'the wording a paragraph\'s job-need quote mandates is excused where the caller holds that quote'
+        + ` (without=${withoutQuote.detail}; with=${withQuote.detail})`);
+      // And the battery reads that quote off the plan it is handed rather than
+      // leaving the caller to pass it separately, measured through the helper the
+      // paste validator calls: the audit's coverLetterPlan is the one record in
+      // this pipeline that holds a jobNeedQuote, a plan built from a
+      // coverLetterArgument alone holds none, and a quote naming some other
+      // responsibility excuses nothing.
+      const throughBattery = plan => evaluateCoverLetterChecks({
+        plan, paragraphs: needEcho, evidence, researchText: '',
+      }).find(check => check.id === 'repeated-phrase');
+      const argumentOnlyPlan = { mappings: [{}], companyHook: { detail: '' } };
+      assert(!throughBattery(argumentOnlyPlan).passed
+        && throughBattery({ ...argumentOnlyPlan, paragraphs: [{ argumentMapping: { jobNeedQuote: 'reliable system delivery' } }] }).passed
+        && !throughBattery({ ...argumentOnlyPlan, paragraphs: [{ argumentMapping: { jobNeedQuote: 'incident response rotas' } }] }).passed,
+      'the battery reads each paragraph\'s own job-need quote off the plan it is given'
+        + ` (argument-only=${throughBattery(argumentOnlyPlan).detail})`);
+
+      // Across paragraphs the carrier is still the only thing blanked, which is
+      // what round 2 measured and this round leaves alone: two transfer
+      // sentences in two paragraphs are compared in full past their carriers.
+      const acrossParagraphs = checkRepeatedPhrase([
+        'Release safety is what this role is written around.',
+        'At Acme the deploy path had no rollback. I rebuilt it so a failed deploy rolled itself back.'
+        + ' I would apply that rollback practice to the release safety this team needs.',
+        'Reporting was the other half. I moved the aggregation into a nightly job.'
+        + ' I would apply that rollback practice to the weekly figures your operations team publishes.',
+        'I welcome a conversation about either.',
+      ]);
+      assert(!acrossParagraphs.passed
+        && acrossParagraphs.detail.includes('paragraph 2 sentence 3 and paragraph 3 sentence 3 repeat one run of 5 words, “that rollback practice to the”'),
+      `two paragraphs transferring in the same words past the carrier are still reported (detail=${acrossParagraphs.detail})`);
+      return {
+        thirdOccurrence: 'ui and backend',
+        elaboration: 'for internal users',
+        crossParagraph: 'that rollback practice to the',
+      };
+    },
+  },
+  {
+    name: 'cover letter harness: a repeated run is reported as the measurement it is rather than as a statement made twice',
+    run() {
+      // The old message ended "is the same statement made twice". That asserts a
+      // cause, and the cause is untrue wherever the run is a lowercase compound
+      // artifact name: the design system's own fixture letter names one artifact
+      // twice in one paragraph and says something different about it each time.
+      // The run stays reported — it is indistinguishable in structure from the
+      // "device management platforms" repeat this check exists for, and the
+      // letter contract already asks for the shortest unambiguous reference
+      // after a first mention — so the wording is what changes, not the gate.
+      const named = checkRepeatedPhrase([DESIGN_SYSTEM_ARTIFACT_PARAGRAPH]);
+      assert(!named.passed && named.detail.includes('repeat one run of 4 words, “device check-in and check-out”'),
+        `a compound artifact name repeated in full inside one paragraph is still reported (detail=${named.detail})`);
+      assert(named.detail.includes(`the floor inside one paragraph is ${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words`)
+        && named.detail.includes('satisfies the rule while it stands at one position only'),
+      `the observation states the floor it measured against and what would satisfy it (detail=${named.detail})`);
+
+      // Neither branch asserts a cause, and the cross-paragraph branch keeps the
+      // structure of the same-paragraph one, measured on the letter that carries
+      // both distances at once.
+      const both = checkRepeatedPhrase(LETTER_THAT_RESTATES_ITSELF).detail;
+      assert(both.includes(`the floor from one paragraph into another is ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words`)
+        && both.includes('satisfies the rule while it stands at one position only'),
+      `the cross-paragraph branch states its own floor in the same shape (detail=${both})`);
+      for (const claim of ['the same statement made twice', 'is a restatement', 'restating itself']) {
+        for (const [label, detail] of [['the named-artifact run', named.detail], ['the measured letter', both]]) {
+          assert(!detail.includes(claim), `${label} asserts no cause (“${claim}” in detail=${detail})`);
+        }
+      }
+
+      // The rule the letter contract prints carries the same change, or the
+      // responder is told the thing the report stopped saying.
+      for (const claim of ['the same statement made twice', 'a statement made twice', 'is the letter restating itself']) {
+        assert(!REPEATED_PHRASE_RULE.includes(claim),
+          `the printed rule asserts no cause either (“${claim}” in rule=${REPEATED_PHRASE_RULE})`);
+      }
+      assert(REPEATED_PHRASE_RULE.includes(`${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words or more repeated inside one paragraph`)
+        && REPEATED_PHRASE_RULE.includes(`${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words or more carried from one paragraph into another`)
+        && REPEATED_PHRASE_RULE.includes('is reported at every position it stands in past the first'),
+      `the rule states both floors and what is reported (rule=${REPEATED_PHRASE_RULE})`);
+      // And it discloses the exclusions a transfer sentence relies on, so a
+      // writer does not rewrite the words another rule demanded.
+      for (const disclosed of ['capability phrase that carrier hands over', 'responsibility phrase it reaches',
+        'job-need quote puts there', 'is counted like any other wording']) {
+        assert(REPEATED_PHRASE_RULE.includes(disclosed),
+          `the rule discloses “${disclosed}” (rule=${REPEATED_PHRASE_RULE})`);
+      }
+      return { namedRun: 'device check-in and check-out' };
     },
   },
 ];

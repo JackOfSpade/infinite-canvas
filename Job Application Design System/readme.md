@@ -153,6 +153,27 @@ same document-wide copy edit to compounds such as "in-house." Data-flow copy
 names its actors instead of using "their APIs" or "data they returned," and
 temporal modifiers such as "after testing" sit beside the action they modify.
 
+Standing alone is not the same as standing apart. A bullet can pass
+every check above — name its system, carry its own subject, wrap under
+three lines — and still be half of something else: a shipped résumé
+once reported one accomplishment, a full-stack internal-tools hub, as
+three separate bullets — one that built it, one that containerized it
+for deployment, one that added a feature to it. Each read fine alone;
+together they were one accomplishment wearing three `<li>`s, and the
+role carried 9 bullets for 4 real ones. **One accomplishment gets one
+bullet**, its trailing clause carrying whatever supporting mechanism,
+constraint, or result the split-off bullets were protecting — the same
+"does this entry carry something nothing else already carries" test
+`SKILL.md`'s "Do not let a project section restate the bullets"
+applies to a project against the bullet corpus, here applied one
+bullet against its neighbors. The tell is almost always visible in the
+sentence itself: a bullet whose subject is the previous bullet's
+object — "Containerized *the internal-tools hub*…" right after the
+bullet that built it — is reporting the second half of one
+accomplishment, not a second one. And it is never the fix for a short
+page: a role that runs short needs an accomplishment the résumé hasn't
+used yet, not a used one cut into more bullets to fill the line.
+
 The same role's bullets get **re-sequenced for every application.**
 Within a role, the first bullet is the one whose evidence most
 directly answers *this* job description — its responsibilities,

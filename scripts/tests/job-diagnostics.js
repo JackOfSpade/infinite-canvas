@@ -30,7 +30,7 @@ import { sanitizeLastRunReceipt } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
-import { fixedPageTypeAreaHeight, formatUnderfilledTypeAreaUtilization, pageTextMeasurementExpression, resumeIsMateriallyUnderfilled, resumeTypeAreaUtilization } from '../test-dependencies.js';
+import { fixedPageTypeAreaHeight, formatTypeAreaUtilization, pageTextMeasurementExpression, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
@@ -115,6 +115,70 @@ export default [
           && !unrelated.includes('## Local Application Paste Handoff Lifecycle'),
         'FULL and APPLICATION expose a compact rejection receipt while unrelated report scopes omit it');
         return { full: true, application: true };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
+  {
+    name: 'Local Application paste receipts name the failed check ids behind a SCHEMA_INVALID streak',
+    run: () => {
+      _resetPasteHandoffDiagnostics();
+      try {
+        // The shape this section could not explain on 2026-09-23: six
+        // cover-letter rounds rejected at one revision, every one of them
+        // SCHEMA_INVALID, with nothing to say which rule kept failing.
+        for (let round = 0; round < 3; round += 1) {
+          recordPasteHandoffDiagnostic({
+            stage: 'cover-letter', outcome: 'rejected', reason: 'SCHEMA_INVALID',
+            responseChars: 3700 + round, revision: 2, logCount: 2,
+            errorCount: 5, checkIds: ['redundancy', 'anchor-relevance', 'redundancy'], uncodedErrors: 2,
+          });
+        }
+        recordPasteHandoffDiagnostic({
+          stage: 'cover-letter', outcome: 'accepted', responseChars: 3712, revision: 2, logCount: 2,
+          errorCount: 3, checkIds: ['redundancy'],
+        });
+        const markdown = buildPasteHandoffDiagnosticsMarkdown();
+        assert((markdown.match(/failed checks anchor-relevance, redundancy/g) || []).length === 3,
+          `each rejected round must name its failed checks, deduped and sorted, got ${markdown}`);
+        assert(markdown.includes('5 validation item(s)') && markdown.includes('2 item(s) named no rule'),
+          'the counts separate one broken rule from several, and named rules from structural items');
+        const acceptedLine = markdown.split('\n').find(line => line.includes('· accepted'));
+        assert(acceptedLine && !acceptedLine.includes('failed checks') && !acceptedLine.includes('validation item')
+          && !acceptedLine.includes('named no rule'),
+          `an accepted round carries no rejection metadata, got ${acceptedLine}`);
+        return { rejectedRoundsNamed: 3 };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
+  {
+    name: 'Local Application paste receipts reject anything but a bare check id',
+    run: () => {
+      _resetPasteHandoffDiagnostics();
+      try {
+        recordPasteHandoffDiagnostic({
+          stage: 'cover-letter', outcome: 'rejected', reason: 'SCHEMA_INVALID', errorCount: 2,
+          checkIds: [
+            'redundancy',
+            'redundancy: Cover-letter paragraph "p2" repeats PRIVATE_QUOTE.',
+            'Cover-letter paragraph 2',
+            'PRIVATE_CONTACT@example.com',
+            42,
+            null,
+          ],
+        });
+        const markdown = buildPasteHandoffDiagnosticsMarkdown();
+        const listed = /· failed checks ([^·\n]*)/.exec(markdown)?.[1]?.trim();
+        assert(listed === 'redundancy',
+          `a receipt takes bare rule names only, never detail text or non-strings, got ${JSON.stringify(listed)}`);
+        for (const leak of ['PRIVATE_QUOTE', 'PRIVATE_CONTACT@example.com', 'Cover-letter paragraph', '"p2"']) {
+          assert(!markdown.includes(leak),
+            `a rejected detail string must not reach the report; ${leak} leaked into ${markdown}`);
+        }
+        return { shapeBackstop: true };
       } finally {
         _resetPasteHandoffDiagnostics();
       }
@@ -3420,7 +3484,7 @@ export default [
       });
       assert(reconnected.includes('HTTP status: `auto-detected`'),
         'the current positive trace still renders alongside the preserved negative');
-      assert(reconnected.includes('ℹ️ historical NOT-CONNECTED verdict; current cached status is connected')
+      assert(reconnected.includes('ℹ️ historical NOT-CONNECTED verdict (')
         && !reconnected.includes('⚠️ preserved prior NOT-CONNECTED verdict'),
       'a prior negative is retained as historical evidence without presenting it as a conflicting current warning');
       assert(reconnected.includes('without auth redirect or sign-in body')
@@ -3431,6 +3495,11 @@ export default [
       'the preserved negative carries its own nested trace evidence (status/bodyHead), not just the bare reason string');
       assert(reconnected.includes(new Date(clobberedTs).toISOString()),
         'the preserved negative is dated with the same absolute/relative style the surrounding session rows use, so a stale verdict cannot read as this-session');
+      // The age belongs to the HISTORICAL verdict. Trailing the current-status
+      // clause instead, it read as the age of the CURRENT status and dated a
+      // freshly verified row three weeks back.
+      assert(new RegExp(`historical NOT-CONNECTED verdict \\(${new Date(clobberedTs).toISOString()} \\(\\d+s ago\\)\\); current cached status is connected:`).test(reconnected),
+        'the preserved negative age attaches to the historical clause, never to the current cached status');
 
       // Currently NOT connected: the platform's own reason/trace already say
       // why, so repeating lastNegative here would just restate the same fact.
@@ -3455,7 +3524,7 @@ export default [
           lastNegative: { reason: 'restored: prior session read not-connected', ts: clobberedTs },
         },
       });
-      assert(restored.includes('ℹ️ historical NOT-CONNECTED verdict; current cached status is connected')
+      assert(restored.includes('ℹ️ historical NOT-CONNECTED verdict (')
         && restored.includes('restored: prior session read not-connected'),
       'a disk-restored entry with no lastTrace at all still surfaces its preserved negative verdict');
       assert(!restored.includes('target:') && !restored.includes('HTTP status:'),
@@ -4149,7 +4218,7 @@ export default [
               at: '2026-08-18T05:17:00.000Z', type: 'fit-revision-requested', resultSha256: 'fedcba9876543210', revisionRound: 3,
               resume: { pageCount: 1, targetPageCount: 1, layout: { utilization: 0.895641 }, attempts: [{ attempt: 1, density: 'default', pageCount: 1 }] },
               coverLetter: { pageCount: 1, targetPageCount: 1 },
-              detail: 'résumé content spans 89.56% of the measured type area, below the 90% minimum.',
+              detail: 'résumé content spans 89.56% of the measured type area.',
             }],
           },
         });
@@ -4162,7 +4231,7 @@ export default [
           && report.includes('fit-revision-requested · revision 2 · result 0123456789abcdef')
           && report.includes('résumé type area 86%')
           && report.includes('résumé attempts #1=2p, #2[compact]=2p')
-          && report.includes('résumé type area 89.56% (below 90% minimum)')
+          && report.includes('résumé type area 89.56%')
           && report.includes('AI-authored quality review: résumé changed_materially')
           && report.includes('cover letter kept_diminishing_returns'),
       'FULL reports retain the exact app-measured Local AI result/version/page sequence and AI-authored quality disposition needed to audit a claimed revision loop');
@@ -4170,6 +4239,115 @@ export default [
         recordApplicationTelemetry(prior);
       }
       return { handoffTrace: true };
+    },
+  },
+{
+    // 2026-09-23 bug report: a job's manifest.json held FIVE handoff events but
+    // the report rendered only four, ending on a `result-imported` success —
+    // one event short of what actually happened, because the render bound had
+    // no way to say it was even applying. This pins the render bound itself:
+    // given more events than the bound, the newest ones must survive (never
+    // the oldest) and the omission must be stated in plain language, the same
+    // convention the clipboard cap uses everywhere else in this file.
+    name: 'Local AI handoff trace bounds a long history and states the omission, keeping the newest event',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        const handoffHistory = Array.from({ length: 14 }, (_, i) => ({
+          at: `2026-08-18T05:${String(i).padStart(2, '0')}:00.000Z`,
+          type: i === 13 ? 'bundle-save-retry-required' : 'result-imported',
+          resultSha256: `sha${i}`.padEnd(16, '0'),
+          // Zero-padded and dashed so no elided index's marker is a substring
+          // of a kept one (plain "event 1" would also match "event 10"-"13").
+          detail: `synthetic-event-${String(i).padStart(2, '0')}`,
+        }));
+        recordApplicationTelemetry({
+          attemptId: 'local-ai-handoff-bound-test', nodeId: 'local-ai-handoff-bound-card', windowId: 901,
+          source: 'local-ai', jobTitle: 'Backend Engineer', company: 'Acme', status: 'completed',
+          localAi: { jobId: 'bound-test-job', handoffHistory },
+        });
+        const report = generateMarkdown({
+          description: 'Check a long Local AI handoff trace.',
+          nodes: [{ id: 'local-ai-handoff-bound-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }, 901).markdown;
+        assert(report.includes('Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review) — showing the newest 12 of 14; 2 earlier event(s) omitted:'),
+          'a handoff trace longer than the render bound must say plainly how many earlier events were left out');
+        assert(report.includes('synthetic-event-13') && report.includes('bundle-save-retry-required'),
+          'the bound must keep the NEWEST event, not drop it — the exact failure this report exists to catch');
+        assert(!report.includes('synthetic-event-00') && !report.includes('synthetic-event-01'),
+          'events elided by the bound must not also appear verbatim elsewhere in the trace');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { bounded: true };
+    },
+  },
+{
+    // Every Local AI telemetry record leaves `achievements` unset (the paste
+    // protocol reports no ledger reuse/mine decision back to the app), so
+    // `ach.source` always falls to 'unknown' and `ach.kept` is always
+    // undefined for that route. `ach.kept ?? 0` used to print an asserted
+    // zero in the same line that admitted the ledger state was unknown.
+    name: 'Achievement ledger never asserts a count when the ledger source is unrecorded',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-ledger-unknown-test', nodeId: 'application-ledger-unknown-card',
+          jobTitle: 'Platform Engineer', company: 'Example Co', status: 'completed',
+        });
+        const report = generateMarkdown({
+          description: 'Check the achievement ledger line when unrecorded.',
+          nodes: [{ id: 'application-ledger-unknown-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(report.includes('Achievement ledger: unknown · kept count unavailable'),
+          'a ledger state the app never recorded must not also assert an exact item count');
+        assert(!report.includes('kept 0 item(s)'),
+          'an unmeasured achievement count must never render as an asserted zero');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { ledgerUnknown: true };
+    },
+  },
+{
+    // 2026-09-23 bug report: "Application Generation … Outcome: completed"
+    // sat three lines above "Application Export … Outcome: ⚠️ failed" for the
+    // SAME generation, reading as a direct contradiction. `status` is in fact
+    // set once at import time, before any save attempt — a distinct, earlier
+    // phase that genuinely did complete. The fix names that phase instead of
+    // inventing or revising a status the app never recorded.
+    name: 'Application Generation Outcome names its phase so it cannot read as contradicting a later Application Export failure',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-outcome-phase-test', nodeId: 'application-outcome-phase-card',
+          source: 'local-ai', jobTitle: 'Platform Engineer', company: 'Example Co',
+          status: 'completed', phase: 'imported',
+          applicationExport: {
+            status: 'failed', destination: '/tmp/Applied Jobs/Example Co/Remote/Platform Engineer',
+            failedAt: Date.now(), phase: 'reading generated artifacts',
+            error: 'Could not produce a resume PDF consistent with Application.html.',
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Check the Outcome phase label.',
+          nodes: [{ id: 'application-outcome-phase-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(report.includes('### Application Generation (last)')
+          && report.includes('Outcome (phase: imported): **completed**'),
+          'the generation Outcome must name the recorded phase it describes');
+        assert(report.includes('### Application Export (last)')
+          && report.includes('Outcome: **⚠️ failed**'),
+          'the export Outcome must remain a separate, later phase reported at its own heading');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { phaseLabeled: true };
     },
   },
 {
@@ -10930,37 +11108,31 @@ export default [
     },
   },
 {
-    name: 'Application: résumé fit measurement — underfill/overflow utilities behind the (now Local-AI-owned) fit loop',
+    name: 'Application: résumé fit measurement — type-area utilization is a pure, unclamped, unfloored ratio; the shared convergence tracker',
     run: () => {
       // decideFitStep (the old pure render → page-count → fit decision function)
       // and its buildResumeUnderfillRevisionPrompt/buildResumeLengthRevisionPrompt/
       // buildResumeRoleEvidenceRevisionPrompt companions were removed as dead code
-      // — the fit loop now lives entirely in the Local AI handoff routine. The
-      // underfill/overflow MEASUREMENT utilities those functions consumed are
-      // still live and still worth a direct unit test.
+      // — the fit loop now lives entirely in the Local AI handoff routine. There
+      // is no minimum utilization for either document: resumeTypeAreaUtilization
+      // is a pure, reported measurement that gates nothing, and is still worth a
+      // direct unit test across its whole range.
       const underfilledLayout = { contentHeightPx: 620, typeAreaHeightPx: 720 };
-      assert(resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: underfilledLayout })
-        && Math.round(resumeTypeAreaUtilization(underfilledLayout) * 100) === 86,
-      'a materially underfilled one-page résumé is detected below the utilization minimum');
-      const justUnderfilledLayout = { contentHeightPx: 895.641, typeAreaHeightPx: 1000 };
-      assert(resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: justUnderfilledLayout })
-        && formatUnderfilledTypeAreaUtilization(0.57) === '57%'
-        && formatUnderfilledTypeAreaUtilization(resumeTypeAreaUtilization(justUnderfilledLayout)) === '89.56%'
-        && formatUnderfilledTypeAreaUtilization(0.899999) === '89.99%',
-      'a raw utilization below the 90% minimum is displayed below that threshold rather than rounded up to equality');
-      assert(!resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 2, layout: underfilledLayout }),
-        'the utilization check never flags a multi-page target as underfilled');
+      assert(Math.round(resumeTypeAreaUtilization(underfilledLayout) * 100) === 86,
+      'a short one-page résumé still reports its measured ratio (no floor to fail)');
+      const justUnderLayout = { contentHeightPx: 895.641, typeAreaHeightPx: 1000 };
+      assert(formatTypeAreaUtilization(0.57) === '57%'
+        && formatTypeAreaUtilization(resumeTypeAreaUtilization(justUnderLayout)) === '89.56%',
+      'the plain percentage formatter rounds for display and applies no floor');
 
       // Overflow magnitude must survive measurement. A clamp at 1 made every
       // overflowing résumé report exactly 100%, erasing the only size signal
-      // the fit feedback and handoff trace carry. The underfill verdict is
-      // defined strictly below 0.90, so an unbounded ratio cannot move it.
+      // the fit feedback and handoff trace carry.
       const overflowingLayout = { contentHeightPx: 1240, typeAreaHeightPx: 917.76 };
       assert(resumeTypeAreaUtilization(overflowingLayout) > 1
         && Math.round(resumeTypeAreaUtilization(overflowingLayout) * 100) === 135
-        && !resumeIsMateriallyUnderfilled({ pageCount: 2, targetPageCount: 1, layout: overflowingLayout })
-        && !resumeIsMateriallyUnderfilled({ pageCount: 1, targetPageCount: 1, layout: overflowingLayout }),
-      'type-area utilization reports overflow magnitude unclamped, and a value above 1 never reads as underfilled');
+        && formatTypeAreaUtilization(resumeTypeAreaUtilization(overflowingLayout)) === '135.11%',
+      'type-area utilization reports overflow magnitude unclamped');
 
       // A screen-preview page grows when its text overflows; the measurable
       // type area must remain the fixed minimum paper height minus padding.
@@ -10984,6 +11156,40 @@ export default [
       assert(emptyMeasurement === null
         && !pageMeasurement.includes('`'),
       'the injected page-text probe is free of the template-literal delimiter that broke layout measurement');
+
+      // The probe reports one rect per rendered line, so its median is the
+      // document's typical line at whatever density and paper it really used.
+      // The median, not the mean: the display-size name and the section
+      // headings are genuine lines but outsized ones, and a mean would let
+      // them inflate the figure the shortfall is divided by.
+      const measuredNodes = ['bullet', 'heading', 'tail'];
+      const rectsByNode = new Map([
+        ['bullet', [{ top: 100, bottom: 119.8, height: 19.8 }, { top: 119.8, bottom: 139.6, height: 19.8 }]],
+        ['heading', [{ top: 80, bottom: 108, height: 28 }]],
+        ['tail', [{ top: 150, bottom: 169.8, height: 19.8 }]],
+      ]);
+      let walked = 0;
+      const lineMeasurement = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${pageMeasurement};`)(
+        {
+          querySelector: () => ({}),
+          createTreeWalker: () => ({ nextNode: () => (walked < measuredNodes.length ? measuredNodes[walked++] : null) }),
+          createRange: () => {
+            let selected = null;
+            return {
+              selectNodeContents: (node) => { selected = node; },
+              getClientRects: () => rectsByNode.get(selected) || [],
+            };
+          },
+        },
+        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px' }),
+        { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
+      );
+      assert(Math.abs(lineMeasurement.contentHeightPx - 89.8) < 0.001
+        && Math.abs(lineMeasurement.typeAreaHeightPx - 917.76) < 0.001
+        && Math.abs(lineMeasurement.lineHeightPx - 19.8) < 0.001,
+      'the page-text probe reports a median line height alongside the measured text span');
+      assert(emptyMeasurement === null,
+        'a page with no measurable text reports no layout at all rather than a zero line height');
 
       const convergence = createApplicationConvergenceTracker('draft-a');
       assert(convergence.assess('draft-b').accept && convergence.assess('draft-c').accept,

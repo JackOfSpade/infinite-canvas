@@ -348,6 +348,15 @@
 .meta-row > :only-child {
   grid-column: 1 / -1;
 }
+/* The ROW owns its spacing, never its cells. A grid item's own margin does
+   not collapse into the grid box, so a cell that kept the base paragraph
+   margin (0 0 var(--s-4)) trapped 8pt INSIDE the row and stacked it on top of
+   whatever the row declared below itself — doubling every gap §4.1 specifies
+   for this utility. Measured on a shipped resume: 6pt + 8pt between the role
+   header and the row under it where the table says 6pt. */
+.meta-row > p {
+  margin-bottom: 0;
+}
 
 /* =========================================================
    Inline separator (·) used between sibling inline items.
@@ -387,6 +396,13 @@
 .role-header {
   break-after: avoid;
   margin-bottom: var(--s-3);
+}
+/* Whichever meta row is last before the bullets owns the role-meta -> first
+   bullet gap (§4.1, --s-4). With a lone location folded into the dates cell
+   (§5.2b) the header IS that row, and .role-meta/.role-header are the only
+   divs a role block contains. */
+.role-header:last-of-type {
+  margin-bottom: var(--s-4);
 }
 .role-meta {
   break-after: avoid;

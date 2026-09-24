@@ -4,6 +4,7 @@
  * the document structure so an untrusted paste cannot alter the design system.
  */
 import { careerDataProjectProvenanceHeadingForName, resumeProjectProvenanceFailures } from './jobApplication.js';
+import { titleCaseSkillGroupLabel } from './skillGroupLabel.js';
 
 export const STRUCTURED_RESUME_SCHEMA_VERSION = 'structured-resume.v1';
 
@@ -38,6 +39,11 @@ const MAX_CONTACT = 12;
 const MAX_ROLES = 32;
 const MAX_BULLETS_PER_ROLE = 24;
 const MAX_PROJECTS = 24;
+// Structural ceilings, not the design budget: they exist so a pathological
+// paste cannot turn one rejection into a megabyte of correction prompt. The
+// design system's own budget for this block is 8x tighter and is enforced
+// separately below (MAX_DESIGN_SKILL_*), because a résumé that cleared these
+// still rendered one row of 11 terms.
 const MAX_SKILL_GROUPS = 24;
 const MAX_SKILL_ITEMS_PER_GROUP = 48;
 // Per-field character ceilings. text()'s `max` used to be a literal at every
@@ -74,10 +80,63 @@ export const STRUCTURED_RESUME_LIMITS = Object.freeze({
 // proficiency or importance. The gate exists to block editorializing headings
 // ("Expert Technologies", "Core Strengths", "Leadership"), not to force a
 // resume's ordinary taxonomy through a vocabulary too small to name it.
+//
+// 'skills', 'technical skills' and 'technologies' were removed from this list:
+// each names the SECTION, not a kind of skill. A row labelled with one of them
+// restates the <h2>Skills</h2> printed directly above it and gives a parser no
+// category axis it did not already have, which is the whole reason the `dt`
+// labels are load-bearing (STYLE.md §5.6). 'tools' stays: it is a real domain
+// beside Languages and Frameworks. The vocabulary that remains can still
+// express a real split (languages / frameworks / infrastructure / platforms /
+// integration), which matters because career data carrying no skills section
+// of its own leaves this list as the whole vocabulary a responder may draw a
+// label from.
+//
+// SURVEY of every label the design system ships or documents as a skills-row
+// `<dt>`, because that is the set this vocabulary has to be able to express:
+//   Languages            resume.html:197, preview/component-skills.html:20,
+//                        build/multi-page-fragmentation-check.html:227,
+//                        uploads/Application.html:1536,
+//                        handoff/Application-paginated-example.html:1550,
+//                        build/fit-estimate-test.js:441
+//   Data & Storage       resume.html:200, preview/component-skills.html:22,
+//                        build/multi-page-fragmentation-check.html:229,
+//                        build/line-yield-check.html:86
+//   Infrastructure       resume.html:203, preview/component-skills.html:24,
+//                        build/multi-page-fragmentation-check.html:231
+//   Web & Data           uploads/Application.html:1539,
+//                        handoff/Application-paginated-example.html:1553
+//   Infrastructure & AI  uploads/Application.html:1542,
+//                        handoff/Application-paginated-example.html:1556
+//   AI/ML                STYLE.md:833 and SKILL.md:696-697 — the `dt`-casing rule's
+//                        own example of a label that keeps its own spelling
+// STYLE.md §5.6 (STYLE.md:826-828, 843-855) and SKILL.md's Skills-block
+// section (SKILL.md:693-701) document the first three in prose and name no
+// further domain; the last three come from the two Application fixtures, which
+// are real generated output. 'languages' and 'infrastructure' were already
+// here; 'data', 'storage', 'web', 'ai' and 'ml' are exactly what that survey
+// adds, and every one of those exemplar rows is now reachable.
+//
+// This was already the case before the section-head synonyms came out, and it
+// went from latent to acute with them: a candidate whose career data carries no
+// skills section leaves the "occurs verbatim in career data" escape hatch empty,
+// so this list IS the whole vocabulary, and a list of single nouns could not
+// name a compound domain the design system ships on its own sample page.
+// Nothing beyond the survey was added: the list is printed verbatim into the
+// résumé prompt and is what a responder picks from, so an entry the design
+// system never uses is a domain this app invented and then asked for.
+// scripts/tests/paste-application-assembly.js drives every label above through
+// the real validator, so an exemplar this vocabulary cannot express fails the
+// suite here instead of costing the user a manual correction round.
 export const NEUTRAL_SKILL_GROUP_LABELS = Object.freeze([
-  'skills', 'technical skills', 'tools', 'languages', 'programming languages', 'technologies',
+  'tools', 'languages', 'programming languages',
   'frameworks', 'libraries', 'databases', 'platforms', 'infrastructure', 'integration',
   'systems', 'methods', 'methodologies', 'practices', 'competencies', 'web development',
+  // The survey's additions. 'data' and 'storage' carry "Data & Storage" (the
+  // shipped sample's own middle row); 'web' carries "Web & Data"; 'ai' carries
+  // "Infrastructure & AI"; 'ml' carries the documented "AI/ML", which 'ai'
+  // alone leaves half-reachable.
+  'data', 'storage', 'web', 'ai', 'ml',
 ].sort());
 const NEUTRAL_SKILL_GROUPS = new Set(NEUTRAL_SKILL_GROUP_LABELS);
 // "Infrastructure & Integration" or "Tools / Platforms" joins neutral category
@@ -96,6 +155,70 @@ function isNeutralSkillGroupLabel(label) {
   const parts = String(label).toLocaleLowerCase().split(NEUTRAL_GROUP_CONNECTOR_RE).map(part => part.trim()).filter(Boolean);
   return parts.length > 0 && parts.length <= MAX_NEUTRAL_GROUP_PARTS && parts.every(part => NEUTRAL_SKILL_GROUPS.has(part));
 }
+
+// The one separator a rendered skills row is joined by. The row-length gate
+// below measures the exact string the renderer emits rather than a second
+// guess at it, so the budget can never be enforced against a row nobody sees.
+const SKILL_ITEM_SEPARATOR = ' · ';
+// The design system's own budget for this block, which the structural ceilings
+// above are 8x looser than: a résumé that cleared MAX_SKILL_GROUPS and
+// MAX_SKILL_ITEMS_PER_GROUP still rendered ONE row of 11 terms behind a
+// 120-character `dd`, and nothing in this app measured it.
+//
+// Source of truth: "Job Application Design System/build/fit-estimate-test.js"
+// lines 171-172 (`skillsRow: 64`, `skillsRows: 3`), which in turn cite
+// STYLE.md §5.6 (STYLE.md:797-807) and SKILL.md:670-674 / 755-756: "3 rows,
+// one line each, 16-20 terms" and "no skills block over 3 rows / 20 terms".
+// That file is a CommonJS build script that runs its whole suite on load and
+// exports nothing, so it cannot be imported here. The numbers are restated
+// instead, and scripts/tests/paste-application-assembly.js reads that file as
+// text and fails the moment either side drifts from the other.
+const MAX_DESIGN_SKILL_GROUPS = 3;
+const MAX_DESIGN_SKILL_ITEMS = 20;
+const MAX_DESIGN_SKILL_ROW_CHARS = 64;
+// A block big enough to split must be split. The shipped 3-row sample carries
+// 16 terms across 3 rows (5/5/6), so six items is one full row's worth past a
+// single row: enough vocabulary to name a second domain, and past the point
+// where one `dt` can honestly cover everything under it. Below that a single
+// group is still a real answer, so the gate stands down.
+const MIN_SPLIT_SKILL_ITEMS = 6;
+const MIN_SPLIT_SKILL_GROUPS = 2;
+export const STRUCTURED_RESUME_SKILLS_BUDGET = Object.freeze({
+  groups: MAX_DESIGN_SKILL_GROUPS,
+  items: MAX_DESIGN_SKILL_ITEMS,
+  rowChars: MAX_DESIGN_SKILL_ROW_CHARS,
+  splitAtItems: MIN_SPLIT_SKILL_ITEMS,
+  splitIntoGroups: MIN_SPLIT_SKILL_GROUPS,
+});
+// The résumé prompt states this budget and the gates read the same constants,
+// so the shape a responder is told to write can never drift from the shape it
+// is graded by. The rendered row is described by the separator the renderer
+// actually joins with, because that is what the character count is measured
+// on. The separator prints with its own spaces: a responder counting the row
+// without them undercounts by two characters per gap and is rejected for a row
+// it had measured as fitting.
+export const SKILLS_BLOCK_BUDGET_RULE = `at most ${MAX_DESIGN_SKILL_GROUPS} groups and ${MAX_DESIGN_SKILL_ITEMS} items across the whole block; each group renders as one row of its items joined by "${SKILL_ITEM_SEPARATOR}", separator spaces included, and that row is at most ${MAX_DESIGN_SKILL_ROW_CHARS} characters; and a block carrying ${MIN_SPLIT_SKILL_ITEMS} items or more is sorted into at least ${MIN_SPLIT_SKILL_GROUPS} groups, because one row carrying everything restates the section head instead of sorting anything`;
+// STYLE.md §5.6 and SKILL.md:676-688 already say this block holds only nouns a
+// recruiter can filter on and never concepts, and prose is all that rule ever
+// was: the shipped defect rendered "connectors", "prompt harnessing" and
+// "model delegation" beside React and Django. A named product, language,
+// platform or acronym shows its name in its own spelling. React, Typescript,
+// Next.js, Django, Nginx, Gunicorn, Docker Compose, MCP, gRPC and iOS all
+// carry an uppercase letter or a digit; a lowercase common noun or a concept
+// phrase carries neither, which makes the distinction decidable here.
+//
+// The one real cost: an all-lowercase product name (npm, ffmpeg) is rejected
+// with them. That class is commodity tooling, which SKILL.md:687 already bans
+// from this block, so nothing the design system wanted kept is refused here.
+const FILTERABLE_SKILL_ITEM_RE = /[\p{Lu}\p{Lt}\p{N}]/u;
+export const SKILL_ITEM_FILTERABLE_RULE = 'each item is a named product, language, platform or acronym a recruiter can filter on, and a name shows in its spelling: every item carries at least one uppercase letter or digit. A lowercase common noun, and any phrase naming a concept or an activity rather than a product, belongs in a bullet where it is evidence';
+// The `<dt>` casing rule lives in its own import-free module and is
+// re-exported here, where the résumé contract's consumers read it: the second
+// renderer that writes into this same `<dl class="skills">` is resumeHtml.js,
+// and an import edge from there to this module closes a cycle that kills the
+// suite at module link. See skillGroupLabel.js for the whole reason and the
+// rule itself.
+export { titleCaseSkillGroupLabel };
 const GROUNDING_STOPWORDS = new Set(['about', 'after', 'against', 'built', 'build', 'created', 'create', 'delivered', 'developed', 'for', 'from', 'into', 'made', 'manual', 'over', 'reduced', 'system', 'systems', 'that', 'the', 'this', 'through', 'using', 'with', 'work']);
 // “At least two meaningful terms” is unsatisfiable while “meaningful” is
 // undefined: the list below deliberately drops the résumé verbs a writer
@@ -292,6 +415,66 @@ function normalizeEvidenceIds(value, label, allowedEvidenceIds, careerEvidenceId
   return ids;
 }
 
+// The contact row on a résumé or a cover letter is how a reader reaches the
+// candidate. Career data commonly states work-authorization facts in the same
+// header block, and the evidence-plan responder, told to copy identity out of
+// career data, carries them straight onto both documents — a shipped letterhead
+// read `… · Canadian citizenship · Willing to work anywhere. Can obtain TN-Visa
+// without sponsorship.` Those questions belong on the employer's own
+// application form, which is where they are actually answered.
+//
+// Scoped to the contact row, and deliberately NOT a prose classifier: reading
+// this vocabulary over career prose measured 15 false positives on 24 ordinary
+// lines (`citizen developers`, `Visa payment network`), which is why the
+// legal-status GATES were deleted on 2026-09-21. A contact element is a short
+// channel value, never a sentence about the work, so those second readings do
+// not arise here. This also drops rather than rejects: the failure mode is one
+// missing line a reader can see, never a refused round or a rewritten document.
+const APPLICATION_LOGISTICS_CONTACT_RE = new RegExp([
+  'citizen(?:ship)?', 'nationality', 'permanent resident(?:ncy|s)?', 'green card',
+  'work(?:ing)? (?:status|authori[sz]ation|permit|eligibility)',
+  '(?:authori[sz]ed|eligible|permitted) to work', 'right to work',
+  'visas?', 'sponsor(?:s|ed|ing|ship)?', 'relocat\\w*',
+  'willing to (?:work|relocate|travel|commute)',
+  'notice period', 'start date', 'availability',
+].join('|'), 'iu');
+
+// A value that carries an email address, a link, or a phone number IS a way to
+// reach the candidate, whatever else it says, so it is never dropped. This is
+// what keeps the rule above from ever costing a real contact channel.
+const CONTACT_CHANNEL_RE = /@[\w-]+\.[a-z]{2,}|https?:\/\/|\b[\w-]+\.(?:com|net|org|io|dev|me|co|ca|uk)\b|\d[\d\s().+-]{6,}\d/iu;
+
+function isReachableContactValue(value) {
+  const entry = String(value ?? '');
+  if (CONTACT_CHANNEL_RE.test(entry)) return true;
+  return !APPLICATION_LOGISTICS_CONTACT_RE.test(entry);
+}
+
+/**
+ * Keep only the contact values that are ways to reach the candidate.
+ *
+ * The app owns this row rather than the responder — `pasteApplicationAssembly.js`
+ * has said so in a comment since before this existed: "A backend-projected
+ * identity is preferred because it prevents an AI from choosing which contact
+ * fragments to expose." Applied where the identity is frozen, so every later
+ * stage repeats an already-projected list and no round is spent on it.
+ *
+ * Never returns empty: a contact row is required, and a career file with no
+ * reachable value at all is a different problem than this one solves.
+ */
+export function projectContactChannels(contact) {
+  if (!Array.isArray(contact)) return contact;
+  const kept = contact.filter(isReachableContactValue);
+  return kept.length ? kept : contact;
+}
+
+/** Project a frozen identity's contact row. Idempotent; other fields are untouched. */
+export function projectTrustedIdentity(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return identity;
+  const contact = projectContactChannels(identity.contact);
+  return contact === identity.contact ? identity : { ...identity, contact };
+}
+
 function normalizeIdentity(raw, trustedIdentity) {
   const identity = record(raw, 'identity');
   if (!Array.isArray(identity.contact) || !identity.contact.length || identity.contact.length > MAX_CONTACT) {
@@ -308,11 +491,15 @@ function normalizeIdentity(raw, trustedIdentity) {
   if (trustedIdentity != null) {
     const trusted = record(trustedIdentity, 'trustedIdentity');
     const trustedContact = Array.isArray(trusted.contact)
-      ? trusted.contact.map((entry, index) => text(entry, `trustedIdentity.contact[${index}]`, { required: true, max: MAX_LONG_TEXT }))
+      ? projectContactChannels(trusted.contact.map((entry, index) => text(entry, `trustedIdentity.contact[${index}]`, { required: true, max: MAX_LONG_TEXT })))
       : fail('trustedIdentity.contact must be an array.');
     for (const key of ['name', 'subtitleRole', 'credential']) {
       equalTrustedIdentityValue(normalized[key], text(trusted[key], `trustedIdentity.${key}`, { required: key === 'name', max: key === 'credential' ? MAX_LONG_TEXT : MAX_SHORT_TEXT }), `identity.${key}`);
     }
+    // Compare what the app will actually render. A responder that echoed an
+    // identity frozen before this projection existed still matches, and the
+    // rendered row is the projected one either way.
+    normalized.contact = projectContactChannels(normalized.contact);
     if (normalized.contact.length !== trustedContact.length || normalized.contact.some((entry, index) => entry !== trustedContact[index])) {
       fail(`identity.contact must repeat trustedIdentity.contact element-for-element in the same order \u2014 exactly these ${trustedContact.length} value(s), unchanged and unreordered: ${trustedContact.map(entry => `"${entry}"`).join(', ')}.`);
     }
@@ -339,6 +526,23 @@ const ROLE_BULLET_SCOPE_RULE = 'bullet-cites-own-role-career-section';
 // answer the host left, so this stays silent rather than rejecting a bullet
 // that cannot be written any other way.
 const ROLE_BULLET_OPENING_BLOCK_RULE = 'bullet-cites-past-its-section-opening-block';
+
+const ROLE_BULLET_EVIDENCE_REUSE_RULE = 'bullet-cites-evidence-already-spent-in-role';
+// A shipped résumé once padded a starved role by splitting one accomplishment
+// into several bullets instead of writing a second one: nine bullets across a
+// single role cited only four distinct career-data evidence IDs, one ID
+// backing three bullets at once. No grounding rule saw it, because every one
+// of those nine bullets, read alone, cited real evidence — the defect only
+// exists ACROSS a role's bullets, in an ID an earlier bullet had already
+// spent, and nothing before this compared a bullet's citation to its
+// siblings'.
+//
+// A later bullet whose career-data IDs are a SUBSET of an earlier bullet's is
+// not a second accomplishment; it reports the same one a second time under a
+// different sentence. A later bullet that cites even one career-data ID no
+// earlier bullet in the role cites still passes, because it carries a fact
+// the role did not already have on the page.
+export const ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE = 'each bullet must cite at least one career-data evidence id that no earlier bullet in that same role already cites, because a later bullet whose career-data ids are all already cited by an earlier one reports that same source accomplishment a second time rather than a new one';
 
 function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenceIds, careerData, careerEvidenceQuotesById, careerDataRoleRegions, offenses) {
   const role = record(raw, `roles[${index}]`);
@@ -402,6 +606,31 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
           `roles[${index}].bullets[${bulletIndex}] cites career-data evidence only from inside that employer's career-data section opening block — ${CAREER_SECTION_OPENING_BLOCK_RULE}. `
           + 'The résumé prints those three from the saved work history already, so this bullet has nothing else to rewrite and can only restate the role header. '
           + `The accepted evidence plan carries ${planBodyQuotes.length === 1 ? 'one career-data item' : `${planBodyQuotes.length} career-data items`} quoting that same section below its opening block: cite ${planBodyQuotes.length === 1 ? 'it' : 'at least one of them'} here instead, and write the bullet from what it says about the work.`);
+      }
+    }
+  }
+  // Scoping a bullet to its own role's career section (above) cannot catch two
+  // bullets IN that same role citing the same career-data ID: each one, read
+  // alone, is properly grounded. Only comparing a role's bullets against each
+  // other catches it. `careerEvidenceIds` is null for the legacy string-only
+  // evidence lists, which cannot say which IDs are career-data at all, so this
+  // stands down exactly where the career-evidence rule above already does.
+  if (careerEvidenceIds) {
+    const careerIdsByBullet = normalized.bullets.map((bullet, bulletIndex) =>
+      (evidenceAccepted[bulletIndex] ? new Set(bullet.evidenceIds.filter(evidenceId => careerEvidenceIds.has(evidenceId))) : null));
+    for (const [bulletIndex, bullet] of normalized.bullets.entries()) {
+      const laterIds = careerIdsByBullet[bulletIndex];
+      if (!laterIds) continue;
+      for (let earlierIndex = 0; earlierIndex < bulletIndex; earlierIndex += 1) {
+        const earlierIds = careerIdsByBullet[earlierIndex];
+        if (!earlierIds || ![...laterIds].every(evidenceId => earlierIds.has(evidenceId))) continue;
+        const earlierBullet = normalized.bullets[earlierIndex];
+        const shared = [...laterIds];
+        offend(bulletOffenses, ROLE_BULLET_EVIDENCE_REUSE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
+          `roles[${index}] bullets "${earlierBullet.id}" and "${bullet.id}" both rest on career-data evidence ${shared.length === 1 ? 'id' : 'ids'} ${shared.map(evidenceId => `"${evidenceId}"`).join(', ')} with no career-data id of its own beyond ${shared.length === 1 ? 'that one' : 'those'}: two bullets reporting one source accomplishment, not two. Combine "${earlierBullet.id}" and "${bullet.id}" into a single bullet, or cite a career-data evidence id that no other bullet in roles[${index}] cites.`);
+        // One offense per fragmented bullet is enough to fix it; the earliest
+        // match already names the accomplishment it duplicates.
+        break;
       }
     }
   }
@@ -635,10 +864,32 @@ function occursInQuotedCareerEvidence(value, quotes) {
 
 const PROJECT_OCCURRENCE_RULE = 'project-field-occurs-in-cited-career-evidence';
 const PROJECT_DESCRIPTION_RULE = 'project-description-shares-career-evidence-terms';
+const PROJECT_LISTING_EVIDENCE_RULE = 'project-cites-job-listing-evidence';
+const PROJECT_LISTING_OVERLAP_RULE = 'project-shares-job-listing-evidence-terms';
+// Grounding says a project is TRUE; these say it belongs on THIS résumé. They
+// are different questions and only the first was ever asked, so a project the
+// corpus supports rendered for every posting alike — the one thing a tailored
+// résumé is not supposed to do.
+//
+// Deliberately NOT the plan's priority ranking, which was measured against a
+// real accepted plan and does not discriminate: 17 of its 19 evidence items
+// were already ranked highest or high, so a priority gate would have read as
+// principled while refusing nothing. The binding signal is the posting's own
+// words. A project must cite a job-listing quote and share vocabulary with it,
+// which is the same pair of tests its career-data side already passes — true
+// AND asked for, rather than true alone. A project answering nothing the
+// posting says has no listing quote to cite honestly, and that is the case
+// this exists to catch.
+export const PROJECT_JOB_RELEVANCE_RULE_TEXT = 'a project is carried only when it answers something this posting actually says: it cites at least one job-listing evidence item beside its career-data evidence, and its name and description share at least two meaningful terms with one of those cited listing quotes';
 const SKILL_ITEM_RULE = 'skill-item-occurs-in-cited-career-evidence';
 const SKILL_GROUP_RULE = 'skill-group-is-neutral-or-in-career-data';
+const SKILL_ITEM_FILTERABLE_NOUN_RULE = 'skill-item-is-a-filterable-name';
+const SKILLS_BLOCK_SPLIT_RULE = 'skills-block-big-enough-to-split-is-split';
+const SKILLS_BLOCK_ROWS_RULE = 'skills-block-within-design-row-budget';
+const SKILLS_BLOCK_ITEMS_RULE = 'skills-block-within-design-term-budget';
+const SKILLS_ROW_LENGTH_RULE = 'skills-row-within-design-character-budget';
 
-function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses) {
+function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_PROJECTS) fail(`projects must be an array with at most ${MAX_PROJECTS} projects.`);
   const projectOffenses = offenses;
@@ -675,6 +926,22 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
       offend(projectOffenses, PROJECT_DESCRIPTION_RULE, `projects.${project.id}.description`,
         `projects.${project.id}.description must share at least two distinct meaningful terms with its cited career-data evidence.`);
     }
+    // Only gradeable when the caller supplied the source-tagged catalog. A
+    // string-only evidence list cannot say which quotes came from the posting,
+    // and a rule that cannot read its input must not invent a verdict — the
+    // same reason the career-evidence rule above stands down without one.
+    if (listingEvidenceQuotesById && listingEvidenceQuotesById.size) {
+      const listingQuotes = project.evidenceIds
+        .map(evidenceId => listingEvidenceQuotesById.get(evidenceId))
+        .filter(quote => typeof quote === 'string' && quote);
+      if (!listingQuotes.length) {
+        offend(projectOffenses, PROJECT_LISTING_EVIDENCE_RULE, `projects.${project.id}`,
+          `projects.${project.id} cites no job-listing evidence, so nothing ties it to this posting; cite the listing quote it answers, or omit the project from this résumé.`);
+      } else if (!hasCareerOverlap(`${project.name} ${project.description || ''}`, listingQuotes)) {
+        offend(projectOffenses, PROJECT_LISTING_OVERLAP_RULE, `projects.${project.id}`,
+          `projects.${project.id} must share at least two distinct meaningful terms with a job-listing quote it cites; a listing citation it has no words in common with does not make it relevant to this posting.`);
+      }
+    }
   }
   unique(projects.map(project => project.id), 'projects');
   return projects;
@@ -687,10 +954,15 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
   // group before reporting. Three bad group labels are one defect class and
   // cost one correction round, not three manual copy/paste handoff rounds.
   const skillOffenses = offenses;
-  const skills = value.map((raw, index) => {
+  // Array.from, not map: map SKIPS a hole and leaves one in its result, so a
+  // sparse array (JSON cannot write one, but a fuzzed or mutated draft can)
+  // used to reach the block-level checks below as an entry nothing had
+  // validated. Array.from reads a hole as undefined, which record() and text()
+  // already reject by name.
+  const skills = Array.from(value, (raw, index) => {
     const group = record(raw, `skills[${index}]`);
     if (!Array.isArray(group.items) || !group.items.length || group.items.length > MAX_SKILL_ITEMS_PER_GROUP) fail(`skills[${index}].items must contain between 1 and ${MAX_SKILL_ITEMS_PER_GROUP} values.`);
-    const items = group.items.map((entry, itemIndex) => text(entry, `skills[${index}].items[${itemIndex}]`, { required: true, max: MAX_SKILL_TEXT }));
+    const items = Array.from(group.items, (entry, itemIndex) => text(entry, `skills[${index}].items[${itemIndex}]`, { required: true, max: MAX_SKILL_TEXT }));
     unique(items, `skills[${index}].items`);
     const offensesBefore = skillOffenses.length;
     const evidenceIds = normalizeEvidenceIds(group.evidenceIds, `skills[${index}].evidenceIds`, allowedEvidenceIds, careerEvidenceIds, { requireCareerEvidence: true, collect: skillOffenses });
@@ -706,6 +978,16 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
         }
       }
     }
+    // Grounding says an item is TRUE of the candidate; this says it is a NAME
+    // the block can be filtered on. They are different defects with different
+    // repairs, so an item carrying both is named by both: the two rules batch
+    // separately and the whole response still costs one correction round.
+    for (const item of items) {
+      if (!FILTERABLE_SKILL_ITEM_RE.test(item)) {
+        offend(skillOffenses, SKILL_ITEM_FILTERABLE_NOUN_RULE, `skills[${index}] item "${item}"`,
+          `skills[${index}] item "${item}" must be a name a recruiter can filter on rather than a concept or an activity: ${SKILL_ITEM_FILTERABLE_RULE}.`);
+      }
+    }
     const groupName = text(group.group, `skills[${index}].group`, { required: true, max: MAX_SKILL_TEXT });
     if (!isNeutralSkillGroupLabel(groupName) && !occursInCareerData(groupName, careerData)) {
       offend(skillOffenses, SKILL_GROUP_RULE, `skills[${index}].group "${groupName}"`,
@@ -716,6 +998,39 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
       evidenceIds,
     };
   });
+  // The design system's shape for this block (STYLE.md §5.6, SKILL.md:670-674),
+  // measured on what renders rather than on the structural ceilings above.
+  // Every one of these batches, so a block that breaks all four still costs
+  // one correction round.
+  if (skills.length) {
+    const totalItems = skills.reduce((count, group) => count + group.items.length, 0);
+    // A2 removed the section-head synonyms from the label vocabulary, so a
+    // single row can no longer be labelled with a word that means "skills".
+    // This is the other half of that: a block with enough terms to sort must
+    // actually sort them, instead of bolting one honest label onto a keyword
+    // run.
+    if (totalItems >= MIN_SPLIT_SKILL_ITEMS && skills.length < MIN_SPLIT_SKILL_GROUPS) {
+      offend(skillOffenses, SKILLS_BLOCK_SPLIT_RULE, `skills[0].group "${skills[0].group}"`,
+        `skills[0].group "${skills[0].group}" carries all ${totalItems} items of this block under one label; a block of ${MIN_SPLIT_SKILL_ITEMS} items or more must name at least ${MIN_SPLIT_SKILL_GROUPS} groups, so sort these items by the kind of skill they actually are.`);
+    }
+    if (skills.length > MAX_DESIGN_SKILL_GROUPS) {
+      offend(skillOffenses, SKILLS_BLOCK_ROWS_RULE, `skills (${skills.length} groups)`,
+        `skills renders ${skills.length} rows but this block carries at most ${MAX_DESIGN_SKILL_GROUPS}; a further row buys page space with the weakest content on the page, so keep the domains this posting asks about and drop the rest.`);
+    }
+    if (totalItems > MAX_DESIGN_SKILL_ITEMS) {
+      offend(skillOffenses, SKILLS_BLOCK_ITEMS_RULE, `skills (${totalItems} items)`,
+        `skills lists ${totalItems} items but this block carries at most ${MAX_DESIGN_SKILL_ITEMS} in total; drop the terms this posting never asks about rather than dropping a domain.`);
+    }
+    for (const [index, group] of skills.entries()) {
+      // The exact string the renderer emits for this row, so the budget is
+      // enforced against what a reader sees and not against the items alone.
+      const rowChars = group.items.join(SKILL_ITEM_SEPARATOR).length;
+      if (rowChars > MAX_DESIGN_SKILL_ROW_CHARS) {
+        offend(skillOffenses, SKILLS_ROW_LENGTH_RULE, `skills[${index}].items (${rowChars} characters)`,
+          `skills[${index}].items renders a row of ${rowChars} characters but a row holds at most ${MAX_DESIGN_SKILL_ROW_CHARS}, which is one line at this block's measure; move a term into another group or drop it.`);
+      }
+    }
+  }
   unique(skills.map(group => group.id), 'skills');
   return skills;
 }
@@ -745,6 +1060,12 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   const careerEvidenceQuotesById = new Map(verifiedEvidence
     .filter(entry => entry?.sourceId === 'career-data' && typeof entry?.quote === 'string')
     .map(entry => [id(entry.id, 'verified evidenceCatalog id'), entry.quote]));
+  // The posting's own half of the catalog, which nothing rendered has ever
+  // been measured against until now: it is what says a project answers this
+  // job rather than merely being true of the candidate.
+  const listingEvidenceQuotesById = new Map(verifiedEvidence
+    .filter(entry => entry?.sourceId === 'job-listing' && typeof entry?.quote === 'string')
+    .map(entry => [id(entry.id, 'verified evidenceCatalog id'), entry.quote]));
   const normalizedSourceRoles = normalizeSourceRoles(sourceRoles);
   const sourceById = new Map(normalizedSourceRoles.map(role => [role.id, role]));
   const careerDataRoleRegions = careerEvidenceIds
@@ -764,7 +1085,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   ));
   const roleIds = unique(roles.map(role => role.id), 'roles');
   for (const role of normalizedSourceRoles) if (!roleIds.has(role.id)) fail(`roles is missing trusted source role "${role.id}".`);
-  const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses);
+  const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses);
   const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses);
   failOffenses(offenses);
   return {
@@ -783,11 +1104,32 @@ function escapeHtml(value) {
 function separator() { return '<span class="sep" aria-hidden="true">·</span>'; }
 function sectionHead(title, id) { return `<div class="section-head"><h2 id="${id}">${escapeHtml(title)}</h2><span class="rule" aria-hidden="true"></span></div>`; }
 
+// A second role row exists to carry a scope summary and a location together.
+// This schema rejects `roles[].summary` outright (see normalizeRole), so that
+// row could only ever hold one right-aligned city — and it still spent a whole
+// line plus two stacked margins on it, ~29.8pt per role, roughly 2 baselines
+// (`build/fit-estimate-test.js` COST.roleMeta). STYLE.md §5.2b is the
+// sanctioned remedy: fold a LONE location up into the dates cell, where it
+// costs zero lines and changes no typography, because both cells already share
+// one rule. `resumeRoleDatesAndLocation` reads that shape back.
+//
+// Fold only what that reader can parse back: it splits on the LAST `·`,
+// requires a digit in the head, and refuses a tail carrying a bare four-digit
+// year (which would read as a second date range). A location that would break
+// either condition keeps its own row rather than becoming unreadable.
+function foldableRoleLocation(dates, location) {
+  return Boolean(dates) && Boolean(location)
+    && /\d/.test(dates) && !/\b\d{4}\b/.test(location) && !location.includes('\u00b7');
+}
+
 function renderRole(role) {
   const company = role.company ? `${separator()}<span class="company">${escapeHtml(role.company)}</span>` : '';
-  const dates = role.dates ? `<p class="role-dates">${escapeHtml(role.dates)}</p>` : '';
+  const folded = !role.summary && foldableRoleLocation(role.dates, role.location);
+  const datesCell = folded ? `${escapeHtml(role.dates)}${separator()}${escapeHtml(role.location)}` : escapeHtml(role.dates);
+  const dates = role.dates ? `<p class="role-dates">${datesCell}</p>` : '';
   const summary = role.summary ? `<p class="role-summary">${escapeHtml(role.summary)}</p>` : '';
-  const location = role.location ? `<p class="role-location">${escapeHtml(role.location)}</p>` : '';
+  // A row still carrying a second cell is the grid doing its job; leave it.
+  const location = role.location && !folded ? `<p class="role-location">${escapeHtml(role.location)}</p>` : '';
   const meta = summary || location ? `<div class="role-meta meta-row">${summary}${location}</div>` : '';
   const bullets = role.bullets.map(bullet => {
     return `<li>${escapeHtml(bullet.text)}</li>`;
@@ -820,7 +1162,7 @@ export function renderStructuredResume(raw, context = {}) {
   const header = `<header class="resume-header"><h1 class="name" itemprop="name">${escapeHtml(draft.identity.name)}</h1>${subtitle ? `<p class="tagline">${subtitle}</p>` : ''}<p class="contact" role="group" aria-label="Contact">${draft.identity.contact.map(escapeHtml).join(separator())}</p></header>`;
   const experience = `<section class="section" aria-labelledby="sec-experience">${sectionHead('Experience', 'sec-experience')}${draft.roles.map(renderRole).join('')}</section>`;
   const projects = draft.projects.length ? renderProjects(draft.projects, context.careerData) : '';
-  const skills = draft.skills.length ? `<section class="section" aria-labelledby="sec-skills">${sectionHead('Skills', 'sec-skills')}<dl class="skills">${draft.skills.map(group => `<dt>${escapeHtml(group.group)}</dt><dd>${group.items.map(escapeHtml).join(' · ')}</dd>`).join('')}</dl></section>` : '';
+  const skills = draft.skills.length ? `<section class="section" aria-labelledby="sec-skills">${sectionHead('Skills', 'sec-skills')}<dl class="skills">${draft.skills.map(group => `<dt>${escapeHtml(titleCaseSkillGroupLabel(group.group))}</dt><dd>${group.items.map(escapeHtml).join(SKILL_ITEM_SEPARATOR)}</dd>`).join('')}</dl></section>` : '';
   const resumeMainHtml = `<main class="page" role="document" itemscope itemtype="https://schema.org/Person">${header}${experience}${projects}${skills}</main>`;
   // Catch a provenance-bearing project section mismatch before the result is
   // imported, so the next review can remove or revise it instead of reaching

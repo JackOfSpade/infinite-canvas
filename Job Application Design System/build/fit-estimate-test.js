@@ -412,9 +412,9 @@ targets.forEach(function (rel) {
     ok('NOTE: the band straddles capacity — word mix decides. Render at default ' +
        'density and measure before applying compact (SKILL.md §The pipeline, step 5).');
   } else if (hi.lines < 0.90 * CAP) {
-    ok('NOTE: even the pessimistic estimate is under 90% (' +
-       (hi.lines / CAP * 100).toFixed(1) + '%). Look for true, distinct evidence to add — ' +
-       'never filler (STYLE.md §6).');
+    ok('NOTE: even the pessimistic estimate leaves headroom (' +
+       (hi.lines / CAP * 100).toFixed(1) + '% of capacity). If genuinely distinct, ' +
+       'source-supported evidence exists, add it — never filler (STYLE.md §6).');
   }
 });
 

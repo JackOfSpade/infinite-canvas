@@ -63,14 +63,20 @@ function formattingSensitiveResumeWorkspace(body) {
 <aside data-shell='preserve'>Outside &amp; untouched</aside></body></html>`;
 }
 
+// `.skills` is a two-column grid: the `dt` label occupies the left column and
+// its `dd` value the right one, so a row's label and the first line of its
+// value share one visual line and read label-first. A long value then wraps
+// underneath both. These are assembled lines, the shape
+// `orderedTextBlocksFromItems` produces; the item-level ordering that produces
+// it has its own test below.
 function visualResumeLines(body) {
   return [
     { page: 1, x: 56, y: 700, text: 'Maya Chen' },
     { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
     { page: 1, x: 56, y: 640, text: `• ${body}` },
     { page: 1, x: 56, y: 600, text: 'S K I L L S' },
-    { page: 1, x: 56, y: 570, text: 'Python · TypeScriptLanguages' },
-    { page: 1, x: 56, y: 540, text: 'MCP · ETLAI & Data' },
+    { page: 1, x: 56, y: 570, text: 'Languages Python · TypeScript' },
+    { page: 1, x: 56, y: 540, text: 'AI & Data MCP · ETL' },
   ];
 }
 
@@ -107,7 +113,147 @@ function wrappedCoverBodyLines(firstLine, continuationLine) {
   ];
 }
 
+// Mirrors the real letterhead that broke export on 2026-09-23: a candidate
+// whose contact row carries citizenship and a work-authorization sentence
+// alongside the email and phone. `.contact` is `display: flex; flex-wrap:
+// wrap`, so that row occupies two visual PDF lines while remaining one leaf.
+const WRAPPED_CONTACT_ITEMS = [
+  'Email: maya@example.test',
+  'Phone: (555) 010-0100',
+  'Canadian citizenship',
+  'Willing to work anywhere. Can obtain TN-Visa without sponsorship.',
+];
+
+function wrappedContactCoverWorkspace(paragraphs, { signatureTitle = '' } = {}) {
+  const contact = WRAPPED_CONTACT_ITEMS.join('<span class="sep" aria-hidden="true">·</span>');
+  const body = paragraphs.map(paragraph => `<p>${paragraph}</p>`).join('');
+  const title = signatureTitle ? `<p class="signature-title">${signatureTitle}</p>` : '';
+  return `<!doctype html><html><head><meta data-shell="preserve"></head><body><section data-ic-document-panel="cover"><main class="page">`
+    + `<header class="resume-header letter-letterhead"><h1 class="name">Maya Chen</h1>`
+    + `<p class="tagline"><span class="subtitle-role">Engineer</span><span class="sep" aria-hidden="true">·</span><span class="credential">B.S. Computer Science, York University</span></p>`
+    + `<p class="contact" role="group" aria-label="Contact">${contact}</p></header>`
+    + `<div class="letter-meta"><p class="letter-date"><time datetime="2026-09">September 2026</time></p></div>`
+    + `<div class="letter-body"><p class="salutation">Dear Stripe Hiring Team,</p>${body}</div>`
+    + `<div class="letter-close"><p class="valediction">Sincerely,</p><p class="signature">Maya Chen</p>${title}</div>`
+    + `</main></section><script data-shell="preserve">trusted()</script></body></html>`;
+}
+
+// Geometry copied from the PDF that failed export three times: the name/tagline
+// gap (20.25pt) is larger than the gap inside the wrapped contact row
+// (15.75pt), but both straddle the same page-wide leading estimate, so only the
+// trusted DOM can say where the contact row ends.
+function wrappedContactCoverLines(paragraphs, { signatureTitleLines = [] } = {}) {
+  const lines = [
+    { page: 1, x: 45.4, y: 778.2, height: 28, text: 'Maya Chen' },
+    { page: 1, x: 45.4, y: 757.9, height: 11, text: 'Engineer · B.S. Computer Science, York University' },
+    { page: 1, x: 45.4, y: 732.4, height: 9, text: 'Email: maya@example.test · Phone: (555) 010-0100 · Canadian citizenship ·' },
+    { page: 1, x: 45.4, y: 716.7, height: 9, text: 'Willing to work anywhere. Can obtain TN-Visa without sponsorship.' },
+    { page: 1, x: 484.2, y: 678.4, height: 9, text: 'September 2026' },
+    { page: 1, x: 45.4, y: 652.2, height: 10, text: 'Dear Stripe Hiring Team,' },
+  ];
+  let y = 623.7;
+  for (const paragraph of paragraphs) {
+    for (const visualLine of paragraph) {
+      lines.push({ page: 1, x: 45.4, y, height: 10, text: visualLine });
+      y -= 15;
+    }
+    y -= 12.75;
+  }
+  lines.push({ page: 1, x: 45.4, y: y - 6.75, height: 10, text: 'Sincerely,' });
+  lines.push({ page: 1, x: 45.4, y: y - 36.75, height: 15, text: 'Maya Chen' });
+  let titleY = y - 66.75;
+  for (const visualLine of signatureTitleLines) {
+    lines.push({ page: 1, x: 45.4, y: titleY, height: 9, text: visualLine });
+    titleY -= 12;
+  }
+  return lines;
+}
+
+const WRAPPED_CONTACT_PARAGRAPHS = [
+  ['At Stripe, Connect pairs end-to-end product experiences with integration work', 'that reduces complexity for platforms.'],
+  ['Data migration workflows provide another example of the same integration', 'practice across third-party platforms.'],
+  ['Earlier, my data work handled ingestion and controlled access through REST', 'APIs over a local database.'],
+];
+
+function wrappedContactParagraphText(paragraph) {
+  return paragraph.join(' ');
+}
+
 export default [
+  {
+    name: 'Application PDF reconcile: a wrapped letterhead contact row keeps every envelope leaf on its own text',
+    run: () => {
+      const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText));
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'cover',
+        blocks: wrappedContactCoverLines(WRAPPED_CONTACT_PARAGRAPHS),
+      });
+      // The regression: the contact's second visual line used to be mapped onto
+      // `.letter-date`, pushing the salutation into the body, where it counted
+      // as a fourth paragraph and blocked the bundle save outright.
+      assert(!/geometry-separated body block/.test(result.reason || ''),
+        `a wrapped contact row must not be counted as an extra body paragraph, got ${JSON.stringify(result)}`);
+      assert(result.success && result.status === 'unchanged' && result.exactTextMatch,
+        `an unedited generated cover letter must reconcile unchanged, got ${JSON.stringify(result)}`);
+      return { mappedLeaves: result.mappedLeaves, wrappedEnvelopeLeafMapped: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a body edit imports while a wrapped contact row stays intact',
+    run: () => {
+      const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText));
+      const edited = WRAPPED_CONTACT_PARAGRAPHS.map((paragraph, index) => (index === 1
+        ? [paragraph[0], 'practice across audited third-party platforms.']
+        : paragraph));
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'cover',
+        blocks: wrappedContactCoverLines(edited),
+      });
+      assert(result.success && result.status === 'updated'
+        && result.html.includes('practice across audited third-party platforms.'),
+      `a body edit must still import when the letterhead wraps, got ${JSON.stringify(result)}`);
+      assert(result.html.includes('Willing to work anywhere. Can obtain TN-Visa without sponsorship.')
+        && result.html.includes('<time datetime="2026-09">September 2026</time>')
+        && result.html.includes('Dear Stripe Hiring Team,'),
+      'the wrapped contact row, the date, and the salutation must keep their own trusted text');
+      return { coverUpdated: true, envelopePreserved: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a wrapped closing signature title maps from the end of the letter',
+    run: () => {
+      const signatureTitle = 'Software Engineer · Toronto, Ontario · Available on four weeks notice';
+      const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText), { signatureTitle });
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'cover',
+        blocks: wrappedContactCoverLines(WRAPPED_CONTACT_PARAGRAPHS, {
+          signatureTitleLines: ['Software Engineer · Toronto, Ontario ·', 'Available on four weeks notice'],
+        }),
+      });
+      assert(result.success && result.status === 'unchanged' && result.exactTextMatch,
+        `a wrapped signature title must be mapped to its own leaf, got ${JSON.stringify(result)}`);
+      return { suffixLeafWrapMapped: true };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: a genuinely extra cover paragraph is still a conflict',
+    run: () => {
+      const source = wrappedContactCoverWorkspace(WRAPPED_CONTACT_PARAGRAPHS.map(wrappedContactParagraphText));
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'cover',
+        blocks: wrappedContactCoverLines([...WRAPPED_CONTACT_PARAGRAPHS, ['A fourth paragraph the panel never had.']]),
+      });
+      assert(!result.success && result.status === 'conflict'
+        && /4 geometry-separated body block\(s\), but the cover letter has 3 paragraph\(s\)/.test(result.reason)
+        && result.html === source,
+      `an added PDF paragraph must remain an unmapped conflict, got ${JSON.stringify(result)}`);
+      return { extraParagraphConflict: true };
+    },
+  },
   {
     name: 'Application PDF reconcile: wrapped hyphenated words preserve DOM token identity',
     run: () => {
@@ -723,7 +869,7 @@ export default [
     },
   },
   {
-    name: 'Application PDF reconcile: printed résumé headings, bullets, and reversed skills normalize before conservative import',
+    name: 'Application PDF reconcile: printed résumé headings, bullets, and two-column skills normalize before conservative import',
     run: () => {
       const source = resumeWorkspace('Maya builds systems safely.');
       const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya builds systems safely.') });
@@ -732,7 +878,83 @@ export default [
       const changed = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: visualResumeLines('Maya ships systems safely.') });
       assert(changed.success && changed.status === 'updated' && changed.changed && changed.html.includes('Maya ships systems safely.'),
         `one semantic token change should retain conservative importability, got ${JSON.stringify(changed)}`);
-      return { headingsCollapsed: true, skillsReordered: true, changed: changed.changed };
+      return { headingsCollapsed: true, skillRowsSplit: true, changed: changed.changed };
+    },
+  },
+  {
+    // The two grid cells of one `.skills` row do not share a baseline: `dd`
+    // carries `line-height: var(--lh-snug)` and its `dt` does not, so the
+    // value sits fractionally above the label that introduces it. Line
+    // grouping tolerates that, but composing the grouped line in the
+    // page-wide y-descending order emitted the right-hand value BEFORE the
+    // left-hand label — on 2026-09-23 that produced
+    // `... Docker Compose · MCP ·technologies` from a correct PDF and failed
+    // the generated-bundle save with an unresolvable token alignment. Only an
+    // item-level test covers this; the assembled-line fixtures above start
+    // after the ordering decision has already been made.
+    name: 'Application PDF reconcile: a grid row whose columns differ in baseline still reads left to right',
+    run: async () => {
+      const source = resumeWorkspace('Maya builds systems safely.');
+      const pdfBytes = await textPdf([
+        { text: 'Maya Chen', y: 700 },
+        { text: 'E X P E R I E N C E', y: 670 },
+        { text: '• Maya builds systems safely.', y: 640 },
+        { text: 'S K I L L S', y: 600 },
+        // Right column drawn fractionally higher than its own left-column
+        // label, exactly as the rendered résumé does.
+        { text: 'Python · TypeScript', x: 180, y: 570.75 },
+        { text: 'Languages', x: 56, y: 570 },
+        { text: 'MCP · ETL', x: 180, y: 540.75 },
+        { text: 'AI & Data', x: 56, y: 540 },
+      ]);
+      const blocks = await extractPdfTextBlocks(pdfBytes);
+      const skillLines = blocks.filter(block => /Languages|AI & Data/.test(block.text)).map(block => block.text);
+      assert(skillLines.length === 2
+        && skillLines[0] === 'Languages Python · TypeScript'
+        && skillLines[1] === 'AI & Data MCP · ETL',
+      `each grid row must compose in x order, got ${JSON.stringify(skillLines)}`);
+      const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
+        `a faithfully rendered résumé PDF must reconcile unchanged, got ${JSON.stringify(unchanged)}`);
+      return { skillLines, status: unchanged.status };
+    },
+  },
+  {
+    // The 2026-09-23 save failure reported only "inserted or removed text",
+    // which named neither where the alignment broke nor which of the two very
+    // different causes it was. Text the PDF genuinely gained or lost is a
+    // document problem; the same words in a different order is an extraction
+    // reading-order problem. They have opposite repairs.
+    name: 'Application PDF reconcile: an alignment conflict names its location and distinguishes lost text from lost order',
+    run: () => {
+      const html = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><p class="role-summary">Maya builds systems safely.</p></section></main></section></body></html>';
+      const head = [
+        { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+        { page: 1, x: 56, y: 670, text: 'E X P E R I E N C E' },
+      ];
+      const inserted = reconcileApplicationHtmlFromPdfBlocks({
+        html,
+        documentKind: 'resume',
+        blocks: [...head, { page: 1, x: 56, y: 640, text: 'Maya builds durable resilient systems safely.' }],
+      });
+      assert(inserted.status === 'conflict'
+        && /first divergence is in the Experience section, <p class="role-summary">/.test(inserted.error)
+        && /PDF holds 9 token\(s\) against the document's 7/.test(inserted.error),
+      `a genuine insertion must report its location and both token counts, got ${JSON.stringify(inserted.error)}`);
+      const reordered = reconcileApplicationHtmlFromPdfBlocks({
+        html,
+        documentKind: 'resume',
+        blocks: [...head, { page: 1, x: 56, y: 640, text: 'systems builds Maya safely.' }],
+      });
+      assert(reordered.status === 'conflict'
+        && /first divergence is in the Experience section/.test(reordered.error)
+        && /same words in a different order/.test(reordered.error),
+      `an order-only divergence must be named as one, got ${JSON.stringify(reordered.error)}`);
+      // The reason reaches the responding model through fit-feedback.json, so
+      // it must not quote the résumé's own words back at it.
+      assert(!/durable|resilient|builds/.test(inserted.error) && !/builds|systems/.test(reordered.error),
+        `a conflict reason must not quote document text, got ${JSON.stringify([inserted.error, reordered.error])}`);
+      return { insertion: inserted.error, reorder: reordered.error };
     },
   },
   {

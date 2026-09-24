@@ -363,7 +363,12 @@ export default [
       assert(mergedDt?.nextElementSibling?.querySelector('[data-ic-inferred-skill="skill-1"]'),
         '"SAFETY & RESPONSE" (case/entity variant) must merge into "Safety &amp; Response"');
       const created = document.querySelector('[data-ic-inferred-label]');
-      assert(created?.textContent === 'safety and response', '"safety and response" is a different word sequence and must create its own row, not merge');
+      // Displayed Title Case, matched on the raw text: the created label is
+      // cased for display (every shipped <dt> is Title Case) while the merge
+      // key stays skillLabelKey()'s lowercased, punctuation-stripped form, so
+      // casing cannot move a group off the row it should have merged into. A
+      // connecting "and" stays lowercase.
+      assert(created?.textContent === 'Safety and Response', '"safety and response" is a different word sequence and must create its own row, not merge, and its label renders in the design system\u2019s Title Case');
       assert(created.nextElementSibling?.querySelector('[data-ic-inferred-skill="skill-2"]'), 'created group did not receive the non-matching skill');
       return { ok: true };
     },
@@ -490,11 +495,15 @@ export default [
         docId: 'escape-test',
         skillInsights: { items: [item({ id: 'skill-1', canonicalSkillName: 'Weird Cert', suggestedResumeText: 'Weird Cert', resumeCategory: maliciousCategory })] },
       });
+      // The created label is title-cased for display before it is escaped, so
+      // the expected text is the cased string; escaping is what this case is
+      // about and casing cannot open a tag boundary.
+      const displayedCategory = '<Script>X</Script> & "Ops"';
       assert(!html.includes(maliciousCategory), 'the raw category string must never appear unescaped in the generated HTML');
-      assert(html.includes('&lt;script&gt;x&lt;/script&gt; &amp; &quot;Ops&quot;'), 'the category must be escaped exactly like every other model string');
+      assert(html.includes('&lt;Script&gt;X&lt;/Script&gt; &amp; &quot;Ops&quot;'), 'the category must be escaped exactly like every other model string');
       const { document } = new JSDOM(html).window;
       const dt = document.querySelector('[data-ic-inferred-label]');
-      assert(dt?.textContent === maliciousCategory, 'once parsed back, the escaped label must round-trip to the original text');
+      assert(dt?.textContent === displayedCategory, 'once parsed back, the escaped label must round-trip to the original text under the display casing');
       assert(!dt.querySelector('script'), 'a malicious category must not materialize a live <script> element inside the created <dt>');
       assert(!Array.prototype.some.call(document.querySelectorAll('script'), (s) => s.textContent.includes('x</script>')),
         'a malicious category must not escape its own tag boundary anywhere in the document');

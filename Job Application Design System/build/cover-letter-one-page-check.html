@@ -41,6 +41,20 @@
     if (!page) throw new Error('cover-letter.html has no main.page');
     rig.hidden = false;
     rig.appendChild(page);
+    // A script element a DOMParser built is flagged already-started, so it
+    // stays inert when it is reparented into this live document. The letter
+    // fills its own date line from script, so without this the rig measures a
+    // letter whose date is blank — a collapsed row that read as ~38px of
+    // content the real document has, and reported the page ~3.6 points emptier
+    // than it is. Re-create each one so it runs here as it does in the letter.
+    Array.prototype.forEach.call(page.querySelectorAll('script'), function (inert) {
+      var live = document.createElement('script');
+      Array.prototype.forEach.call(inert.attributes, function (attribute) {
+        live.setAttribute(attribute.name, attribute.value);
+      });
+      live.textContent = inert.textContent;
+      inert.replaceWith(live);
+    });
     await document.fonts.ready;
     var probe = document.createElement('div');
     probe.style.cssText = 'position:absolute;visibility:hidden;height:var(--page-h)';

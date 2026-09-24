@@ -44,6 +44,8 @@ import solve_ipc_failure from './tests/solve-ipc-failure.js';
 import nested_canvas_absorption from './tests/nested-canvas-absorption.js';
 import job_role_lock_regressions from './tests/job-role-lock-regressions.js';
 import application_handoff_dock from './tests/application-handoff-dock.js';
+import paste_identity_guard from './tests/paste-identity-guard.js';
+import paste_review_delta from './tests/paste-review-delta.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -93,6 +95,8 @@ const testGroups = [
   ['nested-canvas-absorption.js', nested_canvas_absorption],
   ['job-role-lock-regressions.js', job_role_lock_regressions],
   ['application-handoff-dock.js', application_handoff_dock],
+  ['paste-identity-guard.js', paste_identity_guard],
+  ['paste-review-delta.js', paste_review_delta],
 ];
 
 function validateTestRegistry(groups) {

@@ -1,11 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { assert } from './testHelpers.js';
 import {
+  APPLICATION_DOCK_BLOCKED_STATUSES,
   APPLICATION_DOCK_IDLE_STATUSES,
+  APPLICATION_DOCK_WORKING_STATUSES,
   APPLICATION_HANDOFF_LIMIT,
+  applicationAwaitsPaste,
+  applicationDockItemState,
   applicationDockRequest,
   applicationLimitMessage,
   brokenApplicationDockRequest,
+  workingApplicationDockRequest,
   getDismissedApplicationBundles,
   setDismissedApplicationBundles,
   flushApplicationDraftWrites,
@@ -50,15 +55,18 @@ const handoffRecord = (overrides = {}) => ({
 
 export default [
   {
-    name: 'application dock: only paste bundles awaiting a response take a slot',
+    name: 'application dock: only genuinely finished paste bundles give up their slot',
     run: () => {
       const nodes = [
         jobCard('a', pasteJob('job-a', 'queued')),
         jobCard('b', pasteJob('job-b', 'revision-required')),
         jobCard('c', pasteJob('job-c', 'invalid')),
-        // Terminal and app-owned states hold no prompt to paste against.
+        // Only the terminal pair holds no slot.
         jobCard('d', pasteJob('job-d', 'saved')),
         jobCard('e', pasteJob('job-e', 'failed')),
+        // The app's own post-accept work still holds its slot: no paste is
+        // possible, but the bundle is not finished — see
+        // APPLICATION_DOCK_WORKING_STATUSES.
         jobCard('f', pasteJob('job-f', 'importing')),
         jobCard('g', pasteJob('job-g', 'completed')),
         jobCard('h', pasteJob('job-h', 'paste-completed')),
@@ -70,10 +78,10 @@ export default [
       ];
       const selected = selectApplicationHandoffCandidates(nodes).map(node => node.id);
       assert(
-        selected.join(',') === 'a,b,c',
-        `expected only pending paste bundles, got ${selected.join(',') || '(none)'}`,
+        selected.join(',') === 'a,b,c,f,g,h',
+        `expected waiting and working bundles, got ${selected.join(',') || '(none)'}`,
       );
-      assert(countActiveApplicationHandoffs(nodes) === 3, 'count must agree with selection');
+      assert(countActiveApplicationHandoffs(nodes) === 6, 'count must agree with selection');
       assert(countActiveApplicationHandoffs(null) === 0, 'a missing node list is zero, not a throw');
       // The idle list is the single source of truth for "holds no slot"; a new
       // terminal status added there must not need a second edit here.
@@ -83,6 +91,47 @@ export default [
         )),
         'every idle status must be excluded',
       );
+    },
+  },
+  {
+    name: 'application dock: the blocked panel names a card action that actually exists',
+    run: () => {
+      const dialog = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const card = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      // A panel that deliberately keeps a bundle on screen owes the person
+      // the way out of it, and naming a button that does not exist is worse
+      // than naming none at all. This is the one place the dock points at an
+      // affordance it does not own, so the two have to be checked together.
+      assert(dialog.includes('press Retry layout check on its card')
+        && card.includes('Retry layout check')
+        && card.includes("localApplication.status === 'render-retry-required' && ("),
+      'the dock names the card\u2019s Retry layout check button, and the card still renders it for exactly that status');
+      return { checkedActions: 1 };
+    },
+  },
+  {
+    name: 'application dock: a working bundle is classified from the main process status, not the stale node copy',
+    run: () => {
+      const hook = readFileSync(new URL('../../src/hooks/useApplicationHandoffDock.js', import.meta.url), 'utf8');
+      // node.data.localApplication.status is written by a 2.5s card poll that
+      // accepting a response does not trigger. The refresh a submit fires
+      // therefore lands while that copy still reads the PRE-submit status,
+      // classifies as 'waiting', and drops the chip until the next full
+      // discovery interval — the exact disappearance the working item exists
+      // to stop, reintroduced while looking correct. getLocalApplicationHandoff
+      // returns manifest.status read from disk in the same call; that is the
+      // only current one.
+      assert(hook.includes('const freshStatus = result.localJob?.status || local.status;')
+        && hook.includes('const workingState = applicationDockItemState(freshStatus);')
+        && hook.includes('workingApplicationDockRequest({ node, canvasFilePath, status: freshStatus })')
+        && !hook.includes('applicationDockItemState(local.status)'),
+      'the dock classifies a working bundle from the status the main process just read, never from the node copy a poll has not refreshed');
+      // A completed paste whose status has not caught up even in the manifest
+      // is still the app working. Only an explicitly idle status ends it.
+      assert(hook.includes("if (result.completed && workingState !== 'idle') {")
+        && hook.includes("workingApplicationDockRequest({ node, canvasFilePath, status: 'paste-completed' })"),
+      'a completed paste whose status lags keeps its slot instead of vanishing');
+      return { checkedSignals: 2 };
     },
   },
   {
@@ -471,26 +520,149 @@ export default [
     },
   },
   {
-    name: 'application dock: a bundle past the paste phase occupies no slot and lights no action',
+    name: 'application dock: a blocked bundle keeps its slot and its number, but still lights no action',
     run: () => {
       // The result already exists; it is the LAYOUT check that is retried,
-      // from the card. There is no prompt to hand back, so counting it would
-      // spend a slot on a bundle the dock can never show — and light a
-      // Continue action that opens nothing.
+      // from the card. There is still no prompt to hand back, so Continue
+      // still opens nothing — but the bundle is NOT finished, and if the
+      // retry fails back into a paste round, its dock slot and its ordinal
+      // have to still be there waiting for it. This is the opposite of the
+      // old rule: render-retry-required used to hold no slot at all.
       assert(
-        APPLICATION_DOCK_IDLE_STATUSES.includes('render-retry-required'),
-        'render-retry-required is past the paste phase and holds no dock slot',
+        APPLICATION_DOCK_BLOCKED_STATUSES.includes('render-retry-required'),
+        'render-retry-required is blocked, not idle',
       );
       assert(
-        selectApplicationHandoffCandidates([jobCard('a', pasteJob('job-a', 'render-retry-required'))]).length === 0,
-        'it must not be a dock candidate',
+        !APPLICATION_DOCK_IDLE_STATUSES.includes('render-retry-required'),
+        'a blocked bundle must not be idle: idle is what releases the number',
       );
-      // The card's Continue button and the dock's candidate rule must not drift.
+      assert(
+        selectApplicationHandoffCandidates([jobCard('a', pasteJob('job-a', 'render-retry-required'))]).length === 1,
+        'it must still be a dock candidate, holding its slot',
+      );
+      assert(
+        applicationDockItemState('render-retry-required') === 'blocked',
+        'the shared classifier must call it blocked',
+      );
+      assert(
+        !applicationAwaitsPaste('render-retry-required'),
+        'there is still no prompt to paste against, so Continue must not light',
+      );
+      // The card's Continue button and the dock's "can this show a prompt"
+      // rule must not drift apart: both have to read the one shared predicate,
+      // not each maintain their own copy of which statuses qualify.
       const card = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       assert(
-        card.includes('!APPLICATION_DOCK_IDLE_STATUSES.includes(localApplication.status)'),
-        'the card must gate Continue AI handoff on the same list the dock selects with',
+        card.includes('applicationAwaitsPaste(localApplication.status)'),
+        'the card must gate Continue AI handoff on the shared awaits-paste predicate',
       );
+    },
+  },
+  {
+    name: 'application dock: every working status is a dock candidate',
+    run: () => {
+      for (const status of APPLICATION_DOCK_WORKING_STATUSES) {
+        assert(
+          selectApplicationHandoffCandidates([jobCard('a', pasteJob('job-a', status))]).length === 1,
+          `${status} must still hold a dock slot`,
+        );
+        assert(applicationDockItemState(status) === 'working', `${status} must classify as working`);
+        assert(!applicationAwaitsPaste(status), `${status} must not await a paste`);
+      }
+    },
+  },
+  {
+    name: 'application dock: a bundle keeps its ordinal across waiting to working',
+    run: () => {
+      // Two discovery passes for the SAME job — first while it is waiting on
+      // a paste, then after the accepted answer put it into its own
+      // post-accept work. The number on screen must not move between them,
+      // or the chip a person is watching for stops meaning the same bundle.
+      const ordinals = new Map();
+      const waiting = { jobId: 'job-a', requestId: applicationRequestId('job-a') };
+      assignApplicationOrdinals(ordinals, [waiting]);
+      const assignedNumber = ordinals.get('job-a');
+      assert(assignedNumber === 1, 'the first bundle in an empty queue takes number 1');
+      const working = {
+        jobId: 'job-a',
+        requestId: applicationRequestId('job-a'),
+        working: true,
+        workingState: 'working',
+      };
+      assignApplicationOrdinals(ordinals, [working]);
+      assert(
+        ordinals.get('job-a') === assignedNumber,
+        'the number must not change when the same bundle goes from waiting to working',
+      );
+    },
+  },
+  {
+    name: 'application dock: a new bundle cannot take a working bundle’s number',
+    run: () => {
+      const ordinals = new Map();
+      const working = {
+        jobId: 'job-a',
+        requestId: applicationRequestId('job-a'),
+        working: true,
+        workingState: 'working',
+      };
+      assignApplicationOrdinals(ordinals, [working]);
+      assert(ordinals.get('job-a') === 1, 'the working bundle holds number 1 on its own');
+      // A second bundle discovered while the first is still saving must not
+      // be able to seize 1 — that number is not free until job-a is idle.
+      const arriving = { jobId: 'job-b', requestId: applicationRequestId('job-b') };
+      assignApplicationOrdinals(ordinals, [working, arriving]);
+      assert(ordinals.get('job-a') === 1, 'the working bundle keeps its number');
+      assert(ordinals.get('job-b') === 2, 'the new bundle takes the next free number, never a held one');
+    },
+  },
+  {
+    name: 'application dock: applicationAwaitsPaste is true only for a genuinely waiting status',
+    run: () => {
+      for (const status of APPLICATION_DOCK_IDLE_STATUSES) {
+        assert(!applicationAwaitsPaste(status), `${status} (idle) must not await a paste`);
+      }
+      for (const status of APPLICATION_DOCK_WORKING_STATUSES) {
+        assert(!applicationAwaitsPaste(status), `${status} (working) must not await a paste`);
+      }
+      for (const status of APPLICATION_DOCK_BLOCKED_STATUSES) {
+        assert(!applicationAwaitsPaste(status), `${status} (blocked) must not await a paste`);
+      }
+      assert(applicationAwaitsPaste('queued'), 'a fresh waiting bundle must await a paste');
+      assert(applicationAwaitsPaste('revision-required'), 'a correction round is still waiting on a paste');
+    },
+  },
+  {
+    name: 'application dock: workingApplicationDockRequest mirrors its broken sibling’s identity fields',
+    run: () => {
+      assert(
+        workingApplicationDockRequest({ node: null, status: 'importing' }) === null,
+        'no node, no item',
+      );
+      assert(
+        workingApplicationDockRequest({ node: jobCard('a', null), status: 'importing' }) === null,
+        'a card with no bundle owns no handoff',
+      );
+
+      const node = jobCard('card-1', pasteJob('job-1', 'importing'));
+      const working = workingApplicationDockRequest({ node, status: 'importing' });
+      const broken = brokenApplicationDockRequest({ node, message: 'x' });
+      assert(working, 'a usable node must produce an item');
+      for (const field of ['stage', 'jobId', 'nodeId', 'requestId', 'canvasFilePath', 'label', 'subject']) {
+        assert(
+          working[field] === broken[field],
+          `working and broken items must carry the same ${field}, got ${working[field]} vs ${broken[field]}`,
+        );
+      }
+      assert(working.working === true, 'a working item must be flagged working');
+      assert(working.workingState === 'working', 'importing must classify as working');
+      assert(working.prompt === '', 'a working item has nothing to paste against');
+
+      const blocked = workingApplicationDockRequest({
+        node: jobCard('card-2', pasteJob('job-2', 'render-retry-required')),
+        status: 'render-retry-required',
+      });
+      assert(blocked.workingState === 'blocked', 'render-retry-required must classify as blocked');
     },
   },
   {
@@ -662,6 +834,96 @@ export default [
           `the card must read ${field} off the discard event detail`,
         );
       }
+    },
+  },
+  {
+    name: 'application dock: the prompt textarea and panel body both reset their scroll offset on every new prompt',
+    run: () => {
+      // Two scrollers are reused for every prompt the dock ever shows: the
+      // <textarea id="non-api-ai-prompt">, and the <form ref={panelBodyRef}>
+      // panel body wrapped around it. Both keep their scroll offset across a
+      // value change on their own, and the panel body's height genuinely
+      // varies prompt to prompt (attachments block, error banner, fix-count
+      // chip, full-prompt escape hatch), so a leftover offset there does not
+      // merely hold position — it can land on unrelated content or push the
+      // action buttons off the bottom of a shorter prompt. Without an
+      // explicit reset, submitting a response from halfway down a long
+      // prompt opens the NEXT prompt at that same stale offset in one or
+      // both scrollers. This locks the fix in place against the ways it
+      // could silently regress: either ref going missing, the identity check
+      // running after a ref read instead of before, the bail-out firing when
+      // only one scroller is unmounted instead of both, either scroller's
+      // reset being dropped, the identity dropping displayedPrompt, or the
+      // effect downgrading to useEffect (which paints the old offset for one
+      // frame before the reset runs).
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+
+      // Both scrollers must be the exact nodes the reset can reach, and the
+      // textarea must render the exact value the reset is keyed on — not
+      // some other expression that could drift out of sync with what is
+      // actually on screen.
+      assert(dock.includes('ref={promptFieldRef}'), 'the prompt textarea must carry the ref the scroll reset uses');
+      assert(dock.includes('ref={panelBodyRef}'), 'the panel body form must carry the ref the scroll reset uses');
+      assert(dock.includes('value={displayedPrompt}'), 'the prompt textarea must render displayedPrompt itself, not a re-derived expression');
+
+      // The reset must be a useLayoutEffect — not useEffect, which would let
+      // the browser paint the old scroll offset for one frame before the
+      // reset ran — and it must stay keyed on promptScrollIdentity. Isolate
+      // its body between those two anchors so the checks below are specific
+      // to this effect without depending on the exact lines around it.
+      const effectStart = dock.indexOf('useLayoutEffect(() => {');
+      assert(effectStart >= 0, 'the scroll reset must be a useLayoutEffect');
+      const depArrayMarker = '}, [promptScrollIdentity]);';
+      const effectEnd = dock.indexOf(depArrayMarker, effectStart);
+      assert(effectEnd > effectStart, 'the layout effect must stay keyed on promptScrollIdentity');
+      const effectBody = dock.slice(effectStart, effectEnd);
+
+      // The identity check has to run before either ref is read: that is what
+      // makes an unrelated re-render (same prompt, some other state changing)
+      // a no-op instead of re-zeroing a scroller the person is mid-read on.
+      const identityCheckIndex = effectBody.indexOf('promptScrollIdentityRef.current === promptScrollIdentity');
+      const fieldReadIndex = effectBody.indexOf('promptFieldRef.current');
+      const bodyReadIndex = effectBody.indexOf('panelBodyRef.current');
+      assert(
+        identityCheckIndex >= 0 && fieldReadIndex > identityCheckIndex && bodyReadIndex > identityCheckIndex,
+        'the identity check must run before either ref is read',
+      );
+
+      // The effect must give up only when BOTH scrollers are unmounted (the
+      // dock is collapsed) — bailing on just one missing ref would skip the
+      // reset for whichever scroller is actually mounted.
+      assert(
+        effectBody.includes('if (!field && !body) return;'),
+        'the effect must bail only when both scrollers are unmounted',
+      );
+
+      // The textarea reset must zero both axes, guarded so it never runs
+      // against a null ref.
+      const fieldGuardIndex = effectBody.indexOf('if (field)');
+      const fieldScrollTopIndex = effectBody.indexOf('field.scrollTop = 0');
+      const fieldScrollLeftIndex = effectBody.indexOf('field.scrollLeft = 0');
+      assert(
+        fieldGuardIndex >= 0 && fieldScrollTopIndex > fieldGuardIndex && fieldScrollLeftIndex > fieldScrollTopIndex,
+        'the textarea reset must zero scrollTop and scrollLeft inside an `if (field)` guard',
+      );
+
+      // The panel body reset rides the same trigger. It only needs scrollTop
+      // zeroed — the body scrolls vertically only — so it has no scrollLeft
+      // companion the way the textarea's reset does.
+      assert(
+        effectBody.includes('body.scrollTop = 0'),
+        'the panel body must have its scrollTop zeroed on the same trigger as the textarea',
+      );
+
+      // promptScrollIdentity must include displayedPrompt itself, not just the
+      // handoffCode/revision/correction bookkeeping — a correction reissued
+      // under the SAME handoffCode (an ordinary rejection keeps its stage
+      // code) still has to reset both scrollers, and only the text changing
+      // can catch that case.
+      assert(
+        dock.includes('    displayedPrompt,\n  ].join(\'\\n\');'),
+        'promptScrollIdentity must include displayedPrompt so a same-code correction still resets the scroll',
+      );
     },
   },
   {

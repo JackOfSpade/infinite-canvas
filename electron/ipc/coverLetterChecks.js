@@ -69,6 +69,52 @@ export const MIN_SHARED_SHAPE_PARAGRAPHS = 3;
 // can clear them; the cap only bounds a letter templated at more positions
 // than a message can usefully list, and that letter is told more remain.
 const MAX_REPEATED_SHAPE_OBSERVATIONS = 4;
+// How long a verbatim run has to be before the letter is restating itself.
+// Two floors, because the distance between the two occurrences is what decides
+// when an echo reads as restatement: inside one paragraph the first statement
+// is still in the reader's head when the second arrives, so three words
+// already land as the same thing said twice, while across paragraphs the
+// reader has moved on and three words of ordinary English recur without
+// anybody noticing. Exported so the letter contract prints the two floors this
+// check actually applies instead of a hand-copied pair beside them.
+export const MIN_SAME_PARAGRAPH_REPEAT_WORDS = 3;
+export const MIN_CROSS_PARAGRAPH_REPEAT_WORDS = 4;
+// How much of a run has to be CONTENT before repeating it is the letter saying
+// one thing twice. A run at either floor above is short enough to be nothing
+// but the syntax English gives a sentence, and the first build of this check had
+// no such test, so a sweep of the reported runs found six inside one paragraph
+// ("one of the", "in order to", "there was no", "that had to be", "as well as
+// the", "i worked on the") and four across paragraphs at the wider floor
+// ("i was able to", "at the same time", "the work had to", "was one of the
+// things"). The check's own message used to call a reported run "the same
+// statement made twice", which is simply untrue of every one of those, and each
+// would have cost a manual handoff round; the message states what it measured
+// now, for a second reason recorded above checkRepeatedPhrase.
+//
+// Two, not one, and not "every word is a function word". Measured: all ten of
+// those runs carry either no content word or exactly one, while the three real
+// repeats in the same letter carry two ("the engineering challenge was"), three
+// ("scalability across the ui and backend") and three ("device management
+// platforms"). So two is the boundary the measurement draws, and the stricter
+// all-function-words test would have excused only three of the ten. The reason
+// it lands there rather than anywhere else: one content word inside a run this
+// short is a topic word sitting in the frame the language gives it, and a topic
+// recurs in a paragraph about it; a statement takes two content terms, a thing
+// and what is said of it, before saying it again can be saying it twice.
+export const MIN_REPEAT_CONTENT_WORDS = 2;
+// The most repeated runs one rejection names. Every run over a floor is the
+// same defect class, so they travel in one message and one handoff round can
+// clear the class; the cap only bounds a letter that restates itself at more
+// places than a message can usefully list, and that letter is told more
+// remain.
+const MAX_REPEATED_PHRASE_OBSERVATIONS = 4;
+// longestSharedRun answers with ONE run per pair of spans, so a run this check
+// excuses would stand in front of every shorter repeat in the same pair and
+// hide it. An excused run is blanked out of both spans and the pair is asked
+// again, up to this many times. Three is past anything the measured letters
+// have shown in one sentence pair, and the bound is what keeps a pathological
+// span from looping.
+const MAX_EXCUSED_RUN_PEELS = 3;
 const OBSERVATION_SNIPPET_WORDS = 8;
 
 export const BANNED_GENERIC_PHRASES = Object.freeze([
@@ -165,8 +211,16 @@ function normalized(value) {
   return text(value).toLowerCase();
 }
 
+// Named rather than inlined because two readers need the same token
+// boundaries: `words()` below, and the repetition check, which has to know
+// where each token starts in the source string so it can drop the words a
+// mandated carrier occupies. A second copy of this pattern would be a second
+// tokenizer, and the two would disagree on the first hyphenated or possessive
+// word that mattered.
+const WORD_TOKEN_RE = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu;
+
 function words(value) {
-  return normalized(value).match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu) || [];
+  return normalized(value).match(WORD_TOKEN_RE) || [];
 }
 
 function wordCount(value) {
@@ -393,7 +447,17 @@ export function checkNeedGrounding(needs = [], jobText = '', researchText = '') 
 const ARGUMENT_TRANSFER_CUE = /\b(?:i\s+would\s+(?:apply|bring|use|contribute)|i\s+can\s+(?:apply|bring|use)|(?:would\s+)?(?:apply|bring|use|contribute)\s+(?:that|this|my|the)\s+(?:experience|work|capability|practice|approach|judgment)|(?:that|this|these|those|the)\s+(?:[\p{L}'’-]+\s+){0,5}(?:pattern|patterns|practice|practices|experience|work|capability|capabilities|approach|approaches|judgment|judgments)\s+would\s+(?:help|support|enable)|help(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work)|support(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work))\b/iu;
 const GENERIC_ARGUMENT_RELEVANCE = /\b(?:experience|background|skills?|capabilit(?:y|ies)|work)\b[^.!?]{0,50}\b(?:relevant|applicable|valuable|useful|beneficial|transferable|well[- ]suited|fit)\b|\b(?:innovative|dynamic|fast[- ]paced)\s+(?:team|environment|work)\b/iu;
 const VACUOUS_TARGET_WORK = /\b(?:interface and service work|service and interface work)\b/iu;
-const CANDIDATE_CAPABILITY_CUE = /\b(?:my|i(?:'m| am| have))\b[^.!?]{0,100}\b(?:experience|background|skill|capabilit(?:y|ies)|practice|approach|judgment|foundation)\b|\b(?:i\s+(?:have\s+)?(?:worked\s+on|build|design|implement|maintain|improve|secure|have\s+built))\b[^.!?]{0,120}\b(?:interface|interfaces|workflow|workflows|service|services|system|systems|application|applications|software|access)\b|\bmy\b[^.!?]{0,60}\bwork\s+spans\b|\b(?:designing|building|implementing|maintaining|improving|securing)\b[^.!?]{0,80}\b(?:is|has been|remains)\b[^.!?]{0,80}\b(?:a|the)\b[^.!?]{0,40}\b(?:capability|skill|foundation|strength)\b/iu;
+// The final alternative is the abstraction beat that sits between a
+// paragraph's proof and its transfer: a sentence whose subject is the WORK
+// and whose predicate says what the work consisted of. Every shape before it
+// makes the CANDIDATE the subject (“my experience …”, “I build …”), which is the
+// register that yields generic capability assertions; without a work-subject
+// shape a writer reaching for the general point had no legal span and wrote
+// none, leaving the transfer to reach back to a bare mechanism. The gerund
+// must take an object because a gerund with one is a verb while a bare one is
+// usually an adjective — that is what separates “was in absorbing those
+// differences” from “was mostly rewarding”.
+const CANDIDATE_CAPABILITY_CUE = /\b(?:my|i(?:'m| am| have))\b[^.!?]{0,100}\b(?:experience|background|skill|capabilit(?:y|ies)|practice|approach|judgment|foundation)\b|\b(?:i\s+(?:have\s+)?(?:worked\s+on|build|design|implement|maintain|improve|secure|have\s+built))\b[^.!?]{0,120}\b(?:interface|interfaces|workflow|workflows|service|services|system|systems|application|applications|software|access)\b|\bmy\b[^.!?]{0,60}\bwork\s+spans\b|\b(?:designing|building|implementing|maintaining|improving|securing)\b[^.!?]{0,80}\b(?:is|has been|remains)\b[^.!?]{0,80}\b(?:a|the)\b[^.!?]{0,40}\b(?:capability|skill|foundation|strength)\b|\b(?:the|that)\s+(?:engineering|work|hard\s+part|difficulty|challenge|problem)\b[^.!?]{0,40}\b(?:was|lay|sat)\b[^.!?]{0,60}?\b(?:in|largely|mostly|mainly|less|chiefly|really)\b[^.!?]{0,60}?\b[\p{L}]+ing\s+(?:the|a|an|this|that|these|those|his|her|their|its|our|my|what|how|which|each|every|all|both|one|several|many|most|some|any)\b/iu;
 // The two cues above are matched on the literal word form, not on meaning, and
 // every mapping span must be an exact span of the final paragraph — so a
 // paragraph written without one of these shapes has no legal span to offer,
@@ -408,7 +472,9 @@ export const ARGUMENT_CLAIM_SPAN_RULE = 'a claim span states the candidate capab
   + 'I\u2019m or I have, followed within the sentence by experience, background, skill, capability, practice, approach, judgment or '
   + 'foundation; I build, design, implement, maintain, improve, secure or worked on, followed within the sentence by an interface, '
   + 'workflow, service, system, application, software or access; my \u2026 work spans; or designing, building, implementing, '
-  + 'maintaining, improving or securing something is, has been or remains a capability, skill, foundation or strength \u2014 and it '
+  + 'maintaining, improving or securing something is, has been or remains a capability, skill, foundation or strength; or the or '
+  + 'that engineering, work, hard part, difficulty, challenge or problem was, lay or sat in, largely, mostly, mainly, less, '
+  + 'chiefly or really doing something, where that gerund is followed by its own object rather than standing alone as a mood \u2014 and it '
   + 'names the capability rather than one particular past action, and never the transfer';
 export const ARGUMENT_RELEVANCE_SPAN_RULE = 'a relevance span states the transfer outright, in one of these shapes: I would apply, '
   + 'bring, use or contribute; I can apply, bring or use; apply, bring, use or contribute that, this, my or the experience, work, '
@@ -825,6 +891,39 @@ export function paragraphArgumentSpanGaps(paragraph = '', postingQuoteText = '')
   if (!CANDIDATE_CAPABILITY_CUE.test(value)) gaps.push({ field: 'claim', rule: ARGUMENT_CLAIM_SPAN_RULE });
   if (!paragraphOffersRelevanceSpan(value, postingQuoteText)) gaps.push({ field: 'relevance', rule: ARGUMENT_RELEVANCE_SPAN_RULE });
   return gaps;
+}
+
+// Deliberately wider than PAST_PROOF_CUE's closed verb list. That list decides
+// which paragraph owes an argumentMapping, a question about one paragraph's
+// argument; this one asks whether the candidate ever acts anywhere in the
+// letter, and “I kept the service dependable” is first-person agency even
+// though "kept" is not a proof verb. Reading the narrow list here would
+// misreport ordinary first-person prose as evasion. Present-tense lookalikes
+// ending in -ed are excluded so “I need …” is not read as a past action.
+const FIRST_PERSON_AGENCY_CUE = /\b(?:i|we)\s+(?:(?:have|had|also|then|later|personally)\s+){0,2}(?!need|exceed|proceed|succeed|speed)(?:[\p{L}]+ed|built|kept|wrote|led|ran|made|took|gave|held|sent|drove|brought|taught|met|set|put|began|chose|found|grew|knew|left|paid|read|said|saw|sold|spent|stood|told|won|rebuilt|oversaw)\b/iu;
+
+/**
+ * A letter in which no paragraph ever makes the candidate the subject of a
+ * completed action. Every span rule above is gated on that cue, so a writer
+ * who describes the artifact acting instead — “my app connected …”, “a
+ * project moved …”, “pipelines handled …” — owes no argumentMapping on any
+ * paragraph, and the claim/proof/relevance triad that carries the argument is
+ * never demanded. The letter then reads as a tour of systems that happen to
+ * exist rather than work the candidate did, which is the same defect from the
+ * reader's side. One first-person proof somewhere in an evidence-bearing
+ * letter is the floor, not a style preference: below it the whole argument
+ * battery silently has nothing to grade.
+ */
+export function checkCandidateAgency(paragraphs = []) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
+  if (!list.length) return result('candidate-agency', true, 'no paragraphs to read for candidate agency');
+  const proofCount = list.filter(paragraph => FIRST_PERSON_AGENCY_CUE.test(paragraph)).length;
+  if (proofCount) {
+    return result('candidate-agency', true,
+      `${proofCount} paragraph(s) state a completed action in the candidate's own first person`);
+  }
+  return result('candidate-agency', false,
+    'no paragraph states a completed action in the candidate\u2019s own first person; the letter attributes every action to an artifact, project or system, so no paragraph owes an argumentMapping and the claim, proof and relevance spans go ungraded');
 }
 
 const PERFORMANCE_NEED_KINDS = new Set(['capability', 'domain', 'scale']);
@@ -2754,7 +2853,15 @@ export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = [
     const previous = normalized(list[index - 1]);
     const employer = employers.find(name => words(name).includes(label) && previous.includes(normalized(name)));
     if (!employer) continue;
-    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming ${employer} in the prior paragraph; when the candidate remains the subject, continue naturally with “I …” or use “In that role” if a re-entry cue clarifies the continued role; repeat ${employer} if another employer or role makes the reference ambiguous`);
+    // Names the offending span and the shape of the repair, and quotes no
+    // wording for the letter to adopt. The rule is stated in full beside
+    // checkRepeatedSentenceShape below: a gate that hands over a string hands
+    // over something to copy into the letter. This message and the adjacent one
+    // both used to offer a literal re-entry cue as the repair, and the letter of
+    // 2026-09-23 opened two of its four paragraphs with exactly that cue. The
+    // employer's own name stays: it is the candidate's employer, already in the
+    // letter, and it is what makes the observation locatable.
+    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming ${employer} in the prior paragraph; open instead on whatever this paragraph is actually about, whether that is the candidate, the work itself, or ${employer} named in full where another employer or role could be the referent`);
     if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
   }
   return observationResult('opening-employer-shorthand', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
@@ -2784,7 +2891,10 @@ export function checkAdjacentEmployerRepetition(paragraphs = [], employerNames =
     const employer = priorMentions[0];
     const repeatedCandidateOpening = new RegExp(`^(?:at\\s+)?${escapeRegExp(employer)}\\s*,\\s*i\\b`, 'iu');
     if (!repeatedCandidateOpening.test(opening)) continue;
-    observations.push(`paragraph ${index + 1} repeats ${employer} in its opening immediately after paragraph ${index}; use “In that role” when a cross-paragraph re-entry cue helps, or continue with “I …” when the continuity is already clear. Keep ${employer} if it distinguishes employers or roles`);
+    // Same rule as the message above, and the same repair: describe what the
+    // opening should be about and stop. A named cue here is a phrase the letter
+    // will contain, which is how two of four paragraphs came to share one.
+    observations.push(`paragraph ${index + 1} repeats ${employer} in its opening immediately after paragraph ${index}; one established employer needs no re-introduction, so let the opening start from this paragraph's own subject and keep ${employer} only where another employer or role could be the referent`);
     if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
   }
   return observationResult('adjacent-employer-repetition', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
@@ -2860,6 +2970,17 @@ export const SHARED_SENTENCE_SHAPE_CEILING_RULE =
   `at most ${SHAPE_CEILING_FLOOR} of them may carry one shape,`
   + ` and once the letter runs longer than ${SHAPE_CEILING_FLOOR + SHAPE_CEILING_OFFSET} paragraphs`
   + ` the ceiling is its paragraph count less ${SHAPE_CEILING_OFFSET}`;
+// The adjacency branch of the same check, stated for the contract. A ceiling is
+// a count, and a count cannot see distance: two adjacent paragraphs are always
+// at or under SHAPE_CEILING_FLOOR, which is how the letter of 2026-09-23 opened
+// paragraphs 2 and 3 on one frame and passed the whole battery. The
+// clause has no number of its own, so there is none to derive; it is written
+// beside the ceiling rule it qualifies so the contract can never print the
+// formula without the condition the formula cannot express.
+export const ADJACENT_SENTENCE_SHAPE_RULE =
+  'and no two paragraphs standing next to each other may carry one shape at all,'
+  + ' because the parallelism that ceiling leaves room for is parallelism spread through the letter,'
+  + ' not paragraphs running together';
 
 /**
  * Names where each repeat sits. A paragraph number alone was enough while only
@@ -2870,6 +2991,40 @@ function joinShapeLocations(locations) {
   const parts = locations.map(({ paragraph, sentence }) => `paragraph ${paragraph} sentence ${sentence}`);
   if (parts.length < 2) return parts[0];
   return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * The locations of one shape that sit in consecutive paragraphs, in paragraph
+ * order. A location with no neighbour one paragraph away is dropped: a shape in
+ * paragraphs 1 and 4 is spread parallelism the ceiling governs, and naming
+ * paragraph 1 in an adjacency report would point the writer at a sentence the
+ * report is not about.
+ */
+function backToBackShapeLocations(locations) {
+  const ordered = [...locations].sort((left, right) => left.paragraph - right.paragraph || left.sentence - right.sentence);
+  return ordered.filter((location, index) => ordered.some((other, otherIndex) =>
+    otherIndex !== index && Math.abs(other.paragraph - location.paragraph) === 1));
+}
+
+/**
+ * How many of those sentences have to move. Breaking a run of consecutive
+ * paragraphs takes every second paragraph in the run, so a pair costs one
+ * rewrite and a triad also costs one: the middle. Each maximal run is counted
+ * on its own, because two separate adjacent pairs of one shape are two repairs.
+ */
+function backToBackShapeRewrites(locations) {
+  let rewrites = 0;
+  let run = 1;
+  for (let index = 1; index <= locations.length; index++) {
+    const continues = index < locations.length && locations[index].paragraph - locations[index - 1].paragraph === 1;
+    if (continues) {
+      run += 1;
+      continue;
+    }
+    rewrites += Math.floor(run / 2);
+    run = 1;
+  }
+  return rewrites;
 }
 
 /**
@@ -2913,9 +3068,40 @@ export function checkRepeatedSentenceShape(paragraphs = []) {
   const over = [...shapes]
     .filter(([, locations]) => locations.length > ceiling)
     .sort((left, right) => right[1].length - left[1].length);
-  if (!over.length) {
+  // The ceiling counts, and a count cannot see distance. It exists to permit
+  // deliberate parallelism, which is why it allows a shape in all but two
+  // paragraphs; but what a reader registers as one template filled twice is
+  // back-to-back, and two adjacent paragraphs are always at or under a ceiling
+  // that starts at two. The live letter of 2026-09-23 is the measurement:
+  // paragraph 2 opened "In that role, my application experience includes" and
+  // paragraph 3 answered "In that Software Engineer role, my migration
+  // experience spans", one shape in consecutive paragraphs, two of four, and
+  // the whole battery passed it. So adjacency is read as its own defect, and
+  // only for shapes the count has not already reported, because a shape over
+  // the ceiling is the same defect and must not be named twice in one message.
+  //
+  // This branch charges a shape checkRepeatedPhrase excuses the words of, and on
+  // that same letter it does: it reports paragraph 1 sentence 5 and paragraph 2
+  // sentence 4 for one shape, "i would * that *", while
+  // repeatComparisonSentence removes those very words from the repeat
+  // comparison. Read as one rule the pair looks contradictory; they are two
+  // levels, and what the writer was free to do differs at each. ARGUMENT_RELEVANCE_SPAN_RULE mandates a transfer
+  // carrier but offers a CHOICE of shapes to carry it in, so once one is chosen
+  // its words are compliance and charging them would charge obedience. Reaching
+  // for the same shape again in the very next paragraph is not compliance with
+  // anything: the rule left that open, and paragraph 3 of that letter shows it
+  // was satisfiable, transferring on "I can apply that" while 1 and 2 both used
+  // "I would apply that". Rotating among the shapes a rule offers is exactly
+  // what this check exists to ask for, so the asymmetry is the design.
+  const adjacent = [...shapes]
+    .filter(([frame, locations]) => !over.some(([reported]) => reported === frame)
+      && backToBackShapeLocations(locations).length > 0)
+    .map(([frame, locations]) => [frame, backToBackShapeLocations(locations)])
+    .sort((left, right) => right[1].length - left[1].length
+      || left[1][0].paragraph - right[1][0].paragraph);
+  if (!over.length && !adjacent.length) {
     return result('repeated-sentence-shape', true,
-      `no sentence shape is carried by more than ${ceiling} of ${list.length} paragraph(s)`);
+      `no sentence shape is carried by more than ${ceiling} of ${list.length} paragraph(s) or by two consecutive paragraphs`);
   }
   // No em dash and no suggested replacement wording: this detail is quoted
   // back to the writer verbatim, and a gate that hands over a string hands
@@ -2929,10 +3115,508 @@ export function checkRepeatedSentenceShape(paragraphs = []) {
     `${joinShapeLocations(locations)} reduce to the same sentence shape “${boundedDetailValue(frame)}”,`
     + ` and at most ${ceiling} of these ${list.length} paragraphs may carry one shape,`
     + ` so at least ${locations.length - ceiling} of those ${locations.length} sentences must be rewritten to a different shape`);
+  // The adjacency report does the same arithmetic the count report does, so the
+  // writer is never left to work out how many sentences have to move: breaking
+  // a run of N consecutive paragraphs takes every second one of them.
+  const adjacentVisible = adjacent.slice(0, MAX_REPEATED_SHAPE_OBSERVATIONS);
+  const adjacentOmitted = adjacent.length - adjacentVisible.length;
+  const adjacentReports = adjacentVisible.map(([frame, locations]) =>
+    `${joinShapeLocations(locations)} carry the same sentence shape “${boundedDetailValue(frame)}” in back-to-back paragraphs,`
+    + ` and the ${ceiling} paragraphs the count allows one shape are for parallelism spread through the letter rather than for paragraphs running together,`
+    + ` so at least ${backToBackShapeRewrites(locations)} of those ${locations.length} sentences must be rewritten to a different shape`);
   return result('repeated-sentence-shape', false,
-    `${reports.join('; ')}${omitted ? `; ${omitted} additional repeated shape(s) omitted` : ''};`
+    `${[...reports, ...adjacentReports].join('; ')}`
+    + `${omitted ? `; ${omitted} additional repeated shape(s) omitted` : ''}`
+    + `${adjacentOmitted ? `; ${adjacentOmitted} additional back-to-back shape(s) omitted` : ''};`
     + ` a sentence shape is that sentence's first ${SENTENCE_SHAPE_FRAME_WORDS} words with every run of content words shown as ${FRAME_WILDCARD},`
     + ` so rotating the verb or the noun through the same slots leaves it unchanged`);
+}
+
+// Derived from the cue the argument gate enforces rather than restated, so the
+// rule that MANDATES the carrier and the exclusion that excuses it can never
+// drift apart. Only the global flag differs: the exclusion has to find every
+// carrier in a sentence, not the first one. matchAll iterates a clone, so the
+// shared literal's lastIndex is never carried between callers.
+const ARGUMENT_TRANSFER_CUE_GLOBAL = new RegExp(ARGUMENT_TRANSFER_CUE.source, `${ARGUMENT_TRANSFER_CUE.flags}g`);
+// A blanked position stands for a word removed from the comparison. Real tokens
+// come out of WORD_TOKEN_RE, which matches letters, digits and two connectors,
+// so no word of the letter can contain a space or a colon and none of them can
+// ever equal one of these. The position is part of the value because two
+// blanked positions must not match each other either: two sentences that both
+// dropped the same carrier would otherwise read as sharing it.
+const BLANKED_TOKEN_PREFIX = 'blanked ';
+
+function blankedToken(key, index) {
+  return `${BLANKED_TOKEN_PREFIX}${key}:${index}`;
+}
+
+/** Every occurrence of one word run replaced by blanks the comparison cannot match. */
+function blankWordRun(tokens, runWords, key) {
+  if (!runWords.length) return tokens;
+  const blanked = [...tokens];
+  for (let index = 0; index + runWords.length <= tokens.length; index++) {
+    if (!runWords.every((word, offset) => tokens[index + offset] === word)) continue;
+    for (let offset = 0; offset < runWords.length; offset++) blanked[index + offset] = blankedToken(key, index + offset);
+  }
+  return blanked;
+}
+
+// The phrase a transfer carrier hands over, and why the walk below reads only a
+// determiner-headed one. ARGUMENT_RELEVANCE_ANAPHORA_RULE permits a bare
+// back-reference in six fixed phrases only, so a capability that fits none of
+// them has to be NAMED again in the transfer sentence, and that re-naming is the
+// noun phrase the carrier's verb takes: “I would apply THAT SCALABILITY
+// APPROACH”, “I would apply MY EXPERIENCE DELIVERING SUPPORTED SYSTEMS”. Both
+// are mandated, and both land beside the claim they answer inside one paragraph.
+//
+// A carrier whose own match already reaches the capability noun (“apply that
+// experience”) has named what it transfers inside the match, so there is nothing
+// to walk; and the two cue shapes that end on the TARGET rather than on a
+// capability (“helping this role”, “supporting your team”) are followed by the
+// target's own words, which no rule mandates. Requiring a determiner is what
+// separates the two cases without a second cue list.
+const TRANSFERRED_CAPABILITY_DETERMINERS = new Set([
+  'a', 'an', 'the', 'this', 'that', 'these', 'those', 'my', 'our', 'its', 'their', 'his', 'her',
+]);
+// The real end of either phrase is the first function word after it, which is
+// what stops the walk on every letter measured so far; this is the bound for a
+// sentence that has no function word left. Five words is the longest re-naming
+// the measured letters carry (“my experience delivering supported systems”), so
+// six leaves one word of headroom and still cannot swallow a sentence's tail.
+const MAX_TRANSFERRED_CAPABILITY_WORDS = 6;
+// Where ARGUMENT_RELEVANCE_SPAN_RULE's shapes put the responsibility the
+// transfer reaches: apply, bring, use or contribute the capability TO the
+// responsibility. The responsibility has to be named — relevanceNamesNeed grades
+// the relevance span for two content words of its jobNeedQuote — and at the
+// drafting stage no caller yet holds that quote, so the slot the rule mandates
+// is read instead of the words it will later be graded against. Only this one
+// preposition: the measured letter of 2026-09-23 hung “across UI and backend”
+// off its capability phrase before reaching “to feature design …”, and reading
+// every preposition would have excused exactly the echo this round is for.
+const TRANSFER_TARGET_PREPOSITION = 'to';
+// Read off the three regexes the anaphora rule is PRINTED from rather than
+// restated, so the phrases a writer is told may stand in for the re-naming are
+// the same ones excused here. Global copies only: the exclusion has to find
+// every occurrence in a sentence, not the first.
+const PERMITTED_ANAPHORA_GLOBAL = [
+  DIRECT_PROOF_ANAPHORA, DIRECT_PROOF_ARTIFACT_REFERENCE, DIRECT_PROOF_PRONOUN_REFERENCE,
+].map(pattern => new RegExp(pattern.source, `${pattern.flags}g`));
+
+/** Character spans one regex matches in a sentence. */
+function matchedSpans(source, pattern) {
+  return [...source.matchAll(pattern)].map(match => ({ start: match.index, end: match.index + match[0].length }));
+}
+
+/** Whether a token sits inside any of those spans. */
+function tokenInSpans(token, spans) {
+  return spans.some(span => token.start < span.end && token.end > span.start);
+}
+
+/**
+ * Token positions of one noun phrase: its determiner, then its words up to the
+ * first function word.
+ *
+ * A function word is where a noun phrase ends: “that scalability approach ACROSS
+ * ui and backend” ends at “across”, “my experience delivering supported systems
+ * TO reliable system delivery” at “to”, “the reliable system delivery THIS role
+ * needs” at “this”. FRAME_FUNCTION_WORDS is the same closed set the shape check
+ * holds literal and runContentWordCount counts against, so the three checks
+ * agree on which words are syntax.
+ *
+ * `requireDeterminer` is what separates the two slots. A capability handed over
+ * is written with one (“that scalability approach”, “my experience delivering
+ * supported systems”), and requiring it is what keeps the walk off a carrier
+ * that already named the capability inside its own match (“apply that experience
+ * to …”, where the next word is the preposition) and off the two cue shapes that
+ * end on the target rather than a capability. A responsibility is as often bare
+ * (“to reliable system delivery”) as determined (“to the reliable system
+ * delivery this role needs”), so the target slot takes either.
+ */
+function nounPhrasePositions(tokens, start, { requireDeterminer }) {
+  if (start < 0 || start >= tokens.length) return [];
+  const determined = TRANSFERRED_CAPABILITY_DETERMINERS.has(tokens[start].word);
+  if (requireDeterminer && !determined) return [];
+  const positions = determined ? [start] : [];
+  for (let index = determined ? start + 1 : start;
+    index < tokens.length && positions.length < MAX_TRANSFERRED_CAPABILITY_WORDS; index++) {
+    if (FRAME_FUNCTION_WORDS.has(tokens[index].word)) break;
+    positions.push(index);
+  }
+  return positions;
+}
+
+/**
+ * Token positions one carrier's mandated phrases occupy: the capability it hands
+ * over, and the responsibility it reaches.
+ *
+ * Everything between the two is the writer's own, which is the whole point of
+ * reading them as two phrases rather than as one span from the carrier to the
+ * end of the sentence. On the measured letter that middle is “across UI and
+ * backend”, carried verbatim out of the proof sentence three sentences earlier.
+ */
+function mandatedTransferPositions(tokens, carrier) {
+  const afterCarrier = tokens.findIndex(token => token.start >= carrier.end);
+  if (afterCarrier < 0) return [];
+  const capability = nounPhrasePositions(tokens, afterCarrier, { requireDeterminer: true });
+  const searchFrom = capability.length ? capability[capability.length - 1] + 1 : afterCarrier;
+  const preposition = tokens
+    .findIndex((token, index) => index >= searchFrom && token.word === TRANSFER_TARGET_PREPOSITION);
+  const target = preposition < 0 ? [] : nounPhrasePositions(tokens, preposition + 1, { requireDeterminer: false });
+  return [...capability, ...target];
+}
+
+/**
+ * One sentence as a comparable word stream, with the words a mandated argument
+ * carrier occupies blanked out, plus a second stream for the comparison against
+ * its OWN paragraph, where the rules dictate more of the sentence than the
+ * carrier.
+ *
+ * ARGUMENT_TRANSFER_CUE is not a phrase the writer chose. The argument contract
+ * REQUIRES that carrier shape in every proof-bearing paragraph and prints it to
+ * the stage that writes them, so a letter whose paragraphs all carry it is
+ * obeying the rules, and reporting the repeat would make two rules contradict
+ * each other. The carrier's words are removed from the comparison rather than
+ * filtered off the result, because longestSharedRun answers with one run per
+ * pair: post-filtering the carrier would let it stand in front of a real repeat
+ * in the same pair of sentences and hide it, which is exactly what happens in
+ * the measured letter, where one pair of transfer sentences carries both the
+ * mandated carrier and a four-word run the writer repeated on top of it.
+ *
+ * This excuses the carrier's WORDS while checkRepeatedSentenceShape's adjacency
+ * branch charges its SHAPE, and on the measured letter both fire that way at
+ * once: nothing here reports "i would apply that", and that check reports
+ * paragraph 1 sentence 5 and paragraph 2 sentence 4 for carrying one shape in
+ * back-to-back paragraphs. That is deliberate, and it is not two rules
+ * contradicting each other, because the writer's freedom differs at the two
+ * levels. ARGUMENT_RELEVANCE_SPAN_RULE offers a CHOICE of carrier shapes: I
+ * would apply, bring, use or contribute; I can apply, bring or use; apply,
+ * bring, use or contribute that, this, my or the experience, work, capability,
+ * practice, approach or judgment; and the rest enumerated there. Once a writer
+ * has chosen one, its exact words are mandated, so charging those words would be
+ * charging compliance. Choosing the SAME shape in two paragraphs that stand next
+ * to each other is mandated by nothing: it is a choice that rule left open and
+ * the writer declined to make, and the measured letter's own paragraph 3 proves
+ * the alternative was available, since it transferred on "I can apply that"
+ * where paragraphs 1 and 2 both reached for "I would apply that". Making a
+ * writer rotate among the shapes a rule offers has been the shape check's whole
+ * job since it was written.
+ *
+ * The second stream is what a transfer sentence is compared as against the rest
+ * of ITS OWN paragraph, and it exists because the first build of this exclusion
+ * took the whole sentence out of that comparison. The reason it did is sound as
+ * far as it goes: inside one paragraph the transfer sentence is the one sentence
+ * whose CONTENT the rules dictate too — the capability has to be re-named (see
+ * TRANSFERRED_CAPABILITY_DETERMINERS) and the relevance span has to reach the
+ * responsibility its jobNeedQuote came from, so the need gets named again as
+ * well — and both re-namings land beside the claim and the need they answer.
+ * Comparing them would make this check contradict the three rules that produced
+ * them, and it did: comparing the whole sentence failed 39 test sites that
+ * assert a contract-following fixture letter is accepted, 38 of them on one
+ * shared fixture paragraph.
+ *
+ * But blanking the WHOLE sentence overshoots, and the measured letter of
+ * 2026-09-23 is the cost. Its paragraph 1 stated “scalability across the UI and
+ * backend” in sentences 2 and 3 and then closed on “I would apply that
+ * scalability approach across UI and backend to …”. “That scalability approach”
+ * is the mandated re-naming; “across UI and backend” is elaboration hung off it,
+ * mandated by nothing, and a verbatim echo of sentence 3 that the whole-sentence
+ * exemption could not see. So only the mandated words come out: the carrier, the
+ * capability phrase it hands over, the responsibility phrase it reaches, the
+ * phrases the anaphora rule permits in place of the capability phrase, and the
+ * paragraph's own job-need vocabulary where a caller holds the quote. Everything
+ * else in the sentence is compared exactly as any other sentence is.
+ *
+ * Across paragraphs nothing is blanked but the carrier. Nothing asks two
+ * paragraphs to transfer the same capability in the same words, and the measured
+ * letter carried one four-word run from one transfer sentence into the next.
+ */
+function repeatComparisonSentence(sentence, key, jobNeedQuote) {
+  const source = normalized(sentence);
+  const tokens = [...source.matchAll(WORD_TOKEN_RE)]
+    .map(match => ({ word: match[0], start: match.index, end: match.index + match[0].length }));
+  const carriers = matchedSpans(source, ARGUMENT_TRANSFER_CUE_GLOBAL);
+  const carried = tokens.map(token => tokenInSpans(token, carriers));
+  const words = tokens.map((token, index) => (carried[index] ? blankedToken(key, index) : token.word));
+  // A sentence with no carrier is under no content mandate at either distance,
+  // so it is compared as one stream and the two are the same array.
+  if (!carriers.length) return { words, sameParagraphWords: words };
+  const anaphora = PERMITTED_ANAPHORA_GLOBAL.flatMap(pattern => matchedSpans(source, pattern));
+  const mandated = new Set(carriers.flatMap(carrier => mandatedTransferPositions(tokens, carrier)));
+  // argumentContentWords is the same reader relevanceNamesNeed grades the
+  // overlap with, so the words excused here are exactly the ones that gate
+  // makes the sentence carry: its stop words and its plural folding included.
+  const needTerms = new Set(argumentContentWords(jobNeedQuote));
+  const sameParagraphWords = tokens.map((token, index) => (
+    carried[index] || mandated.has(index) || tokenInSpans(token, anaphora)
+      || argumentContentWords(token.word).some(term => needTerms.has(term))
+      ? blankedToken(key, index)
+      : token.word));
+  return { words, sameParagraphWords };
+}
+
+/**
+ * The letter's sentences as comparable word streams, each tagged with where it
+ * sits. `jobNeedQuotes` is indexed by paragraph: the quote the paragraph's
+ * argument mapping answers, where the caller holds one.
+ */
+function repeatComparisonUnits(paragraphs, jobNeedQuotes = []) {
+  const units = [];
+  paragraphs.forEach((paragraph, paragraphIndex) => {
+    sentences(paragraph).forEach((sentence, sentenceIndex) => {
+      const key = `${paragraphIndex}.${sentenceIndex}`;
+      units.push({
+        paragraph: paragraphIndex + 1,
+        sentence: sentenceIndex + 1,
+        key,
+        ...repeatComparisonSentence(sentence, key, jobNeedQuotes[paragraphIndex] || ''),
+      });
+    });
+  });
+  return units;
+}
+
+/** The stream one unit is compared as at one distance, with its blanking key. */
+function comparedUnit(unit, together) {
+  return { key: unit.key, words: together ? unit.sameParagraphWords : unit.words };
+}
+
+// A name is SUPPOSED to recur. An employer, a product or a project named twice
+// is the same thing named twice, and how often a name may be repeated is
+// already governed by checkPriorEmployerOpening, checkOpeningEmployerShorthand
+// and checkAdjacentEmployerRepetition, so a run of nothing but names belongs to
+// them and not here. Capitalization is read across the whole letter rather than
+// at the occurrence, because a name is capitalized wherever it appears while an
+// ordinary word is capitalized only where a sentence happens to open with it,
+// and a run of ordinary words is never capitalized the whole way through.
+const CAPITALIZED_TOKEN_RE = /\p{Lu}[\p{L}\p{N}]*(?:['’-][\p{L}\p{N}]+)*/gu;
+
+function capitalizedSourceWords(paragraphs) {
+  const found = new Set();
+  paragraphs.forEach(paragraph => {
+    for (const match of text(paragraph).matchAll(CAPITALIZED_TOKEN_RE)) {
+      words(match[0]).forEach(word => found.add(word));
+    }
+  });
+  return found;
+}
+
+/**
+ * How many words of a run carry content, by the ONE closed set this file keeps
+ * for the distinction: FRAME_FUNCTION_WORDS, the articles, pronouns,
+ * determiners, auxiliaries, modals, common prepositions and conjunctions the
+ * sentence-shape frame holds literal. A word is content exactly when that set
+ * does not hold it. Reusing the set rather than authoring a second stopword list
+ * is what keeps the two checks agreeing on the word: the shape check erases runs
+ * of content and this one counts them, and a word that was content to one and
+ * syntax to the other would make the pair incoherent to a reader and to a
+ * writer repairing against both. A blanked position can never reach here, so it
+ * is not special-cased: its token carries a space and a colon, which
+ * WORD_TOKEN_RE cannot produce, and it is unique per sentence and position, so
+ * two sentences never share one.
+ */
+function runContentWordCount(runWords) {
+  return runWords.filter(word => !FRAME_FUNCTION_WORDS.has(word)).length;
+}
+
+/**
+ * The longest run two sentences share that this check is entitled to report, or
+ * null. An excused run is blanked out of both sentences and the pair is asked
+ * again, so a run of names, or a run that is only syntax, costs the pair its own
+ * report and nothing else.
+ *
+ * Both exclusions share the one peel budget, and the order longestSharedRun
+ * answers in is what keeps that safe: it returns the LONGEST run in the pair, so
+ * a run peeled off here was at least as long as any repeat still underneath it.
+ * A pair that spends the whole budget therefore had that many runs longer than
+ * its real repeat, and the cost of the bound is a repeat gone unreported rather
+ * than a wrong report, which is the direction this check is tuned in.
+ */
+function reportableSharedRun(left, right, floor, nameWords) {
+  let leftWords = left.words;
+  let rightWords = right.words;
+  for (let peel = 0; peel <= MAX_EXCUSED_RUN_PEELS; peel++) {
+    const run = longestSharedRun(leftWords, rightWords);
+    if (run.length < floor) return null;
+    // A run of nothing but names is another rule's business (see
+    // capitalizedSourceWords). A run carrying fewer than
+    // MIN_REPEAT_CONTENT_WORDS content words is ordinary English syntax
+    // recurring, not a statement made twice; the constant carries the
+    // measurement that put the boundary at two.
+    const excused = run.words.every(word => nameWords.has(word))
+      || runContentWordCount(run.words) < MIN_REPEAT_CONTENT_WORDS;
+    if (!excused) return run.words;
+    leftWords = blankWordRun(leftWords, run.words, `${left.key}excused${peel}`);
+    rightWords = blankWordRun(rightWords, run.words, `${right.key}excused${peel}`);
+  }
+  return null;
+}
+
+/** Distinct locations of one repeat, in reading order. */
+function orderedRepeatLocations(locations) {
+  const seen = new Map();
+  locations.forEach(location => seen.set(`${location.paragraph}.${location.sentence}`, location));
+  return [...seen.values()].sort((left, right) => left.paragraph - right.paragraph || left.sentence - right.sentence);
+}
+
+/** Longest repeat first, with a run already contained in a longer one dropped. */
+function orderedRepeatedRuns(found) {
+  const entries = [...found.values()]
+    .map(entry => ({ run: entry.run, locations: orderedRepeatLocations(entry.locations) }))
+    .sort((left, right) => right.run.length - left.run.length
+      || left.locations[0].paragraph - right.locations[0].paragraph
+      || left.locations[0].sentence - right.locations[0].sentence);
+  // A shorter run sitting inside a longer reported one is the same repeat seen
+  // through a narrower window WHERE it names the same sentences, and reporting
+  // both would then spend the observation cap on one sentence pair and ask for
+  // one repair twice. It stops being the same repeat the moment it names a
+  // sentence the longer run does not: a third sentence reaching for part of
+  // those words has its own repair, and rewriting either sentence the longer run
+  // names leaves it standing. Dropping it on length alone is what hid sentence 5
+  // of the measured letter's paragraph 1, which echoed “ui and backend” out of
+  // the six words sentences 2 and 3 already shared.
+  //
+  // With locations collected from the PAIRS that share a run, every sentence in
+  // a run's location set carries that run, so any pair drawn from that set
+  // reports the run itself and a contained run always names a sentence from
+  // outside the set. The location test therefore excuses nothing today and this
+  // filter drops nothing; it is kept as the condition rather than deleted
+  // because it is the correct one if a later change ever widens how a run's
+  // locations are gathered, and because deleting it would leave the next reader
+  // to re-derive why length alone was wrong.
+  return entries.filter((entry, index) => !entries.some((other, otherIndex) =>
+    otherIndex !== index && other.run.length > entry.run.length && containsWordSequence(other.run, entry.run)
+    && entry.locations.every(location => other.locations
+      .some(kept => kept.paragraph === location.paragraph && kept.sentence === location.sentence))));
+}
+
+// What the letter contract prints for the check below. Every floor is read out
+// of the same constants checkRepeatedPhrase compares against, so the shape a
+// writer is told to avoid can never drift from the shape it is graded by. Every
+// exclusion is stated too, and that is not padding: a writer who does not know
+// them over-corrects. The words the argument contract dictates in a transfer
+// sentence, and a run of names, are repeats the system itself asked for, so
+// rewriting one spends a handoff round AND breaks the rule that demanded it; a
+// writer who thinks the ordinary syntax holding two sentences together is
+// counted has to write around the language to satisfy a rule that never applied
+// to it; and one who is told only that a transfer sentence is treated specially
+// hangs the next echo off the phrase it excuses, which is the defect this round
+// was opened for, so the clause says what is still counted there.
+export const REPEATED_PHRASE_RULE =
+  `a verbatim run of ${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words or more repeated inside one paragraph,`
+  + ` or of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words or more carried from one paragraph into another,`
+  + ' is reported at every position it stands in past the first, wherever in the letter it sits;'
+  + ' the mandated transfer carrier is never counted against you, and inside its own paragraph neither is the'
+  + ' capability phrase that carrier hands over, nor the responsibility phrase it reaches, each read to the'
+  + ' first function word that ends it, nor a phrase the anaphora exception lets stand in for the capability,'
+  + ' nor the wording its own paragraph’s job-need quote puts there, since the relevance rules mandate each of those;'
+  + ' what a transfer sentence adds around those mandated words is counted like any other wording.'
+  + ' A run of nothing but capitalized names is not counted either,'
+  + ` and neither is a run carrying fewer than ${MIN_REPEAT_CONTENT_WORDS} content words,`
+  + ' which is the scaffolding two English sentences share rather than either of them reaching back for the other,'
+  + ' so make each point in its own words rather than reaching back for the words that made it last time';
+
+/**
+ * The letter repeating itself. Nothing in this battery compared a paragraph to
+ * itself or to another paragraph: `checkRedundancy` and `checkSalientPhraseEcho`
+ * measure the letter against the RÉSUMÉ, `checkRepeatedSentenceShape` compares
+ * skeletons with every content word erased, and every other n-gram site takes
+ * its needle from the résumé, the plan or a fixed list. So the letter of
+ * 2026-09-23 stated "scalability across the UI and backend" twice in one
+ * paragraph, opened a sentence in each of two paragraphs with "The engineering
+ * challenge was", and named "device management platforms" twice in three
+ * sentences, and the whole battery passed it.
+ *
+ * Two floors, one per distance, and both are the reader's position rather than
+ * a statistical one: see MIN_SAME_PARAGRAPH_REPEAT_WORDS. Three exclusions. Two
+ * of them are repeats another rule asked for: the words the argument contract
+ * dictates in a transfer sentence (blanked in repeatComparisonSentence, which
+ * carries what each of them is and why the list is longer inside one paragraph
+ * than across two) and a run of names (excused in reportableSharedRun). The
+ * third is a repeat that is not a restatement at all, whoever asked for it: a
+ * run carrying fewer than MIN_REPEAT_CONTENT_WORDS content words is the syntax
+ * two English sentences share, and the constant carries the ten measured runs
+ * that made the exclusion necessary. The report names the run and where it sits
+ * and stops there, because a message that supplied a replacement would be
+ * supplying the next letter's wording.
+ *
+ * What the report does NOT do is say what the repeat means. It used to: "a run
+ * of N words or more repeated inside one paragraph is the same statement made
+ * twice" asserted a cause, and the cause is untrue wherever the run is a
+ * lowercase compound artifact name, because two sentences can make two different
+ * statements about one named thing. The design system's own fixture letter is
+ * the measurement — its paragraph 1 names "device check-in and check-out" in
+ * sentence 2 and again in sentence 4, once as what was built and once as what
+ * moved onto a third-party platform. That run stays reported: it is
+ * indistinguishable in structure from the "device management platforms" repeat
+ * this check was written for, and the letter contract already asks a writer to
+ * frame an artifact on first mention and then use the shortest unambiguous
+ * reference, so a full compound name repeated verbatim is a defect by the
+ * contract the letter already has. The wording was what was wrong, so the
+ * message now states the run, its length, the positions it stands at, the floor
+ * it passed, and what satisfies the rule.
+ */
+export function checkRepeatedPhrase(paragraphs = [], { jobNeedQuotes = [] } = {}) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
+  const units = repeatComparisonUnits(list, Array.isArray(jobNeedQuotes) ? jobNeedQuotes : []);
+  const nameWords = capitalizedSourceWords(list);
+  const sameParagraph = new Map();
+  const crossParagraph = new Map();
+  for (let left = 0; left < units.length; left++) {
+    for (let right = left + 1; right < units.length; right++) {
+      const together = units[left].paragraph === units[right].paragraph;
+      // Which stream each sentence is compared as carries the whole difference
+      // between the two distances: inside one paragraph a transfer sentence is
+      // read with the words the argument rules dictate blanked out, and across
+      // paragraphs with only its carrier blanked. repeatComparisonSentence holds
+      // the measurement behind that split.
+      const floor = together ? MIN_SAME_PARAGRAPH_REPEAT_WORDS : MIN_CROSS_PARAGRAPH_REPEAT_WORDS;
+      const run = reportableSharedRun(comparedUnit(units[left], together), comparedUnit(units[right], together),
+        floor, nameWords);
+      if (!run) continue;
+      const found = together ? sameParagraph : crossParagraph;
+      const phrase = run.join(' ');
+      const entry = found.get(phrase) || { run, locations: [] };
+      entry.locations.push(units[left], units[right]);
+      found.set(phrase, entry);
+    }
+  }
+  // Same-paragraph repeats lead. They are the ones a reader hits hardest, they
+  // are repaired inside one paragraph, and the measured letter's own complaint
+  // was one of them.
+  const observations = [
+    ...orderedRepeatedRuns(sameParagraph).map(({ run, locations }) =>
+      `${joinShapeLocations(locations)} repeat one run of ${run.length} words, ${quotedRunPhrase(run)}, inside paragraph ${locations[0].paragraph};`
+      + ` the floor inside one paragraph is ${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words, and a run at or past it satisfies the rule while it stands at one position only,`
+      + ` so all but one of those ${locations.length} sentences has to make its point without it`),
+    ...orderedRepeatedRuns(crossParagraph).map(({ run, locations }) =>
+      `${joinShapeLocations(locations)} repeat one run of ${run.length} words, ${quotedRunPhrase(run)}, across paragraphs;`
+      + ` the floor from one paragraph into another is ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words, and a run at or past it satisfies the rule while it stands at one position only,`
+      + ` so all but one of those ${locations.length} sentences has to make its point without it`),
+  ];
+  return observationResult('repeated-phrase', observations, MAX_REPEATED_PHRASE_OBSERVATIONS,
+    `${list.length} paragraph(s) repeat no run of ${MIN_SAME_PARAGRAPH_REPEAT_WORDS} words inside one paragraph`
+    + ` and none of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words across paragraphs`);
+}
+
+/**
+ * The job-need quote each letter paragraph answers, indexed by paragraph.
+ *
+ * There is exactly one jobNeedQuote in this pipeline: the field the generation
+ * audit's coverLetterPlan records per paragraph, which checkParagraphArgumentLinks
+ * grades as a span of the posting. So that is the field read here, off whichever
+ * plan the caller passes, and nothing is invented where a plan has no paragraph
+ * records — which is every plan built from a coverLetterArgument alone, including
+ * the one the cover-letter drafting stage and the completion gate hold. A
+ * paragraph with no quote to read simply has no need vocabulary blanked, and what
+ * that costs is bounded rather than lucky: both re-namings the relevance rules
+ * mandate are already excused by POSITION — the capability the carrier hands over
+ * and the responsibility it reaches (see mandatedTransferPositions) — so reading
+ * the quote adds only the paragraph that names its need somewhere other than the
+ * slot the transfer shape puts it in.
+ */
+function paragraphJobNeedQuotes(plan) {
+  return (Array.isArray(plan?.paragraphs) ? plan.paragraphs : [])
+    .map(planned => text(planned?.argumentMapping?.jobNeedQuote));
 }
 
 /** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
@@ -3035,6 +3719,8 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkAdjacentEmployerRepetition(paragraphs, priorEmployers),
     checkEntailedPremise(paragraphs),
     checkRepeatedSentenceShape(paragraphs),
+    checkRepeatedPhrase(paragraphs, { jobNeedQuotes: paragraphJobNeedQuotes(plan) }),
+    checkCandidateAgency(paragraphs),
   ];
 }
 

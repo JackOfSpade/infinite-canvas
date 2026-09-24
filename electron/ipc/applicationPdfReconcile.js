@@ -115,11 +115,9 @@ function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
   for (const item of ordered) {
     let line = lines.find(candidate => sameVisualLine(candidate, item));
     if (!line) {
-      line = { page, x: item.x, y: item.y, width: item.width, height: item.height, text: '', items: [] };
+      line = { page, x: item.x, y: item.y, width: item.width, height: item.height, items: [] };
       lines.push(line);
     }
-    const previous = line.items[line.items.length - 1];
-    line.text += `${needsSpace(previous, item) ? ' ' : ''}${item.text}`;
     line.items.push(item);
     line.x = Math.min(line.x, item.x);
     line.y = Math.max(line.y, item.y);
@@ -127,10 +125,28 @@ function orderedTextBlocksFromItems(items, { page = 1 } = {}) {
     line.height = Math.max(line.height, item.height);
   }
   return lines
-    // Keep whitespace after an attached hyphen until the trusted DOM can tell
-    // us whether it is a wrapped compound (`full- scale`) or a genuine
-    // suspended form (`part- and`).
-    .map(line => ({ ...line, text: normalizeReconcileText(line.text) }))
+    .map((line) => {
+      // A visual line reads left to right, so compose it in x order rather
+      // than in the page-wide y-descending order that grouped it. Grouping
+      // deliberately tolerates a baseline difference, and two cells of one
+      // grid row routinely have one: `.skills dd` carries `line-height:
+      // var(--lh-snug)` and its `dt` does not, so the value's first line sits
+      // 0.75pt above the label that introduces it. Composed in the outer
+      // order, the right-hand column landed BEFORE the left-hand one and the
+      // Skills label was emitted after its own wrapped value
+      // (`... Docker Compose · MCP ·technologies`), which no token alignment
+      // against the DOM can resolve. `needsSpace` also only means anything
+      // between x-adjacent items.
+      const items = [...line.items].sort((left, right) => left.x - right.x);
+      const text = items.reduce(
+        (accumulated, item, index) => `${accumulated}${needsSpace(items[index - 1], item) ? ' ' : ''}${item.text}`,
+        '',
+      );
+      // Keep whitespace after an attached hyphen until the trusted DOM can
+      // tell us whether it is a wrapped compound (`full- scale`) or a genuine
+      // suspended form (`part- and`).
+      return { ...line, items, text: normalizeReconcileText(text) };
+    })
     .filter(line => line.text)
     .sort((left, right) => left.page - right.page || right.y - left.y || left.x - right.x);
 }
@@ -363,6 +379,71 @@ function replaceCoverLeafText(element, replacement) {
   return { changed: true };
 }
 
+function compactFoldedText(value) {
+  return normalizeReconcileText(value).toLocaleLowerCase().replace(/\s+/gu, '');
+}
+
+/**
+ * Decide how many PDF visual lines each fixed envelope leaf occupies.
+ *
+ * An envelope leaf is not guaranteed to be one visual line.  `.contact` is
+ * `display: flex; flex-wrap: wrap` by design, so a candidate whose contact row
+ * carries more than an email and a phone wraps onto a second line, and `.name`
+ * / `.tagline` / `.signature-title` can wrap too.  A fixed one-line-per-leaf
+ * slice silently shifts every later leaf — the date absorbs the contact's
+ * second line, the salutation absorbs the date, and the salutation's own line
+ * falls into the body, where it is counted as an extra paragraph.
+ *
+ * Geometry cannot settle this: on a real letter the gap between the name and
+ * the tagline (20.25pt) and the gap inside a wrapped contact row (15.75pt) sit
+ * on either side of the same page-wide threshold by a fraction of a point.
+ * The trusted DOM can: a leaf only absorbs a following line while that line
+ * continues the leaf's own text.  A PDF edited outside the app stops matching
+ * at the first changed token and falls back to one line per leaf, which is the
+ * behaviour this function replaced — an unmappable result is then reported as
+ * a conflict rather than written into the wrong leaf.
+ */
+function envelopeLineSpan(envelopeLeaves, lines, { fromEnd = false, reserved = 0 } = {}) {
+  const orderedLeaves = fromEnd ? [...envelopeLeaves].reverse() : envelopeLeaves;
+  const orderedLines = fromEnd ? [...lines].reverse() : lines;
+  const join = fromEnd ? (accumulated, next) => `${next}${accumulated}` : (accumulated, next) => `${accumulated}${next}`;
+  const continues = fromEnd
+    ? (trusted, accumulated) => trusted.endsWith(accumulated)
+    : (trusted, accumulated) => trusted.startsWith(accumulated);
+  const perLeaf = [];
+  let cursor = 0;
+  for (let index = 0; index < orderedLeaves.length; index += 1) {
+    if (cursor >= orderedLines.length) return null;
+    const trusted = compactFoldedText(orderedLeaves[index].textContent);
+    const remainingLeaves = orderedLeaves.length - index - 1;
+    let accumulated = compactFoldedText(orderedLines[cursor].text);
+    let taken = 1;
+    while (trusted !== accumulated && continues(trusted, accumulated)
+      // Never consume a line another envelope leaf, or the body, still needs.
+      && orderedLines.length - (cursor + taken) > remainingLeaves + reserved) {
+      const next = compactFoldedText(orderedLines[cursor + taken].text);
+      const extended = join(accumulated, next);
+      if (!next || !continues(trusted, extended)) break;
+      accumulated = extended;
+      taken += 1;
+    }
+    perLeaf.push(taken);
+    cursor += taken;
+  }
+  return { lineCount: cursor, perLeaf: fromEnd ? perLeaf.reverse() : perLeaf };
+}
+
+/** Join each leaf's own visual lines back into one replacement string. */
+function envelopeLeafTexts(lines, perLeaf) {
+  const texts = [];
+  let cursor = 0;
+  for (const taken of perLeaf) {
+    texts.push(normalizeReconcileText(lines.slice(cursor, cursor + taken).map(line => line.text).join(' ')));
+    cursor += taken;
+  }
+  return texts;
+}
+
 /**
  * Reconcile a cover letter's geometry-separated PDF text with its semantic
  * leaf elements.  The fixed envelope (name/tagline/contact/date/salutation),
@@ -377,11 +458,18 @@ function reconcileCoverTextBlocks(main, lines) {
   const pageNumbers = new Set(lines.map(line => line.page));
   if (!leaves.length || !bodyLeaves.length) return { conflict: 'The cover-letter panel has no recognizable semantic paragraph structure.' };
   if (pageNumbers.size !== 1) return { conflict: 'Only a one-page cover letter can be reconciled safely.' };
-  if (lines.length < prefixLeaves.length + suffixLeaves.length) return { conflict: 'The PDF has too little text to map the cover-letter envelope.' };
+  if (lines.length < prefixLeaves.length + bodyLeaves.length + suffixLeaves.length) {
+    return { conflict: 'The PDF has too little text to map the cover-letter envelope.' };
+  }
 
-  const prefix = lines.slice(0, prefixLeaves.length).map(line => line.text);
-  const suffix = lines.slice(lines.length - suffixLeaves.length).map(line => line.text);
-  const bodyLines = lines.slice(prefixLeaves.length, lines.length - suffixLeaves.length);
+  const prefixSpan = envelopeLineSpan(prefixLeaves, lines, { reserved: bodyLeaves.length + suffixLeaves.length });
+  if (!prefixSpan) return { conflict: 'The PDF has too little text to map the cover-letter envelope.' };
+  const suffixSpan = envelopeLineSpan(suffixLeaves, lines.slice(prefixSpan.lineCount), { fromEnd: true, reserved: bodyLeaves.length });
+  if (!suffixSpan) return { conflict: 'The PDF has too little text to map the cover-letter envelope.' };
+
+  const prefix = envelopeLeafTexts(lines.slice(0, prefixSpan.lineCount), prefixSpan.perLeaf);
+  const suffix = envelopeLeafTexts(lines.slice(lines.length - suffixSpan.lineCount), suffixSpan.perLeaf);
+  const bodyLines = lines.slice(prefixSpan.lineCount, lines.length - suffixSpan.lineCount);
   const bodyBlocks = groupGeometrySeparatedBlocks(bodyLines);
   if (bodyBlocks.length !== bodyLeaves.length) {
     return { conflict: `The PDF has ${bodyBlocks.length} geometry-separated body block(s), but the cover letter has ${bodyLeaves.length} paragraph(s).` };
@@ -439,22 +527,38 @@ function skillRows(main) {
   return rows.filter(row => row.label && row.value);
 }
 
+/**
+ * Split the Skills grid's visual lines back into one line per `dt`/`dd`.
+ *
+ * `.skills` is a two-column grid, so a row's label and the first line of its
+ * value share a visual line and a long value wraps underneath both of them.
+ * Joining those lines yields `label value label value …` in DOM order; this
+ * restores the element boundary that the join erased, so a row's value cannot
+ * absorb the next row's label.
+ *
+ * Every label must sit exactly where the previous row's value ended.  A label
+ * that is missing, out of order, or preceded by text belonging to no row
+ * leaves the section unmapped rather than guessing an individual skill
+ * boundary — the caller then keeps the extracted lines untouched.
+ */
 function semanticSkillLines(lines, rows) {
   const source = normalizeReconcileText(lines.map(line => line.text).join(' '));
+  const folded = foldedText(source);
+  const split = [];
   let offset = 0;
-  const reordered = [];
-  for (const row of rows) {
-    const labelOffset = foldedText(source).indexOf(foldedText(row.label), offset);
-    if (labelOffset < offset) return null;
-    const value = normalizeReconcileText(source.slice(offset, labelOffset));
+  for (let index = 0; index < rows.length; index += 1) {
+    const { label } = rows[index];
+    if (folded.indexOf(foldedText(label), offset) !== offset) return null;
+    const valueStart = offset + label.length;
+    const next = rows[index + 1];
+    const valueEnd = next ? folded.indexOf(foldedText(next.label), valueStart) : source.length;
+    if (valueEnd < valueStart) return null;
+    const value = normalizeReconcileText(source.slice(valueStart, valueEnd));
     if (!value) return null;
-    // The print layout puts the `dd` value before its `dt` label, and can put
-    // them flush together (`BashLanguages`).  Reconstruct DOM order without
-    // guessing individual skill boundaries.
-    reordered.push({ ...lines[0], text: row.label }, { ...lines[0], text: value });
-    offset = labelOffset + row.label.length;
+    split.push({ ...lines[0], text: label }, { ...lines[0], text: value });
+    offset = valueEnd;
   }
-  return offset === source.length ? reordered : null;
+  return offset === source.length ? split : null;
 }
 
 /**
@@ -624,6 +728,33 @@ function reconcilePlainTextBulletInsertions(main, nodes, current, incoming, anch
 }
 
 /**
+ * Name the part of the résumé a token index falls in, for a conflict message.
+ *
+ * Deliberately structural: the section heading and the element, never the
+ * divergent words themselves.  This reason is written into `fit-feedback.json`
+ * and read back by the responding model, and a host gate that quotes document
+ * text invites the model to edit that text — here the retry is an app-side
+ * one and the result is supposed to stay untouched.  A section name is enough
+ * to find the divergence by hand and carries nothing to copy.
+ */
+function resumeTokenLocation(nodes, tokenIndex) {
+  let offset = 0;
+  for (const node of nodes) {
+    const length = textTokens(node.nodeValue).length;
+    if (tokenIndex < offset + length) {
+      const element = node.parentElement;
+      const heading = element?.closest('.section')?.querySelector('.section-head h2');
+      const sectionName = normalizeReconcileText(heading?.textContent);
+      const elementName = element ? `<${element.localName}${element.className ? ` class="${element.className}"` : ''}>` : '';
+      if (sectionName && elementName) return `${sectionName} section, ${elementName}`;
+      return sectionName || elementName || '';
+    }
+    offset += length;
+  }
+  return '';
+}
+
+/**
  * Reconcile résumé text only when every changed range has an unambiguous
  * one-for-one token mapping between stable LCS anchors.  Insertions/removals,
  * a wholly rewritten document, or oversized documents return a conflict.
@@ -651,7 +782,20 @@ function reconcileResumeTextBlocks(main, lines) {
     if (afterCurrent - beforeCurrent !== afterIncoming - beforeIncoming) {
       const leafResult = reconcilePlainTextBulletInsertions(main, nodes, current, incoming, anchors, lines);
       if (leafResult) return leafResult;
-      return { conflict: 'The résumé PDF inserted or removed text; automatic token alignment would be ambiguous.' };
+      // Say where the alignment first came apart, and whether the two sides
+      // hold the same words. An identical multiset that will not align is a
+      // reading-order problem in extraction; a differing one is text the PDF
+      // genuinely gained or lost. Those have opposite repairs, and without
+      // this the message named neither.
+      const location = resumeTokenLocation(nodes, Math.max(0, beforeCurrent + 1));
+      const sameWords = [...current].sort().join(' ') === [...incoming].sort().join(' ');
+      return {
+        conflict: 'The résumé PDF inserted or removed text; automatic token alignment would be ambiguous.'
+          + `${location ? ` The first divergence is in the ${location}.` : ''}`
+          + (sameWords
+            ? ' Both sides hold the same words in a different order, so the PDF text layer is complete and its reading order could not be reconstructed.'
+            : ` The PDF holds ${incoming.length} token(s) against the document's ${current.length}.`),
+      };
     }
   }
   if (!replaceTokenSequence(nodes, incoming)) return { conflict: 'The résumé markup could not preserve its text-node boundaries.' };

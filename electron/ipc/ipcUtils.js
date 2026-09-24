@@ -140,7 +140,13 @@ function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null) {
       ? manualAiRunId
       : null,
   });
-  logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId}`);
+  // Name the channel. Every invoke registers its own AbortController, so two
+  // registrations for one node a millisecond apart are ordinarily two
+  // concurrent operations and nothing is overwritten — but without the
+  // channel the line cannot be told apart from the same channel being
+  // dispatched twice, which would be a renderer-side duplicate. A reader of
+  // the bug report had to correlate against source to reach "benign".
+  logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId} channel ${channel || '?'}`);
 }
 
 /**

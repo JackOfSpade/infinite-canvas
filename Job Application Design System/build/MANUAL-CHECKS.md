@@ -15,7 +15,7 @@ render truths behind the numbers those suites assert.
 | File | What it measures | Run it when |
 |------|------------------|-------------|
 | `bullet-length-check.html` | Renders worst-case bullet text at the 180/100-character budget across Letter/A4 × default/compact and asserts ≤ 2 wrapped lines. | Any type-scale, margin, or density change — before trusting `annotation-budget-test.js`'s 180. |
-| `resume-one-page-check.html` | Utilisation of one measured type area by the shipped `resume.html` (target 0.90–1.00). | After editing the sample résumé or the spacing scale. |
+| `resume-one-page-check.html` | Utilisation readout of one measured type area by the shipped `resume.html`; fails only if it overflows one page — there is no fill minimum. | After editing the sample résumé or the spacing scale. |
 | `cover-letter-one-page-check.html` | Same, for `cover-letter.html`. | After editing the sample letter, its type tokens, or the tail trim. |
 | `multi-page-fragmentation-check.html` | Fixture for the **explicit** multi-page override: clean breaks between blocks, running footer on pages 2+. | When touching `@page`, the break-* rules, or the footer margin boxes. |
 | `annotation-typography-check.html` | Computed styles of a rendered annotated bullet — one font-size, one colour, no italic. | Alongside `annotation-typography-test.js` when annotation CSS changes. |

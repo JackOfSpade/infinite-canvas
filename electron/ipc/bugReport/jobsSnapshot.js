@@ -4,8 +4,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { getCurrentRequestJobAnalysisPaths, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
-import { getNonApiAiHandoffLifecycleSnapshot } from '../nonApiAi.js';
-import { formatUnderfilledTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
+import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
+import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
@@ -3840,13 +3840,26 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const failures = Array.isArray(item?.failures) ? item.failures.slice(-8) : [];
     const totalRejected = boardDiagnosticNumber(boardDiagnosticValue(item, 'rejected')) ?? 0;
     const omittedFailures = Math.max(0, totalRejected - failures.length);
-    const safeCodes = new Set(['AI_JSON_INVALID', 'HANDOFF_CODE_MISMATCH', 'HANDOFF_CODE_MISSING', 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID', 'PREFERENCE_RESEARCH_RESPONSE_INVALID', 'JOB_COMPENSATION_RESPONSE_INVALID', 'STRUCTURED_OUTPUT_SCHEMA_INVALID', 'STRUCTURED_OUTPUT_SCHEMA_UNSUPPORTED_KEYWORD', 'VALIDATION_FAILED']);
+    // Built FROM the transport's own allowlists (not re-typed) so a code or
+    // reason added to nonApiAi.js can never silently drop out of what a bug
+    // report is willing to print — that drift already happened once with
+    // DUPLICATE_RESPONSE.
+    const safeCodes = SAFE_NON_API_AI_LOG_ERROR_CODES;
     const safeStages = new Set(['research-sections', 'research-assessment', 'compensation-assessment', 'transport', 'json', 'schema', 'domain']);
     // These are deliberately limited to contract categories and bounded
     // counts. They explain why a compensation assessment was rejected without
     // exporting a response excerpt, a cohort identity, a schema path, or the
     // proprietary research it was checked against.
-    const safeReasons = new Set(['MISSING_SECTION', 'EMPTY_SECTION', 'DUPLICATE_SECTION', 'UNKNOWN_SECTION', 'MALFORMED_MARKER', 'NESTED_SECTION', 'OUTSIDE_SECTION_TEXT', 'UNEXPECTED_SECTION_ORDER', 'INVALID_EXPECTED_IDS', 'ASSESSMENT_COVERAGE_INVALID', 'ASSESSMENT_IDENTITY_INVALID', 'ASSESSMENT_QUOTE_NOT_GROUNDED', 'ASSESSMENT_URL_NOT_GROUNDED', 'ASSESSMENT_SOURCE_DATE_NOT_GROUNDED', 'COMPENSATION_COHORT_COVERAGE_INVALID', 'COMPENSATION_COHORT_IDENTITY_INVALID', 'COMPENSATION_ROLE_FAMILY_COVERAGE_INVALID', 'COMPENSATION_ROLE_FAMILY_IDENTITY_INVALID', 'COMPENSATION_ASSESSMENT_COVERAGE_INVALID', 'COMPENSATION_RANGE_INVALID', 'COMPENSATION_EVIDENCE_NOT_GROUNDED', 'COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED', 'HANDOFF_CODE_MISMATCH', 'HANDOFF_CODE_MISSING', 'INVALID_JSON', 'SCHEMA_INVALID', 'SCHEMA_UNSUPPORTED', 'DOMAIN_VALIDATION_FAILED', 'JOB_INTEGRITY_FAULT', 'VALIDATION_FAILED']);
+    const safeReasons = new Set([
+      ...SAFE_VALIDATION_DIAGNOSTIC_REASONS,
+      // Local extra: JOB_INTEGRITY_FAULT is the Local AI Application paste
+      // handoff's own reason code (pasteHandoffDiagnostics.js's SAFE_REASONS,
+      // raised from localAiApplication.js when frozen app-owned state fails
+      // integrity checks), not a validationDiagnostic.reason the non-API AI
+      // transport in nonApiAi.js can ever produce, so it has no home in that
+      // file's own allowlist.
+      'JOB_INTEGRITY_FAULT',
+    ]);
     const safeCountKeys = ['expectedCount', 'receivedCount', 'sectionCount', 'missingCount', 'duplicateCount', 'unknownCount', 'emptyCount', 'markerCount'];
     const receipts = failures.flatMap((failure) => {
       const at = Number(failure?.at);
@@ -7392,8 +7405,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Route: Local AI manual handoff${a.localAi?.jobId ? ` · job \`${a.localAi.jobId}\`` : ''}`);
       const handoffHistory = Array.isArray(a.localAi?.handoffHistory) ? a.localAi.handoffHistory : [];
       if (handoffHistory.length) {
-        lines.push('- Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review):');
-        for (const event of handoffHistory.slice(-12)) {
+        // Events are appended oldest-first (appendLocalAiHandoffEvent), so a
+        // negative slice keeps the NEWEST ones — the bound below was already
+        // right about which end to keep. What it silently dropped was any
+        // record that a bound applied at all: a report reader would see 12
+        // events and have no way to tell that was every event there ever was
+        // versus the tail of a much longer trace. Name the omission instead,
+        // the same convention the clipboard cap uses elsewhere in this file.
+        const HANDOFF_TRACE_RENDER_LIMIT = 12;
+        const renderedHandoffEvents = handoffHistory.slice(-HANDOFF_TRACE_RENDER_LIMIT);
+        const elidedHandoffEvents = handoffHistory.length - renderedHandoffEvents.length;
+        lines.push(`- Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review)${elidedHandoffEvents > 0 ? ` — showing the newest ${renderedHandoffEvents.length} of ${handoffHistory.length}; ${elidedHandoffEvents} earlier event(s) omitted` : ''}:`);
+        for (const event of renderedHandoffEvents) {
           const resume = event?.resume || {};
           const cover = event?.coverLetter || {};
           const attempts = Array.isArray(resume.attempts) && resume.attempts.length
@@ -7403,14 +7426,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const resultHash = event?.resultSha256 ? ` · result ${String(event.resultSha256).slice(0, 16)}` : '';
           const resumePages = resume.pageCount != null ? ` · résumé ${resume.pageCount}/${resume.targetPageCount ?? '?'}p` : '';
           const utilization = resume?.layout?.utilization;
-          const resumeUnderfilled = resume.pageCount === 1
-            && resume.targetPageCount === 1
-            && Number.isFinite(utilization)
-            && utilization < 0.90;
           const resumeUtilization = Number.isFinite(utilization)
-            ? (resumeUnderfilled
-              ? ` · résumé type area ${formatUnderfilledTypeAreaUtilization(utilization)} (below 90% minimum)`
-              : ` · résumé type area ${Math.round(utilization * 100)}%`)
+            ? ` · résumé type area ${formatTypeAreaUtilization(utilization)}`
             : '';
           const coverPages = cover.pageCount != null ? ` · cover ${cover.pageCount}/${cover.targetPageCount ?? '?'}p` : '';
           const detail = event?.detail ? ` — ${historyReportValue(event.detail, '', 320)}` : '';
@@ -7432,7 +7449,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const outcome = {
         running: 'in progress', completed: 'completed', failed: '⚠️ failed', cancelled: 'cancelled',
       }[a.status] || a.status;
-      lines.push(`- Outcome: **${outcome}**${a.stage ? ` · current/final stage: ${a.stage}` : ''}`);
+      // `status` names only THIS generation/import phase's own outcome. For a
+      // Local AI handoff it is set once, at import time (the "completed"
+      // telemetry record written with phase: 'imported'), before any file-save
+      // attempt exists to fail — so it is never revised by what happens next.
+      // A save failure is recorded separately, below, under "Application
+      // Export". Naming the recorded phase (when there is one) keeps these
+      // two "Outcome" lines from reading as a contradiction: they describe
+      // different steps of the same generation, not the same step twice.
+      const phaseNote = a.phase ? ` (phase: ${a.phase})` : '';
+      lines.push(`- Outcome${phaseNote}: **${outcome}**${a.stage ? ` · current/final stage: ${a.stage}` : ''}`);
       if (Array.isArray(a.taskRoutes) && a.taskRoutes.length > 0) {
         lines.push(`- Intended task route: ${a.taskRoutes.map(route => `${route.task || '?'} → ${route.provider || '?'} / \`${route.model || '?'}\``).join('; ')}`);
       }
@@ -7479,7 +7505,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       reused: 'reused from hub cache', mined: 'freshly mined this generation',
       unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
     }[ach.source] || ach.source || 'unknown';
-    lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.suppressedWeakened ? ` · ${ach.suppressedWeakened} refute-weakened item(s) withheld from application prompts` : ''}${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
+    // `ach.source` reads 'unknown' exactly when the generation route recorded
+    // no ledger decision at all (every Local AI handoff today: the paste
+    // protocol carries no achievement-ledger telemetry back to the app) — and
+    // `ach.kept` is undefined in that same case. `ach.kept ?? 0` turned that
+    // absence into an asserted zero, so the line claimed a measured count in
+    // the same breath it admitted the ledger state was unknown. The count is
+    // only printable when a source for it was actually recorded.
+    const achKeptClause = ach.source != null && Number.isFinite(ach.kept)
+      ? `kept ${ach.kept} item(s)`
+      : 'kept count unavailable';
+    lines.push(`- Achievement ledger: ${achSourceLabel} · ${achKeptClause}${ach.suppressedWeakened ? ` · ${ach.suppressedWeakened} refute-weakened item(s) withheld from application prompts` : ''}${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
     // These are sub-bullets OF the ledger line above, so they have to be pushed
     // here — emitted after the résumé-render block below they would nest under
     // whichever render bullet happened to be last.

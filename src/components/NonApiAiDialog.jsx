@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { EventLogger } from '../utils/EventLogger';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
+import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
 // A failed submit result may carry the job-integrity code: the job's own
 // frozen state failed, not the pasted response, and no further paste can
@@ -105,6 +106,12 @@ const formatValidationDiagnostic = (value) => {
 // a shared instance would carry `lastIndex` state across an early `break`
 // between unrelated calls (the push scan and the application scan both use
 // this), silently skipping matches on the next read of the same text.
+// How many submitted responses the dock remembers for its duplicate check.
+// Bounded because a long run sends hundreds; the mistake this catches — a
+// chat answered once and pasted back a second time — happens within a few
+// prompts of the first paste, never hundreds later.
+const SUBMITTED_RESPONSE_MEMORY = 40;
+
 const findMismatchedHandoffStamp = (text, expectedCode) => {
   const regex = /\bHANDOFF-([2-9A-HJ-NP-Z]{6})\b/gi;
   const normalizedExpected = String(expectedCode || '').trim().toUpperCase();
@@ -195,6 +202,11 @@ export function NonApiAiDialog() {
   const [cancellingRequestIds, setCancellingRequestIds] = useState(() => new Set());
   const [acceptedRequestIds, setAcceptedRequestIds] = useState(() => new Set());
   const [copiedRequestId, setCopiedRequestId] = useState(null);
+  // Per-request opt-in to the full stage prompt during a correction round —
+  // see showingFullRestartPrompt below for why this exists at all. Keyed by
+  // requestId, like submittingRequestIds, so switching the active bundle
+  // never leaks one bundle's reveal state onto another's.
+  const [fullPromptRequestIds, setFullPromptRequestIds] = useState(() => new Set());
   // Holds the full ownership tuple captured when the confirm opens. The confirm
   // is async and a settled event can swap the active request underneath it, so
   // the prompt must act on what the user was actually looking at.
@@ -214,8 +226,23 @@ export function NonApiAiDialog() {
   // The bundle leaves the dock for good once its status poll marks the job
   // failed; until then this keeps Dismiss meaning what it says.
   const [dismissedBrokenRequestIds, setDismissedBrokenRequestIds] = useState(() => new Set());
+  // Content fingerprints of every response this dock has actually sent — never
+  // the text itself. State, not a ref, because the guard below is computed
+  // during render and has to re-read this the moment a submit lands.
+  // Whether a response was ACCEPTED is load-bearing rather than bookkeeping:
+  // an answer this dock REJECTED may simply have been pasted into the wrong
+  // prompt, and filing it where it belongs is the repair — so only an answer
+  // accepted SOMEWHERE ELSE is proof of a duplicate.
+  const [submittedResponses, setSubmittedResponses] = useState([]);
   const dockButtonRef = useRef(null);
   const copiedTimerRef = useRef(null);
+  // The dock's two scrollers: the prompt box, and the panel body around it.
+  // Both are reused for every prompt this dock ever shows, so their scroll
+  // offsets have to be managed by hand — see the reset below, written next to
+  // the text it belongs to.
+  const promptFieldRef = useRef(null);
+  const panelBodyRef = useRef(null);
+  const promptScrollIdentityRef = useRef(null);
   const activeRequestIdRef = useRef(null);
   const requestsRef = useRef([]);
   const applicationItemsRef = useRef([]);
@@ -279,19 +306,115 @@ export function NonApiAiDialog() {
   const brokenApplicationMessage = isApplicationRequest && activeRequestId
     ? (brokenApplicationMessages[activeRequestId] || activeRequest.integrityMessage || '')
     : '';
+  // Past pasting, not yet finished. The dock keeps showing these — see the
+  // panel branch below for why vanishing here was the bug.
+  const applicationWorkingState = isApplicationRequest && activeRequest.working
+    ? (activeRequest.workingState === 'blocked' ? 'blocked' : 'working')
+    : null;
+  // The blocked headline names the card button by its exact label: this panel
+  // is the one place the dock points at an affordance it does not own, and it
+  // is now the only line that can carry it.
+  const workingHeadline = applicationWorkingState === 'blocked'
+    ? 'Needs a layout retry — press Retry layout check on its card'
+    : 'Saving this application bundle…';
   const activeApplicationCorrections = isApplicationRequest ? (activeRequest.corrections || []) : [];
-  // Mirrors ApplicationPasteDialog: a correction round opens on the delta the
-  // person asked for, with a toggle to the full stage prompt for a fresh chat.
-  // A correction round shows ONE prompt: the correction. The full stage prompt
-  // existed only to start the answer over in a FRESH chat, which is not how
-  // this is used — the correction is written for the chat that already holds
-  // the stage context, and offering both made the person choose between two
-  // things that look interchangeable and are not.
+  // A correction round shows ONE prompt BY DEFAULT: the correction. The full
+  // stage prompt existed only to start the answer over in a FRESH chat, which
+  // is not how this is normally used — the correction is written for the chat
+  // that already holds the stage context, and offering both made the person
+  // choose between two things that look interchangeable and are not.
   const showingApplicationCorrection = isApplicationRequest
     && activeApplicationCorrections.length > 0;
+  // The one case the correction cannot answer: the chat itself is anchored on
+  // a stale envelope (e.g. a handoffCode a fit-revision rotated behind the
+  // chat's back — see the CONTENT gate in validatePasteResponse), and a
+  // correction written FOR that chat cannot break its own anchor. The full
+  // stage prompt is self-contained and carries the CURRENT shared fields, so
+  // it is the one artifact that can — but only pasted into a NEW chat; the
+  // anchored chat would just echo the same stale code again. Reveal it as a
+  // subordinate, explicitly-labelled escape hatch per request, never a peer
+  // toggle, so it cannot read as interchangeable with the correction above.
+  const showingFullRestartPrompt = showingApplicationCorrection
+    && fullPromptRequestIds.has(activeRequestId);
   const activeApplicationPrompt = isApplicationRequest
-    ? (showingApplicationCorrection ? (activeRequest.correctionPrompt || '') : (activeRequest.prompt || ''))
+    ? (showingApplicationCorrection && !showingFullRestartPrompt ? (activeRequest.correctionPrompt || '') : (activeRequest.prompt || ''))
     : '';
+  // Exactly what the prompt box shows. Rendered, copied and scrolled from
+  // this one value, so the three can never disagree about which prompt is on
+  // screen.
+  const displayedPrompt = isApplicationRequest ? activeApplicationPrompt : (activeRequest?.prompt || '');
+  // A textarea keeps its scroll offset when its value changes, and this one is
+  // reused for every prompt in the queue. So submitting a response from
+  // halfway down a long prompt opened the NEXT prompt at that same offset:
+  // mid-sentence in a document nobody had read yet, with nothing on screen
+  // saying the box had moved on, and the shared fields a new prompt has to be
+  // read from scrolled out of view above. Send it back to the top whenever the
+  // text changes identity: a stage accepted and re-coded, a correction
+  // reissued against the same code, a different chip selected, or the
+  // full-stage prompt revealed. Scrolling WITHIN one prompt is untouched,
+  // because the identity holds still while the person reads. Layout effect,
+  // not effect: the reset has to land in the same frame as the new text, or
+  // the old offset paints first and the box visibly jumps.
+  //
+  // The panel body around it is a second scroller with the same fault, so it
+  // rides the same trigger — it is the same event, a new prompt. Its height
+  // genuinely differs prompt to prompt (the attachments block, the error
+  // banner, the fix-count chip and the full-prompt escape hatch all come and
+  // go), so a leftover offset there does not merely hold position near the
+  // buttons: it lands on unrelated content, or pushes the buttons off the
+  // bottom of a shorter prompt.
+  const promptScrollIdentity = [
+    activeRequestId || '',
+    activeRequest?.handoffCode || '',
+    String(activeRequest?.revision ?? ''),
+    correctionSignature(activeRequest),
+    showingFullRestartPrompt ? 'full-stage' : 'as-shown',
+    displayedPrompt,
+  ].join('\n');
+  useLayoutEffect(() => {
+    if (promptScrollIdentityRef.current === promptScrollIdentity) return;
+    const field = promptFieldRef.current;
+    const body = panelBodyRef.current;
+    // Nothing to do while the dock is collapsed: both scrollers mount at the
+    // top on their own, and recording an identity neither of them displayed
+    // would skip the reset for whichever prompt is showing when it reopens.
+    if (!field && !body) return;
+    promptScrollIdentityRef.current = promptScrollIdentity;
+    if (field) {
+      field.scrollTop = 0;
+      field.scrollLeft = 0;
+    }
+    // The body scrolls vertically only; leaving scrollLeft alone keeps this
+    // from asserting a horizontal offset the panel never has.
+    if (body) body.scrollTop = 0;
+  }, [promptScrollIdentity]);
+
+  // ONE numbering rule for the whole dock. The chip strip reads it, and so
+  // does every message that has to NAME another prompt — a person told "this
+  // belongs to Application 3" has to find a chip that reads 3. Two rules would
+  // eventually disagree and send them to the wrong chat, which is the exact
+  // mistake this guard exists to stop.
+  const describeQueuedPrompt = useCallback((request, index) => {
+    if (!request) return { selectorLabel: '', label: 'another prompt' };
+    const applicationOrdinal = request.kind === 'application'
+      ? applicationOrdinalsRef.current.get(request.jobId)
+      : null;
+    const selectorLabel = applicationOrdinal
+      ? String(applicationOrdinal)
+      : Number.isFinite(request.batch) ? String(request.batch) : String(index + 1);
+    const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
+    // The positional fallback is last: a prompt recorded for the duplicate
+    // check may have left the queue by the time its label is read, and there
+    // is no honest position for it then.
+    const label = applicationOrdinal
+      ? `Application ${applicationOrdinal}`
+      : Number.isFinite(request.batch)
+        ? `Batch ${request.batch}${count}`
+        : Number.isFinite(index) && index >= 0
+          ? `Prompt ${index + 1}${count}`
+          : 'another prompt';
+    return { selectorLabel, label };
+  }, []);
 
   // Push prompts always carry a HANDOFF-XXXXXX stamp, so this scan only ever
   // fires for push items; an application item's base64url code never matches
@@ -314,7 +437,52 @@ export function NonApiAiDialog() {
       applicationCrossPasteError = `This response is stamped ${stamp}, which is a job-scoring handoff code. This prompt is the ${applicationStageLabel(activeRequest.stage).toLowerCase()} bundle for ${activeRequest.subject || 'this application'}, and it does not use that kind of code. Nothing was saved. Find the application prompt for this job in your AI chat and paste that answer here instead.`;
     }
   }
-  const responseCrossPasteBlocked = Boolean(draftMismatchError) || Boolean(applicationCrossPasteError);
+  // Neither scan above can see the two mistakes this one is for. A `HANDOFF-`
+  // stamp is the only thing they read, so an application bundle answered in
+  // the wrong chat — bundle 2's answer pasted into bundle 1 — carries no stamp
+  // to disagree with and sails past both; the host catches it on jobId, but
+  // only after a round trip that hands the correction machinery a complaint
+  // about the envelope instead of the documents. And nothing at all noticed a
+  // response that was already filed under a different prompt.
+  //
+  // This guard only ever matches a value the QUEUE ALREADY HOLDS — another
+  // pending prompt's code, its job id, or a fingerprint this dock itself sent
+  // and saw accepted. It never infers a conflict from a value merely being
+  // unfamiliar, because a wrong block stops a submit with no way around it.
+  const pasteAssessment = useMemo(() => assessPastedResponse({
+    response: activeResponse,
+    activeRequest,
+    queuedRequests: mergedRequests,
+    priorSubmissions: submittedResponses,
+  }), [activeResponse, activeRequest, mergedRequests, submittedResponses]);
+  const misdirectedOwnerIndex = pasteAssessment.block?.ownerRequestId
+    ? mergedRequests.findIndex(request => request.requestId === pasteAssessment.block.ownerRequestId)
+    : -1;
+  const misdirectedOwnerRequestId = misdirectedOwnerIndex >= 0
+    ? mergedRequests[misdirectedOwnerIndex].requestId
+    : null;
+  // The owning prompt may have settled since it took this answer, so fall back
+  // to the label recorded when it was sent rather than naming nothing.
+  const misdirectedOwnerName = misdirectedOwnerIndex >= 0
+    ? describeQueuedPrompt(mergedRequests[misdirectedOwnerIndex], misdirectedOwnerIndex).label
+    : (pasteAssessment.block?.ownerLabel || 'another prompt');
+  let misdirectedPasteError = '';
+  // Silent when either older scan already spoke: they describe the same paste
+  // in more specific terms, and two red paragraphs saying one thing reads as
+  // two problems.
+  if (pasteAssessment.block && !draftMismatchError && !applicationCrossPasteError) {
+    misdirectedPasteError = pasteAssessment.block.reason === 'already-submitted'
+      ? `This exact response was already sent for ${misdirectedOwnerName} and accepted there. Nothing was saved. If this prompt is still unanswered, its own answer is in the chat whose prompt header reads ${activeRequest.handoffCode || 'this prompt’s code'} — paste that here instead.`
+      : `This response answers ${misdirectedOwnerName}: it ${pasteAssessment.block.detail}. Nothing was saved. Send it to that prompt, and paste this prompt’s own answer here.`;
+  }
+  // Never blocks. Re-sending identical text under a rotated code is a genuine
+  // repair — a handoff code can rotate without the documents changing, and a
+  // hard block there once trapped a live round with no way out — so this only
+  // says what it sees.
+  const repeatedPasteNotice = pasteAssessment.notice
+    ? 'This is the same text that was already sent for this prompt. If it was refused, the correction above asks for a regenerated answer — re-sending it unchanged spends another round on the same result.'
+    : '';
+  const responseCrossPasteBlocked = Boolean(draftMismatchError) || Boolean(applicationCrossPasteError) || Boolean(misdirectedPasteError);
   // An application rejection already states itself twice over: the header line
   // says the previous answer did not validate, and the correction prompt the
   // person is about to copy carries every fix verbatim. Repeating the
@@ -322,8 +490,8 @@ export function NonApiAiDialog() {
   // screen. A cross-paste block is different — it stops a submit, and nothing
   // else says why — so that one still shows.
   const effectiveError = isApplicationRequest
-    ? applicationCrossPasteError
-    : [...new Set([draftMismatchError, activeValidationDetails].filter(Boolean))].join('\n');
+    ? [applicationCrossPasteError, misdirectedPasteError].filter(Boolean).join('\n')
+    : [...new Set([draftMismatchError, misdirectedPasteError, activeValidationDetails].filter(Boolean))].join('\n');
   const isSubmitting = activeRequestId ? submittingRequestIds.has(activeRequestId) : false;
   const isSteppingBack = activeRequestId ? steppingBackRequestIds.has(activeRequestId) : false;
   const isCancelling = activeRequestId ? cancellingRequestIds.has(activeRequestId) : false;
@@ -404,6 +572,12 @@ export function NonApiAiDialog() {
         return next;
       });
       setCopiedRequestId(previous => previous === requestId ? null : previous);
+      setFullPromptRequestIds(previous => {
+        if (!previous.has(requestId)) return previous;
+        const next = new Set(previous);
+        next.delete(requestId);
+        return next;
+      });
     };
 
     const receiveRequest = (incoming) => {
@@ -566,6 +740,19 @@ export function NonApiAiDialog() {
           if (!(requestId in previous)) return previous;
           const { [requestId]: _cleared, ...remaining } = previous;
           return remaining;
+        });
+        // The full-prompt reveal answers ONE anchored round (see the comment
+        // above showingFullRestartPrompt). Without this, a reveal opened on
+        // e.g. a résumé-stage correction stayed set through this same stable
+        // requestId's later, unrelated cover-letter-stage correction — it
+        // would open on "Full stage prompt" instead of that round's
+        // correction, and the amber fix-count chip (gated on
+        // !showingFullRestartPrompt) would stay hidden behind it.
+        setFullPromptRequestIds(previous => {
+          if (!previous.has(requestId)) return previous;
+          const next = new Set(previous);
+          next.delete(requestId);
+          return next;
         });
       };
 
@@ -751,7 +938,7 @@ export function NonApiAiDialog() {
 
   const copyPrompt = useCallback(async () => {
     if (!activeRequest) return;
-    const textToCopy = isApplicationRequest ? activeApplicationPrompt : activeRequest.prompt;
+    const textToCopy = displayedPrompt;
     if (!textToCopy) return;
     const requestId = activeRequest.requestId;
     try {
@@ -771,7 +958,7 @@ export function NonApiAiDialog() {
         [requestId]: error?.message || 'Could not copy the prompt. Select it and copy manually.',
       }));
     }
-  }, [activeApplicationPrompt, activeRequest, isApplicationRequest]);
+  }, [activeRequest, displayedPrompt]);
 
   const revealAttachment = useCallback(async (filePath) => {
     if (!activeRequestId || !filePath) return;
@@ -789,6 +976,34 @@ export function NonApiAiDialog() {
     }
   }, [activeRequestId]);
 
+  // Remembered the moment a response leaves this dock, accepted or not, so
+  // the guard above can recognise it if it is pasted somewhere else. Only a
+  // fingerprint is kept: the text itself is already on disk where it belongs,
+  // and a second copy here would be a second thing to leak.
+  const recordSubmittedResponse = useCallback((request, index, response, accepted) => {
+    const fingerprint = responseFingerprint(response);
+    // Short answers are never fingerprinted at all — they can legitimately
+    // repeat across prompts, and a false duplicate has no escape.
+    if (!fingerprint || !request?.requestId) return;
+    const { label } = describeQueuedPrompt(request, index);
+    setSubmittedResponses(previous => {
+      const next = previous.filter(entry => !(
+        entry.fingerprint === fingerprint && entry.requestId === request.requestId
+      ));
+      next.push({
+        fingerprint,
+        requestId: request.requestId,
+        handoffCode: request.handoffCode || '',
+        jobId: request.jobId || '',
+        label,
+        accepted: Boolean(accepted),
+      });
+      return next.length > SUBMITTED_RESPONSE_MEMORY
+        ? next.slice(next.length - SUBMITTED_RESPONSE_MEMORY)
+        : next;
+    });
+  }, [describeQueuedPrompt]);
+
   const submit = useCallback(async (event) => {
     event?.preventDefault();
     if (!activeRequestId || !activeResponse.trim() || isSubmitting || isSteppingBack || isCancelling || isDiscarding || isAccepted) return;
@@ -802,6 +1017,9 @@ export function NonApiAiDialog() {
       }
       const requestId = activeRequestId;
       const { jobId, canvasFilePath, handoffCode } = activeRequest;
+      // Read before the await: the queue can shift underneath a slow submit,
+      // and this label has to name the prompt the answer actually went to.
+      const submittedIndex = mergedRequests.findIndex(item => item.requestId === requestId);
       actionRequestIdsRef.current.add(requestId);
       // The submitted response is authoritative for this handoff code. Flush
       // (not merely cancel) any debounced draft write in flight so a slower
@@ -817,6 +1035,7 @@ export function NonApiAiDialog() {
         const result = await window.electronAPI.submitLocalApplicationHandoff({
           jobId, canvasFilePath, handoffCode, response: activeResponse,
         });
+        recordSubmittedResponse(activeRequest, submittedIndex, activeResponse, Boolean(result?.accepted));
         if (!result?.accepted) {
           // The job failed on state this response never supplied, so there is
           // no correction round to send back: stop asking for a paste it
@@ -854,6 +1073,18 @@ export function NonApiAiDialog() {
         // stage, and this item's requestId reappears — unchanged or advanced
         // — once that refresh republishes it.
         setAcceptedRequestIds(previous => new Set(previous).add(requestId));
+        // This bundle now keeps its chip while the app finishes it. Before
+        // that it VANISHED here and focus fell through to whatever was first,
+        // so advancing deliberately is what PRESERVES the old flow rather
+        // than changing it — otherwise the panel would newly pin itself to a
+        // bundle that wants nothing from anyone. Only once, from here: a
+        // later click back onto the saving chip sticks, because nothing
+        // re-runs this.
+        const nextWaiting = mergedRequests.find(item => item.requestId !== requestId && !item.working);
+        if (nextWaiting) {
+          awaitingSuccessorRef.current = null;
+          setSelectedRequestId(nextWaiting.requestId);
+        }
         requestApplicationHandoffRefresh(jobId);
       } catch (error) {
         setErrors(previous => ({
@@ -878,6 +1109,7 @@ export function NonApiAiDialog() {
     }
 
     const requestId = activeRequestId;
+    const submittedIndex = mergedRequests.findIndex(item => item.requestId === requestId);
     actionRequestIdsRef.current.add(requestId);
     setSubmittingRequestIds(previous => new Set(previous).add(requestId));
     setErrors(previous => {
@@ -889,6 +1121,7 @@ export function NonApiAiDialog() {
         requestId,
         response: activeResponse,
       });
+      recordSubmittedResponse(activeRequest, submittedIndex, activeResponse, Boolean(result?.accepted));
       if (result?.accepted) {
         // Do not close optimistically. The settled event is the authoritative
         // signal that this particular request has left the main-process queue.
@@ -913,7 +1146,7 @@ export function NonApiAiDialog() {
         return next;
       });
     }
-  }, [activeRequest, activeRequestId, activeResponse, flushApplicationDraftSave, isAccepted, isApplicationRequest, isCancelling, isDiscarding, isSteppingBack, isSubmitting, responseCrossPasteBlocked]);
+  }, [activeRequest, activeRequestId, activeResponse, flushApplicationDraftSave, isAccepted, isApplicationRequest, isCancelling, isDiscarding, isSteppingBack, isSubmitting, mergedRequests, recordSubmittedResponse, responseCrossPasteBlocked]);
 
   const stepBack = useCallback(async () => {
     if (!activeRequestId || !activeRequest?.canStepBack || isSubmitting || isSteppingBack || isCancelling || isAccepted) return;
@@ -1117,10 +1350,11 @@ export function NonApiAiDialog() {
     requestAnimationFrame(() => dockButtonRef.current?.focus());
   }, []);
 
-  const queueLabel = useMemo(() => {
-    if (mergedRequests.length < 2) return null;
-    return `${mergedRequests.length} pending`;
-  }, [mergedRequests.length]);
+  // Shown at every depth, including one. The chip strip below it is always on
+  // screen now, so a count that blanked itself at one left the header reflowing
+  // for no reason while contradicting the collapsed dock, which says "1 handoff
+  // waiting" for that same state.
+  const queueLabel = useMemo(() => `${mergedRequests.length} pending`, [mergedRequests.length]);
 
   const multipleHubQueue = useMemo(() => {
     const owners = new Set(mergedRequests
@@ -1131,7 +1365,17 @@ export function NonApiAiDialog() {
 
   if (!activeRequest) return null;
 
-  const dockLabel = mergedRequests.length === 1 ? '1 handoff waiting' : `${mergedRequests.length} handoffs waiting`;
+  // "Waiting" stopped being the whole truth once a bundle holds its slot
+  // while the app saves it. Calling a bundle that wants nothing from you a
+  // waiting handoff is the same kind of confusion this change set out to
+  // remove, so the collapsed dock names both states.
+  const savingCount = mergedRequests.filter(request => request.working).length;
+  const waitingCount = mergedRequests.length - savingCount;
+  const dockLabel = savingCount === 0
+    ? (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`)
+    : waitingCount === 0
+      ? (savingCount === 1 ? '1 bundle saving' : `${savingCount} bundles saving`)
+      : `${waitingCount} waiting · ${savingCount} saving`;
 
   return createPortal(
     // The dock normally sits above everything (z-11000/11001). ConfirmDialog
@@ -1169,8 +1413,14 @@ export function NonApiAiDialog() {
         id="non-api-ai-handoff-panel"
         role="region"
         aria-labelledby="non-api-ai-dialog-title"
-        aria-busy={isSubmitting || isSteppingBack || isCancelling || isDiscarding || isAccepted}
-        className="max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
+        aria-busy={isSubmitting || isSteppingBack || isCancelling || isDiscarding || isAccepted || applicationWorkingState === 'working'}
+        // A prompt with its paste box runs ~47rem tall; a saving notice is a
+        // couple of lines. Without a floor the panel collapsed the instant a
+        // response was accepted and sprang back when the next prompt arrived,
+        // so the dock jumped around under the pointer. The floor is capped by
+        // the viewport rather than set flat, because a min-height that beats
+        // max-height would push the submit button off a short screen.
+        className="min-h-[min(47rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col"
       >
         <header className="shrink-0 px-5 py-4 border-b border-white/10">
           <div className="flex items-start gap-3">
@@ -1210,82 +1460,99 @@ export function NonApiAiDialog() {
               </button>
             </div>
           </div>
-          {mergedRequests.length > 1 && (
-            <nav aria-label="Pending AI handoff batches" className="mt-3">
-              <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
-                {mergedRequests.map((request, index) => {
-                  const selected = request.requestId === activeRequestId;
-                  const hasDraft = Boolean(drafts[request.requestId]?.trim());
-                  const hasError = Boolean(errors[request.requestId]);
-                  const isWorking = submittingRequestIds.has(request.requestId)
-                    || steppingBackRequestIds.has(request.requestId)
-                    || cancellingRequestIds.has(request.requestId)
-                    || discardingRequestIds.has(request.requestId)
-                    || acceptedRequestIds.has(request.requestId);
-                  // A full handoff code is already shown in the prompt header.
-                  // These controls only select a queued prompt, so one batch
-                  // number per button keeps ten concurrent prompts visible.
-                  const applicationOrdinal = request.kind === 'application'
-                    ? applicationOrdinalsRef.current.get(request.jobId)
-                    : null;
-                  const selectorLabel = applicationOrdinal
-                    ? String(applicationOrdinal)
-                    : Number.isFinite(request.batch) ? String(request.batch) : String(index + 1);
-                  const count = Number.isFinite(request.itemCount) ? ` · ${request.itemCount}` : '';
-                  const label = applicationOrdinal
-                    ? `Application ${applicationOrdinal}`
-                    : Number.isFinite(request.batch)
-                      ? `Batch ${request.batch}${count}`
-                      : `Prompt ${index + 1}${count}`;
-                  const ownerBadge = multipleHubQueue ? ownerBadgeForNode(request.nodeId) : null;
-                  const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;
-                  const statusLabel = [
-                    hasDraft ? 'response pasted' : null,
-                    isWorking ? 'action in progress' : null,
-                    hasError ? 'needs correction' : null,
-                  ].filter(Boolean).join(', ');
-                  const selectorDescription = `${chipLabel}: ${dockItemSummary(request)}${statusLabel ? `, ${statusLabel}` : ''}`;
-                  return (
-                    <button
-                      key={request.requestId}
-                      type="button"
-                      onClick={() => {
-                        // A direct choice is stronger than an in-flight
-                        // completion's automatic successor preference, and
-                        // than a bundle whose card asked for focus before
-                        // discovery had published it.
-                        awaitingSuccessorRef.current = null;
-                        pendingFocusJobIdsRef.current.clear();
-                        setSelectedRequestId(request.requestId);
-                        EventLogger.log(`[Manual AI] user selected queued handoff${Number.isFinite(request.batch) ? ` batch=${request.batch}` : ''}`);
-                      }}
-                      // Switching the panel to another hub's handoff while the
-                      // confirm is open would let the prompt say one thing and
-                      // cancel another.
-                      disabled={!!cancelConfirmTarget}
-                      aria-current={selected ? 'page' : undefined}
-                      aria-label={selectorDescription}
-                      title={selectorDescription}
-                      className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${selected
-                        ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
-                        : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
-                    >
-                      <span>{selectorLabel}</span>
-                      {(hasDraft || isWorking || hasError) && (
-                        <span
-                          aria-hidden="true"
-                          className={`h-1.5 w-1.5 rounded-full ${hasError ? 'bg-red-300' : isWorking ? 'bg-amber-300' : 'bg-emerald-300'}`}
-                        />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </nav>
-          )}
+          {/*
+            The strip stays on screen at every queue depth, including one. These
+            numbers are how someone keeps up to ten parallel AI chats straight,
+            and a bundle's number appears NOWHERE else in this panel — so hiding
+            the strip once the queue drains to a single prompt would delete the
+            only on-screen answer to "which chat is this prompt from?" at exactly
+            the moment the last chat is being finished. A lone chip also holds
+            the position and size it had in a full strip, so nothing jumps as
+            siblings settle.
+          */}
+          <nav aria-label="Pending AI handoff batches" className="mt-3">
+            <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
+              {mergedRequests.map((request, index) => {
+                const selected = request.requestId === activeRequestId;
+                const hasDraft = Boolean(drafts[request.requestId]?.trim());
+                const hasError = Boolean(errors[request.requestId]);
+                const isWorking = submittingRequestIds.has(request.requestId)
+                  || steppingBackRequestIds.has(request.requestId)
+                  || cancellingRequestIds.has(request.requestId)
+                  || discardingRequestIds.has(request.requestId)
+                  || acceptedRequestIds.has(request.requestId);
+                // The BUNDLE's own state, not an action this dock started:
+                // the app is finishing it and no paste is possible. Kept
+                // separate because it outlives any one action and is the
+                // reason this chip is still on screen at all.
+                const isBundleSaving = Boolean(request.working);
+                // A full handoff code is already shown in the prompt header.
+                // These controls only select a queued prompt, so one batch
+                // number per button keeps ten concurrent prompts visible. The
+                // rule itself lives in describeQueuedPrompt because a guard
+                // message that names a prompt has to use the same one.
+                const { selectorLabel, label } = describeQueuedPrompt(request, index);
+                const ownerBadge = multipleHubQueue ? ownerBadgeForNode(request.nodeId) : null;
+                const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;
+                const statusLabel = [
+                  isBundleSaving
+                    ? (request.workingState === 'blocked' ? 'needs a layout retry' : 'still saving')
+                    : null,
+                  hasDraft ? 'response pasted' : null,
+                  isWorking ? 'action in progress' : null,
+                  hasError ? 'needs correction' : null,
+                ].filter(Boolean).join(', ');
+                const selectorDescription = `${chipLabel}: ${dockItemSummary(request)}${statusLabel ? `, ${statusLabel}` : ''}`;
+                return (
+                  <button
+                    key={request.requestId}
+                    type="button"
+                    onClick={() => {
+                      // A direct choice is stronger than an in-flight
+                      // completion's automatic successor preference, and
+                      // than a bundle whose card asked for focus before
+                      // discovery had published it.
+                      awaitingSuccessorRef.current = null;
+                      pendingFocusJobIdsRef.current.clear();
+                      setSelectedRequestId(request.requestId);
+                      EventLogger.log(`[Manual AI] user selected queued handoff${Number.isFinite(request.batch) ? ` batch=${request.batch}` : ''}`);
+                    }}
+                    // Switching the panel to another hub's handoff while the
+                    // confirm is open would let the prompt say one thing and
+                    // cancel another.
+                    disabled={!!cancelConfirmTarget}
+                    aria-current={selected ? 'page' : undefined}
+                    aria-label={selectorDescription}
+                    title={selectorDescription}
+                    className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${selected
+                      ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
+                      : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
+                  >
+                    <span>{selectorLabel}</span>
+                    {/*
+                      A spinner rather than a dot while the app finishes the
+                      bundle: the number staying put is the point, and a
+                      static dot would read as one more settled state rather
+                      than as work still running.
+                    */}
+                    {isBundleSaving ? (
+                      request.workingState === 'blocked'
+                        ? <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-amber-300" />
+                        : <LoaderCircle size={10} className="animate-spin text-violet-200" aria-hidden="true" />
+                    ) : (hasDraft || isWorking || hasError) && (
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full ${hasError ? 'bg-red-300' : isWorking ? 'bg-amber-300' : 'bg-emerald-300'}`}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
         </header>
 
-        <form onSubmit={submit} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
+        <form ref={panelBodyRef} onSubmit={submit} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
           {brokenApplicationMessage ? (
             // No prompt and no response box: this job takes no further paste,
             // and the message already names the action that replaces it.
@@ -1301,6 +1568,42 @@ export function NonApiAiDialog() {
                 >
                   Dismiss
                 </button>
+              </div>
+            </div>
+          ) : applicationWorkingState ? (
+            // The response was accepted and the app is finishing the bundle:
+            // rendering it, measuring the pages, writing the files. Nothing
+            // here is actionable, and that is exactly why the entry used to
+            // disappear — which is what made a RETURNING prompt unreadable.
+            // A bundle that leaves the queue releases its chip number, so one
+            // that came back from a failed save could return wearing a
+            // different number, or find another bundle already wearing its
+            // old one. Holding the entry holds the number, and the number is
+            // how someone knows this is still the same job.
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-start gap-3 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs leading-relaxed text-violet-100"
+            >
+              {applicationWorkingState === 'working' ? (
+                <LoaderCircle size={15} className="mt-0.5 shrink-0 animate-spin text-violet-200" aria-hidden="true" />
+              ) : (
+                <AlertTriangle size={15} className="mt-0.5 shrink-0 text-amber-300" aria-hidden="true" />
+              )}
+              {/*
+                Two lines, and `truncate` on both so it cannot grow into a
+                third: what this state is, and which job it belongs to. The
+                paragraph that used to sit here explained the chip-number
+                rule, which is a thing to understand once, not to re-read on
+                every save.
+              */}
+              <div className="min-w-0">
+                <div className="truncate font-semibold text-white" title={workingHeadline}>
+                  {workingHeadline}
+                </div>
+                <div className="truncate text-violet-100/75" title={activeRequest.subject || activeRequest.label || ''}>
+                  {activeRequest.subject || activeRequest.label || 'This application'}
+                </div>
               </div>
             </div>
           ) : (
@@ -1341,29 +1644,53 @@ export function NonApiAiDialog() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <label htmlFor="non-api-ai-prompt" className="text-xs font-medium text-white/65 uppercase tracking-wider">
-                      {isApplicationRequest && showingApplicationCorrection ? 'Correction prompt' : 'Prompt'}
+                      {isApplicationRequest && showingApplicationCorrection
+                        ? (showingFullRestartPrompt ? 'Full stage prompt' : 'Correction prompt')
+                        : 'Prompt'}
                     </label>
-                    {isApplicationRequest && showingApplicationCorrection && (
+                    {isApplicationRequest && showingApplicationCorrection && !showingFullRestartPrompt && (
                       <span className="inline-flex rounded border border-amber-400/30 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
                         {activeApplicationCorrections.length === 1 ? '1 fix to send' : `${activeApplicationCorrections.length} fixes to send`}
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-3">
+                    {isApplicationRequest && showingApplicationCorrection && (
+                      <button
+                        type="button"
+                        onClick={() => setFullPromptRequestIds(previous => {
+                          const next = new Set(previous);
+                          if (next.has(activeRequestId)) next.delete(activeRequestId);
+                          else next.add(activeRequestId);
+                          return next;
+                        })}
+                        className="text-[11px] font-medium text-white/40 underline decoration-dotted underline-offset-2 transition-colors hover:text-white/70"
+                        title={showingFullRestartPrompt
+                          ? 'Return to the correction prompt for this chat'
+                          : 'Only if this AI chat has lost track of the current stage: copy this into a NEW chat to start the answer over from scratch'}
+                      >
+                        {showingFullRestartPrompt ? 'Back to correction' : 'Chat lost the thread? Start over in a new chat'}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={copyPrompt}
                       className="inline-flex items-center gap-1.5 rounded-md border border-violet-400/30 bg-violet-500/15 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-500/25 transition-colors"
                     >
                       {isCopied ? <Check size={13} aria-hidden="true" /> : <ClipboardCopy size={13} aria-hidden="true" />}
-                      {isCopied ? 'Copied' : (isApplicationRequest ? showingApplicationCorrection : isCorrection) ? 'Copy correction prompt' : 'Copy prompt'}
+                      {isCopied
+                        ? 'Copied'
+                        : showingFullRestartPrompt
+                          ? 'Copy full prompt'
+                          : (isApplicationRequest ? showingApplicationCorrection : isCorrection) ? 'Copy correction prompt' : 'Copy prompt'}
                     </button>
                   </div>
                 </div>
                 <textarea
                   id="non-api-ai-prompt"
+                  ref={promptFieldRef}
                   readOnly
-                  value={isApplicationRequest ? activeApplicationPrompt : activeRequest.prompt}
+                  value={displayedPrompt}
                   onFocus={(event) => event.currentTarget.select()}
                   className="h-48 w-full resize-y rounded-lg border border-white/10 bg-black/35 p-3 font-mono text-xs leading-relaxed text-white/80 outline-none focus:border-violet-400/60"
                   aria-label="Prompt to send to your AI chat"
@@ -1380,17 +1707,58 @@ export function NonApiAiDialog() {
                   disabled={isSubmitting || isSteppingBack || isCancelling || isDiscarding || isAccepted || !!cancelConfirmTarget}
                   placeholder="Paste the full response here…"
                   className="h-44 w-full resize-y rounded-lg border border-white/15 bg-black/45 p-3 font-mono text-xs leading-relaxed text-white placeholder:text-white/30 outline-none focus:border-violet-400/60 disabled:opacity-60"
-                  aria-describedby={effectiveError || correctionGuidance ? 'non-api-ai-validation-error' : undefined}
+                  aria-describedby={effectiveError || (correctionGuidance && !isApplicationRequest) ? 'non-api-ai-validation-error' : undefined}
                   spellCheck={false}
                 />
               </div>
 
-              {(effectiveError || correctionGuidance) && (
+              {repeatedPasteNotice && (
+                <p className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100/90">
+                  {repeatedPasteNotice}
+                </p>
+              )}
+
+              {(effectiveError || (correctionGuidance && !isApplicationRequest)) && (
                 <div id="non-api-ai-validation-error" role="alert" className="flex items-start gap-2 rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-200 whitespace-pre-wrap">
                   <XCircle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                   <div className="min-w-0">
                     {correctionGuidance && <p>{correctionGuidance}</p>}
                     {effectiveError && <p className={correctionGuidance ? 'mt-2 text-red-100/80' : undefined}>{effectiveError}</p>}
+                    {/*
+                      A blocked paste is a dead end without these. The text in
+                      the box provably is not this prompt's answer, so clearing
+                      it is always the right move; and when the guard knows
+                      which queued prompt the text belongs to, the repair is
+                      one press instead of a hunt through ten open chats.
+                    */}
+                    {responseCrossPasteBlocked && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {misdirectedOwnerRequestId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              // Same two cancellations a chip press makes: a
+                              // deliberate choice outranks both automatic
+                              // focus preferences.
+                              awaitingSuccessorRef.current = null;
+                              pendingFocusJobIdsRef.current.clear();
+                              setSelectedRequestId(misdirectedOwnerRequestId);
+                              EventLogger.log('[Manual AI] user followed a misdirected paste to the prompt that owns it');
+                            }}
+                            className="rounded-md border border-red-300/35 bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-red-100 transition-colors hover:border-red-200/60 hover:bg-red-500/20 focus:outline-none focus:ring-2 focus:ring-red-300/60"
+                          >
+                            Go to {misdirectedOwnerName}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setActiveResponse('')}
+                          className="rounded-md border border-white/20 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-violet-400/70"
+                        >
+                          Clear this box
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

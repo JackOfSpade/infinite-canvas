@@ -394,14 +394,18 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      optional-but-recommended row the design references describe, and it is not
      the candidate-contact location the privacy rule in step 3 governs — it is
      an employment fact the career data supplied with the role, so reading it
-     off that role's own entry is not an inference. Render it either as
+     off that role's own entry is not an inference. By default, fold it into
+     the `.role-dates` cell after a `<span class="sep" aria-hidden="true">·</span>`
+     — the cell then reads `<date range> · <City, ST>`. Render it instead as
      `<p class="role-location">` inside a `<div class="role-meta meta-row">`
-     (the design system's own role block), or, when the role carries no
-     `<p class="role-summary">` to share that row with, folded into the
-     `.role-dates` cell after a `<span class="sep" aria-hidden="true">·</span>`
-     — the cell then reads `<date range> · <City, ST>`. Prefer the fold when the page is
-     tight: a `.role-meta` row holding one right-aligned city spends a whole
-     line on it, and those lines belong to bullets. Abbreviate the region the
+     (the design system's own role block) only where the fold does not apply:
+     the role also carries a `<p class="role-summary">` to share that row
+     with, or the location itself cannot parse back out of the dates cell —
+     a value containing a bare four-digit year (indistinguishable from a
+     second date once folded) or a `·` (the fold's own separator). A
+     `.role-meta` row holding one right-aligned city and nothing else spends
+     a whole line for a fact the folded cell shows for free, and those lines
+     belong to bullets. Abbreviate the region the
      way the design references' own samples do (`Brooklyn, NY`, not
      `Brooklyn, New York`); shortening a stated region is formatting, not a new
      fact. Take the city and region from the career data's own entry for that
@@ -485,6 +489,15 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      `.subsection-head` only for a genuine grouping within its enclosing parent
      section; never use it as a peer category heading or nest a peer category
      inside the preceding role/section.
+   - A personal project is carried for THIS posting or not at all. Career data
+     proving a project is true of the candidate is what makes it citable; it is
+     not what makes it belong on this résumé. Include a project only where the
+     posting asks for what that project shows, and name in the generation audit
+     the listing requirement it answers. Where the posting asks for nothing the
+     project shows, omit it — however real the project is, and however well the
+     corpus proves it. Personal projects are not a standing section every
+     résumé carries, and a project section that would look the same for every
+     employer is the defect this rule exists to prevent.
    - A source-stated project category is factual provenance, not a stylistic
      heading choice. If any retained project is identified beneath `Personal
      Projects` in the career data, render that project in a peer section whose
@@ -514,10 +527,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    not spend the next round on mere paraphrasing; make a materially stronger
    structural reduction. An unsatisfied measured layout criterion requires a
    material change and can never be overridden by a diminishing-returns
-   declaration. When the app reports that a one-page résumé is materially
-   underfilled, do the opposite: reassess omitted source-supported evidence
-   and add only distinct, job-relevant facts that improve the candidate's
-   case. Do not use generic filler, repetition, invented detail, or decorative
+   declaration. One page is the hard requirement for both documents; there is
+   no minimum fill. Never lengthen a document to fill its page — a shorter
+   page carrying only evidence that earns its place is the supported outcome.
+   Do not use generic filler, repetition, invented detail, or decorative
    prose to occupy space. For the résumé,
    retain direct matches to the job's highest-priority
    requirements, concrete outcomes/scale, and credible differentiators before
@@ -565,6 +578,30 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    industry, feature, or tool into a requirement of the target role. Do not
    catalog features: explain the shared mechanism that makes the selected proof
    useful for the responsibility named in this posting.
+   State completed work with yourself as the grammatical subject of the
+   action. An artifact, project, pipeline, or system named as the actor
+   describes something that exists rather than work a person did. It also
+   decides whether a paragraph owes an `argumentMapping`, so a letter written
+   entirely in artifact-as-actor sentences is graded by none of the argument
+   rules and ships unexamined; the omission is silent, not permissive. Every
+   paragraph offering completed work as proof carries at least one first-person
+   action.
+   Between a paragraph's concrete evidence and its transfer, state what the
+   described work required, one level of abstraction above the artifact. That
+   sentence introduces no fact the evidence did not already contain: it
+   re-describes the same work as a problem shape, so it can never smuggle in an
+   outcome, a scale, or a motivation the sources do not state. Make the work,
+   not yourself, its grammatical subject, and keep it in past tense anchored to
+   that project, because a general claim about what you are good at is a scope
+   assertion the sources do not support. Exclude every proper noun, product,
+   tool, and domain particular the evidence named, and do not name the target
+   employer, team, or product, which belongs to the transfer that follows. Name
+   the difficulty, constraint, or design trade the work resolved; a sentence
+   that only assigns the work to a category adds nothing and is cut. It must
+   stay true if a different project of the same shape were substituted for the
+   one described, and must not announce that a generalization follows. Without
+   it a transfer reaches back to a bare mechanism and the reader is left to
+   build the connection unaided.
    Give every paragraph one argumentative job, not one sentence. Use as many
    sentences as that paragraph needs to make its point, establish its proof,
    and explain its relevance clearly. Do not compress those jobs into one
@@ -799,6 +836,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      that metric. Label conclusions from reading the markup as your own
      diagnosis (for example, "My diagnosis is that several bullets wrap too
      long").
+
+     One page is the hard requirement for both documents; there is no minimum
+     fill. `fit-feedback.json` never asks for more résumé content because a
+     page reads short — only because it overflows its page target. Never
+     lengthen a document to fill its page: a shorter page carrying only
+     evidence that earns its place is the supported outcome, matching the
+     design system's own rule that a shorter honest page beats a padded one.
    - Continue through every measured revision requested by the app in this same
      local AI agent session. There is no fixed round limit. These layout-feedback
      rounds are separate from your private drafting critique.

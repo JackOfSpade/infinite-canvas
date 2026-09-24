@@ -1,9 +1,9 @@
 import { assert, fs, getLocalApplicationHandoff, importLocalApplicationJob, os, path, PDFDocument, queueLocalApplicationJob, submitLocalApplicationHandoff, validateLocalApplicationResult } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, ARGUMENT_EVIDENCE_REBIND_RULE, ARGUMENT_JOB_NEED_QUOTE_RULE, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, PASTE_EVIDENCE_PRIORITIES, PASTE_FINDING_DOCUMENTS, COVER_LETTER_ARGUMENT_TEXT_LIMITS, GENERATION_AUDIT_TEXT_MINIMUMS, QUALITY_NOTE_MIN_CHARS, QUALITY_NOTE_MIN_WORDS, QUALITY_NOTE_RULE, EVIDENCE_PLAN_CRITERION_IDS, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS, MAX_EVIDENCE_PLAN_REQUIREMENT_ITEMS, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, MIN_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SOURCE_GROUNDING_QUOTE_WORDS, PASTE_BASE_HASH_KEYS, PASTE_CHECK_PROSE_UNITS, PASTE_STABLE_ID_PATTERN, pasteReportableCheckIds, SOURCE_TERM_OVERLAP_RULE, __setLocalAiRenderPdfForTests, localApplicationStatus, updateLocalApplicationDraft } from '../../electron/ipc/localAiApplication.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, ARGUMENT_EVIDENCE_REBIND_RULE, ARGUMENT_JOB_NEED_QUOTE_RULE, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, PASTE_EVIDENCE_PRIORITIES, PASTE_FINDING_DOCUMENTS, COVER_LETTER_ARGUMENT_TEXT_LIMITS, GENERATION_AUDIT_TEXT_MINIMUMS, QUALITY_NOTE_MIN_CHARS, QUALITY_NOTE_MIN_WORDS, QUALITY_NOTE_RULE, EVIDENCE_PLAN_CRITERION_IDS, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS, MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS, MAX_EVIDENCE_PLAN_REQUIREMENT_ITEMS, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, MIN_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SOURCE_GROUNDING_QUOTE_WORDS, PASTE_BASE_HASH_KEYS, PASTE_CHECK_PROSE_UNITS, PASTE_STABLE_ID_PATTERN, pasteRejectionCheckIds, pasteReportableCheckIds, SOURCE_TERM_OVERLAP_RULE, __setLocalAiRenderPdfForTests, localApplicationStatus, updateLocalApplicationDraft } from '../../electron/ipc/localAiApplication.js';
 import { EMPTY_JOB_LISTING_BODY_NOTE, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
-import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, renderStructuredApplicationResume, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
-import { ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
+import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, renderStructuredApplicationResume, SKILL_ITEM_FILTERABLE_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
+import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, REPEATED_PHRASE_RULE, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
 import { assemblePasteApplicationResult, MAX_UNIT_CAREER_DATA_QUOTES } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { extractResumeEvidence, RESUME_BULLET_CHARACTER_BUDGET } from '../../electron/ipc/jobApplication.js';
 import crypto from 'node:crypto';
@@ -432,7 +432,9 @@ async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY
   const queued = await queueLocalApplicationJob({
     transport: 'paste', canvasFilePath: project.canvasFilePath,
     careerData: ['Ada Lovelace', 'ada@example.test', 'Engineer', ...bullets, ...projects.map(item => item.description), ...paragraphs].join('\n'),
-    job: { title: 'Engineer', company: 'Acme', snippet: listing },
+    // A project now has to answer something the posting says, so a scenario
+    // that ships one puts its words in the listing too and cites them below.
+    job: { title: 'Engineer', company: 'Acme', snippet: [listing, ...projects.map(item => item.description)].join(' ') },
     resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
   });
   const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
@@ -452,6 +454,7 @@ async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY
       // résumé carries it, so a scenario that needs one ships it through the
       // same plan-then-résumé path every other fixture field takes.
       ...projects.map((item, index) => ({ id: `project-proof-${index + 1}`, sourceId: 'career-data', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
+      ...projects.map((item, index) => ({ id: `project-listing-${index + 1}`, sourceId: 'job-listing', quote: item.description, requirement: 'Reliable system delivery', priority: 'highest' })),
       ...paragraphs.map((quote, index) => ({ id: `letter-proof-${index + 1}`, sourceId: 'career-data', quote, requirement: 'Reliable system delivery', priority: 'highest' })),
       { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
     ],
@@ -462,7 +465,7 @@ async function coverLetterBatteryStage(project, { paragraphs, bullets = [BATTERY
       schemaVersion: 'structured-resume.v1',
       identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' },
       roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: bullets.map((text, index) => ({ id: `bullet-${index + 1}`, text, evidenceIds: [`resume-proof-${index + 1}`] })) }],
-      ...(projects.length ? { projects: projects.map((item, index) => ({ id: `project-${index + 1}`, name: item.name, description: item.description, evidenceIds: [`project-proof-${index + 1}`] })) } : {}),
+      ...(projects.length ? { projects: projects.map((item, index) => ({ id: `project-${index + 1}`, name: item.name, description: item.description, evidenceIds: [`project-proof-${index + 1}`, `project-listing-${index + 1}`] })) } : {}),
     },
   });
   const prompt = (await current()).prompt;
@@ -588,7 +591,7 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
     rejectedBy: 'repeated-sentence-shape',
     control: [
       `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support the reliable system delivery this role needs.',
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
       'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment, and I can bring that experience to reliable system delivery.',
     ],
   },
@@ -603,13 +606,13 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
     clause: 'one evidence-sentence shape repeated through the letter',
     paragraphs: [
       `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. In my engineering role at Acme, I scripted that step so a colleague could repeat it without me present during the change window. That practice would support the reliable system delivery this role needs.',
+      'My delivery practice covers the deployment step itself. In my engineering role at Acme, I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
       'My delivery judgment covers the colleagues who depend on the service. In my engineering role at Acme, I wrote the weekly runbook the rotation followed. This role needs the same judgment, and I can bring that experience to reliable system delivery.',
     ],
     rejectedBy: 'repeated-sentence-shape',
     control: [
       `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
-      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support the reliable system delivery this role needs.',
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
       'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment, and I can bring that experience to reliable system delivery.',
     ],
   },
@@ -789,6 +792,25 @@ export default [
           && recoveredManifest.paste.requiredChangeDocuments.every(document => reopened.handoff.correctionPrompt.includes(document))
           && reopened.handoff.correctionPrompt.length * 2 < reopened.handoff.prompt.length,
         `a measured reopen hands back the measurement as a correction delta (corrections=${JSON.stringify(reopened.handoff.corrections || [])}, correction=${reopened.handoff.correctionPrompt?.length}, stage=${reopened.handoff.prompt.length})`);
+
+        // The measured finding must survive an intervening rejection for its
+        // own, UNRELATED reason. rememberPasteCorrections' per-job map is
+        // overwritten by every rejection this process handles; a live handoff
+        // lost this exact 67%-utilization finding that way — four rejections
+        // in a row for a stale-envelope defect each erased it, and every
+        // following correction round asked only about the envelope and never
+        // again mentioned the fit floor it was actually waiting on. Reading
+        // state.findings directly (pasteHandoffRecord's `measured`, built
+        // from durable state rather than the volatile corrections map) is
+        // what makes it survive: prove it here with an unrelated rejection
+        // that carries no mention of the measurement at all.
+        const unrelated = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: reopened.handoff.handoffCode, response: '{not valid json' });
+        assert(!unrelated.accepted && !/Measured/.test(unrelated.validationErrors.join(' ')),
+          `the intervening rejection must be for its own reason, unrelated to the fit measurement (errors=${JSON.stringify(unrelated.validationErrors)})`);
+        const afterUnrelatedRejection = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(afterUnrelatedRejection.handoff.correctionPrompt?.includes('Measured 2 pages'),
+          `the measured finding must survive an unrelated rejection instead of being silently dropped from the next correction round (correction=${afterUnrelatedRejection.handoff.correctionPrompt})`);
+
         await fs.promises.writeFile(logPath, creationLog, 'utf8');
         await fs.promises.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
         const reopenedBeforeAppend = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
@@ -1078,6 +1100,46 @@ export default [
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'A rejected round reports its failed rules by check id and counts the items that carry none',
+    run: () => {
+      // The two frozen vocabularies a receipt may name: the prose checks the
+      // paste batteries run, and the review criteria a host-validation
+      // failure reports against.
+      const reportable = new Set([...pasteReportableCheckIds(), ...APPLICATION_QUALITY_CRITERIA.map(({ id }) => id)]);
+      const items = [
+        'redundancy: Cover-letter paragraph "p2" reuses PRIVATE_SHINGLE from paragraph "p1".',
+        'Local AI cover letter failed required checks: anchor-relevance: Cover-letter paragraph "p3" names PRIVATE_TOOL. | redundancy: again.',
+        'Cover letter needs a roleThesis.',
+        'not-a-real-check-id: something the pipeline never runs.',
+        // A host-validation failure reports a review CRITERION in the same
+        // shape. Criterion ids are a second frozen vocabulary, never a paste
+        // check, so reading only PASTE_CHECK_PROSE_UNITS drops them.
+        'Local AI cover letter failed required checks: cover-register: paragraph 1 closes on a deferential invitation.',
+        'host-validation-3-1: the assembled package did not match.',
+      ];
+      const { checkIds, uncodedErrors } = pasteRejectionCheckIds(items);
+      assert(checkIds.join(',') === 'anchor-relevance,cover-register,redundancy',
+        `check ids are deduped, sorted, and read through the document prefix, got ${JSON.stringify(checkIds)}`);
+      assert(checkIds.every(id => reportable.has(id)),
+        'a receipt may only name an id this pipeline can actually report');
+      assert(!checkIds.includes('host-validation-3-1'),
+        'a per-round finding id is not a rule name and carries a round counter, so it is not retained');
+      // A structural item and an unknown id both carry no reportable rule, so
+      // the count is what tells a reader the id list is not the whole round.
+      // A structural item, an unknown id, and a per-round host-validation
+      // finding id all carry no rule name, so the count is what tells a
+      // reader the id list is not the whole round.
+      assert(uncodedErrors === 3, `items with no reportable check id must be counted, got ${uncodedErrors}`);
+      const joined = JSON.stringify(checkIds);
+      for (const secret of ['PRIVATE_SHINGLE', 'PRIVATE_TOOL', 'p2', 'p3', 'roleThesis', 'deferential', 'host-validation-3-1']) {
+        assert(!joined.includes(secret), `only the id before ": " is extracted; ${secret} leaked`);
+      }
+      assert(pasteRejectionCheckIds(null).checkIds.length === 0 && pasteRejectionCheckIds([]).uncodedErrors === 0,
+        'a missing or empty item list yields no ids and no count');
+      return { checkIds, uncodedErrors };
     },
   },
   {
@@ -1486,7 +1548,7 @@ export default [
   {
     name: 'A correction delta stays smaller than the stage prompt it replaces even when a response reports many genuinely distinct long defects',
     async run() {
-      // Note 3, measured on the real submit path. Four employers of twenty
+      // Note 3, measured on the real submit path. Sixteen employers of five
       // bullets each, every bullet citing an unsupported "daily frequency"
       // qualifier its cited career-data quote never states — a real,
       // per-bullet source-grounding rejection (assertSupportedSourceQualifiers
@@ -1496,13 +1558,24 @@ export default [
       // this very round: 23,269 correction characters against a
       // 15,603-character stage prompt (ratio 1.49) — a correction delta
       // LARGER than the prompt it exists to replace. This measures the same
-      // real rejection after the fix.
-      const ROLES = 4;
-      const BULLETS_PER_ROLE = 20;
+      // real rejection after the fix. Five bullets per role, not twenty: past
+      // jobApplication.js's RESUME_ROLE_BULLET_CEILING (6) a role also trips
+      // resume-role-bullet-budget, a real but different defect this count is
+      // not measuring.
+      const ROLES = 16;
+      const BULLETS_PER_ROLE = 5;
       const parts = ['Ada Lovelace', 'ada@example.test', ''];
       for (let r = 1; r <= ROLES; r++) {
-        parts.push(`Senior Engineer ${r}`, `Employer ${r} — City ${r}, Region`, '2018 - 2022', '',
-          `- Improved the reporting pipeline for the engineering team at Employer ${r}.`, '');
+        parts.push(`Senior Engineer ${r}`, `Employer ${r} — City ${r}, Region`, '2018 - 2022', '');
+        // One distinct line per bullet: structuredResume.js's
+        // ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE now rejects two bullets in one
+        // role citing the same career-data ID, so this fixture — which wants
+        // 20 genuinely distinct real prose defects per role — must ground each
+        // bullet in its own quote rather than repeat one across all twenty.
+        for (let b = 1; b <= BULLETS_PER_ROLE; b++) {
+          parts.push(`- Improved the reporting pipeline for the engineering team at Employer ${r}, iteration ${b}.`);
+        }
+        parts.push('');
       }
       const manyDefectCareerData = parts.join('\n');
       const workHistory = [];
@@ -1522,8 +1595,14 @@ export default [
         const requirements = [];
         for (let r = 1; r <= ROLES; r++) {
           evidence.push({ id: `cd-open-${r}`, sourceId: 'career-data', quote: `Senior Engineer ${r}\nEmployer ${r} — City ${r}, Region\n2018 - 2022`, requirement: `Employer ${r} tenure`, priority: 'supporting' });
-          evidence.push({ id: `cd-body-${r}`, sourceId: 'career-data', quote: `Improved the reporting pipeline for the engineering team at Employer ${r}.`, requirement: `Employer ${r} delivery`, priority: 'highest' });
-          requirements.push({ id: `need-${r}`, text: `Employer ${r} delivery`, priority: 'highest', evidenceIds: [`cd-body-${r}`, `cd-open-${r}`, 'job-need'] });
+          // One evidence item per bullet, mirroring the career-data line added
+          // above: every bullet gets its own career-data ID so twenty bullets
+          // in one role read as twenty distinct accomplishments, not one
+          // accomplishment fragmented across twenty citations of the same ID.
+          for (let b = 1; b <= BULLETS_PER_ROLE; b++) {
+            evidence.push({ id: `cd-body-${r}-${b}`, sourceId: 'career-data', quote: `Improved the reporting pipeline for the engineering team at Employer ${r}, iteration ${b}.`, requirement: `Employer ${r} delivery`, priority: 'highest' });
+          }
+          requirements.push({ id: `need-${r}`, text: `Employer ${r} delivery`, priority: 'highest', evidenceIds: [`cd-body-${r}-1`, `cd-open-${r}`, 'job-need'] });
         }
         evidence.push({ id: 'job-need', sourceId: 'job-listing', quote: 'own delivery', requirement: 'Delivery ownership', priority: 'highest' });
         requirements.push({ id: 'need-job', text: 'Delivery ownership', priority: 'highest', evidenceIds: ['job-need'] });
@@ -1542,7 +1621,7 @@ export default [
             bullets.push({
               id: `bullet-r${r}-b${String(b).padStart(2, '0')}`,
               text: `I improved the reporting pipeline daily for the engineering team at Employer ${r}, iteration ${b}.`,
-              evidenceIds: [`cd-body-${r}`],
+              evidenceIds: [`cd-body-${r}-${b}`],
             });
           }
           roles.push({ id: `role-${r}`, title: `Senior Engineer ${r}`, company: `Employer ${r}`, dates: '2018 – 2022', location: '', bullets });
@@ -1986,7 +2065,7 @@ export default [
         ].join('\n');
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: scopedCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect automated test coverage.' },
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect automated test coverage. You will own marketplace price tracker tooling too.' },
           resumeProfile: { workHistory: [
             { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
             { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
@@ -2003,6 +2082,7 @@ export default [
             { id: 'cd-projects', sourceId: 'career-data', quote: 'Built a marketplace price tracker with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
             { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
             { id: 'job-testing', sourceId: 'job-listing', quote: 'automated test coverage', requirement: 'Automated test coverage', priority: 'supporting' },
+            { id: 'job-tracker', sourceId: 'job-listing', quote: 'marketplace price tracker tooling', requirement: 'Marketplace tracker ownership', priority: 'high' },
           ],
           requirements: [
             { id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'job-stack'] },
@@ -2028,6 +2108,16 @@ export default [
           && prompt.includes(`at most ${STRUCTURED_RESUME_LIMITS.projects} projects; at most ${STRUCTURED_RESUME_LIMITS.skillGroups} skill groups of 1 to ${STRUCTURED_RESUME_LIMITS.skillItemsPerGroup} items`)
           && prompt.includes(`1 to ${STRUCTURED_RESUME_LIMITS.contactValues} contact values; at most ${STRUCTURED_RESUME_LIMITS.textChars} characters of bullet text`),
         'the résumé contract states every enforced collection and field ceiling, interpolated from the constants the validator reads');
+        // The skills block has TWO sets of numbers and the loose one used to be
+        // the only set stated: a responder reading "at most 24 skill groups of 1
+        // to 48 items" and nothing else wrote one row of 11 terms behind a
+        // 120-character `dd`, which the design budget rejects. Both the budget
+        // and the item rule are printed from the constants their gates read, and
+        // the structural clause now says what it actually bounds.
+        assert(prompt.includes(SKILLS_BLOCK_BUDGET_RULE)
+          && prompt.includes(SKILL_ITEM_FILTERABLE_RULE)
+          && prompt.includes('which bound a pathological response and nothing else'),
+        'the résumé contract states the design system’s own skills-block budget and item rule, and says the structural skill ceilings are outer bounds rather than the budget');
         assert(prompt.includes('Nothing may repeat: identity.contact values, the items inside one skills group, bullet ids within their role')
           && prompt.includes('collapsed to single spaces and trimmed before any exact match is compared'),
         'the résumé contract states the uniqueness rules and that whitespace is collapsed before exact-match comparisons');
@@ -2082,7 +2172,7 @@ export default [
         // because every text field is whitespace-collapsed before comparison.
         const repaired = await submitResume({
           ...draft({ title: 'Senior\n   Engineer' }),
-          projects: [{ id: 'project-tracker', name: 'marketplace price tracker', description: 'Built a price tracker with a local model.', evidenceIds: ['cd-projects'] }],
+          projects: [{ id: 'project-tracker', name: 'marketplace price tracker', description: 'Built a price tracker with a local model.', evidenceIds: ['cd-projects', 'job-tracker'] }],
         });
         assert(repaired.accepted && repaired.handoff?.stage === 'cover-letter',
           `the disclosed repair passes on the first round: out-of-section evidence in projects[], and collapsed whitespace in an exact-match field (${JSON.stringify(repaired.validationErrors || [])})`);
@@ -3715,11 +3805,20 @@ export default [
           'Maintained internal systems for 12 teams before the 2024 release.',
           'Maintained internal systems after clearing three years of archived ticket data.',
         ];
-        const controlResult = await controls.submit({
-          resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: controlTexts.map((text, index) => ({ id: `bullet-${index + 1}`, text, evidenceIds: ['resume-proof'] })) }] },
-        });
-        assert(controlResult.result.accepted && controlResult.result.handoff?.stage === 'cover-letter',
-          `a four-year rollout, a three-years-to-six-weeks reduction, a version number with 24/7, bare calendar years, and a span belonging to the backlog rather than the candidate all stay silent (errors=${JSON.stringify(controlResult.result.validationErrors || [])})`);
+        // One job per text rather than one role of five bullets: all five cite
+        // the corpus's only career-data line, 'resume-proof', and packing them
+        // into one role would now trip structuredResume.js's own
+        // ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE — a real rule, but not the one
+        // this control proves silent. Each gets its own single-bullet role.
+        for (const text of controlTexts) {
+          const control = await auditJobSteps(project);
+          await control.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+          const controlResult = await control.submit({
+            resume: { ...plan.resume, roles: [{ ...plan.resume.roles[0], bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }] },
+          });
+          assert(controlResult.result.accepted && controlResult.result.handoff?.stage === 'cover-letter',
+            `"${text}" must stay silent under the duration rule (errors=${JSON.stringify(controlResult.result.validationErrors || [])})`);
+        }
 
         // A span the cited evidence does state is admissible, digits or words.
         const supportingQuote = 'Ada Lovelace has 6 years of internal systems delivery.';
@@ -3766,7 +3865,7 @@ export default [
           'the corpus under test carries no markdown heading at all, so the contract sentence being checked is the one this corpus actually exercises');
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: headlessCareerData,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end.' },
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end, and a marketplace price tracker.' },
           resumeProfile: { workHistory: [
             { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
             { id: 'role-2', title: 'Software Engineer', employer: 'Difference Machines', startDate: '2018', endDate: '2021' },
@@ -3780,8 +3879,9 @@ export default [
             { id: 'cd-machines', sourceId: 'career-data', quote: 'Shipped the billing service with automated alerts.', requirement: 'Billing ownership', priority: 'highest' },
             { id: 'cd-tracker', sourceId: 'career-data', quote: 'Price Tracker - a marketplace price tracker with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
             { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
+            { id: 'job-tracker', sourceId: 'job-listing', quote: 'a marketplace price tracker', requirement: 'Marketplace tracker ownership', priority: 'high' },
           ],
-          requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-tracker', 'job-stack'] }],
+          requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-tracker', 'job-stack', 'job-tracker'] }],
         })) });
         assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume', `the heading-less evidence plan opens the résumé handoff: ${JSON.stringify(acceptedPlan.validationErrors || [])}`);
 
@@ -3824,8 +3924,11 @@ export default [
           }],
           ...overrides,
         });
-        const project1 = { id: 'project-tracker', name: 'Price Tracker', description: 'Marketplace price tracker that runs a local model.', evidenceIds: ['cd-tracker'] };
-        const skillGroup = { id: 'skills-tools', group: 'tools', items: ['local model'], evidenceIds: ['cd-tracker'] };
+        const project1 = { id: 'project-tracker', name: 'Price Tracker', description: 'Marketplace price tracker that runs a local model.', evidenceIds: ['cd-tracker', 'job-tracker'] };
+        // A skill item has to be a name a recruiter can filter on, which shows in
+        // its spelling, so this group carries the product its cited quote names
+        // rather than the "local model" phrase that names the activity.
+        const skillGroup = { id: 'skills-tools', group: 'tools', items: ['Price Tracker'], evidenceIds: ['cd-tracker'] };
         const draft = (overrides = {}) => ({
           schemaVersion: 'structured-resume.v1',
           identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
@@ -3851,8 +3954,8 @@ export default [
         const flatDescription = await submitResume(draft({ projects: [{ ...project1, description: 'Built and delivered the system using work over time.' }] }));
         assert(!flatDescription.accepted && flatDescription.validationErrors?.some(message => /projects\.project-tracker\.description must share at least two distinct meaningful terms/.test(message)),
           `a description that restates the deed in résumé verbs alone shares nothing the gate counts, exactly as the stopword list now printed says (errors=${JSON.stringify(flatDescription.validationErrors || [])})`);
-        const repeatedItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['local model', 'local model'] }] }));
-        assert(!repeatedItem.accepted && repeatedItem.validationErrors?.some(message => /skills\[0\]\.items contains duplicate identifier "local model"/.test(message)),
+        const repeatedItem = await submitResume(draft({ skills: [{ ...skillGroup, items: ['Price Tracker', 'Price Tracker'] }] }));
+        assert(!repeatedItem.accepted && repeatedItem.validationErrors?.some(message => /skills\[0\]\.items contains duplicate identifier "Price Tracker"/.test(message)),
           'a repeated item inside one skills group is rejected, as the contract now states');
         const repeatedProjectId = await submitResume(draft({ projects: [project1, { ...project1, name: 'Price Tracker' }] }));
         assert(!repeatedProjectId.accepted && repeatedProjectId.validationErrors?.some(message => /projects contains duplicate identifier "project-tracker"/.test(message)),
@@ -4077,6 +4180,20 @@ export default [
           // letter does not exist yet. Printing it from the function that
           // enforces it keeps both of its numbers on one source.
           ['the ceiling that formula produces', SHARED_SENTENCE_SHAPE_CEILING_RULE],
+          // The formula the clause above prints understates the rule: a count
+          // cannot see distance, so two adjacent paragraphs are always under it.
+          // A writer told only the ceiling spends a round on a defect the
+          // contract never mentioned.
+          ['the adjacency condition that ceiling cannot express', ADJACENT_SENTENCE_SHAPE_RULE],
+          // Both floors and ALL THREE exclusions. The exclusions are not
+          // decoration: a writer who does not know the mandated transfer
+          // carrier and a run of names are excused over-corrects into breaking
+          // the rules that demanded them, and a writer who thinks the ordinary
+          // function-word syntax two sentences share is counted writes around
+          // the language to satisfy a rule that never applied to it. The third
+          // one carries MIN_REPEAT_CONTENT_WORDS, so this clause also proves
+          // that number reaches the prompt from the constant the gate reads.
+          ['the two repeat floors and the three repeats it excuses', REPEATED_PHRASE_RULE],
         ]) {
           assert(base.prompt.includes(printed),
             `the contract prints ${clause} from the constant its own check reads (missing “${printed}”)`);
@@ -4087,6 +4204,20 @@ export default [
         // false permission rather than a vague one.
         assert(!base.prompt.includes('figures that also appear in the résumé'),
           'the contract no longer offers the whole résumé as a source of figures');
+        // REPEATED_PHRASE_RULE dropped "is the letter restating itself" because
+        // the claim is untrue of a repeated lowercase compound artifact name —
+        // two sentences can say different things about one named thing, which
+        // is what the design system's own fixture letter does. The prose that
+        // INTRODUCED the rule here still said it, so the responder was told the
+        // cause the rule itself had stopped asserting, and a run reported on a
+        // name reads as a wrong report to argue with rather than a measurement
+        // to repair. Both surfaces now name what is read instead.
+        for (const claim of ['restatement of the letter', 'restate itself', 'restating itself', 'statement made twice']) {
+          assert(!base.prompt.includes(claim),
+            `the cover-letter contract introduces the repeat rule by what is read, not by an asserted cause (“${claim}” in the prompt)`);
+        }
+        assert(base.prompt.includes(`the letter is read against its own wording too: ${REPEATED_PHRASE_RULE}`),
+          'the repeat rule reaches the cover-letter contract behind a lead-in that names its subject and states no cause');
         // A clause with no number to interpolate still needs a guard, or the
         // disclosure can be deleted without a test noticing.
         for (const [clause, printed] of [
@@ -4223,6 +4354,73 @@ export default [
         assert(whole.accepted && whole.handoff?.stage === 'review',
           `a letter that follows every disclosed clause is accepted in one round (errors=${JSON.stringify(whole.validationErrors || [])})`);
         return { clauses: measured.length };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'A cover-letter response broken two independent ways — a structural argument-envelope defect and a separate prose defect — reports both in one rejection',
+    async run() {
+      // pasteCoverLetterCompletionTwinErrors used to build the letter's
+      // rendered envelope and its non-rendered argument inside one
+      // try/catch: a throw from either half skipped everything below it,
+      // even the half that did not depend on it. Measured live: a response
+      // with two independent defects — one structural (the argument), one
+      // prose (the paragraph battery) — cost two correction rounds, because
+      // the second was never even checked in the first round. Each half now
+      // runs in its own try, so a broken argument and a broken paragraph are
+      // both reported the first time.
+      const project = await createCanvasProject();
+      try {
+        const { letter } = await coverLetterBatteryStage(project, {
+          paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY} The listing states that dependable delivery matters, and that is what I practised.`],
+        });
+        const result = await letter({
+          coverLetterArgument: {
+            primaryEvidence: { evidence: BATTERY_BULLET, evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' },
+            // narrativeRole "primary" is illegal for a SECOND mapping — a
+            // structural defect in the argument envelope, independent of the
+            // paragraph's own prose below.
+            secondaryEvidence: { evidence: BATTERY_BULLET, evidenceRole: 'Engineer at Acme', narrativeRole: 'primary', relationToPrimary: 'Extends the same argument with more detail.' },
+          },
+        });
+        assert(!result.accepted, 'the malformed argument alone must reject this response');
+        const errors = result.validationErrors || [];
+        assert(errors.some(message => /narrativeRole reads "primary"/.test(message)),
+          `the structural argument-envelope defect must be reported (errors=${JSON.stringify(errors)})`);
+        assert(errors.some(message => message.startsWith('posting-reference:')),
+          `the independent prose defect must ALSO be reported in the same rejection, not deferred to a second round (errors=${JSON.stringify(errors)})`);
+        return { errors: errors.length };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Two cover-letter paragraphs failing the same structural check are reported as two distinct items, not deduped into one',
+    async run() {
+      // normalizePasteCorrections dedupes by exact string equality. Each
+      // structural paragraph message is built from `${unit}`, which names
+      // the paragraph by its own id (see the comment at this check's own
+      // site), so two independently empty paragraphs must never collapse
+      // into one byte-identical string that hides a sibling defect.
+      const project = await createCanvasProject();
+      try {
+        const { letter } = await coverLetterBatteryStage(project, { paragraphs: [`${BATTERY_LEAD} ${BATTERY_BODY}`] });
+        const result = await letter({
+          paragraphs: [
+            { id: 'paragraph-1', text: '', evidenceIds: ['job-proof'] },
+            { id: 'paragraph-2', text: '', evidenceIds: ['job-proof'] },
+          ],
+        });
+        assert(!result.accepted, 'two empty paragraphs must be rejected');
+        const errors = result.validationErrors || [];
+        assert(errors.includes('Cover-letter paragraph paragraph-1 has no text.') && errors.includes('Cover-letter paragraph paragraph-2 has no text.'),
+          `each empty paragraph must be named by its own id as a separate item, not collapsed into one (errors=${JSON.stringify(errors)})`);
+        assert(new Set(errors).size === errors.length,
+          `no two distinct paragraph defects may collapse to the same message string (errors=${JSON.stringify(errors)})`);
+        return { errors: errors.length };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -4416,7 +4614,7 @@ export default [
           '## Difference Machines — Leeds, England', '', 'Software Engineer',
           '- Shipped the billing service with automated alerts.', '', '---', '',
           '## Personal Projects', '',
-          '- Built a marketplace price tracker with a local model.', '',
+          '- Built a marketplace price tracker with a local Llama model.', '',
         ].join('\n');
         const workHistory = [
           { id: 'role-1', title: 'Senior Engineer', employer: 'Analytical Engines', startDate: '2021', endDate: '2024' },
@@ -4424,7 +4622,7 @@ export default [
         ];
         const queued = await queueLocalApplicationJob({
           transport: 'paste', canvasFilePath: project.canvasFilePath, careerData: careerCorpus,
-          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect automated test coverage.' },
+          job: { title: 'Reporting Engineer', company: 'Acme', snippet: 'We own reporting and billing end to end and expect automated test coverage. You will own marketplace price tracker tooling too.' },
           resumeProfile: { workHistory },
         });
         const planHandoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
@@ -4432,15 +4630,16 @@ export default [
         const evidenceCatalog = [
           { id: 'cd-engines', sourceId: 'career-data', quote: 'Built the reporting pipeline for nightly batches.', requirement: 'Reporting ownership', priority: 'highest' },
           { id: 'cd-machines', sourceId: 'career-data', quote: 'Shipped the billing service with automated alerts.', requirement: 'Billing ownership', priority: 'highest' },
-          { id: 'cd-projects', sourceId: 'career-data', quote: 'Built a marketplace price tracker with a local model.', requirement: 'Independent delivery', priority: 'supporting' },
+          { id: 'cd-projects', sourceId: 'career-data', quote: 'Built a marketplace price tracker with a local Llama model.', requirement: 'Independent delivery', priority: 'supporting' },
           { id: 'job-stack', sourceId: 'job-listing', quote: 'reporting and billing end to end', requirement: 'Reporting and billing ownership', priority: 'highest' },
+          { id: 'job-tracker', sourceId: 'job-listing', quote: 'marketplace price tracker tooling', requirement: 'Marketplace tracker ownership', priority: 'high' },
         ];
         const acceptedPlan = await submitLocalApplicationHandoff({
           jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: planHandoff.handoffCode,
           response: JSON.stringify(reply(planHandoff, {
             identity: planIdentity,
             evidence: evidenceCatalog,
-            requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-projects', 'job-stack'] }],
+            requirements: [{ id: 'need-stack', text: 'Reporting and billing ownership across the stack', priority: 'highest', evidenceIds: ['cd-engines', 'cd-machines', 'cd-projects', 'job-stack', 'job-tracker'] }],
           })),
         });
         assert(acceptedPlan.accepted && acceptedPlan.handoff?.stage === 'resume',
@@ -4461,8 +4660,10 @@ export default [
               bullets: [{ id: 'resumeid-bullet-billing', text: 'Shipped the billing service with automated alerts.', evidenceIds: ['cd-machines'] }],
             },
           ],
-          projects: [{ id: 'resumeid-project-tracker', name: 'marketplace price tracker', description: 'Built a price tracker with a local model.', evidenceIds: ['cd-projects'] }],
-          skills: [{ id: 'resumeid-skill-tools', group: 'tools', items: ['local model'], evidenceIds: ['cd-projects'] }],
+          projects: [{ id: 'resumeid-project-tracker', name: 'marketplace price tracker', description: 'Built a price tracker with a local model.', evidenceIds: ['cd-projects', 'job-tracker'] }],
+          // Same filterable-name rule as the résumé stage case above; the corpus
+          // names the model this project ran so the row has a name to carry.
+          skills: [{ id: 'resumeid-skill-tools', group: 'tools', items: ['Llama'], evidenceIds: ['cd-projects'] }],
         };
         const resumeStage = acceptedPlan.handoff;
         const accepted = await submitLocalApplicationHandoff({
@@ -4721,6 +4922,64 @@ export default [
           && returned.result.validationErrors.some(message => /repeats the package the app's own checks rejected/.test(message)),
         `the identical package cannot be returned to the round that rejected it (errors=${JSON.stringify(returned.result.validationErrors || [])})`);
         return { targets: paste.requiredChangeTargets };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // A host-validation failure prints a review CRITERION id (from
+    // APPLICATION_QUALITY_CRITERIA, e.g. cover-register) in the exact
+    // `<id>: detail` shape a paste check prints its own id in — but a
+    // criterion is deliberately absent from PASTE_CHECK_PROSE_UNITS, because
+    // that table enumerates the batteries alone. The function that scopes a
+    // correction round's repair brief used to read only that table, so a
+    // round whose one and only defect was a criterion recognised no prose
+    // part at all and went out with an empty brief — silently, since the
+    // numbered item list above it still named the defect just fine.
+    name: 'A host rejection naming only a review criterion still scopes its repair brief to the document that criterion grades',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const plan = auditPlanFixture();
+        const steps = await auditJobSteps(project);
+        await steps.send({ identity: plan.identity, evidence: plan.evidence, requirements: plan.requirements });
+        await steps.send({ resume: plan.resume });
+        await steps.send({ coverLetter: plan.coverLetter });
+        const passFields = () => ({
+          decision: 'pass', findings: [], checklist: checklist(),
+          qualityReview: {
+            checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+            criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: requirement })),
+            resume: { decision: 'approved', rationale: 'The résumé preserves direct source-supported systems evidence with clear relevance.' },
+            coverLetter: { decision: 'approved', rationale: 'One controlling argument uses minimum-sufficient evidence for target system delivery.' },
+          },
+          generationAudit: plan.audit(),
+        });
+        const completed = await steps.submit(passFields());
+        assert(completed.result.completed, `the fixture completes before the import rejects it (errors=${JSON.stringify(completed.result.validationErrors || [])})`);
+
+        // The same recovered-rejection shape as the test above, but with the
+        // one detail this test exists to cover: the only id in the message is
+        // a review criterion, not a paste check.
+        const folder = completed.result.localJob.folder;
+        const resultRaw = await fs.promises.readFile(path.join(folder, 'result.json'), 'utf8');
+        await fs.promises.writeFile(path.join(folder, 'fit-feedback.json'), JSON.stringify({
+          version: 1, jobId: steps.queued.id, status: 'invalid', measured: false,
+          resultSha256: crypto.createHash('sha256').update(resultRaw).digest('hex'),
+          error: 'Local AI cover letter failed required checks: cover-register: paragraph 1 closes on a deferential invitation.',
+          rejectedAt: new Date().toISOString(), documentSha256: null, revisionRound: 0, priorMeasured: null,
+          message: 'Infinite Canvas rejected this result.json during validation.',
+        }), 'utf8');
+
+        const reopened = await getLocalApplicationHandoff({ jobId: steps.queued.id, canvasFilePath: project.canvasFilePath });
+        const prompt = reopened.handoff?.correctionPrompt || '';
+        assert(prompt.includes('cover-register: paragraph 1 closes on a deferential invitation'),
+          `the reopened correction prompt still names the rejected criterion (prompt=${JSON.stringify(prompt.slice(0, 400))})`);
+        assert(prompt.includes('Rules that govern this repair'),
+          `a rejection naming only a criterion still carries a repair brief instead of going out empty (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
+        assert(prompt.includes('every paragraph you change is measured against') && !prompt.includes('every bullet you change is measured against'),
+          `the brief is scoped to the letter paragraph cover-register grades, not a résumé bullet (prompt=${JSON.stringify(prompt.slice(0, 2000))})`);
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -5741,7 +6000,10 @@ export default [
           `once the posting text runs to ${MIN_ANCHOR_RELEVANCE_CORPUS_WORDS} words`,
           `at most ${MAX_PARAGRAPH_OFF_POSTING_TOOLS} off-posting tool in any one paragraph and ${MAX_LETTER_OFF_POSTING_TOOLS} across the whole letter`,
           `its first ${SENTENCE_SHAPE_FRAME_WORDS} words`,
-          `once the letter runs to ${MIN_SHARED_SHAPE_PARAGRAPHS} paragraphs, ${SHARED_SENTENCE_SHAPE_CEILING_RULE}`,
+          `once the letter runs to ${MIN_SHARED_SHAPE_PARAGRAPHS} paragraphs, ${SHARED_SENTENCE_SHAPE_CEILING_RULE}, ${ADJACENT_SENTENCE_SHAPE_RULE}`,
+          REPEATED_PHRASE_RULE,
+          SKILLS_BLOCK_BUDGET_RULE,
+          SKILL_ITEM_FILTERABLE_RULE,
           `at least ${MIN_ROLE_THESIS_WORDS} words running ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.min} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.max} characters`,
           `except evidenceRole at ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMin} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.roleMax}`,
           `at most ${STRUCTURED_RESUME_LIMITS.roles} roles`,
@@ -5751,6 +6013,15 @@ export default [
         ].filter(phrase => !reviewPrompt.includes(phrase));
         assert(!reviewMissing.length,
           `the review contract states every ceiling a replacement is regraded by: missing ${JSON.stringify(reviewMissing)}`);
+        // Same lead-in, same reason as the cover-letter contract: the rule
+        // stopped asserting that a repeat is the letter restating itself, so the
+        // sentence that introduces it here must not assert it either.
+        for (const claim of ['does not restate itself', 'restating itself', 'statement made twice']) {
+          assert(!reviewPrompt.includes(claim),
+            `the review contract introduces the repeat rule by what is read, not by an asserted cause (“${claim}” in the prompt)`);
+        }
+        assert(reviewPrompt.includes(`the letter is read against its own wording as well, and ${REPEATED_PHRASE_RULE}`),
+          'the repeat rule reaches the review contract behind a lead-in that names its subject and states no cause');
 
         // The number it prints is the number it enforces: one ID over the cap
         // is the live rejection, reproduced against the prompt that now
@@ -6068,6 +6339,84 @@ export default [
           `the repair the message describes is accepted in one round (errors=${JSON.stringify(repaired.validationErrors || [])})`);
         return { fields: 5 };
       } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Evidence-plan contract states the per-employer floor is not the target, and interpolates the evidence-item ceiling',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Reporting Engineer', company: 'Acme' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Software Engineer', employer: 'Analytical Engines', startDate: '2020', endDate: '2024' }] },
+        });
+        const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const prompt = handoff.prompt;
+        // The plan is frozen from the résumé stage on ("once this plan is
+        // accepted it cannot be changed"), so an employer whose section could
+        // support several distinct bullets but was only ever catalogued with
+        // one quote is exactly the under-catalogued plan that leaves real
+        // evidence permanently uncatalogued: nothing left off the plan now can
+        // ever be chosen later, even by a revision that would have preferred
+        // it.
+        assert(prompt.includes('One quote per employer is the floor this stage rejects at, never the target:')
+          && prompt.includes('catalogue a separate career-data evidence item for EVERY distinct accomplishment'),
+        'the evidence-plan contract states the exhaustive per-employer cataloguing rule (a floor, not a target)');
+        // Interpolated from the same constant the validator enforces the
+        // evidence-item ceiling with, so a hand-copied number here could not
+        // silently drift from the ceiling a response is actually graded
+        // against; and the raw template token must not survive interpolation.
+        assert(prompt.includes(`Up to ${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS} items are accepted across the whole plan`)
+          && !prompt.includes('${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}'),
+        `the evidence-item ceiling is interpolated rather than left as a raw template token (prompt has raw token=${prompt.includes('${MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS}')})`);
+        return { promptChars: prompt.length, evidenceLimit: MAX_EVIDENCE_PLAN_EVIDENCE_ITEMS };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'A résumé rendering well under the old 90% fill floor now ships on a single page, with no revision reopened and no utilization finding',
+    async run() {
+      // The behaviour this task exists to change: utilization is a pure,
+      // reported measurement now, not a shipping gate. 480/800 = 60%,
+      // comfortably below the deleted floor, on exactly one page at a
+      // one-page target — the exact case that used to reopen the paste
+      // review with a `host-resume-utilization-*` finding and
+      // RESUME_UNDERFILL_REPAIR (see the deleted "live fit loop states the
+      // résumé underfill repair" test this replaces).
+      const project = await createCanvasProject();
+      const pdf = await PDFDocument.create(); pdf.addPage([612, 792]);
+      const bytes = Buffer.from(await pdf.save());
+      __setLocalAiRenderPdfForTests(async () => ({ bytes, pageCount: 1, fontsLoaded: true, missingFontFaces: [], layout: { contentHeightPx: 480, typeAreaHeightPx: 800 } }));
+      try {
+        const plan = auditPlanFixture();
+        const flow = await runAuditFlow(project, plan);
+        const complete = await flow.review(plan.audit());
+        assert(complete.accepted && complete.completed,
+          `the package completes structurally before the render measures it (errors=${JSON.stringify(complete.validationErrors || [])})`);
+        const jobId = flow.queued.id;
+        const { canvasFilePath } = project;
+        const settled = await localApplicationStatus(jobId, canvasFilePath);
+        assert(settled.status === 'completed', `the poll accepts the structurally-complete package (status=${settled.status})`);
+        const imported = await importLocalApplicationJob({ jobId, canvasFilePath, senderId: 42179 });
+        assert(imported.status === 'imported',
+          `a 60%-utilization résumé still ships on its first render: there is no minimum utilization to fail (status=${imported.status}, message=${imported.localJob?.message || ''})`);
+        assert(imported.resumeFit?.pageCount === 1 && imported.resumeFit?.targetMet === true
+          && Math.round(imported.resumeFit.contentUtilization * 100) === 60,
+        `the measurement is still reported on the shipped bundle, unfloored (resumeFit=${JSON.stringify(imported.resumeFit)})`);
+        const feedbackPath = path.join(flow.queued.folder, 'fit-feedback.json');
+        const feedbackExists = await fs.promises.access(feedbackPath).then(() => true, () => false);
+        assert(!feedbackExists, 'no fit-feedback.json revision record is written for a document that ships on its first render');
+        const manifest = JSON.parse(await fs.promises.readFile(path.join(flow.queued.folder, 'manifest.json'), 'utf8'));
+        assert(!(manifest.paste?.findings || []).some(item => String(item?.id || '').startsWith('host-resume-utilization')),
+          `no host-resume-utilization finding is ever recorded (findings=${JSON.stringify(manifest.paste?.findings)})`);
+        return { path: 'ships-under-old-floor', utilization: 0.6 };
+      } finally {
+        __setLocalAiRenderPdfForTests(null);
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },

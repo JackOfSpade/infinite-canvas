@@ -358,7 +358,14 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     // or defaulted from the absence of a logout signal. Describe only the cache
     // fact shared by all three shapes so a healthy session (notably Indeed in
     // the reported run) does not look contradictory or partially disconnected.
-    lines.push(`  - ℹ️ historical NOT-CONNECTED verdict; current cached status is connected (${negAge}): ${redactReportUrlsInText(negative.reason)}`);
+    // `negAge` is the age of the HISTORICAL verdict, so it has to sit beside
+    // that clause. Trailing "current cached status is connected" it read as
+    // the age of the CURRENT status instead, and on 2026-09-23 that put a
+    // 17-day-old stamp (2026-09-06, 1516273s ago) on a LinkedIn row the
+    // session table three lines above had verified 6890s ago — two
+    // timestamps for one status, apparently contradicting each other, with
+    // nothing in the sentence saying they describe different things.
+    lines.push(`  - ℹ️ historical NOT-CONNECTED verdict (${negAge}); current cached status is connected: ${redactReportUrlsInText(negative.reason)}`);
     // The disk-restored shape never carries `trace` (persistStatusCache strips
     // it) — only render this when the in-memory write kept it.
     if (negative.trace && typeof negative.trace === 'object') {

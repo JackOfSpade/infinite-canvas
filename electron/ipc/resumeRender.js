@@ -154,6 +154,7 @@ export function pageTextMeasurementExpression() {
     '      }',
     '    });',
     '    var node;',
+    '    var lineHeights = [];',
     '    while ((node = walker.nextNode())) {',
     '      var range = document.createRange();',
     '      range.selectNodeContents(node);',
@@ -161,10 +162,21 @@ export function pageTextMeasurementExpression() {
     '        if (!rect.height) return;',
     '        top = Math.min(top, rect.top);',
     '        bottom = Math.max(bottom, rect.bottom);',
+    '        lineHeights.push(rect.height);',
     '      });',
     '    }',
     '    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return null;',
-    '    return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight };',
+    // One rect per rendered line, so the MEDIAN of them is this document's
+    // typical line at whatever density and paper it actually rendered at —
+    // measured, not derived from type tokens, and robust to the handful of
+    // outsized lines (the display-size name, section headings) that would
+    // drag a mean upward. It is what converts a px shortfall into "about N
+    // more lines" for the underfill finding; no other consumer reads it.
+    '    var sorted = lineHeights.slice().sort(function (a, b) { return a - b; });',
+    '    var middle = Math.floor(sorted.length / 2);',
+    '    var lineHeightPx = sorted.length === 0 ? null',
+    '      : (sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2);',
+    '    return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight, lineHeightPx: lineHeightPx };',
     '  } catch (_) {',
     '    return null;',
     '  }',
@@ -234,7 +246,7 @@ function withTimeout(promise, ms, label, signal) {
  * "withhold this PDF". `missingFontFaces` names the faces the predicate
  * rejected, so callers report an observation instead of guessing at a cause.
  *
- * @returns {Promise<{bytes: Uint8Array, pageCount: number, fontsLoaded: boolean, missingFontFaces: string[], layout: {contentHeightPx: number, typeAreaHeightPx: number}|null}>}
+ * @returns {Promise<{bytes: Uint8Array, pageCount: number, fontsLoaded: boolean, missingFontFaces: string[], layout: {contentHeightPx: number, typeAreaHeightPx: number, lineHeightPx: number|null}|null}>}
  */
 export async function renderPdf(html, { signal, document = null } = {}) {
   const first = await renderPdfOnce(html, { signal, document });

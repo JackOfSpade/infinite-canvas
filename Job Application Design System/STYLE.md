@@ -228,8 +228,8 @@ Two scales coexist, on purpose.
 |-------|-------|-----------------------------------------------|
 | `--s-1` |  2pt | nudges; metric line ↔ project name           |
 | `--s-2` |  4pt | name ↔ subtitle                               |
-| `--s-3` |  6pt | bullet ↔ bullet; role header ↔ role meta; Skills row gap |
-| `--s-4` |  8pt | role-meta ↔ first bullet; default paragraph gap; subsection-head bottom |
+| `--s-3` |  6pt | bullet ↔ bullet; role header ↔ role meta, on the roles that carry both (§5.2b folds the rest, so this row is now the less common case); Skills row gap |
+| `--s-4` |  8pt | whichever meta row renders last in the role — `.role-header` when the location folded into it, `.role-meta` when it did not — ↔ first bullet; default paragraph gap; subsection-head bottom |
 | `--s-5` | 12pt | subtitle ↔ contact line; project ↔ project; heading ↔ rule gap |
 | `--s-6` | 16pt | section header ↔ section body; letterhead bottom; valediction ↔ signature |
 | `--s-7` | 20pt | (reserved — no current caller)                |
@@ -367,9 +367,12 @@ data states one for that role** — it is a fact about the employment, and
 dropping it silently changes what the résumé says about where the
 candidate has worked. It is optional only in the sense that a role whose
 source data never stated a location has none to render; it is not a fit
-lever. When the page is tight and the role has no summary to share the
-row with, fold the location into the `.role-dates` cell rather than
-spending a whole line on it — see §5.2b.
+lever. A role with no summary to share the second row folds its location
+into the `.role-dates` cell by default — see §5.2b — rather than
+spending a whole line on a row that would otherwise hold nothing else.
+The `.role-meta` row is reserved for the cases that actually need a
+second row: a summary is present (with or without a location beside
+it), or the location itself cannot be folded back out cleanly.
 
 (This is a stricter rule than the location's privacy-gated counterpart in
 §9.1. The two are different fields: `work[].location` is an employment
@@ -419,14 +422,14 @@ was the bug, not the grid.
 ### 5.2b Folding the location into the dates cell
 
 The role block's second row exists to carry a scope summary and a
-location together. A role with no summary leaves that row holding one
-right-aligned city, and the row still costs a full line plus its
-`margin-bottom` — 2.00 baselines, the same as a full summary+location
-row (`build/fit-estimate-test.js`, `COST.roleMeta`). Across 3–5 roles
-that is 6–10 lines spent on whitespace.
-
-So a location-only second row may instead be folded up into the dates
-cell, separated by the standard inline separator:
+location together. A role with no summary would otherwise leave that row
+holding one right-aligned city, and the row still costs a full line plus
+its `margin-bottom` — 2.00 baselines (~29.8pt), the same as a full
+summary+location row (`build/fit-estimate-test.js`, `COST.roleMeta`).
+Across 3–5 roles that is 6–10 lines spent on whitespace, for a single
+fact a folded cell shows at zero cost — so a lone location is folded up
+into the dates cell **by default**, separated by the standard inline
+separator:
 
 ```html
 <p class="role-dates"><time datetime="2023-05">May 2023</time> – <time
@@ -441,7 +444,12 @@ zero line cost.
 
 **Fold only a lone location.** A row that still carries a
 `.role-summary` (or any second cell) is the grid doing its job; leave it
-alone.
+alone — the `.role-meta` row is the correct, and only, shape for a row
+that genuinely carries two cells. The fold is also skipped, and the row
+kept, when the location itself would not survive the round trip: a
+value containing a bare four-digit year (indistinguishable from a second
+date once folded) or a `·` (the fold's own separator), or a role with no
+`.role-dates` cell to fold into.
 
 **And use the folded title budget, not the unfolded one.** Both cells are
 `nowrap`, so a folded cell lengthens the `auto` track and squeezes
@@ -474,6 +482,23 @@ this budget moves with the location's own width.
   agency, database, or platform instead of writing "their APIs" or "data they
   returned." Put temporal modifiers beside the action they modify; avoid a
   late "after testing" that can attach to the wrong verb.
+- **One accomplishment, one bullet.** A build bullet, a deployment
+  bullet for that same system, and a feature bullet for that same
+  system are one accomplishment reported three times, not three
+  accomplishments — combine them into a single bullet whose trailing
+  clause carries the supporting mechanism, constraint, or result. A
+  bullet earns its place in a role only by carrying a distinct system,
+  outcome, or judgment call that no other bullet in the role already
+  carries — the same restates-the-bullets test §6 and `SKILL.md` apply
+  to a `Selected Systems` entry against the bullet corpus, applied
+  bullet-to-bullet within one role (`SKILL.md`'s "Do not let one
+  bullet restate another"). The tell: a bullet whose subject is the
+  previous bullet's object ("Containerized **the internal-tools
+  hub**…" right after the bullet that built it) is almost always the
+  second half of one accomplishment. Splitting one bullet into two to
+  make a role look fuller is padding, never a repair for a short page
+  — the fix is a source-supported accomplishment the page doesn't
+  carry yet, not the same one told twice.
 - Each bullet should contain at least one specific number (QPS,
   p99, team size, $ volume, percentage change). Adjectives without
   numbers are wasted lines. A `.tradeoff` annotation (§5.4) is **not**
@@ -770,6 +795,18 @@ Add `.meta-row` to any future block that needs the same alignment
 behaviour. Element-specific classes layer typography / spacing /
 break rules on top; the grid itself is defined once.
 
+**The row owns its spacing; its cells carry none.** `.role-dates`,
+`.role-location`, and `.role-title-line` are plain `<p>` elements, so
+without an explicit override each inherits the base `p { margin: 0 0
+var(--s-4) }` from `colors_and_type.css`. A `.meta-row` cell is a grid
+item, and a grid item's own margin does not collapse into the grid
+box the way a normal block margin would — so that inherited 8pt stayed
+trapped *inside* the row and stacked on top of whatever margin the row
+itself declared below it, roughly doubling every gap §4.1 specifies for
+this utility. `.meta-row > p { margin-bottom: 0; }` clears every cell's
+margin so only the row's own `margin-bottom` (on `.role-header` or
+`.role-meta`) sets the gap beneath it.
+
 The `.project` block intentionally does **not** use `.meta-row`:
 project metrics are a mono-set numeric run that wraps poorly inside
 a 1.45 in right column. They stack below the description instead.
@@ -802,6 +839,58 @@ gives up the tag path. **Do not delete the block either** — its content
 is the terms that exist nowhere else on the page (in the shipped
 sample, 13 of the 16 — only Postgres, Kafka and Elasticsearch also
 appear in a bullet).
+
+**The `dt` is Title Case, and it names a domain, not the section.**
+Every `dt` the system ships is Title Case (`Languages`,
+`Data & Storage`, `Infrastructure`), and `.skills dt` declares no
+`text-transform`, so the label prints exactly as it was written:
+capitalisation here is copy, not styling. (`.section-head h2` is the
+opposite case, uppercased in CSS, which is why nothing corrects a `dt`
+for you.) Title-case each word; leave a word that already carries an
+uppercase letter as written (`AI/ML`, `iOS`, `gRPC`); keep a connecting
+`and` lowercase. Case is the smaller half of the rule. `Skills`,
+`Technical Skills` and `Technologies` are names for the *section*, so a
+row carrying one restates the `h2` directly above it and gives a parser
+no category axis it did not already have from that `h2`, which is
+exactly the tag path the paragraph above says these labels exist to
+serve. `Languages` beside `Infrastructure` sorts one list of terms into
+two fields a recruiter can filter on; `Technologies` sorts nothing and
+spends the label column saying so.
+
+```html
+<dl class="skills">
+  <dt>Languages</dt>
+  <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python</dd>
+
+  <dt class="nowrap">Data &amp; Storage</dt>
+  <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>Kafka</dd>
+
+  <dt>Infrastructure</dt>
+  <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS</dd>
+</dl>
+```
+
+Three domain rows, one line each; the shipped sample fills them to
+5 / 5 / 6 terms. The compound label takes `.nowrap` so it cannot break
+inside the label column (§8.1).
+
+**The budget is enforced on generated output now, not only on the
+shipped sample.** `build/fit-estimate-test.js` measures `resume.html`;
+the reference consumer's résumé validator (Infinite Canvas,
+`electron/ipc/structuredResume.js`) applies the same three numbers to a
+pasted response before it renders anything: at most 3 rows, at most 20
+terms across the block, and at most 64 characters per row, counted on
+the exact separator string the renderer joins the terms with. It also
+enforces what a check against a finished sample cannot see: a block of
+6 terms or more must sort them into at least 2 rows, every term must
+carry an uppercase letter or a digit (the decidable form of the
+filterable-nouns rule above, and what rejects a lowercase concept such
+as "connectors"), and a label must be a domain drawn from a neutral
+vocabulary or occur verbatim in the candidate's own career data. The
+three numbers are one set across three files: change 3 / 20 / 64 here
+and they change in `build/fit-estimate-test.js` (`BUDGET`) and in that
+validator too, or the consumer's test suite, which reads the build file
+as text, fails on the half that moved.
 
 ### 5.7 Subsection heads
 
@@ -891,7 +980,7 @@ Rules:
 
 ## 6. Density rules
 
-**One well-filled page is the default and only target shape**, for
+**One page is the default and only target shape**, for
 every résumé this system generates, regardless of job title or
 seniority. "Senior Staff," "Principal," "Director," "VP," "executive,"
 or any similar title language is never, on its own, a reason to plan
@@ -904,8 +993,15 @@ override case, not a second default shape this system aims for.
 
 | Length goal | What "fits" looks like |
 |-------------|--------------------------|
-| One page, 90–100% of the measured type area | The desired default outcome, at any seniority. As many of the candidate's roles as exist (typically 3–5), each with 3–6 bullets; a `Selected Systems` entry only where it carries evidence no bullet already states; a 3-row Skills block. |
-| One page, under 90% | Acceptable only when there is nothing true and distinct left to add — see the pipeline's "under 90%" step. Never reach for filler, restated metrics, or adjectives to close the gap. |
+| One page, at whatever fill the evidence supports | As many of the candidate's roles as exist (typically 3–5), each with 3–6 bullets; a `Selected Systems` entry only where it carries evidence no bullet already states; a 3-row Skills block. A page that runs shorter is not a shortfall and needs no rationale to ship; add genuinely distinct, source-supported evidence if it exists, but never reach for filler, restated metrics, or adjectives to fill space. |
+
+A `Selected Systems` entry is also decided per posting, not once per
+candidate. Carrying evidence no bullet states is what qualifies it;
+answering something this listing actually asks for is what earns it the
+space. A project that passes the first test and fails the second is
+omitted from this résumé and may well belong on the next one — see
+`SKILL.md`, "A project is carried for one posting, not for every
+posting".
 | Multi-page | Produced only from an explicit host/user override for this application — never the default, and never inferred from title. Once requested, it uses the same measured `data-density="compact"` fallback and the fragmentation rules in §6.1 as any paginated document. |
 
 Block sizes are not quoted here in pixels on purpose: they depend on
@@ -913,7 +1009,7 @@ the renderer, the density variant, and whether the Google Fonts CDN
 served the real families or a fallback. Measure the actual render if
 you need a number, and state the renderer alongside it.
 
-**Getting to one well-filled page is a content decision, not a type
+**Getting to one page is a content decision, not a type
 decision.** Cut lower-value or redundant content first — a `Selected
 Systems` entry that restates bullet metrics is the largest single
 recovery and costs zero searchable terms (`SKILL.md`'s "Do not let
@@ -1088,7 +1184,7 @@ prefix per JSON Resume convention.
 | `work[].position`                        | `.role-title-line .title`                |
 | `work[].name`                            | `.role-title-line .company`              |
 | `work[].startDate`, `.endDate`           | `.role-dates time`                       |
-| `work[].location`                        | `.role-location`                         |
+| `work[].location`                        | `.role-location`, or — by default, when the role has no `x_summary` — folded into `.role-dates` (§5.2b) |
 | `work[].x_summary`                       | `.role-summary`                          |
 | `work[].highlights[i].text`              | `.highlights li` (text node)             |
 | `work[].highlights[i].x_scope`           | `.highlights li > .scope`                |
@@ -1120,11 +1216,12 @@ the gap with no visual artefact.
 
 `work[].location` (`.role-location`) is different: it is an employment
 fact about that role, and it is **required** whenever it is supplied with
-the role entry (§5.2) — either in the role's `.role-meta` row or folded
-into `.role-dates` (§5.2b). It is still never a source for
-`basics.location`: the two answer different questions, and a supplied
-`work[].location` is not permission to fill in a missing
-`basics.location`.
+the role entry (§5.2) — rendered by default folded into `.role-dates`
+(§5.2b), or in the role's own `.role-meta` row when that fold does not
+apply (a summary shares the row, or the location cannot parse back out
+of the dates cell). It is still never a source for `basics.location`:
+the two answer different questions, and a supplied `work[].location` is
+not permission to fill in a missing `basics.location`.
 
 ---
 

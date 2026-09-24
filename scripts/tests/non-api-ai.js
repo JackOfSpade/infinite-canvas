@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
+import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../../src/utils/nonApiAiNavigation.js';
 
@@ -171,14 +172,135 @@ export default [
         && dialogSource.includes('submittingRequestIds.has(activeRequestId)')
         && dialogSource.includes('actionRequestIdsRef.current.has(activeRequestId)'),
       'the handoff UI exposes every pending batch, tracks each request action independently, and binds cancellation to its captured request');
+      // The strip of numbered prompt buttons is how someone keeps up to ten
+      // parallel AI chats straight, and a bundle's number appears NOWHERE else
+      // in the panel. Hiding the strip once the queue drained to a single
+      // prompt deleted the only on-screen answer to "which chat is this prompt
+      // from?" at exactly the moment the last chat was being finished. So no
+      // count guard may stand between the panel header and the strip, and the
+      // pending count states itself at every depth rather than blanking at one
+      // while the collapsed dock still says "1 handoff waiting".
+      const panelHeaderAt = dialogSource.indexOf('<header className="shrink-0 px-5 py-4 border-b border-white/10">');
+      const promptStripAt = dialogSource.indexOf('<nav aria-label="Pending AI handoff batches"');
+      const beforeStrip = panelHeaderAt >= 0 && promptStripAt > panelHeaderAt
+        ? dialogSource.slice(panelHeaderAt, promptStripAt)
+        : '';
+      assert(panelHeaderAt >= 0 && promptStripAt > panelHeaderAt
+        && !/mergedRequests\.length/.test(beforeStrip)
+        && !/\.length\s*(?:>=|<=|===|!==|==|!=|>|<)\s*\d/.test(beforeStrip)
+        && /const queueLabel = useMemo\(\(\) => `\$\{mergedRequests\.length\} pending`/.test(dialogSource)
+        && dialogSource.includes('1 handoff waiting'),
+      'the numbered prompt selector and the pending count render at every queue depth, including a queue of one');
+      // Two mis-pastes the HANDOFF- scans above structurally cannot see. An
+      // application bundle answered in the wrong chat carries no HANDOFF-
+      // stamp to disagree with, so bundle 2's answer dropped into bundle 1
+      // reached the host and came back as a complaint about the ENVELOPE —
+      // spending a round and handing the correction machinery a defect that
+      // has nothing to do with the documents. And nothing anywhere noticed a
+      // response already filed under a different prompt; that was only ever
+      // found afterwards, in a bug report. Both are now caught before the
+      // submit, so neither costs a handoff.
+      assert(dialogSource.includes("import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard'")
+        && dialogSource.includes('const pasteAssessment = useMemo(() => assessPastedResponse({')
+        && dialogSource.includes('queuedRequests: mergedRequests,')
+        && dialogSource.includes('priorSubmissions: submittedResponses,')
+        && dialogSource.includes('|| Boolean(misdirectedPasteError)'),
+      'the dock checks a pasted answer against every other queued prompt and against what it has already sent, before the submit');
+      // Recorded on BOTH submit paths. A fingerprint stored for only one kind
+      // of prompt would make the duplicate check silently one-directional:
+      // an application answer re-pasted into a scoring prompt would be caught
+      // while the reverse sailed through.
+      const recordCall = 'recordSubmittedResponse(activeRequest, submittedIndex, activeResponse, Boolean(result?.accepted));';
+      assert(dialogSource.split(recordCall).length - 1 === 2
+        && dialogSource.includes('const submittedIndex = mergedRequests.findIndex(item => item.requestId === requestId);')
+        && dialogSource.includes('accepted: Boolean(accepted),')
+        && dialogSource.includes('next.length > SUBMITTED_RESPONSE_MEMORY'),
+      'both the application and scoring submit paths record what they sent, with its accepted verdict, in a bounded store');
+      // The notice must never reach the block. Re-sending identical text under
+      // a rotated handoff code is a real repair — a code can rotate without
+      // the documents changing — and a hard block there once trapped a live
+      // round with no way out.
+      assert(dialogSource.includes('const responseCrossPasteBlocked = Boolean(draftMismatchError) || Boolean(applicationCrossPasteError) || Boolean(misdirectedPasteError);')
+        && !dialogSource.includes('Boolean(repeatedPasteNotice)')
+        && dialogSource.includes('const repeatedPasteNotice = pasteAssessment.notice'),
+      'a repeat of this prompt\u2019s own text informs without blocking, because re-sending under a rotated code is a legitimate repair');
+      // A blocked paste has to be a repair, not a dead end: the text provably
+      // is not this prompt's answer, and when the guard knows which queued
+      // prompt owns it, getting there is one press.
+      assert(dialogSource.includes('Go to {misdirectedOwnerName}')
+        && dialogSource.includes('Clear this box')
+        && dialogSource.includes('setSelectedRequestId(misdirectedOwnerRequestId);')
+        && dialogSource.includes('onClick={() => setActiveResponse(\'\')}')
+        && dialogSource.includes('{responseCrossPasteBlocked && ('),
+      'a blocked paste offers the prompt that owns it and a way to empty the box, instead of only refusing');
+      // One numbering rule. A message that says "Application 3" has to point
+      // at a chip that reads 3; two rules would drift and send someone to the
+      // wrong chat, which is the exact mistake this guard exists to stop.
+      assert(dialogSource.includes('const describeQueuedPrompt = useCallback((request, index) => {')
+        && dialogSource.includes('const { selectorLabel, label } = describeQueuedPrompt(request, index);')
+        && dialogSource.includes('describeQueuedPrompt(mergedRequests[misdirectedOwnerIndex], misdirectedOwnerIndex).label'),
+      'the chip strip and every guard message that names a prompt read one numbering rule');
+      // A bundle past pasting keeps its chip AND its panel until it is
+      // genuinely finished. It used to vanish the instant a response was
+      // accepted — while the app was still rendering, measuring and saving —
+      // and reappear if that work failed back into another round. Because a
+      // bundle that leaves the queue releases its chip number, it could come
+      // back wearing a different one, or find another bundle already wearing
+      // its old one; the returning prompt was then unreadable as same-job or
+      // new-job. Holding the entry holds the number.
+      assert(dialogSource.includes('const applicationWorkingState = isApplicationRequest && activeRequest.working')
+        && dialogSource.includes("? (activeRequest.workingState === 'blocked' ? 'blocked' : 'working')")
+        && dialogSource.includes(') : applicationWorkingState ? (')
+        && dialogSource.includes('Saving this application bundle\u2026')
+        && dialogSource.includes('Needs a layout retry \u2014 press Retry layout check on its card')
+        // TWO LINES, and structurally unable to become three: what the state
+        // is, and which job it is. The paragraphs that used to sit here
+        // explained the chip-number rule — a thing to understand once, not to
+        // re-read on every save — and `truncate` on both rows is what stops a
+        // long job title from wrapping into a third.
+        && dialogSource.includes('<div className="truncate font-semibold text-white" title={workingHeadline}>')
+        && dialogSource.includes('<div className="truncate text-violet-100/75"')
+        && !dialogSource.includes('Nothing to paste while this runs.')
+        && !dialogSource.includes('The documents are already written'),
+      'an application bundle the app is still finishing keeps its panel, in a two-line state that asks for nothing');
+      // The panel is floored so a short state cannot collapse it. A prompt with
+      // its paste box runs ~47rem; a saving notice is two lines, and without a
+      // floor the dock shrank the instant a response was accepted and sprang
+      // back when the next prompt arrived. Capped by the viewport, because a
+      // min-height that beats max-height pushes the submit button off a short
+      // screen.
+      assert(dialogSource.includes('min-h-[min(47rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)]'),
+      'the dock panel keeps one height across every state instead of collapsing onto a short one');
+      // The chip carries the same fact, and carries it as motion: a static dot
+      // would read as one more settled state rather than as work still running.
+      assert(dialogSource.includes('const isBundleSaving = Boolean(request.working);')
+        && dialogSource.includes("? 'needs a layout retry' : 'still saving'")
+        && dialogSource.includes('animate-spin text-violet-200'),
+      'the chip shows a spinner while its bundle is still being saved, and says so to a screen reader');
+      // Focus must still advance. Before this the accepted item VANISHED and
+      // activeRequest fell through to whatever was first, so advancing on
+      // purpose is what PRESERVES that flow — without it the panel would newly
+      // pin itself to a bundle that wants nothing from anyone.
+      assert(dialogSource.includes('const nextWaiting = mergedRequests.find(item => item.requestId !== requestId && !item.working);'),
+      'accepting a bundle still moves focus to the next prompt that actually wants a paste');
+      // And the collapsed dock stops calling a bundle that wants nothing a
+      // waiting handoff, which would be the same confusion in miniature.
+      assert(dialogSource.includes('1 bundle saving')
+        && dialogSource.includes('const savingCount = mergedRequests.filter(request => request.working).length;')
+        && dialogSource.includes('1 handoff waiting'),
+      'the collapsed dock names waiting and saving separately instead of calling both waiting');
       assert(dialogSource.includes('const awaitingSuccessorRef = useRef(null)')
         && dialogSource.includes("focus awaiting workflow successor")
         && dialogSource.includes('isWorkflowSuccessor(successor, incoming)')
         && dialogSource.includes('workflow successor issued; focus advanced from prior completed handoff')
         // A direct chip click cancels BOTH automatic preferences before it
         // selects: the settling run's queued successor, and a bundle whose
-        // card asked for focus before discovery had published it.
-        && dialogSource.includes('awaitingSuccessorRef.current = null;\n                        pendingFocusJobIdsRef.current.clear();\n                        setSelectedRequestId(request.requestId);'),
+        // card asked for focus before discovery had published it. Matched
+        // whitespace-tolerantly on purpose: what has to hold is the ORDER of
+        // these three statements. Pinning their exact indentation turned
+        // re-nesting the JSX above them into a failure that said nothing
+        // about focus.
+        && /awaitingSuccessorRef\.current = null;\s*\n\s*pendingFocusJobIdsRef\.current\.clear\(\);\s*\n\s*setSelectedRequestId\(request\.requestId\);/.test(dialogSource),
       'when the active handoff settles before its workflow can issue the next prompt, focus follows that same run’s successor instead of reverting to an older correction; a direct user selection cancels the automatic preference');
       // Overall progress through the task. A batch number alone does not answer
       // "how many are left" when the run is dozens of handoffs long.
@@ -3043,6 +3165,88 @@ export default [
     },
   },
   {
+    // Regression test for a real drift: jobsSnapshot.js used to keep its own
+    // hand-copied safeCodes/safeReasons Sets instead of building them from
+    // SAFE_NON_API_AI_LOG_ERROR_CODES/SAFE_VALIDATION_DIAGNOSTIC_REASONS, so
+    // adding DUPLICATE_RESPONSE to the transport did not add it to the
+    // report's filter — the one rejection that proves a cross-paste happened
+    // would have been silently dropped. jobsSnapshot.js now builds its Sets
+    // from these two imports directly, so this sweeps every current member
+    // of both through a real reject cycle and would fail the moment a future
+    // addition to either allowlist stopped reaching the rendered report.
+    name: 'non-API AI: every SAFE_NON_API_AI_LOG_ERROR_CODES/SAFE_VALIDATION_DIAGNOSTIC_REASONS member survives the bug-report filter',
+    run: async () => {
+      // Stage is required alongside reason, and three reason groups are only
+      // accepted under their own matching stage (see cloneSafeValidationDiagnostic
+      // in nonApiAi.js). Rather than re-typing that grouping here — which would
+      // recreate exactly the kind of hand-copied list this test exists to stop
+      // trusting — discover a working stage per reason using the transport's
+      // own diagnostic constructor as the oracle.
+      const stageCandidates = ['research-sections', 'research-assessment', 'compensation-assessment', 'transport', 'json', 'schema', 'domain'];
+      const stageForReason = (reason) => stageCandidates.find((stage) => {
+        const probe = __defaultSafeValidationDiagnosticForTests({ validationDiagnostic: { stage, reason } }, 'VALIDATION_FAILED');
+        return probe?.stage === stage && probe?.reason === reason;
+      });
+
+      let nodeSeq = 0;
+      const rejectOnceAndReadMarkdown = async ({ code, diagnostic }) => {
+        ipcMain.__clearInvokeHandlers();
+        _resetNonApiAiHandoffLifecycle();
+        registerNonApiAiHandlers();
+        nodeSeq += 1;
+        const nodeId = `safe-allowlist-sweep-node-${nodeSeq}`;
+        const sent = [];
+        const sender = {
+          id: 9000 + nodeSeq, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+          send: (channel, payload) => sent.push({ channel, payload }),
+        };
+        handleSafe('non-api-safe-allowlist-sweep-test', async (_event, _args, signal) => ({
+          result: await requestNonApiAi({
+            prompt: 'sweep prompt', task: 'job-preference-research-batch', requestKind: 'raw-text', signal,
+            responseValidator: () => {
+              const error = new Error('sweep validator message');
+              error.code = code;
+              if (diagnostic) error.validationDiagnostic = diagnostic;
+              throw error;
+            },
+          }),
+        }));
+        const run = ipcMain.__getInvokeHandler('non-api-safe-allowlist-sweep-test')({ sender }, { nodeId });
+        await new Promise(resolve => setImmediate(resolve));
+        const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+        const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+        await submit({ sender }, { requestId: request.requestId, response: `Handoff: ${request.handoffCode}\n\nsweep response` });
+        const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set([nodeId]), sender.id);
+        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        await run;
+        return markdown;
+      };
+
+      const missingCodes = [];
+      for (const code of SAFE_NON_API_AI_LOG_ERROR_CODES) {
+        const markdown = await rejectOnceAndReadMarkdown({ code });
+        if (!markdown.includes(code)) missingCodes.push(code);
+      }
+      assert(missingCodes.length === 0,
+        `every SAFE_NON_API_AI_LOG_ERROR_CODES member renders verbatim in the bug report (missing: ${missingCodes.join(', ') || 'none'})`);
+
+      const unpairedReasons = [];
+      const missingReasons = [];
+      for (const reason of SAFE_VALIDATION_DIAGNOSTIC_REASONS) {
+        const stage = stageForReason(reason);
+        if (!stage) { unpairedReasons.push(reason); continue; }
+        const markdown = await rejectOnceAndReadMarkdown({ code: 'VALIDATION_FAILED', diagnostic: { stage, reason } });
+        if (!markdown.includes(`${stage}:${reason}`)) missingReasons.push(reason);
+      }
+      assert(unpairedReasons.length === 0,
+        `every SAFE_VALIDATION_DIAGNOSTIC_REASONS member has a stage the transport itself accepts it under (unpaired: ${unpairedReasons.join(', ') || 'none'})`);
+      assert(missingReasons.length === 0,
+        `every SAFE_VALIDATION_DIAGNOSTIC_REASONS member renders verbatim in the bug report (missing: ${missingReasons.join(', ') || 'none'})`);
+
+      return { codes: SAFE_NON_API_AI_LOG_ERROR_CODES.size, reasons: SAFE_VALIDATION_DIAGNOSTIC_REASONS.size };
+    },
+  },
+  {
     name: 'non-API AI: AIHANDOFF narrows main-process logs but FULL keeps the global ring',
     run: () => {
       const unrelated = `UNRELATED_MAIN_PROCESS_AUDIT_${Date.now()}`;
@@ -3733,6 +3937,209 @@ export default [
       assert(markdown.includes('code mismatch rejection(s)'), 'markdown reports code mismatch rejection');
       assert(markdown.includes('receipt tag `'), 'markdown reports a process-keyed response receipt tag');
       return { lifecycleVerified: true, missingCodesRejected: true };
+    },
+  },
+  {
+    // Reproduces the confirmed 2026-09-17 corruption: a durable step restored
+    // from before handoff-code enforcement existed has no code to compare
+    // against, so a response with no code at all was accepted for TWO
+    // different batches of one run. claimAcceptedResponseFingerprint is the
+    // guard closing that hole; requestNonApiAi/submit-non-api-ai-response
+    // cannot legitimately be driven into the pre-enforcement (code-optional)
+    // state from a fresh call in this shared test process — every step this
+    // process creates from scratch is stamped with the CURRENT enforcement
+    // version — so this exercises the exact function the submit handler
+    // calls, at the exact call site's inputs (a record's runId/stepKey/
+    // handoffCode plus the raw pasted text).
+    name: 'non-API AI: an accepted response cannot be silently accepted again for a different step',
+    run: () => {
+      _resetNonApiAiHandoffLifecycle();
+      const body = 'A'.repeat(DUPLICATE_RESPONSE_MIN_LENGTH); // exactly at the floor, inclusive
+      const recordA = { runId: 'run-dup-cross', stepKey: 'step-A', handoffCode: 'HANDOFF-AAAAAA' };
+      const recordB = { runId: 'run-dup-cross', stepKey: 'step-B', handoffCode: 'HANDOFF-BBBBBB' };
+      __claimAcceptedResponseFingerprintForTests(recordA, body);
+      let error = null;
+      try {
+        __claimAcceptedResponseFingerprintForTests(recordB, body);
+      } catch (err) { error = err; }
+      assert(error instanceof NonApiAiDuplicateResponseError, 'a different step claiming the identical body is rejected with the new error class');
+      assert(error.code === 'DUPLICATE_RESPONSE', 'the rejection carries the DUPLICATE_RESPONSE code');
+      assert(error.message.includes('already accepted for a different prompt'), 'message states the response was already accepted for a different prompt');
+      assert(error.message.includes('Nothing was saved'), 'message states nothing was saved');
+      assert(error.message.includes(recordB.handoffCode), "message names THIS prompt's own handoff code as the repair");
+      assert(!error.message.includes(recordA.handoffCode), 'message never names the other step\'s code, which may belong to a different run');
+      return { rejected: true };
+    },
+  },
+  {
+    name: 'non-API AI: re-accepting the identical body for the SAME logical step is never a conflict',
+    run: () => {
+      _resetNonApiAiHandoffLifecycle();
+      const body = 'B'.repeat(DUPLICATE_RESPONSE_MIN_LENGTH + 40);
+      const record = { runId: 'run-dup-same', stepKey: 'step-same', handoffCode: 'HANDOFF-CCCCCC' };
+      let threwFirst = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(record, body);
+        __claimAcceptedResponseFingerprintForTests(record, body);
+      } catch { threwFirst = true; }
+      assert(!threwFirst, 'the same record object re-claiming its own accepted text never conflicts with itself');
+      // Identity is stepKey, not object identity and not handoffCode: a
+      // re-issued or stepped-back request builds a brand-new record for the
+      // same logical step, sometimes with a different collision-fallback
+      // handoffCode, and must still be able to re-accept the identical text.
+      const reissuedRecord = { runId: 'run-dup-same', stepKey: 'step-same', handoffCode: 'HANDOFF-DDDDDD' };
+      let threwReissued = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(reissuedRecord, body);
+      } catch { threwReissued = true; }
+      assert(!threwReissued, 'a re-issued request for the same step can still re-accept the identical text');
+      // And runId is NOT part of that identity, which is the difference
+      // between a guard and a trap. stepKey hashes the prompt, so a new run
+      // asking the SAME question produces the same stepKey — and cancelling a
+      // run discards every pasted response while inviting a retry of exactly
+      // those prompts. Someone who still holds those answers and re-pastes
+      // them must not be told their own correct answer belongs elsewhere.
+      const retriedRunRecord = { runId: 'run-dup-same-RETRY', stepKey: 'step-same', handoffCode: 'HANDOFF-KKKKKK' };
+      let threwRetriedRun = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(retriedRunRecord, body);
+      } catch { threwRetriedRun = true; }
+      assert(!threwRetriedRun, 'a retried run re-asking the same prompt can re-accept the answer already given to it');
+      return { allowed: true };
+    },
+  },
+  {
+    name: 'non-API AI: short repeated answers below the duplicate-response floor never conflict across steps',
+    run: () => {
+      _resetNonApiAiHandoffLifecycle();
+      const shortBody = 'C'.repeat(DUPLICATE_RESPONSE_MIN_LENGTH - 1);
+      const recordA = { runId: 'run-dup-short', stepKey: 'short-A', handoffCode: 'HANDOFF-EEEEEE' };
+      const recordB = { runId: 'run-dup-short', stepKey: 'short-B', handoffCode: 'HANDOFF-FFFFFF' };
+      __claimAcceptedResponseFingerprintForTests(recordA, shortBody);
+      let threw = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(recordB, shortBody);
+      } catch { threw = true; }
+      assert(!threw, `a ${shortBody.length}-char response (one under the ${DUPLICATE_RESPONSE_MIN_LENGTH}-char floor) is never fingerprinted, so it cannot conflict across two different steps`);
+      // Incidental leading/trailing paste whitespace must not itself push a
+      // short answer over the floor ("normalized" means trimmed length).
+      const paddedShortBody = `   ${shortBody}   `;
+      const recordC = { runId: 'run-dup-short', stepKey: 'short-C', handoffCode: 'HANDOFF-GGGGGG' };
+      let threwPadded = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(recordC, paddedShortBody);
+      } catch { threwPadded = true; }
+      assert(!threwPadded, 'whitespace padding a below-floor response does not push it over the floor');
+      return { belowFloorAllowed: true };
+    },
+  },
+  {
+    name: 'non-API AI: the accepted-response fingerprint registry is bounded and evicts its oldest entry first',
+    run: () => {
+      _resetNonApiAiHandoffLifecycle();
+      const bodyFor = index => `${'D'.repeat(DUPLICATE_RESPONSE_MIN_LENGTH)}-${index}`;
+      const firstBody = bodyFor(0);
+      const firstRecord = { runId: 'run-dup-cap', stepKey: 'cap-step-0', handoffCode: 'HANDOFF-HHHHHH' };
+      __claimAcceptedResponseFingerprintForTests(firstRecord, firstBody);
+      // Fill the registry with many more distinct (step, body) pairs than any
+      // reasonable cap could hold. The exact bound is a private implementation
+      // detail (not exported), so this loop just needs to comfortably exceed
+      // it rather than pin its precise value.
+      const fillCount = 400;
+      for (let index = 1; index <= fillCount; index += 1) {
+        __claimAcceptedResponseFingerprintForTests(
+          { runId: 'run-dup-cap', stepKey: `cap-step-${index}`, handoffCode: 'HANDOFF-IIIIII' },
+          bodyFor(index),
+        );
+      }
+      // The oldest fingerprint must have been evicted: the exact same body,
+      // now claimed for yet another brand-new step, must be accepted rather
+      // than flagged as a conflict with the long-since-forgotten first step.
+      let threwForEvictedFingerprint = false;
+      try {
+        __claimAcceptedResponseFingerprintForTests(
+          { runId: 'run-dup-cap', stepKey: 'cap-step-reused', handoffCode: 'HANDOFF-JJJJJJ' },
+          firstBody,
+        );
+      } catch { threwForEvictedFingerprint = true; }
+      assert(!threwForEvictedFingerprint, `the registry evicted its oldest entry after ${fillCount} newer claims, so the first body no longer conflicts with a brand-new step`);
+      return { bounded: true, evictedOldestFirst: true };
+    },
+  },
+  {
+    name: 'non-API AI: DUPLICATE_RESPONSE is wired through the safe log and diagnostic classification lists',
+    run: () => {
+      const error = new NonApiAiDuplicateResponseError('HANDOFF-ZZZZZZ');
+      assert(error.code === 'DUPLICATE_RESPONSE', 'the new error carries the DUPLICATE_RESPONSE code');
+      assert(__nonApiAiLogErrorCodeForTests(error) === 'DUPLICATE_RESPONSE',
+        'DUPLICATE_RESPONSE passes through the safe-log error-code allowlist unchanged instead of collapsing to VALIDATION_FAILED');
+      const diagnostic = __defaultSafeValidationDiagnosticForTests(error, 'DUPLICATE_RESPONSE');
+      assert(diagnostic.stage === 'transport' && diagnostic.reason === 'DUPLICATE_RESPONSE',
+        'the diagnostic classifier maps DUPLICATE_RESPONSE to a transport-stage, DUPLICATE_RESPONSE-reason diagnostic');
+      // cloneSafeValidationDiagnostic (the allowlist filter feeding a real
+      // lifecycle receipt) must also accept this exact diagnostic rather than
+      // silently dropping it. Round-trip it back through the classifier as an
+      // already-typed diagnostic, exactly as a real rejection would carry it.
+      const roundTripped = __defaultSafeValidationDiagnosticForTests({ validationDiagnostic: diagnostic }, 'DUPLICATE_RESPONSE');
+      assert(roundTripped.stage === 'transport' && roundTripped.reason === 'DUPLICATE_RESPONSE',
+        'a DUPLICATE_RESPONSE diagnostic survives the safe-diagnostic allowlist filter unmodified');
+      return { wired: true };
+    },
+  },
+  {
+    name: 'non-API AI: a duplicate-response rejection reissues the original prompt unchanged, exactly like a code mismatch',
+    run: () => {
+      const duplicateRecord = { materializedPrompt: 'ORIGINAL PROMPT TEXT', validationCode: 'DUPLICATE_RESPONSE', responseSchema: null };
+      const duplicateRetry = __promptForRetryForTests(duplicateRecord, new NonApiAiDuplicateResponseError('HANDOFF-JJJJJJ'));
+      assert(duplicateRetry.prompt === duplicateRecord.materializedPrompt && duplicateRetry.isCorrection === false,
+        'a duplicate-response rejection reissues the identical prompt with no correction annotation');
+      const mismatchRecord = { materializedPrompt: 'ORIGINAL PROMPT TEXT', validationCode: 'HANDOFF_CODE_MISMATCH', responseSchema: null };
+      const mismatchRetry = __promptForRetryForTests(mismatchRecord, new NonApiAiCodeMismatchError('HANDOFF-X', 'HANDOFF-Y'));
+      assert(duplicateRetry.prompt === mismatchRetry.prompt && duplicateRetry.isCorrection === mismatchRetry.isCorrection,
+        'a duplicate-response rejection reissues identically to a code-mismatch rejection');
+      // A missing-code rejection, by contrast, DOES annotate a correction --
+      // confirming the bypass above is specific to mismatch/duplicate, not a
+      // side effect of some broader change to promptForRetry.
+      const missingRecord = { materializedPrompt: 'ORIGINAL PROMPT TEXT', validationCode: 'HANDOFF_CODE_MISSING', responseSchema: null };
+      const missingRetry = __promptForRetryForTests(missingRecord, new NonApiAiCodeMissingError('HANDOFF-Z'));
+      assert(missingRetry.isCorrection === true && missingRetry.prompt !== missingRecord.materializedPrompt,
+        'a missing-code rejection still annotates a correction, unlike mismatch/duplicate');
+      return { matched: true };
+    },
+  },
+  {
+    name: 'non-API AI: code-mismatch and code-missing error messages are unchanged',
+    run: () => {
+      const mismatch = new NonApiAiCodeMismatchError('HANDOFF-W8NG11', 'HANDOFF-C8RECT');
+      assert(mismatch.message === 'This response is stamped HANDOFF-W8NG11, but this prompt is HANDOFF-C8RECT — it is the answer to a different handoff. Nothing was saved. Find the chat whose prompt header reads HANDOFF-C8RECT and paste that answer here. (Each prompt carries its own code precisely so two batches of the same task cannot be swapped.)',
+        `code-mismatch message text is unchanged, got: ${mismatch.message}`);
+      assert(mismatch.code === 'HANDOFF_CODE_MISMATCH' && mismatch.isCodeMismatch === true, 'code-mismatch error shape is unchanged');
+
+      const missing = new NonApiAiCodeMissingError('HANDOFF-EXPECT');
+      assert(missing.message === 'This response is missing the required HANDOFF-EXPECT handoff code. Nothing was saved. Paste the complete response from the chat whose prompt header reads HANDOFF-EXPECT; its first line must be "Handoff: HANDOFF-EXPECT" (or, for JSON, include the matching handoffCode property).',
+        `code-missing message text is unchanged, got: ${missing.message}`);
+      assert(missing.code === 'HANDOFF_CODE_MISSING', 'code-missing error shape is unchanged');
+
+      // Still exercised through the real validation entry point, unchanged.
+      const schema = { type: 'object', properties: { ok: { type: 'boolean' } } };
+      let mismatchThrown = null;
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ handoffCode: 'HANDOFF-W8NG11', ok: true }),
+          responseSchema: schema, task: 'test-task', expectedHandoffCode: 'HANDOFF-C8RECT',
+        });
+      } catch (err) { mismatchThrown = err; }
+      assert(mismatchThrown?.message === mismatch.message, 'validateNonApiAiSubmission still throws the exact unchanged mismatch message');
+
+      let missingThrown = null;
+      try {
+        validateNonApiAiSubmission({
+          response: JSON.stringify({ ok: true }),
+          responseSchema: schema, task: 'test-task', expectedHandoffCode: 'HANDOFF-EXPECT',
+        });
+      } catch (err) { missingThrown = err; }
+      assert(missingThrown?.message === missing.message, 'validateNonApiAiSubmission still throws the exact unchanged missing-code message');
+      return { unchanged: true };
     },
   },
 ];

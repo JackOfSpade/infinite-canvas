@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
+import { requestApplicationHandoffRefresh } from '../utils/applicationHandoffDock';
 import {
   LOCAL_AI_POLL_INTERVAL_MS,
   LOCAL_AI_RESULT_SETTLE_MS,
@@ -203,6 +204,12 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
               : (result.fitMessage || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine; it will use fit-feedback.json to prioritize the strongest evidence and argument.'),
           });
           EventLogger.log(`[LocalAI] fallback revision-required job=${jobId} card=${nodeId}`);
+          // Same rotation the mounted-card path handles in JobCardNode.jsx: a
+          // measured fit failure mints a new handoffCode for an unchanged set
+          // of documents, and the dock's CONTENT gate only knows the current
+          // code by re-reading this job — this manager runs precisely when
+          // the card is UNMOUNTED, so it is the refresh, or nothing is.
+          if (pasteRevision && result.handoff) requestApplicationHandoffRefresh(jobId);
           toast?.({
             title: pasteRevision ? 'Application Review and Edit Needed' : 'Local AI Document Revision Needed',
             description: pasteRevision

@@ -32,19 +32,67 @@
 // quota. The chip strip is laid out `sm:grid-cols-10` for the same reason.
 export const APPLICATION_HANDOFF_LIMIT = 10;
 
-// Application statuses that never occupy a dock slot. A job is owned by its
-// polling/import machinery in these states and has no prompt to paste against:
-// 'saved'/'failed' are terminal, 'importing'/'completed'/'paste-completed'
-// are the app's own work after the final stage was accepted.
-export const APPLICATION_DOCK_IDLE_STATUSES = Object.freeze([
-  'saved', 'failed', 'importing', 'completed', 'paste-completed',
-  // Past the paste phase: the result exists and it is the LAYOUT check that
-  // must be retried, from the card's own action. getLocalApplicationHandoff
-  // has no prompt to hand back for one, so counting it would spend a dock
-  // slot on a bundle that can never show a prompt — and would light a
-  // Continue action that opens nothing. Mirrors LOCAL_AI_CARD_POLL_IDLE_STATUSES.
+// Application statuses that are genuinely FINISHED: nothing is still driving
+// this bundle toward another state, so it is safe to give up both its dock
+// slot and its ordinal number. Deliberately the same pair as
+// LOCAL_AI_FALLBACK_IDLE_STATUSES (src/utils/localAiFallback.js) — that is
+// load-bearing, not a coincidence: the fallback manager supervises every
+// status NOT in that pair and drives a stalled job to 'failed', so reusing
+// its terminal pair here is what stops a bundle from holding a dock slot
+// (and a chip number) forever if the thing supposedly finishing it dies.
+//
+// Everything else — 'importing'/'completed'/'paste-completed' (the app's own
+// work after a stage was accepted, see APPLICATION_DOCK_WORKING_STATUSES) and
+// 'render-retry-required' (a result blocked on a card-side retry, see
+// APPLICATION_DOCK_BLOCKED_STATUSES) — is NOT idle: none of them can take a
+// paste, but the bundle is not done, so it must keep its slot and its number
+// until it actually lands here.
+export const APPLICATION_DOCK_IDLE_STATUSES = Object.freeze(['saved', 'failed']);
+
+// The app's own work running after a stage was accepted. No paste is
+// possible — there is nothing to paste against — but the entry stays on the
+// dock to show that progress rather than vanishing while the host is still
+// rendering, measuring, and saving.
+export const APPLICATION_DOCK_WORKING_STATUSES = Object.freeze([
+  'importing', 'completed', 'paste-completed',
+]);
+
+// Past the paste phase, but not finished: the result exists and it is the
+// LAYOUT check that must be retried, from the card's own action.
+// getLocalApplicationHandoff has no prompt to hand back for one, so no paste
+// is possible here either — but unlike a truly idle status, the bundle can
+// still fail back into another paste round, so its number must not be
+// released while it sits here. Mirrors LOCAL_AI_CARD_POLL_IDLE_STATUSES.
+export const APPLICATION_DOCK_BLOCKED_STATUSES = Object.freeze([
   'render-retry-required',
 ]);
+
+/**
+ * True only when a status is in none of the three lists above — the "can
+ * actually show a prompt" predicate. Idle, working, and blocked bundles all
+ * have zero prompt to paste against; this is the one check the dock's
+ * candidate selection and the card's Continue affordance both have to agree
+ * with, so neither can drift into offering an action the other has nothing
+ * to back it with.
+ */
+export function applicationAwaitsPaste(status) {
+  return (
+    !APPLICATION_DOCK_IDLE_STATUSES.includes(status)
+    && !APPLICATION_DOCK_WORKING_STATUSES.includes(status)
+    && !APPLICATION_DOCK_BLOCKED_STATUSES.includes(status)
+  );
+}
+
+/**
+ * Classify one status into the shape the dock renders. One function so no
+ * caller re-derives "which of the three lists is this in" on its own.
+ */
+export function applicationDockItemState(status) {
+  if (APPLICATION_DOCK_WORKING_STATUSES.includes(status)) return 'working';
+  if (APPLICATION_DOCK_BLOCKED_STATUSES.includes(status)) return 'blocked';
+  if (APPLICATION_DOCK_IDLE_STATUSES.includes(status)) return 'idle';
+  return 'waiting';
+}
 
 const PUSH_HANDOFF_CODE_RE = /^HANDOFF-[2-9A-HJ-NP-Z]{6}$/;
 
@@ -67,7 +115,9 @@ export function usesPushHandoffCode(request) {
 }
 
 /**
- * Job cards whose application bundle is waiting on a pasted response. Pure so
+ * Job cards whose application bundle currently holds a dock slot: waiting on
+ * a pasted response, doing the app's own post-accept work, or blocked on a
+ * card-side retry — every status except the idle (saved/failed) pair. Pure so
  * the cap and the queue are derived from one rule; `allNodes` is the canvas's
  * full node list (every level), as enumerateAllNodes returns it.
  */
@@ -100,7 +150,7 @@ export function countActiveApplicationHandoffs(allNodes, dismissedRequestIds = n
 }
 
 export function applicationLimitMessage(limit = APPLICATION_HANDOFF_LIMIT) {
-  return `${limit} application bundles are already waiting for a pasted response. Finish or discard one of them, then press Generate again.`;
+  return `${limit} application bundles are already in progress or waiting for a pasted response. Finish or discard one of them, then press Generate again.`;
 }
 
 /**
@@ -207,6 +257,47 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
     correctionPrompt: '',
     isCorrection: false,
     integrityMessage: text,
+    label: company || title || 'Application',
+    subject: [title, company].filter(Boolean).join(' · '),
+  };
+}
+
+/**
+ * A bundle that is not waiting on a paste but is not finished either: the
+ * app's own post-accept work, or a result blocked on a card-side retry (see
+ * APPLICATION_DOCK_WORKING_STATUSES / APPLICATION_DOCK_BLOCKED_STATUSES). No
+ * response box is offered — there is no prompt for one — but the item still
+ * has to hold the bundle's dock slot and its ordinal, or the number a person
+ * is watching for would come free the instant a save started and could be
+ * handed to someone else's bundle before this one is actually done.
+ *
+ * Mirrors applicationDockRequest's sibling brokenApplicationDockRequest in
+ * shape and in its defensive checks, minus the message: there is no fault to
+ * explain here, only progress to show.
+ */
+export function workingApplicationDockRequest({ node, canvasFilePath = null, status }) {
+  const local = node?.data?.localApplication;
+  if (!node?.id || !local?.id) return null;
+  const company = typeof node.data?.company === 'string' ? node.data.company.trim() : '';
+  const title = typeof node.data?.title === 'string' ? node.data.title.trim() : '';
+  return {
+    kind: 'application',
+    requestId: applicationRequestId(local.id),
+    jobId: local.id,
+    canvasFilePath: local.canvasFilePath || canvasFilePath || null,
+    nodeId: node.id,
+    runId: local.id,
+    task: local.stage || 'application',
+    stage: local.stage || '',
+    revision: null,
+    handoffCode: '',
+    prompt: '',
+    initialResponse: '',
+    corrections: [],
+    correctionPrompt: '',
+    isCorrection: false,
+    working: true,
+    workingState: applicationDockItemState(status),
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
   };

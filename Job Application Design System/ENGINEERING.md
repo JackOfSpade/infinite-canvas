@@ -88,6 +88,7 @@ Run in this order by the `test` script:
 | `page-policy-doc-test.js` | The one-page default and its explicit-override language. |
 | `parallelism-gate-doc-test.js` | §11.2.3 Rule 5 (parallel construction) survives in all three docs. |
 | `synthesis-scope-gate-doc-test.js` | §11.2.3 Rule 6 (earned generalization) survives in all three docs. |
+| `bullet-redundancy-gate-doc-test.js` | The one-accomplishment-one-bullet rule (STYLE.md §5.3, SKILL.md "Do not let one bullet restate another" + its negative-space line, readme.md "Bullet ordering") survives in all three docs. |
 | `fixture-safety-test.js` | Handoff/upload HTML fixtures use the documented synthetic identity and inert sync capability; no production-looking bearer token or live endpoint can be committed there. |
 
 ### Browser checks — `build/MANUAL-CHECKS.md`
