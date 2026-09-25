@@ -178,6 +178,16 @@ End-to-end, given candidate data + job description:
    merely restates a category without adding a decision, mechanism, constraint,
    or result.
 
+   Give each cover-letter paragraph one argumentative job, not a prescribed
+   number of sentences. Use as many sentences as clarity requires. Split
+   separate claims, action steps, or relevance links when combining them makes
+   the grammar harder to follow. In particular, an artifact may be introduced
+   in one sentence and its supported trigger or follow-up action explained in
+   the next. Do not force a feature inventory into the introduction, and do not
+   add a standalone abstract sentence merely to label the work's difficulty or
+   "problem shape." Explain the evidence-to-role connection only when the proof
+   and transfer do not already make it clear.
+
    **Project-category provenance is binding too.** A heading that identifies
    work as personal, open-source, academic, volunteer, or employer-owned is a
    factual attribution, not disposable source wording. Preserve that category
@@ -251,16 +261,27 @@ End-to-end, given candidate data + job description:
 
    **Then read the final sentence as a role-facing invitation.** If it invites
    a conversation, it must connect the candidate's relevant contribution to the
-   target work. Do not end solely on what the candidate wants to learn, hear, or
-   discuss. Keep the invitation direct and present-tense, without conditional or
-   deferential boilerplate: `I welcome a conversation` is direct; `I would
+   target work. The sentence graded is the paragraph's final *substantive*
+   sentence — a trailing courtesy line (`Thank you for your consideration.`,
+   `I am available at your convenience.`) carries no invitation of its own and
+   is skipped when finding it, so a letter that ends on one of those still has
+   to satisfy this rule on the sentence before it. Do not end solely on what
+   the candidate wants to learn, hear, or discuss. Keep the invitation direct
+   and present-tense, without conditional or deferential boilerplate:
+   `I welcome a conversation` is direct; `I would
    welcome a conversation` or `I would welcome a discussion` is not.
-   The check reads two halves of that sentence: the candidate's asset has to
+   The check reads three things in that sentence: the candidate's asset has to
    be named by a possessive, an authorship clause, or a demonstrative carrying
    its own descriptor (`my integration work`, `the connector I built`, `that
-   MCP server experience` — never a bare `that work`), and the sentence has to
-   say what the asset does for the target work (`... could support ...`,
-   `... supports ...`, `applying ... to ...`).
+   MCP server experience` — never a bare `that work`); the sentence has to
+   say what the asset does (`... could support ...`, `... supports ...`,
+   `applying ... to ...`); and the sentence has to reach the employer's own
+   side of that action with an explicit target — `your ...`, `the`/`this`
+   plus a work noun (`the platform`, `this team`), a reader noun
+   (`customers`, `users`, `clients`), or the employer's own name. A sentence
+   that names only the candidate's asset and what it does, with no
+   employer-facing target in that same sentence, does not pass — however
+   specific the asset is.
 
    **The letter's opening sentence is a hard gate.** `STYLE.md §11.2.2`:
    the first sentence must lead with a job-specific thesis, a concrete

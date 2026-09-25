@@ -428,23 +428,22 @@ Use any local coding agent with filesystem and shell access. The routine is prov
      or causal result, and never move a fact between employers or projects. If
      the data supports only familiarity and no applied action can be derived,
      keep it in Skills or omit it from the highlights.
-   - When one application or system pairs an identifying or observing capability with
-     a connected action that changes why the artifact matters, name both in the
-     sentence that introduces it. Do not make an initial clause sound like the
-     application or system existed only to perform its first named function and defer its
-     connected action to the next sentence. Use a natural coordinated predicate
-     that names what the app does, not an awkward implementation transition such
-     as "and connected." Express relationships plainly instead of stacking nouns:
+   - When one application or system pairs an identifying or observing capability
+     with a connected action, explain that action in the same sentence or in an
+     immediately following causal sentence, whichever is easier to read. Do not
+     compress both into one sentence merely to introduce the artifact. Keep the
+     connection explicit with a clear subject such as `the application`, `it`, or
+     the shortest unambiguous system name. Express relationships plainly instead
+     of stacking nouns:
      prefer `a web application for the organization` over a compressed noun
      stack
      when that is the supported relationship. Place the relationship before the
      application when it could otherwise attach ambiguously. Do not catalog
-     every feature. For example: `I built a web application that accepted the
-     source-supported input and, when the stated condition applied, initiated
-     the supported follow-up action through an external service.` Preserve the
-     source's exact trigger and scope: describe a follow-up action only when
-     the career evidence says the application or system could initiate it, and
-     do not imply that every input initiated that action.
+     every feature or copy every supported action into one sentence. Select the
+     actions that matter to the point, and preserve the source's exact trigger
+     and scope. Describe a follow-up action only when the career evidence says
+     the application or system could initiate it, and do not imply that every
+     input initiated that action.
    - Order each role's highlights by interview value for this target job, not
      chronology or source order: lead with direct, credible evidence for a hard
      screen or highest-priority requirement; follow with distinctive outcomes,
@@ -586,27 +585,32 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    rules and ships unexamined; the omission is silent, not permissive. Every
    paragraph offering completed work as proof carries at least one first-person
    action.
-   Between a paragraph's concrete evidence and its transfer, state what the
-   described work required, one level of abstraction above the artifact. That
-   sentence introduces no fact the evidence did not already contain: it
-   re-describes the same work as a problem shape, so it can never smuggle in an
-   outcome, a scale, or a motivation the sources do not state. Make the work,
-   not yourself, its grammatical subject, and keep it in past tense anchored to
-   that project, because a general claim about what you are good at is a scope
-   assertion the sources do not support. Exclude every proper noun, product,
-   tool, and domain particular the evidence named, and do not name the target
-   employer, team, or product, which belongs to the transfer that follows. Name
-   the difficulty, constraint, or design trade the work resolved; a sentence
-   that only assigns the work to a category adds nothing and is cut. It must
-   stay true if a different project of the same shape were substituted for the
-   one described, and must not announce that a generalization follows. Without
-   it a transfer reaches back to a bare mechanism and the reader is left to
-   build the connection unaided.
-   Give every paragraph one argumentative job, not one sentence. Use as many
-   sentences as that paragraph needs to make its point, establish its proof,
-   and explain its relevance clearly. Do not compress those jobs into one
-   sentence or force a paragraph to follow a fixed claim-proof-relevance
-   sentence pattern. When a paragraph changes from
+   Explain the relationship between concrete evidence and the target work only
+   when the proof and transfer do not already make it clear. Do not insert a
+   mandatory standalone warrant or problem-shape sentence. The explanation may
+   stay inside the evidence sentence, stay inside the transfer, or use
+   additional sentences when that is easier to understand. Keep concrete
+   actors, artifacts, actions, and supported domain details when they make the
+   relationship clearer. Abstract only enough to name a real dependency,
+   constraint, or design trade. Reject stock frames that turn a clear action
+   into an abstract obligation or merely announce that the work was difficult.
+   The explanation may introduce no outcome, scale, or motivation the sources
+   do not state. A sentence that only assigns the work to a category adds
+   nothing and is cut. If removing the explanation leaves the same clear
+   evidence-to-need connection, remove it.
+   Give every paragraph one argumentative job, not a prescribed number of
+   sentences. Use as many sentences as that paragraph needs to make its point,
+   establish its proof, and explain its relevance clearly. Split a sentence
+   when separate claims, action steps, or relevance links need their own clear
+   grammatical path; combine them only when the combined sentence is simpler
+   and easier to parse. Do not compress those jobs into one sentence or force a
+   paragraph to follow a fixed claim-proof-relevance sentence pattern. Source
+   material that lists one trigger and several resulting actions is not a
+   command to reproduce every item in one sentence. Select the load-bearing
+   examples and use an immediately following causal sentence for a trigger or
+   follow-up action when that reads more naturally. The final audit records the
+   sentences the prose needs; it does not allocate one sentence to each planning
+   field. When a paragraph changes from
    one implementation path, system, employer, or proof to another, state the
    real relationship before the new details; a generic connective or a truism
    does not create coherence. When the thesis names multiple decision branches,
@@ -639,9 +643,10 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    A coined frame may organize the evidence, but never let it recast one posted
    role as multiple positions. Name the target role literally and in the
    singular when referring to it.
-   Keep the letter in a plain, direct register. Write short declarative
-   sentences, split long reasoning into short causal ones instead of nesting
-   purpose clauses, and keep every sentence to 40 words or fewer. Infinite
+   Keep the letter in a plain, direct register. Write clear sentences of
+   natural length, splitting multi-step reasoning when separate actions or
+   causal links need their own grammatical path, and keep every sentence to 40
+   words or fewer. Infinite
    Canvas rejects the whole result at 41. Use no semicolon anywhere in the
    letter, and no dash as a clause splice. Infinite Canvas rejects the whole
    result for any semicolon, for an em dash, for a double hyphen between

@@ -4218,6 +4218,14 @@ export default [
         }
         assert(base.prompt.includes(`the letter is read against its own wording too: ${REPEATED_PHRASE_RULE}`),
           'the repeat rule reaches the cover-letter contract behind a lead-in that names its subject and states no cause');
+        assert(base.prompt.includes('Give every paragraph one argumentative job, not a prescribed number of sentences')
+          && base.prompt.includes('use an immediately following causal sentence for a trigger or follow-up action')
+          && base.prompt.includes('The audit records the sentences the prose needs; it does not allocate one sentence to each planning field')
+          && base.prompt.includes('Do not insert a mandatory standalone warrant or problem-shape sentence'),
+        'the initial cover-letter contract permits natural multi-sentence evidence sequences instead of reserving one sentence for each planning field');
+        assert(!base.prompt.includes('state what the described work required, one level of abstraction above the artifact')
+          && !base.prompt.includes('carry that action into the introduction'),
+        'the initial contract no longer forces an abstract warrant or merges a follow-up action into the artifact-introduction sentence');
         // A clause with no number to interpolate still needs a guard, or the
         // disclosure can be deleted without a test noticing.
         for (const [clause, printed] of [

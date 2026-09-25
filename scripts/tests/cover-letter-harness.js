@@ -2,7 +2,6 @@ import {
   assert,
   assertCandidateDashPunctuation,
   authorCoverLetterEnvelope,
-  checkArtifactActionCompleteness,
   formatCoverLetterDate,
   BANNED_GENERIC_PHRASES,
   BANNED_GENERIC_PATTERNS,
@@ -1235,6 +1234,63 @@ export default [
         && selfDirectedContribution.passed
         && nonFinalIntent.passed,
       'the closing check catches final invitations that stop at conversation or learning while leaving contribution-connected and non-final intent alone');
+      // The observation used to name the GOAL ("direct") without the OPERATION
+      // (delete the modal), and its second clause pointed at the half of the
+      // sentence the writer had already satisfied — exactly why a real handoff
+      // enriched the contribution clause for 16 rounds and never dropped "would".
+      // The fix must name the operation, not re-present the contribution clause
+      // as the missing half, and must carry the contribution rule too, since
+      // deleting the modal moves the sentence onto DIRECT_CONVERSATION_CLOSE.
+      const conditionalOperationDetail = checkDirectWelcomeClosing(['I would welcome the chance to talk about that work.']).detail;
+      // "needs both halves" became "needs all three parts": the conditional
+      // branch grades the sentence before any of the three contribution
+      // predicates have run, so it always lists asset, action, AND target —
+      // the target half is the one a second incident (752d8241, see the
+      // comment on contributionHalfRequirement) found this message never
+      // demonstrated at all, in any branch.
+      assert(conditionalOperationDetail.includes('delete that opening modal')
+        && conditionalOperationDetail.includes('make the invitation direct')
+        && conditionalOperationDetail.includes('the sentence needs all three parts')
+        && conditionalOperationDetail.includes('never a bare demonstrative')
+        && conditionalOperationDetail.includes('reach the employer’s side too')
+        && !conditionalOperationDetail.includes('name the specific work or contribution to discuss'),
+      `the conditional-close rejection must name the operation (delete the modal) and carry the full three-part contribution rule in the same round, got ${JSON.stringify(conditionalOperationDetail)}`);
+      // A closing that reuses a noun phrase an earlier paragraph already used
+      // satisfies this check and trips checkRepeatedPhrase; 5 of the incident's
+      // 16 rejections also named repeated-phrase. The remediation states that
+      // counter-pressure by reading MIN_CROSS_PARAGRAPH_REPEAT_WORDS rather than
+      // a hardcoded number, so the floor can never drift from what
+      // checkRepeatedPhrase actually enforces.
+      assert(conditionalOperationDetail.includes(`${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} or more words carried verbatim`),
+      `the remediation must state the cross-paragraph repeat floor by constant, got ${JSON.stringify(conditionalOperationDetail)}`);
+      // \bI\s+(?:would|'d)\s+be\s+… forced a space before "'d" that the
+      // contraction never has, so "I'd be glad to discuss…" escaped the check
+      // entirely while "I would be glad to discuss…" was caught beside it.
+      const spacedGladVariant = checkDirectWelcomeClosing(['I would be glad to discuss the migration.']);
+      const contractedGladVariant = checkDirectWelcomeClosing(["I'd be glad to discuss the migration."]);
+      const curlyContractedGladVariant = checkDirectWelcomeClosing(['I’d be glad to discuss the migration.']);
+      assert(!spacedGladVariant.passed
+        && !contractedGladVariant.passed && contractedGladVariant.detail.includes("I'd be glad to discuss")
+        && !curlyContractedGladVariant.passed,
+      'the "I would be glad/happy/pleased to" close must be caught in its contracted spelling too, straight or curly apostrophe alike');
+      // checkDirectWelcomeClosing graded only sentences(paragraph).at(-1), so a
+      // trailing courtesy sentence with no invitation and no contribution
+      // masked whatever closing sentence stood before it.
+      const conditionalMaskedByCourtesy = checkDirectWelcomeClosing([
+        'I would welcome the chance to talk about that work. Thank you for your consideration.',
+      ]);
+      const directMaskedByCourtesy = checkDirectWelcomeClosing([
+        'I welcome a conversation about that work. Thank you for your consideration.',
+      ]);
+      const goodCloseFollowedByCourtesy = checkDirectWelcomeClosing([
+        'I welcome a conversation about how my release-workflow experience could support the team’s deployment process. Thank you for your consideration.',
+      ]);
+      assert(!conditionalMaskedByCourtesy.passed
+        && conditionalMaskedByCourtesy.detail.includes('make the invitation direct')
+        && !directMaskedByCourtesy.passed
+        && directMaskedByCourtesy.detail.includes('never connects a candidate asset')
+        && goodCloseFollowedByCourtesy.passed,
+      'a trailing courtesy sentence must not mask the invitation sentence graded before it, and must not block a closing that already satisfies the rule');
       const awkwardGap = checkPlainRegister(['I answered that gap with a native overlay.']);
       assert(!awkwardGap.passed && awkwardGap.detail.includes('use “closed the gap” or “addressed the gap”'),
         'unnatural gap wording must receive a plain contemporary repair');
@@ -1289,7 +1345,7 @@ export default [
         'I containerized it with Docker Compose and configured Nginx as the reverse proxy.',
       ]);
       assert(!mismatchedRoles.passed
-        && mismatchedRoles.detail.includes('Nginx is a web or application server, not a containerization tool')
+        && mismatchedRoles.detail.includes('“Nginx” is a web or application server, not a containerization tool')
         && mismatchedRoles.detail.includes('Docker or Docker Compose for containerization')
         && accurateRoles.passed && coordinatedRoles.passed,
       'containerization claims cannot grammatically govern web or application servers, while separate role-accurate predicates pass');
@@ -1514,24 +1570,34 @@ export default [
       // and the live letter of 2026-09-23 opened two of its four paragraphs
       // with exactly that cue. They now describe what the opening should be
       // about, name the employer because that is what makes the observation
-      // locatable, and quote nothing else: the only quoted span in either
-      // message is the offending opening itself.
+      // locatable, and quote nothing else beyond the employer's own name: the
+      // only quoted span in either message that is not the employer's name is
+      // the offending opening itself.
       const employerMessages = [shorthandEmployer.detail, repeatedEmployer.detail];
       assert(shorthandEmployer.detail.includes('open instead on whatever this paragraph is actually about')
-        && shorthandEmployer.detail.includes('Thomson School District named in full where another employer or role could be the referent'),
+        && shorthandEmployer.detail.includes('“Thomson School District” named in full where another employer or role could be the referent'),
       `employer-shorthand feedback describes the repair and preserves names for ambiguity: ${shorthandEmployer.detail}`);
       assert(!repeatedEmployer.passed
         && repeatedEmployer.detail.includes('one established employer needs no re-introduction')
         && repeatedEmployer.detail.includes("let the opening start from this paragraph's own subject")
         && conciseRoleReference.passed && disambiguatedEmployers.passed,
       `a needless adjacent employer-name repeat is flagged, while a concise cue and necessary disambiguation remain allowed: ${repeatedEmployer.detail}; ${conciseRoleReference.detail}; ${disambiguatedEmployers.detail}`);
-      // The offending opening is the one span either message may quote. Every
-      // other quoted run would be wording the letter can adopt, which is the
-      // rule stated beside checkRepeatedSentenceShape in coverLetterChecks.js
-      // and the mechanism that put one cue in two paragraphs.
+      // The offending opening is the one span either message may quote besides
+      // the employer's own name. Every other quoted run would be wording the
+      // letter can adopt, which is the rule stated beside
+      // checkRepeatedSentenceShape in coverLetterChecks.js and the mechanism
+      // that put one cue in two paragraphs. The employer name itself is now
+      // curly-quoted too (checkPriorEmployerOpening's comment in
+      // coverLetterChecks.js explains why: it keeps a job-specific name out of
+      // this check's fingerprint), so it is filtered out before applying that
+      // older rule rather than making the older rule blind to it.
       const quotedSpans = employerMessages.flatMap(detail => [...detail.matchAll(/“([^”]*)”/gu)].map(([, span]) => span));
-      assert(quotedSpans.length === 1 && quotedSpans[0] === 'The district chose …',
-        `neither employer message quotes a phrase the letter could paste (quoted=${JSON.stringify(quotedSpans)})`);
+      const employerNameQuotes = quotedSpans.filter(span => span === 'Thomson School District');
+      const otherQuotedSpans = quotedSpans.filter(span => span !== 'Thomson School District');
+      assert(employerNameQuotes.length === 4,
+        `both messages must curly-quote the employer's own name at every mention, twice each (quoted=${JSON.stringify(quotedSpans)})`);
+      assert(otherQuotedSpans.length === 1 && otherQuotedSpans[0] === 'The district chose …',
+        `neither employer message quotes a reusable phrase the letter could paste, beyond the employer's own name (quoted=${JSON.stringify(quotedSpans)})`);
       assert(!employerMessages.some(detail => /\bin that role\b/iu.test(detail)),
         `and neither one names the re-entry cue the shipped letter copied twice (messages=${JSON.stringify(employerMessages)})`);
       const evaluatedEmployerShorthand = evaluateCoverLetterChecks({
@@ -1554,7 +1620,7 @@ export default [
         ['AI-Chalkboard addressed a concrete interface gap because a screen assistant could describe a control but not indicate it.'],
         ['AI-Chalkboard'],
       );
-      assert(!abrupt.passed && abrupt.detail.includes('first names AI-Chalkboard'),
+      assert(!abrupt.passed && abrupt.detail.includes('first names “AI-Chalkboard”'),
         'a named résumé project cannot begin its proof before the reader learns what it is or the candidate relationship');
       const structuredEvidence = extractResumeEvidence('<main class="page"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights"><li>Built a native macOS MCP server.</li></ul></article><div class="projects"><article class="project"><span class="project-name">AI-Chalkboard</span><span class="project-desc">A native macOS MCP server.</span></article></div></main>');
       const hostChecks = evaluateCoverLetterChecks({
@@ -1618,29 +1684,21 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: artifact introduction carries its operational integration and action',
+    name: 'cover letter harness: artifact actions may follow the introduction in an adjacent sentence',
     run: () => {
       const splitCapability = 'For a different operational workflow, I built a district device app that used barcode scans to identify equipment. The app connected to native device-management platforms and could trigger remote wiping or notifications for devices marked lost or stolen when scanned.';
-      const mergedCapability = 'For the district, I also built a web application that used barcode scans to identify devices and could trigger a remote wipe or notification through native device-management platforms when a scanned device was marked lost or stolen.';
       const integrationThenActionSplit = 'For a different operational workflow, I built a district device app that used barcode scans to identify equipment and connected to native device-management platforms. When a scanned device was marked lost or stolen, the app could trigger a remote wipe or notification.';
-      const ordinaryElaboration = 'I built a device app that used barcode scans to identify equipment. The app displayed the equipment owner and last check-in date.';
-      const wipeOnlyFollowup = 'I built a device app that used barcode scans to identify equipment. The app connected to native device-management platforms for remote wiping after a loss report.';
-      const split = checkArtifactActionCompleteness([splitCapability]);
-      const merged = checkArtifactActionCompleteness([mergedCapability]);
-      const integrationThenAction = checkArtifactActionCompleteness([integrationThenActionSplit]);
-      const ordinary = checkArtifactActionCompleteness([ordinaryElaboration]);
-      const wipeOnly = checkArtifactActionCompleteness([wipeOnlyFollowup]);
-      const hostChecks = evaluateCoverLetterChecks({
-        plan: { mappings: [], companyHook: { detail: '' } },
-        paragraphs: [splitCapability], evidence, researchText: '', companyName: '',
-      });
-      assert(!split.passed && split.detail.includes('operational action'),
-        'a discovery-only artifact introduction must carry forward the integration and action that establish its purpose');
-      assert(merged.passed && !integrationThenAction.passed && ordinary.passed && !wipeOnly.passed,
-        `a natural merged operational introduction and ordinary two-sentence elaboration remain valid, while splits that defer the action and remote wiping remain operational-action failures: ${merged.detail}; ${integrationThenAction.detail}; ${ordinary.detail}; ${wipeOnly.detail}`);
-      assert(!hostChecks.find(check => check.id === 'artifact-action-completeness').passed,
-        'the API prose-revision loop receives incomplete artifact introductions as a deterministic failure');
-      return { split: split.detail, merged: merged.detail };
+      for (const paragraph of [splitCapability, integrationThenActionSplit]) {
+        const hostChecks = evaluateCoverLetterChecks({
+          plan: { mappings: [], companyHook: { detail: '' } },
+          paragraphs: [paragraph], evidence, researchText: '', companyName: '',
+        });
+        assert(!hostChecks.some(check => check.id === 'artifact-action-completeness'),
+          'the editorial battery must not force a supported action into the artifact-introduction sentence');
+        assert(checkSentenceLength([paragraph]).passed,
+          `a clear adjacent causal sentence remains valid under the independent sentence-length guard: ${paragraph}`);
+      }
+      return { splitSentencesAccepted: 2 };
     },
   },
   {
@@ -2267,9 +2325,9 @@ This specific position within AWS Identity Center team represents an opportunity
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 43, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 42, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,artifact-action-completeness,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -3170,6 +3228,423 @@ This specific position within AWS Identity Center team represents an opportunity
           `the rule discloses “${disclosed}” (rule=${REPEATED_PHRASE_RULE})`);
       }
       return { namedRun: 'device check-in and check-out' };
+    },
+  },
+  {
+    name: 'cover letter harness: direct-welcome-closing accepts the employer\'s own name and attributes the missing half',
+    run: () => {
+      // Ground truth for a 4-round rejection loop (2026-09-24,
+      // 13:08:05Z–13:10:40Z, fingerprint 752d8241 on every round): each pair
+      // below is identical except the FAIL sentence names the employer by
+      // name — the shape every other rule in this app pushes a writer
+      // toward — while the PASS sentence uses the generic "your" lexicon that
+      // already worked. Each FAIL sentence must pass once companyName names
+      // that employer, and must still fail with no companyName or with a
+      // DIFFERENT one — proving the matcher accepts the employer's own name,
+      // not any proper noun in the sentence.
+      const companyTargetPairs = [
+        {
+          fail: 'I welcome a conversation about how my integration work could support Micromart’s smart-store rollout.',
+          pass: 'I welcome a conversation about how my integration work could support your smart-store rollout.',
+        },
+        {
+          fail: 'I welcome a conversation about applying that MCP server experience to Micromart’s inventory sync.',
+          pass: 'I welcome a conversation about applying that MCP server experience to your inventory pipeline.',
+        },
+        {
+          fail: 'I welcome a conversation about how the connector I built could support Micromart stores.',
+          pass: 'I welcome a conversation about how the connector I built could support the store platform.',
+        },
+      ];
+      for (const { fail, pass } of companyTargetPairs) {
+        const namedCompany = checkDirectWelcomeClosing([fail], 'Micromart');
+        const noCompany = checkDirectWelcomeClosing([fail], '');
+        const differentCompany = checkDirectWelcomeClosing([fail], 'Northwind Robotics');
+        const genericControl = checkDirectWelcomeClosing([pass], '');
+        assert(namedCompany.passed,
+          `naming the employer by name must pass once companyName supplies that name (sentence=${JSON.stringify(fail)}, detail=${namedCompany.detail})`);
+        assert(!noCompany.passed,
+          `the identical sentence must still fail with no companyName (detail=${noCompany.detail})`);
+        assert(!differentCompany.passed,
+          `the identical sentence must still fail against a DIFFERENT company, proving this is not "any proper noun passes" (detail=${differentCompany.detail})`);
+        assert(genericControl.passed,
+          `the generic "your …" control sentence must already pass on its own (detail=${genericControl.detail})`);
+      }
+
+      // Legal-suffix stripping, and the parenthesized-acronym form this app's
+      // own STACK_TOOL_LEXICON already demonstrates is a real company-name
+      // shape ("Amazon Web Services (AWS)"), must not throw and must still
+      // match — the full name, and its distinctive leading token.
+      const suffixed = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Micromart’s smart-store rollout.'],
+        'Micromart Inc.',
+      );
+      assert(suffixed.passed,
+        `"Micromart Inc." must strip its legal suffix so "Micromart’s" still matches (detail=${suffixed.detail})`);
+      let awsLeadingTokenThrew = false;
+      let awsLeadingToken = { passed: false, detail: '' };
+      try {
+        awsLeadingToken = checkDirectWelcomeClosing(
+          ['I welcome a conversation about how my integration work could support Amazon’s smart-store rollout.'],
+          'Amazon Web Services (AWS)',
+        );
+      } catch {
+        awsLeadingTokenThrew = true;
+      }
+      let awsFullNameThrew = false;
+      let awsFullName = { passed: false, detail: '' };
+      try {
+        awsFullName = checkDirectWelcomeClosing(
+          ['I welcome a conversation about how my integration work could support Amazon Web Services (AWS)’s smart-store rollout.'],
+          'Amazon Web Services (AWS)',
+        );
+      } catch {
+        awsFullNameThrew = true;
+      }
+      assert(!awsLeadingTokenThrew && awsLeadingToken.passed,
+        `a parenthesized company name must not throw building its matcher, and its leading token must match (threw=${awsLeadingTokenThrew}, detail=${awsLeadingToken.detail})`);
+      assert(!awsFullNameThrew && awsFullName.passed,
+        `the full parenthesized company name must also match without throwing (threw=${awsFullNameThrew}, detail=${awsFullName.detail})`);
+
+      // A company name too short to be safe (2 characters) builds no pattern
+      // at all: the sentence still fails, and the message never offers a name
+      // the matcher itself would refuse.
+      const shortName = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support AB’s inventory sync.'],
+        'AB',
+      );
+      assert(!shortName.passed && !shortName.detail.includes('own name exactly as this letter'),
+        `a company name under 3 characters must build no pattern and must not be offered as a naming option (detail=${shortName.detail})`);
+
+      // A company name that normalizes to nothing but a stopword ("The")
+      // must not start matching ordinary "the <word>" prose that the GENERIC
+      // lexicon does not already cover on its own — "the details are settled"
+      // names no employer-facing noun, so this must still fail.
+      const stopwordName = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Widgetco once the details are settled.'],
+        'The',
+      );
+      assert(!stopwordName.passed,
+        `a stopword-only company name must build no pattern, so unrelated "the …" prose is not mistaken for a match (detail=${stopwordName.detail})`);
+      // The same stopword-only companyName must not interfere with a
+      // sentence the GENERIC lexicon legitimately passes on its own.
+      const stopwordOrdinary = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support the district team.'],
+        'The',
+      );
+      assert(stopwordOrdinary.passed,
+        `a stopword-only companyName must not break an otherwise-passing generic closing (detail=${stopwordOrdinary.detail})`);
+
+      // Per-half attribution: the same job's letter was rejected for this
+      // check 4 consecutive rounds because the single fixed message quoted
+      // asset and action examples but never a target example, so a writer who
+      // already had both kept rewriting the two halves that were never
+      // broken. A sentence missing only the target must be told about the
+      // target and nothing else; a sentence missing only the asset must be
+      // told about the asset and nothing else.
+      const targetOnlyMissing = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Micromart’s smart-store rollout.'],
+        '',
+      );
+      assert(!targetOnlyMissing.passed
+        && targetOnlyMissing.detail.includes('the sentence is missing its target half')
+        && targetOnlyMissing.detail.includes('reach the employer’s side too')
+        // The reader-noun example set must agree with the design-system docs
+        // and with what EMPLOYER_FACING_TARGET actually accepts (client(s) /
+        // customer(s) / user(s) / student(s) / patient(s) / here): the message
+        // used to demonstrate only "customers" and "users", so a writer
+        // reaching for the docs' own "clients" example had no way to learn the
+        // check would already accept it.
+        && targetOnlyMissing.detail.includes('“clients”, “customers”, “users”')
+        && !targetOnlyMissing.detail.includes('never a bare demonstrative')
+        && !targetOnlyMissing.detail.includes('authorship clause')
+        && !targetOnlyMissing.detail.includes('say what that asset does for the target work'),
+      `a sentence missing only the target half must name the target operation and not repeat the asset or action instructions (detail=${targetOnlyMissing.detail})`);
+      const assetOnlyMissing = checkDirectWelcomeClosing(
+        ['I welcome a conversation about that could support your smart-store rollout.'],
+        '',
+      );
+      assert(!assetOnlyMissing.passed
+        && assetOnlyMissing.detail.includes('the sentence is missing its asset half')
+        && assetOnlyMissing.detail.includes('never a bare demonstrative')
+        && !assetOnlyMissing.detail.includes('reach the employer’s side too')
+        && !assetOnlyMissing.detail.includes('say what that asset does for the target work'),
+      `a sentence missing only the asset half must name the asset operation and not repeat the target or action instructions (detail=${assetOnlyMissing.detail})`);
+
+      // checkDirectWelcomeClosing's own design note says a modal-only guard
+      // "measurably rejected" this present-tense closing shape, which is why
+      // CONTRIBUTION_VERBS_PRESENT exists — but checkProspectiveContributionTense
+      // rejected the identical present-tense bridge in the identical sentence,
+      // pulling the two checks in opposite directions. Once
+      // checkDirectWelcomeClosing certifies this sentence class as a direct
+      // closing invitation, checkProspectiveContributionTense must not then
+      // fail it for using the present tense that certification requires.
+      const tugOfWarParagraphs = [
+        'I built and shipped several data pipelines at my last company.',
+        'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.',
+      ];
+      const tugClosing = checkDirectWelcomeClosing(tugOfWarParagraphs);
+      const tugTense = checkProspectiveContributionTense(tugOfWarParagraphs);
+      assert(tugClosing.passed,
+        `the certified closing invitation must pass checkDirectWelcomeClosing (detail=${tugClosing.detail})`);
+      assert(tugTense.passed,
+        `checkProspectiveContributionTense must not reject a sentence checkDirectWelcomeClosing has already certified as a direct, present-tense closing invitation (detail=${tugTense.detail})`);
+      // The exemption is scoped to the final paragraph only: the identical
+      // present-tense bridge, appearing anywhere else, is exactly the shape
+      // this check exists to catch and must still be caught.
+      const tugNotClosing = checkProspectiveContributionTense([
+        'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.',
+        'Thank you again for your time and consideration.',
+      ]);
+      assert(!tugNotClosing.passed,
+        `the identical present-tense bridge must still be caught when it is not in the final paragraph (detail=${tugNotClosing.detail})`);
+      return { targetOnlyMissing: targetOnlyMissing.detail, assetOnlyMissing: assetOnlyMissing.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: the company leading-token target matcher is case-sensitive so ordinary English words do not falsely satisfy it',
+    run: () => {
+      // VERIFIED collision (companyNameTargetPattern, coverLetterChecks.js):
+      // a multi-word company's leading token used to match CASE-INSENSITIVELY,
+      // guarded only by length>=3 and a 3-word stopword set. "Best Buy" ->
+      // "Best" matched ordinary candidate-facing prose ("my best work"), so
+      // the target half of the three-part closing requirement was falsely
+      // satisfied without the sentence ever reaching the employer's side — a
+      // false PASS on a check gating a paste handoff. This app's own job
+      // board turns up real employers whose leading token is an ordinary
+      // English word too: Float, Loop Financial, Provision, Stripe, Top Hat.
+      const genericBestProse = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support my best work.'],
+        'Best Buy',
+      );
+      assert(!genericBestProse.passed
+        && genericBestProse.detail.includes('the sentence is missing its target half'),
+      `lowercase "best" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Best Buy" (detail=${genericBestProse.detail})`);
+
+      // The full (suffix-stripped) company name keeps matching CASE-
+      // INSENSITIVELY by design — only the leading-token alternative changed.
+      const fullNameLowercase = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support best buy’s checkout flow.'],
+        'Best Buy',
+      );
+      assert(fullNameLowercase.passed,
+        `the full company name must still satisfy the target half case-insensitively (detail=${fullNameLowercase.detail})`);
+
+      // The leading token still matches when a letter capitalizes it exactly
+      // as the company spells it — the shape a letter naming the employer
+      // actually writes ("Best's checkout flow", "Provision's ingestion
+      // pipeline").
+      const leadingTokenCapitalized = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Best’s checkout flow.'],
+        'Best Buy',
+      );
+      assert(leadingTokenCapitalized.passed,
+        `the capitalized leading token must still satisfy the target half (detail=${leadingTokenCapitalized.detail})`);
+
+      // Full company name, capitalized as written, is unaffected either way.
+      const fullNameCapitalized = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Best Buy’s checkout flow.'],
+        'Best Buy',
+      );
+      assert(fullNameCapitalized.passed,
+        `the full company name capitalized as written must still satisfy the target half (detail=${fullNameCapitalized.detail})`);
+
+      return {
+        genericBestProse: genericBestProse.detail,
+        fullNameLowercase: fullNameLowercase.detail,
+        leadingTokenCapitalized: leadingTokenCapitalized.detail,
+      };
+    },
+  },
+  {
+    name: 'cover letter harness: a single-word company name matches the target half case-sensitively, not case-insensitively like a multi-word full name',
+    run: () => {
+      // VERIFIED collision (companyNameTargetPattern, coverLetterChecks.js),
+      // found while re-verifying the leading-token fix directly above against
+      // the SAME measured employer list its own comment names (Float, Loop
+      // Financial, Provision, Stripe, Top Hat): a one-word company name fell
+      // through to the multi-word branch's fullNamePattern, which is
+      // case-INSENSITIVE by design (see fullNameLowercase above — that
+      // case-insensitivity is deliberate for a two-word name like "Best
+      // Buy"). For a ONE-word name the "full name" and the "leading token"
+      // are the identical string, so the case-insensitive treatment let
+      // ordinary lowercase prose with no employer reference at all — "my own
+      // float of ideas" — satisfy the target half for companyName "Float",
+      // exactly the false PASS the leading-token fix exists to close, just on
+      // the single-word half of its own measured list instead of the
+      // multi-word half.
+      const floatLowercase = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support my own float of ideas.'],
+        'Float',
+      );
+      assert(!floatLowercase.passed
+        && floatLowercase.detail.includes('the sentence is missing its target half'),
+      `lowercase "float" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Float" (detail=${floatLowercase.detail})`);
+
+      const provisionLowercase = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support the provision of my own services.'],
+        'Provision',
+      );
+      assert(!provisionLowercase.passed
+        && provisionLowercase.detail.includes('the sentence is missing its target half'),
+      `lowercase "provision" inside ordinary candidate-facing prose must not satisfy the target half for companyName "Provision" (detail=${provisionLowercase.detail})`);
+
+      // Capitalized exactly as the company spells it, the single-word name
+      // still satisfies the target half — the shape a letter naming the
+      // employer actually writes ("Float's ingestion pipeline").
+      const floatCapitalized = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Float’s ingestion pipeline.'],
+        'Float',
+      );
+      assert(floatCapitalized.passed,
+        `the single-word company name capitalized as written must still satisfy the target half (detail=${floatCapitalized.detail})`);
+
+      const provisionCapitalized = checkDirectWelcomeClosing(
+        ['I welcome a conversation about how my integration work could support Provision’s ingestion pipeline.'],
+        'Provision',
+      );
+      assert(provisionCapitalized.passed,
+        `the single-word company name capitalized as written must still satisfy the target half (detail=${provisionCapitalized.detail})`);
+
+      return {
+        floatLowercase: floatLowercase.detail,
+        provisionLowercase: provisionLowercase.detail,
+        floatCapitalized: floatCapitalized.detail,
+        provisionCapitalized: provisionCapitalized.detail,
+      };
+    },
+  },
+  {
+    name: 'cover letter harness: certifiedClosingInvitation includes the "look forward to discussing" close so the tense check does not reject what the closing check just certified',
+    run: () => {
+      // certifiedClosingInvitation (coverLetterChecks.js) used to test only
+      // CONDITIONAL_WELCOME_CLOSE, DIRECT_CONVERSATION_CLOSE, and
+      // SELF_DIRECTED_CONVERSATION_CLOSE — but checkDirectWelcomeClosing's own
+      // selfDirectedMatch already ORs LOOK_FORWARD_CONVERSATION_CLOSE into
+      // that identical certifying branch (see the "bareLookForwardClose" and
+      // "prospectiveClose" fixtures above). A closing certified via "I look
+      // forward to discussing ..." was therefore rejected right back by
+      // checkProspectiveContributionTense for the exact present-tense bridge
+      // its own certifying branch requires — the two-checks-pulling-opposite-
+      // ways bug this whole fix exists to prevent, reproduced by omission.
+      const lookForwardParagraphs = [
+        'I built and shipped several data pipelines at my last company.',
+        'I look forward to discussing how my pipeline experience helps me contribute to your platform team.',
+      ];
+      const lookForwardClosing = checkDirectWelcomeClosing(lookForwardParagraphs);
+      const lookForwardTense = checkProspectiveContributionTense(lookForwardParagraphs);
+      assert(lookForwardClosing.passed,
+        `fixture sanity: the "look forward to discussing" close with all three contribution halves already present must pass checkDirectWelcomeClosing (detail=${lookForwardClosing.detail})`);
+      assert(lookForwardTense.passed,
+        `checkProspectiveContributionTense must not reject a "look forward to discussing" closing checkDirectWelcomeClosing has already certified (detail=${lookForwardTense.detail})`);
+      // The exemption stays scoped to the final paragraph only: the identical
+      // present-tense bridge elsewhere in the letter is exactly the defect
+      // this check exists to catch, "look forward to discussing" wording or
+      // not.
+      const lookForwardNotClosing = checkProspectiveContributionTense([
+        'I look forward to discussing how my pipeline experience helps me contribute to your platform team.',
+        'Thank you again for your time and consideration.',
+      ]);
+      assert(!lookForwardNotClosing.passed,
+        `the identical present-tense bridge must still be caught when it is not in the final paragraph (detail=${lookForwardNotClosing.detail})`);
+      return { lookForwardTense: lookForwardTense.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: the tense-check exemption is scoped to the ONE sentence checkDirectWelcomeClosing certifies, by position, not by text equality',
+    run: () => {
+      // checkDirectWelcomeClosing certifies exactly ONE sentence per letter —
+      // finalSubstantiveClosingSentenceIndex's pick in the final paragraph —
+      // but the old exemption in checkProspectiveContributionTense tested
+      // EVERY sentence of the final paragraph against certifiedClosingInvitation
+      // by TEXT. Two identical sentences in the same final paragraph — the
+      // first a genuine present-tense readiness-bridge defect, the second the
+      // sentence actually certified — used to both pass that text test and
+      // both get exempted, masking the first sentence's defect. This fixture
+      // keeps the two sentences byte-for-byte identical specifically to prove
+      // the fix compares POSITION, not text: only the certified (second)
+      // sentence may be exempted, and the earlier, textually identical one
+      // must still be caught.
+      const duplicateInvitation = 'I welcome the chance to talk about how my pipeline experience helps me contribute to your platform team.';
+      const duplicateClosingParagraph = [`${duplicateInvitation} ${duplicateInvitation}`];
+      const duplicateClosing = checkDirectWelcomeClosing(duplicateClosingParagraph);
+      assert(duplicateClosing.passed,
+        `fixture sanity: the certified (second, final substantive) sentence satisfies all three contribution halves and passes on its own (detail=${duplicateClosing.detail})`);
+      const duplicateTense = checkProspectiveContributionTense(duplicateClosingParagraph);
+      assert(!duplicateTense.passed
+        && duplicateTense.detail.includes('paragraph 1')
+        && duplicateTense.detail.includes('past/present readiness bridge'),
+      `the earlier, textually identical sentence must still be caught for its own readiness-bridge defect even though the LATER, certified sentence shares its exact wording (detail=${duplicateTense.detail})`);
+      // Exactly one observation: the certified (second) occurrence must not
+      // also be reported, or one genuine defect would be double-counted as
+      // two and the writer told to rewrite a sentence that is already fine.
+      assert((duplicateTense.detail.match(/past\/present readiness bridge/gu) || []).length === 1,
+        `only the uncertified sentence is reported, not both identical occurrences (detail=${duplicateTense.detail})`);
+      return { duplicateTense: duplicateTense.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: employer/project/artifact names inside the fingerprinted battery are curly-quoted so one branch fingerprints identically across different letters',
+    run: () => {
+      // checkObservationFingerprint (localAiApplication.js) strips only
+      // curly-quoted spans and collapses "paragraph N"/"passage N" before
+      // hashing (see checkPriorEmployerOpening's comment in
+      // coverLetterChecks.js). Reimplementing just that normalization step —
+      // not the sha256 itself, which adds nothing this test needs to prove —
+      // is enough to show each check touched by this fix now normalizes
+      // identically across two different letters that trip the identical
+      // branch for a different employer, project, or artifact name. Before
+      // the fix, each pair's stripped detail differed by exactly the bare
+      // name — precisely what would have alternated a stuck branch's
+      // fingerprint every round of a real rejection streak, defeating the
+      // cross-receipt branch comparison checkFingerprints exists for.
+      const stripFingerprintInputs = detail => String(detail)
+        .replace(/“[^”]*”/gu, '‹quote›')
+        .replace(/\b(paragraph|passage)\s+\d+\b/giu, (_match, word) => `${word.toLowerCase()} ‹n›`);
+      const pairs = [
+        ['checkPriorEmployerOpening',
+          checkPriorEmployerOpening(['At Thomson School District, I evaluated third-party products before district-wide adoption.'], ['Thomson School District']),
+          checkPriorEmployerOpening(['At Acme, I built the incident workflow.'], ['Acme'])],
+        ['checkNamedArtifactIntroduction',
+          checkNamedArtifactIntroduction(['AI-Chalkboard addressed a concrete interface gap because a screen assistant could describe a control but not indicate it.'], ['AI-Chalkboard']),
+          checkNamedArtifactIntroduction(['Marketplace Hub addressed a concrete interface gap because a screen assistant could describe a control but not indicate it.'], ['Marketplace Hub'])],
+        ['checkOpeningArtifactContext (leading project)',
+          checkOpeningArtifactContext(['Marketplace Hub is my personal project, where Gemini or Claude process item photos and draft listings.'], ['Marketplace Hub']),
+          checkOpeningArtifactContext(['AI-Chalkboard is my personal project, where Gemini or Claude process item photos and draft listings.'], ['AI-Chalkboard'])],
+        ['checkOpeningArtifactContext (leading employer)',
+          checkOpeningArtifactContext(['As a Software Engineer at Thomson School District, I built a device workflow that connected external platforms.'], [], ['Thomson School District']),
+          checkOpeningArtifactContext(['As a Software Engineer at Acme, I built a device workflow that connected external platforms.'], [], ['Acme'])],
+        ['checkOpeningEmployerShorthand',
+          checkOpeningEmployerShorthand([
+            'At Thomson School District, I migrated internal systems and their operational data to third-party platforms.',
+            'The district chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+          ], ['Thomson School District']),
+          checkOpeningEmployerShorthand([
+            'At Wexford School District, I migrated internal systems and their operational data to third-party platforms.',
+            'The district chose those platforms to reduce the ongoing maintenance expense of its in-house systems.',
+          ], ['Wexford School District'])],
+        ['checkAdjacentEmployerRepetition',
+          checkAdjacentEmployerRepetition([
+            'In my software engineering role at Thomson School District, I built a web workflow that connected barcode scans to external management platforms.',
+            'At Thomson School District, I also built an internal tools hub with a UI and back end designed to support additional tools.',
+          ], ['Thomson School District']),
+          checkAdjacentEmployerRepetition([
+            'In my software engineering role at Acme, I built a web workflow that connected barcode scans to external management platforms.',
+            'At Acme, I also built an internal tools hub with a UI and back end designed to support additional tools.',
+          ], ['Acme'])],
+        ['checkContainerizationTechnologyRoles',
+          checkContainerizationTechnologyRoles(['I containerized it with Docker Compose, Nginx, and Gunicorn so it could be deployed on different virtual-machine configurations.']),
+          checkContainerizationTechnologyRoles(['I containerized it with Docker Compose, Apache, and Gunicorn so it could be deployed on different virtual-machine configurations.'])],
+      ];
+      for (const [label, a, b] of pairs) {
+        assert(!a.passed && !b.passed,
+          `fixture sanity: ${label} must fail the identical branch on both fixtures (a=${JSON.stringify(a)}, b=${JSON.stringify(b)})`);
+        assert(a.detail !== b.detail,
+          `fixture sanity: ${label}'s two fixtures must differ in raw detail text before normalization (both were ${JSON.stringify(a.detail)})`);
+        assert(stripFingerprintInputs(a.detail) === stripFingerprintInputs(b.detail),
+          `${label} must fingerprint identically across two different names once curly-quoted spans are stripped (a=${JSON.stringify(a.detail)}, b=${JSON.stringify(b.detail)})`);
+      }
+      return Object.fromEntries(pairs.map(([label, a]) => [label, a.detail]));
     },
   },
 ];

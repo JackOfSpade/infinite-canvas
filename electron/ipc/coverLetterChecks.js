@@ -29,7 +29,6 @@ const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
 const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
 const MAX_COPY_PRECISION_OBSERVATIONS = 4;
 const MAX_STANDALONE_INTRODUCTION_OBSERVATIONS = 4;
-const MAX_ARTIFACT_ACTION_COMPLETENESS_OBSERVATIONS = 4;
 const MAX_TARGET_CLAIM_SCOPE_OBSERVATIONS = 4;
 export const MAX_SENTENCE_WORDS = 40;
 // One off-posting tool name is a paragraph's single concrete anchor; a second
@@ -993,7 +992,12 @@ export function checkAllNeedDisposition(plan = {}, needs = []) {
 /**
  * Surface every consciously dropped eligibility screen. This is a status, not
  * a repair instruction: prose cannot truthfully create a credential, driver
- * authorization, or other logistical qualification.
+ * authorization, or other logistical qualification. `item.reason` is
+ * curly-quoted below though this check is not (yet) in PASTE_CHECK_PROSE_UNITS'
+ * fingerprinted battery — see checkPriorEmployerOpening's comment above; the
+ * same bare-interpolation defect would reappear the day this check joins that
+ * battery, so it is fixed here on the same audit pass rather than left for a
+ * second incident to find.
  */
 export function checkEligibilityNeedDisposition(plan = {}, needs = []) {
   const rankedNeeds = Array.isArray(needs) ? needs : [];
@@ -1005,13 +1009,15 @@ export function checkEligibilityNeedDisposition(plan = {}, needs = []) {
   });
   if (!dropped.length) return result('eligibility-need-disposition', true, 'no eligibility need is honestly dropped');
   return result('eligibility-need-disposition', false,
-    `${dropped.length} eligibility need(s) honestly dropped: ${dropped.map(item => `#${item.index + 1} ${item.kind} — ${boundedDetailValue(item.reason)}`).join('; ')}`);
+    `${dropped.length} eligibility need(s) honestly dropped: ${dropped.map(item => `#${item.index + 1} ${item.kind} — “${boundedDetailValue(item.reason)}”`).join('; ')}`);
 }
 
 /**
  * A truthful plan may leave a hard credential or eligibility screen unargued.
  * That cannot be fixed by asking the model to invent a qualification, but it
  * must remain visible beside the shipped letter rather than only in telemetry.
+ * `dropped.reason` is curly-quoted below — see checkEligibilityNeedDisposition's
+ * comment above.
  */
 export function checkTopNeedDisposition(plan = {}, needs = []) {
   const rankedNeeds = Array.isArray(needs) ? needs : [];
@@ -1024,7 +1030,7 @@ export function checkTopNeedDisposition(plan = {}, needs = []) {
   if (dropped) {
     const kind = text(rankedNeeds[0]?.kind) || 'requirement';
     return result('top-need-disposition', false,
-      `top-ranked ${kind} need is not argued (honestly dropped): ${boundedDetailValue(dropped.reason) || 'no reason recorded'}`);
+      `top-ranked ${kind} need is not argued (honestly dropped): ${dropped.reason ? `“${boundedDetailValue(dropped.reason)}”` : 'no reason recorded'}`);
   }
   return result('top-need-disposition', false, 'top-ranked need is neither argued nor recorded as dropped');
 }
@@ -1555,6 +1561,16 @@ export function checkEntailedPremise(passages = []) {
  * organization belongs in the argument; naming the prior role or relationship
  * supplies that missing context. Later evidence paragraphs may use the shorter
  * form once the letter's argument is established.
+ *
+ * `employer` is curly-quoted in the observation below for the reason stated
+ * on contributionHalfRequirement's 'target' case above: checkObservationFingerprint
+ * (localAiApplication.js) strips only curly-quoted spans before hashing, and
+ * this check is one of PASTE_CHECK_PROSE_UNITS' fingerprinted battery, so an
+ * employer name interpolated bare would destabilize this branch's fingerprint
+ * per job and carry job content into a digest whose header promises it never
+ * does. checkNamedArtifactIntroduction, checkOpeningArtifactContext,
+ * checkOpeningEmployerShorthand, and checkAdjacentEmployerRepetition below
+ * carry the identical note rather than repeating this paragraph.
  */
 export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
   const passages = Array.isArray(paragraphs) ? paragraphs : [];
@@ -1596,7 +1612,7 @@ export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
       if (sentence) first = { index, sentence: text(sentence) };
     }
     if (!first || relationship.test(first.sentence)) continue;
-    observations.push(`paragraph ${first.index + 1} first names ${employer} without the candidate's role or relationship; introduce that context before relying on the employer as evidence`);
+    observations.push(`paragraph ${first.index + 1} first names “${employer}” without the candidate's role or relationship; introduce that context before relying on the employer as evidence`);
   }
   return observationResult('prior-employer-opening', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
     'each prior employer is introduced with the candidate\'s role or relationship before its evidence');
@@ -1609,6 +1625,9 @@ export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
 const ARTIFACT_DESCRIPTOR = /\b(?:project|product|system|tool|application|app|server|service|platform|overlay|workflow|library|framework|extension|plugin|integration|dashboard|website|utility|prototype)\b/iu;
 const ARTIFACT_RELATIONSHIP = /\b(?:I\s+(?:built|created|developed|designed|maintained|led|made|authored)|my\s+|(?:creator|author|builder|developer|designer)\s+of)\b/iu;
 
+// `name` is curly-quoted below — see checkPriorEmployerOpening's comment above
+// for why a job-specific value in this fingerprinted battery cannot be
+// interpolated bare.
 export function checkNamedArtifactIntroduction(paragraphs = [], projectNames = []) {
   const passages = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
@@ -1626,40 +1645,10 @@ export function checkNamedArtifactIntroduction(paragraphs = [], projectNames = [
     const sameSentenceIntroduction = (ARTIFACT_RELATIONSHIP.test(before) || ARTIFACT_RELATIONSHIP.test(after))
       && (ARTIFACT_DESCRIPTOR.test(before) || ARTIFACT_DESCRIPTOR.test(after));
     if (sameSentenceIntroduction) continue;
-    observations.push(`paragraph ${first.index + 1} first names ${name} without identifying it as the candidate's project, product, system, or role context; introduce that context before relying on the name`);
+    observations.push(`paragraph ${first.index + 1} first names “${name}” without identifying it as the candidate's project, product, system, or role context; introduce that context before relying on the name`);
   }
   return observationResult('named-artifact-introduction', observations, MAX_STANDALONE_INTRODUCTION_OBSERVATIONS,
     `${passages.length} paragraph(s) introduce unfamiliar named candidate artifacts before relying on them`);
-}
-
-// Keep this structural check deliberately constrained to an easily
-// misreadable two-sentence pattern. A first sentence that describes an app
-// only as a scanner, lookup, or identifier can make the artifact sound much
-// less capable than the immediately following sentence establishes. We only
-// ask for a recast when the next sentence supplies the consequential action
-// and the first sentence supplies only discovery, with or without a separate
-// integration clause. Ordinary two-sentence explanations remain valid.
-const ARTIFACT_DISCOVERY_CUE = /\b(?:barcode(?:s)?|qr[- ]?code(?:s)?|scan(?:s|ned|ning)?|identif(?:y|ies|ied|ying)|check[- ]?in|look(?:s|ed|ing)?\s+up|locat(?:e|es|ed|ing))\b/iu;
-const ARTIFACT_BUILD_CUE = /\b(?:I|we)\s+(?:built|created|developed|designed)\b/iu;
-const FOLLOWING_ARTIFACT_SUBJECT = /^(?:(?:if|when)\b[^.?!]{1,240},\s*)?(?:the|this)\s+(?:app|application|tool|system|workflow|platform|service)\b/iu;
-const ARTIFACT_ACTION_CUE = /\b(?:trigger(?:s|ed|ing)?|remote[- ]?wip(?:e|es|ed|ing)|notifi(?:es|ed|cation|cations)|action(?:s)?\b)/iu;
-
-export function checkArtifactActionCompleteness(paragraphs = []) {
-  const observations = [];
-  (Array.isArray(paragraphs) ? paragraphs : []).forEach((paragraph, index) => {
-    const paragraphSentences = sentences(paragraph);
-    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length - 1; sentenceIndex++) {
-      const introduction = text(paragraphSentences[sentenceIndex]);
-      const followup = text(paragraphSentences[sentenceIndex + 1]);
-      if (!ARTIFACT_BUILD_CUE.test(introduction) || !ARTIFACT_DISCOVERY_CUE.test(introduction)
-        || ARTIFACT_ACTION_CUE.test(introduction)
-        || !FOLLOWING_ARTIFACT_SUBJECT.test(followup)
-        || !ARTIFACT_ACTION_CUE.test(followup)) continue;
-      observations.push(`paragraph ${index + 1} sentence ${sentenceIndex + 1} introduces a built artifact as a scan or identification tool while the next sentence supplies its operational action; carry that action into the introduction so the artifact’s purpose is clear`);
-    }
-  });
-  return observationResult('artifact-action-completeness', observations, MAX_ARTIFACT_ACTION_COMPLETENESS_OBSERVATIONS,
-    `${Array.isArray(paragraphs) ? paragraphs.length : 0} paragraph(s) introduce artifact capabilities without delaying their operational purpose`);
 }
 
 // A project can be introduced correctly and still make an abrupt first
@@ -1669,7 +1658,9 @@ export function checkArtifactActionCompleteness(paragraphs = []) {
 // catches a known candidate artifact or employer in the leading grammatical
 // frame. A mention of “this role” later in the same sentence does not repair a
 // proof-first opener; the direction must come first. Later paragraphs can lead
-// with the artifact once the thesis is set.
+// with the artifact once the thesis is set. leadingProject/leadingEmployer are
+// curly-quoted in the observations below — see checkPriorEmployerOpening's
+// comment above.
 export function checkOpeningArtifactContext(paragraphs = [], projectNames = [], employerNames = []) {
   const firstSentence = sentences(Array.isArray(paragraphs) ? paragraphs[0] : '')[0] || '';
   if (!firstSentence) return result('opening-artifact-context', true, 'no opening sentence to inspect');
@@ -1684,7 +1675,7 @@ export function checkOpeningArtifactContext(paragraphs = [], projectNames = [], 
     ).test(opening);
   });
   if (leadingProject) {
-    return result('opening-artifact-context', false, `opening leads with the candidate's project ${leadingProject} before establishing its relevance to the target role; lead with the job-specific thesis, then introduce the project as proof`);
+    return result('opening-artifact-context', false, `opening leads with the candidate's project “${leadingProject}” before establishing its relevance to the target role; lead with the job-specific thesis, then introduce the project as proof`);
   }
   const leadingEmployer = employers.find(name => {
     const escaped = escapeRegExp(name);
@@ -1694,7 +1685,7 @@ export function checkOpeningArtifactContext(paragraphs = [], projectNames = [], 
     ).test(opening);
   });
   return leadingEmployer
-    ? result('opening-artifact-context', false, `opening leads with prior-employer evidence from ${leadingEmployer} before establishing its relevance to the target role; lead with the job-specific thesis, then introduce the experience as proof`)
+    ? result('opening-artifact-context', false, `opening leads with prior-employer evidence from “${leadingEmployer}” before establishing its relevance to the target role; lead with the job-specific thesis, then introduce the experience as proof`)
     : result('opening-artifact-context', true, 'opening establishes its direction before any known project or prior-employer proof');
 }
 
@@ -1993,10 +1984,30 @@ function namesProspectiveCompany(sentence, companyName = '') {
 export function checkProspectiveContributionTense(paragraphs = [], companyName = '') {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
+  const finalParagraphIndex = list.length - 1;
   for (let index = 0; index < list.length; index++) {
-    for (const sentence of sentences(list[index])) {
-      const match = NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION.exec(text(sentence));
-      if (!match || (!PROSPECTIVE_CONTRIBUTION_TARGET.test(text(sentence)) && !namesProspectiveCompany(sentence, companyName))) continue;
+    const paragraphSentences = sentences(list[index]);
+    // checkDirectWelcomeClosing certifies exactly ONE sentence per letter —
+    // finalSubstantiveClosingSentenceIndex's pick in the FINAL paragraph — not
+    // "any sentence in the final paragraph that happens to match an
+    // invitation shape". Computing that position once, from this same
+    // sentences() call, and comparing by INDEX below (not by re-testing every
+    // sentence's text against certifiedClosingInvitation) is what keeps a
+    // genuine readiness-bridge defect in an earlier sentence of the final
+    // paragraph from being exempted just because it shares an invitation
+    // regex's wording with the sentence actually certified.
+    const certifiedIndex = index === finalParagraphIndex
+      ? finalSubstantiveClosingSentenceIndex(paragraphSentences)
+      : -1;
+    for (let sentenceIndex = 0; sentenceIndex < paragraphSentences.length; sentenceIndex++) {
+      const sentence = paragraphSentences[sentenceIndex];
+      const value = text(sentence);
+      // See certifiedClosingInvitation's comment: the ONE sentence
+      // checkDirectWelcomeClosing has already certified must not be rejected
+      // here for the present tense that certification requires.
+      if (sentenceIndex === certifiedIndex && certifiedClosingInvitation(value)) continue;
+      const match = NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION.exec(value);
+      if (!match || (!PROSPECTIVE_CONTRIBUTION_TARGET.test(value) && !namesProspectiveCompany(sentence, companyName))) continue;
       observations.push(`paragraph ${index + 1} uses a past/present readiness bridge for prospective-employer work (“${boundedDetailValue(match[0])}”); state the completed work as past evidence, then use conditional or future-facing target language, such as “At the target employer, I would apply that experience to …”`);
       if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
     }
@@ -2172,7 +2183,16 @@ const NON_CONTAINER_SERVER_TOOL = /\b(?:Nginx|Gunicorn|uWSGI|Apache|Tomcat|Caddy
 const CONTAINERIZATION_WITH_TOOL = /\bcontaineri[sz](?:e|ed|ing)\b[^.!?]{0,180}\b(?:with|using|via)\b[^.!?]{0,180}/iu;
 const SEPARATE_DEPLOYMENT_ROLE_CLAUSE = /(?:,?\s+(?:and\s+)?then|,?\s+while|,?\s+where|,?\s+and)\s+(?:configured|used|ran|placed|served|deployed|operated|set\s+up)\b/iu;
 
-/** Ensure each deployment technology is governed by a verb describing its actual role. */
+/**
+ * Ensure each deployment technology is governed by a verb describing its
+ * actual role. serverMatch[0] is curly-quoted below like every other letter-
+ * matched span this file reports: it names whichever one of the closed
+ * NON_CONTAINER_SERVER_TOOL list the letter actually wrote (Nginx, Apache,
+ * ...), which still varies letter to letter, and this check is one of
+ * PASTE_CHECK_PROSE_UNITS' fingerprinted battery — see
+ * checkPriorEmployerOpening's comment above for why that variation cannot be
+ * interpolated bare.
+ */
 export function checkContainerizationTechnologyRoles(paragraphs = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
@@ -2186,7 +2206,7 @@ export function checkContainerizationTechnologyRoles(paragraphs = []) {
       const governedTools = containerizationPhrase[0].split(SEPARATE_DEPLOYMENT_ROLE_CLAUSE, 1)[0];
       const serverMatch = NON_CONTAINER_SERVER_TOOL.exec(governedTools);
       if (!serverMatch) continue;
-      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(containerizationPhrase[0])}”; ${serverMatch[0]} is a web or application server, not a containerization tool—name Docker or Docker Compose for containerization and describe ${serverMatch[0]}'s server or proxy role separately`);
+      observations.push(`paragraph ${index + 1} says “${boundedDetailValue(containerizationPhrase[0])}”; “${serverMatch[0]}” is a web or application server, not a containerization tool—name Docker or Docker Compose for containerization and describe “${serverMatch[0]}”'s server or proxy role separately`);
     }
   }
   return observationResult('containerization-technology-roles', observations, MAX_COPY_PRECISION_OBSERVATIONS,
@@ -2520,7 +2540,15 @@ export function checkVisualReferencePrecision(paragraphs = []) {
 // line with an unnecessary conditional. This check is intentionally limited
 // to that stock cover-letter formula; other valid uses of “would welcome” are
 // not rewritten by a general lexical ban.
-const CONDITIONAL_WELCOME_CLOSE = /\bI(?:\s+would|'d)\s+welcome\s+(?:(?:the\s+)?(?:chance|opportunity)|(?:a\s+)?(?:conversation|discussion))\b|\bI\s+(?:would|'d)\s+be\s+(?:glad|happy|pleased)\s+to\s+(?:discuss|talk|speak|connect|share|explore)\b/iu;
+//
+// Both alternatives share one contraction shape, and only the first used to
+// spell it correctly: `I(?:\s+would|'d)` requires a space before "would" but
+// none before "'d", because the contraction attaches straight to "I" with no
+// space of its own. The second alternative was written `I\s+(?:would|'d)`,
+// which forces that same space in front of "'d" too — a space "I'd be glad to
+// discuss…" never has — so the contraction silently passed this check while
+// "I would be glad to discuss…" was caught right beside it.
+const CONDITIONAL_WELCOME_CLOSE = /\bI(?:\s+would|'d)\s+welcome\s+(?:(?:the\s+)?(?:chance|opportunity)|(?:a\s+)?(?:conversation|discussion))\b|\bI(?:\s+would|'d)\s+be\s+(?:glad|happy|pleased)\s+to\s+(?:discuss|talk|speak|connect|share|explore)\b/iu;
 
 // A closing can be grammatically direct yet still leave the reader with only
 // the writer's wish to have a conversation or learn more. Keep this family
@@ -2531,6 +2559,39 @@ const SELF_DIRECTED_CONVERSATION_CLOSE = /\bI\s+(?:want|hope|plan|aim|intend)\s+
 const LOOK_FORWARD_CONVERSATION_CLOSE = /\bI\s+look\s+forward\s+to\s+(?:talking|speaking|discussing|connecting|learning|exploring)\b/iu;
 const DIRECT_CONVERSATION_CLOSE = /\bI\s+welcome\s+(?:(?:(?:the\s+)?(?:chance|opportunity))\s+to\s+(?:talk|speak|discuss|connect|share|explore)|(?:a\s+)?(?:conversation|discussion)\b)/iu;
 const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b[^.!?]{0,180}\b(?:or|versus)\b/iu;
+
+// checkProspectiveContributionTense's own design note records that a
+// modal-only guard "measurably rejected" a present-tense contribution bridge
+// — the reason CONTRIBUTION_VERBS_PRESENT exists on checkDirectWelcomeClosing.
+// That made the two checks pull in opposite directions on the identical
+// sentence: "I welcome the chance to talk about how my pipeline experience
+// helps me contribute to your platform team." passes checkDirectWelcomeClosing
+// (it is exactly the direct, present-tense, three-half invitation that check
+// certifies) and fails checkProspectiveContributionTense (its present-tense
+// "helps me contribute" bridge is the shape NONCONDITIONAL_PROSPECTIVE_
+// CONTRIBUTION exists to catch). Once one check has certified a sentence as a
+// direct closing invitation, the other must not then reject it for using the
+// present tense that certification requires. Scoped to the four closing-
+// invitation shapes in the FINAL paragraph only, not to "present tense in the
+// closing paragraph" generally: an ordinary present-tense readiness bridge
+// that is not one of these certified invitation shapes — the exact thing this
+// check exists to catch — must still be caught even in the last paragraph.
+//
+// LOOK_FORWARD_CONVERSATION_CLOSE belongs in this list for the same reason
+// SELF_DIRECTED_CONVERSATION_CLOSE does: checkDirectWelcomeClosing's own
+// selfDirectedMatch already ORs the two together (one certifying branch, not
+// two), so a closing certified via "I look forward to discussing ..." was
+// being rejected right back by this function for the identical present-tense
+// bridge its own certifying branch requires — the exact two-checks-pulling-
+// opposite-ways bug this whole certifiedClosingInvitation function exists to
+// prevent, reproduced by omission.
+function certifiedClosingInvitation(value) {
+  return CONDITIONAL_WELCOME_CLOSE.test(value)
+    || DIRECT_CONVERSATION_CLOSE.test(value)
+    || SELF_DIRECTED_CONVERSATION_CLOSE.test(value)
+    || LOOK_FORWARD_CONVERSATION_CLOSE.test(value);
+}
+
 // A future-facing discussion can be an effective close when it makes the
 // candidate's contribution concrete. Two independent conditions, because the
 // contract (STYLE.md §11.2, SKILL.md, and the routine, which all say to apply
@@ -2546,9 +2607,22 @@ const EMPLOYER_CHOICE_CLOSE = /\b(?:conversation|discussion)\s+about\s+whether\b
 // runs” are exactly the closings the guidance asks for, and both were rejected.
 // Ownership still has to be explicit — a bare demonstrative (“that work”)
 // leans on an earlier paragraph instead of standing up in the invitation.
-const CANDIDATE_ASSET_NOUNS = 'experience|expertise|skills?|work|background|perspective|practice|training';
+// "knowledge"/"know-how" widen the asset lexicon for a candidate paraphrasing
+// to avoid repeating "experience" a second time in the same letter —
+// checkRepeatedPhrase already pushes a writer toward exactly that paraphrase
+// once "experience" has been used once, so the asset lexicon has to accept
+// the word that pressure produces.
+const CANDIDATE_ASSET_NOUNS = 'experience|expertise|skills?|work|background|perspective|practice|training'
+  + '|knowledge|know-how';
+// Concrete artifact nouns a candidate plausibly built and would name with "the
+// <noun> I built/wrote/…": app, application, dashboard, parser, extractor,
+// renderer, agent, and api cover common candidate-built shapes the prior list
+// missed. This branch still requires the authorship clause immediately after
+// the noun, so widening the noun list alone cannot admit an employer-owned
+// artifact the candidate merely used.
 const CANDIDATE_ARTIFACT_NOUNS = 'server|service|tool|tooling|pipeline|pipelines|integration|integrations'
-  + '|connector|connectors|system|systems|harness|platform|prototype|library|scraper|model';
+  + '|connector|connectors|system|systems|harness|platform|prototype|library|scraper|model'
+  + '|app|application|dashboard|parser|extractor|renderer|agent|api';
 // Three ways to mark an asset as the candidate's, in decreasing explicitness:
 // a possessive; an authorship clause; or a demonstrative that carries its own
 // descriptor. The third exists because “that MCP server experience” does name
@@ -2595,10 +2669,33 @@ const CANDIDATE_CONTRIBUTION_ACTION = new RegExp(
 // verbs are among the commonest in English and neither test requires the
 // sentence to reach the employer's side at all. STYLE.md §11.2 asks the
 // closing to carry "the role-facing contribution", so the sentence has to name
-// the other side of that connection. No company name is available here, so
-// this is the generic employer-facing lexicon.
+// the other side of that connection.
+//
+// EMPLOYER_TARGET_NOUNS/EMPLOYER_FACING_TARGET are the GENERIC lexicon only —
+// "your", "the/this <noun>", the reader nouns. A comment here used to claim
+// "No company name is available here", which was false: evaluateCoverLetterChecks
+// already receives companyName and already threads it into
+// checkCompanySpecificity and checkProspectiveContributionTense a few hundred
+// lines away — this check alone dropped it on the floor. Measured cost: a
+// job's closing paragraph named the employer BY NAME — "…could support
+// Micromart's smart-store rollout." — which is exactly the shape every other
+// rule in this app pushes a writer toward (checkOpeningEmployerShorthand,
+// checkPriorEmployerOpening, and company-specificity itself all want the
+// employer named, not a placeholder pronoun). The generic-only lexicon
+// rejected it anyway, four consecutive rounds (2026-09-24,
+// 13:08:05Z–13:10:40Z, every rejection fingerprint 752d8241 on this check's
+// direct-conversation branch), because "Micromart's" satisfies none of
+// "your", "the/this <noun>", or the reader-noun list. employerFacingTarget()
+// below now also accepts the employer's own name, derived from companyName.
 const EMPLOYER_TARGET_NOUNS = 'team|teams|role|position|group|organi[sz]ation|company|district|product|products'
-  + '|platform|codebase|backlog|roadmap|effort|work|mission|practice|pipeline|pipelines|system|systems|service|services';
+  + '|platform|codebase|backlog|roadmap|effort|work|mission|practice|pipeline|pipelines|system|systems|service|services'
+  // Nouns an employer-facing closing names when the target is a specific
+  // initiative rather than a standing team or system: "the smart-store
+  // rollout", "this migration", "your onboarding flow". Measured directly
+  // against the incident's own rejected sentences ("…support Micromart's
+  // smart-store rollout", "…support Micromart's inventory sync") — rollout and
+  // migration are exactly the nouns those closings used.
+  + '|rollout|migration|launch|stack|infrastructure|deployment|workflow|workflows|onboarding|store|stores';
 const EMPLOYER_FACING_TARGET = new RegExp(
   '\\byour(?:s)?\\b'
   // A modifier slot is required: real closings say "the service team", "this
@@ -2608,49 +2705,331 @@ const EMPLOYER_FACING_TARGET = new RegExp(
   'iu',
 );
 
-function hasCandidateContributionClose(value) {
-  return CANDIDATE_ASSET_CLOSE.test(value)
-    && CANDIDATE_CONTRIBUTION_ACTION.test(value)
-    && EMPLOYER_FACING_TARGET.test(value);
+// Legal-entity suffixes stripped before deriving a distinctive token:
+// "Micromart Inc." names the same reader-facing company as "Micromart", and
+// matching only the full string with the suffix still attached would reject a
+// writer who — correctly, by every naming convention this app otherwise
+// enforces — drops the suffix in prose. "Co." keeps its period required (a
+// bare "Co" is two letters and too easy to collide with an ordinary word
+// ending); every other suffix accepts an optional trailing period so "Inc"
+// and "Inc." both strip.
+const COMPANY_LEGAL_SUFFIXES = [
+  'incorporated', 'corporation', 'company', 'limited',
+  'l\\.l\\.c\\.?', 'llc', 'inc\\.?', 'ltd\\.?', 'corp\\.?', 'co\\.',
+  'plc', 'gmbh', 's\\.a\\.?', 'pty', 'ab', 'nv',
+];
+// Requires a comma or whitespace immediately before the suffix, so the suffix
+// has to be its own trailing token — "Cisco" ends in "co" but has no comma or
+// space in front of it, so it is never mistaken for a stripped "Co.".
+const COMPANY_LEGAL_SUFFIX_RE = new RegExp(`[,\\s]+(?:${COMPANY_LEGAL_SUFFIXES.join('|')})\\s*$`, 'iu');
+
+// Tokens too generic to identify a company on their own. Deliberately the
+// short, explicit list the task asked for rather than a general stopword
+// list: a longer list would start rejecting real leading tokens ("And Co",
+// "For Good") that happen to share a word with a function word.
+const COMPANY_TARGET_STOPWORDS = new Set(['the', 'a', 'an']);
+
+/**
+ * Builds a matcher for an employer's own name, or null when companyName
+ * carries nothing safe to match on. For a MULTI-word name, matches the full
+ * name CASE-INSENSITIVELY plus its distinctive leading token ("Micromart" for
+ * "Micromart Inc.") CASE-SENSITIVELY — the two halves deliberately do not
+ * share a case-sensitivity rule (see below for why the full multi-word name
+ * is exempt from the case-sensitive treatment). A SINGLE-word name gets only
+ * the case-sensitive token match — see the dedicated comment on that branch
+ * below for why it is not also given a case-insensitive alternative the way
+ * the multi-word full name is. Every alternative optionally accepts a
+ * trailing possessive "'s" — straight or curly, since the letter text this
+ * matches against is not guaranteed to have gone through text()'s apostrophe
+ * normalization by the time this runs — and all are escapeRegExp'd: this
+ * app's own company names include parenthesized forms ("Amazon Web Services
+ * (AWS)") whose literal characters would otherwise be read as regex syntax.
+ *
+ * Case-sensitive tokens are guarded only by length>=3 and a 3-word stopword
+ * set. Measured false positives: "Best Buy" -> "Best" matched "my best
+ * work"; "Target Corporation" -> "Target" matched this app's own guidance
+ * text ("target work"); and this app's own job board turns up real employers
+ * whose distinguishing token is an ordinary English word — Float, Loop
+ * Financial, Provision, Stripe, Top Hat. Each one let candidate-facing prose
+ * satisfy the target half of the three-part closing requirement without the
+ * sentence ever reaching the employer's side — a false PASS, the more
+ * expensive of the two failure directions on a check gating a paste handoff.
+ * Matching that token CASE-SENSITIVELY, exactly as the company spells it,
+ * closes that: a letter naming the employer writes "Provision's ingestion
+ * pipeline" with the posting's own capital; candidate-facing prose writes
+ * "provision" lowercase. This is not airtight — sentence-initial
+ * capitalization ("Provision handles onboarding.") would still satisfy the
+ * case-sensitive match for reasons that have nothing to do with the employer
+ * — but that residual risk is small here specifically: every sentence this
+ * check grades has already matched one of the invitation regexes above
+ * (CONDITIONAL_WELCOME_CLOSE, DIRECT_CONVERSATION_CLOSE,
+ * SELF_DIRECTED_CONVERSATION_CLOSE, LOOK_FORWARD_CONVERSATION_CLOSE), and
+ * every one of those anchors at the START of the sentence ("I welcome a
+ * conversation about ...", "I look forward to ..."), so the token is almost
+ * never itself sentence-initial.
+ */
+function companyNameTargetPattern(companyName) {
+  const stripped = text(companyName).replace(COMPANY_LEGAL_SUFFIX_RE, '').trim();
+  if (stripped.length < 3) return null;
+  const tokens = stripped.split(/\s+/).filter(Boolean);
+  if (tokens.every(token => COMPANY_TARGET_STOPWORDS.has(normalized(token)))) return null;
+  // Both alternatives share the identical boundary + optional-possessive
+  // wrapper; only the case-sensitivity flag differs between them, which is
+  // why they are two separate regexes rather than two branches of one
+  // alternation — a single RegExp cannot vary case-sensitivity per branch.
+  const boundedAlternative = token => `(?<![\\p{L}\\p{N}])${escapeRegExp(token)}(?:['’]s)?(?![\\p{L}\\p{N}])`;
+  // A single-word company name IS its own leading token: nothing distinguishes
+  // it from an ordinary word except capitalization, the identical collision
+  // the multi-word leading-token fix above exists to close. Measured: with
+  // companyName 'Float', "how my integration work could support my own float
+  // of ideas" — pure candidate-facing prose, no employer reference at all —
+  // satisfied the target half before this branch existed, because a
+  // single-word name fell through to fullNamePattern below, which is
+  // case-INSENSITIVE by design for the multi-word case. That design choice is
+  // right for a two-word full name ("Best Buy" together, lowercase or not, is
+  // measurably unlikely to appear by coincidence) but wrong for a one-word
+  // name that IS one of this app's own measured ordinary-word collisions
+  // (Float, Provision, Stripe are all single tokens) — a single common word
+  // colliding with ordinary prose is exactly the case the multi-word branch
+  // already treats as too risky to match case-insensitively. So a one-word
+  // name is routed through the case-sensitive path instead of the full-name
+  // path, never both — a single-word "full name" and a single-word "leading
+  // token" would be the identical string, so building both would only test
+  // the same regex twice.
+  if (tokens.length === 1) {
+    const single = tokens[0];
+    if (single.length < 3 || COMPANY_TARGET_STOPWORDS.has(normalized(single))) return null;
+    const singleTokenPattern = new RegExp(boundedAlternative(single), 'u');
+    return { test: value => singleTokenPattern.test(value) };
+  }
+  const fullNamePattern = new RegExp(boundedAlternative(stripped), 'iu');
+  const leading = tokens[0];
+  const leadingTokenPattern = (leading.length >= 3 && !COMPANY_TARGET_STOPWORDS.has(normalized(leading)))
+    ? new RegExp(boundedAlternative(leading), 'u')
+    : null;
+  return { test: value => fullNamePattern.test(value) || (leadingTokenPattern ? leadingTokenPattern.test(value) : false) };
+}
+
+/**
+ * EMPLOYER_FACING_TARGET plus the employer's own name. Routed through here so
+ * every place inside this check that needs to know whether a sentence reaches
+ * the employer's side reads the identical rule — see the EMPLOYER_TARGET_NOUNS
+ * comment above for the incident that made the company-name half necessary.
+ */
+function employerFacingTarget(value, companyName) {
+  if (EMPLOYER_FACING_TARGET.test(value)) return true;
+  const companyPattern = companyNameTargetPattern(companyName);
+  return companyPattern ? companyPattern.test(value) : false;
+}
+
+/**
+ * Which of the three contribution predicates a closing sentence still fails,
+ * in a fixed order (asset, action, target) so a message built from this array
+ * always lists them the same way. An empty array means the sentence satisfies
+ * the full connection. See the comment on candidateContributionRequirement
+ * below for why the CALLER, not this function, decides how much of this to
+ * report.
+ */
+function missingContributionHalves(value, companyName) {
+  const missing = [];
+  if (!CANDIDATE_ASSET_CLOSE.test(value)) missing.push('asset');
+  if (!CANDIDATE_CONTRIBUTION_ACTION.test(value)) missing.push('action');
+  if (!employerFacingTarget(value, companyName)) missing.push('target');
+  return missing;
 }
 
 // The observation has to be executable on its own: a writer reading only this
 // line must be able to produce a closing that passes. The previous wording
-// ("name the experience, skills, or work…") described the goal but not the two
+// ("name the experience, skills, or work…") described the goal but not the
 // things the check tests, so a revision could name the experience, still miss
 // the ownership marker, and fail the identical check a second time.
-const CANDIDATE_CONTRIBUTION_REMEDIATION = 'the invitation wording itself is correct, so keep it; the '
-  + 'sentence needs both halves — name the candidate’s asset with a possessive, an authorship clause, or a '
-  + 'demonstrative that carries its own descriptor (“my integration work”, “the connector I built”, “that '
-  + 'MCP server experience”), never a bare demonstrative (“that work”), and say what that asset does for the '
-  + 'target work (“…could support…”, “…supports…”, “applying … to …”)';
+//
+// Composed from one function — contributionHalfRequirement() below — rather
+// than hand-maintained twice, so the conditional-modal branch (which grades
+// all three predicates at once, since none of them has been checked yet at
+// that point in the sentence) and the two branches that already know exactly
+// which predicate failed read the identical wording for whichever half they
+// name. That composition is load-bearing, not tidiness, across two separate
+// incidents on the same check:
+//
+// 1. A single job's cover-letter paste handoff was rejected 16 consecutive
+//    times over 87 minutes (2026-09-24, 08:23:19Z to 09:50:59Z), every
+//    rejection naming this check's id, while the response grew from 4227 to
+//    4314 chars rewriting the contribution clause and never touching the
+//    conditional modal that actually tripped it — because the conditional
+//    branch's own message pointed at the contribution clause ("name the
+//    specific work or contribution to discuss") instead of at the modal.
+//    Composing the same requirement into both branches means a writer told to
+//    delete the modal is told, in the same round, the one other way this
+//    sentence can still fail once the modal is gone.
+//
+// 2. The same check rejected a different job's letter a second time, 4
+//    consecutive rounds (2026-09-24, 13:08:05Z–13:10:40Z), every round
+//    fingerprint 752d8241 on the direct-conversation branch (branch 4). The
+//    single fixed message every branch shared quoted an example for the asset
+//    half and the action half but never for the target half — the exact half
+//    the closing kept failing, once the generic-only employer lexicon (see
+//    the EMPLOYER_TARGET_NOUNS comment above) rejected a company-named
+//    target. A writer who already has a working asset and action and reads a
+//    message that only ever demonstrates asset and action has no way to learn
+//    what the sentence actually still needs, and rewrites the two halves that
+//    were never broken. missingContributionHalves() above now reports WHICH
+//    predicates failed; candidateContributionRequirement() below builds the
+//    message from only those, so a writer who satisfies two of three is told
+//    about the one that is failing and nothing else.
+function contributionHalfRequirement(half, companyName) {
+  switch (half) {
+    case 'asset':
+      return 'name the candidate’s asset with a possessive, an authorship clause, or a demonstrative that carries '
+        + 'its own descriptor (“my integration work”, “the connector I built”, “that MCP server experience”), '
+        + 'never a bare demonstrative (“that work”)';
+    case 'action':
+      return 'say what that asset does for the target work (“…could support…”, “…supports…”, “applying … to …”)';
+    case 'target': {
+      // This half had no example at all before the second incident above.
+      // companyName is named in the message itself, when a usable pattern can
+      // actually be built from it (see companyNameTargetPattern), so the
+      // writer does not have to guess that the employer's own spelling counts
+      // as reaching the employer's side — and is never told a name the
+      // matcher itself would refuse (too short, or nothing but a stopword).
+      // The name goes inside curly quotes like every other example here, and
+      // that placement is load-bearing rather than cosmetic:
+      // checkObservationFingerprint (localAiApplication.js) strips every
+      // curly-quoted span before hashing precisely so a branch's fingerprint
+      // is its own fixed wording and nothing job-specific. Interpolated bare,
+      // the employer's name would survive into the digest — giving the SAME
+      // branch a different fingerprint per company (defeating the cross-receipt
+      // branch comparison the fingerprint exists for) and carrying job content
+      // into a receipt whose header promises it never does.
+      const named = companyNameTargetPattern(companyName) ? text(companyName) : '';
+      const namedClause = named ? `, or the employer’s own name exactly as this letter already spells it (“${named}”)` : '';
+      return 'reach the employer’s side too — “your …”, “the”/“this” plus a work noun (“the … platform”, “this '
+        + `… pipeline”), a reader noun (“clients”, “customers”, “users”)${namedClause}; a sentence naming only the `
+        + 'candidate’s side fails this half even when the asset and action are both present';
+    }
+    default:
+      return '';
+  }
+}
+
+/**
+ * Builds the remediation text from exactly the missing halves (the
+ * direct-conversation and self-directed branches, which have already graded
+ * all three predicates) or from all three at once (the conditional-modal
+ * branch, which grades the sentence before the modal is even gone). See the
+ * incident notes on contributionHalfRequirement above for why per-half
+ * attribution replaced one fixed message shared by every branch.
+ */
+function candidateContributionRequirement(missing, companyName) {
+  const lead = missing.length === 3
+    ? 'the sentence needs all three parts'
+    : missing.length === 1
+      ? `the sentence is missing its ${missing[0]} half`
+      : `the sentence is missing its ${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} halves`;
+  const parts = missing.map(half => contributionHalfRequirement(half, companyName));
+  const requirement = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join('; ')}; and ${parts[parts.length - 1]}`;
+  // The repeat-floor clause above tells a writer how far to vary a half's
+  // WORDS. It says nothing about SHAPE: checkRepeatedSentenceShape grades this
+  // closing sentence's syntactic frame against every other sentence in the
+  // letter independently of wording, so a rewrite that clears the word floor
+  // by swapping nouns and verbs into the same slots can still trip that check.
+  // Naming it here, in the same message already sending a writer toward a
+  // wording rewrite, keeps the two floors from reading as one problem with one
+  // fix.
+  return `${lead} — ${requirement}; name whichever half is rewritten in wording this letter has not already used `
+    + `for it elsewhere — a run of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} or more words carried verbatim from an `
+    + 'earlier paragraph into this one is counted as a repeat on its own, independent of this check; sentence shape '
+    + 'is graded separately from wording too, so if an earlier sentence already used this one’s shape, vary the '
+    + 'construction and not only the words';
+}
+
+// Passed to candidateContributionRequirement by the conditional-modal branch,
+// which has not evaluated any of the three predicates yet at the point it
+// fires — the modal itself is what failed the sentence, so all three still
+// belong in that branch's message regardless of what the clause after the
+// modal actually contains.
+const ALL_CONTRIBUTION_HALVES = Object.freeze(['asset', 'action', 'target']);
+
+// A trailing courtesy or sign-off sentence — "Thank you for your
+// consideration.", "I am available at your convenience." — carries no
+// invitation and no contribution, so grading only sentences(paragraph).at(-1)
+// let a closing paragraph pass by ending on one regardless of what the
+// sentence before it said. Measured: "I would welcome the chance to talk about
+// that work. Thank you for your consideration." and "I welcome a conversation
+// about that work. Thank you for your consideration." both passed, though both
+// close on exactly the invitation this check exists to reject. The fix walks
+// backward past sentences this matcher recognizes rather than widening the
+// scope to the whole paragraph, because the comment inside
+// checkDirectWelcomeClosing already explains why grading the two invitation
+// shapes at different scopes made the rule unlearnable — a per-branch scope
+// change here would repeat that mistake. If every sentence in the paragraph is
+// courtesy, there is no substantive sentence to fall back to and today's
+// behaviour holds: the last sentence is graded, no invitation regex fires, and
+// the paragraph passes.
+const COURTESY_CLOSING_SENTENCE = /^(?:thank\s+you\s+for\b|i\s+(?:truly\s+)?appreciate\s+(?:your|the)\b|please\s+(?:feel\s+free|do\s+not\s+hesitate)\b|i(?:\s+am|'m)\s+available\b|feel\s+free\s+to\s+(?:reach|contact)\b)/iu;
+
+/**
+ * Index into an already-split sentence list of the final sentence that
+ * carries content beyond courtesy, walking backward past every sentence
+ * COURTESY_CLOSING_SENTENCE recognizes. Shared by finalSubstantiveClosingSentence
+ * below — which is what checkDirectWelcomeClosing certifies — and
+ * checkProspectiveContributionTense's own exemption, which must skip that
+ * SAME sentence and no other. Returning a POSITION rather than text is what
+ * makes the second caller correct: identifying "the certified sentence" by
+ * text equality would exempt every sentence in the paragraph that happens to
+ * share its wording, including a genuine readiness-bridge defect in an
+ * earlier, merely identical-looking sentence.
+ */
+function finalSubstantiveClosingSentenceIndex(paragraphSentences) {
+  for (let index = paragraphSentences.length - 1; index >= 0; index--) {
+    if (!COURTESY_CLOSING_SENTENCE.test(paragraphSentences[index])) return index;
+  }
+  return paragraphSentences.length ? paragraphSentences.length - 1 : -1;
+}
+
+/** The final sentence of a paragraph that carries content beyond courtesy. */
+function finalSubstantiveClosingSentence(paragraph) {
+  const list = sentences(paragraph);
+  const index = finalSubstantiveClosingSentenceIndex(list);
+  return index >= 0 ? list[index] : '';
+}
 
 /** Keeps the invitation in the closing direct and specific. */
-export function checkDirectWelcomeClosing(paragraphs = []) {
+export function checkDirectWelcomeClosing(paragraphs = [], companyName = '') {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const observations = [];
   const index = list.length - 1;
-  const finalSentence = index >= 0 ? (sentences(list[index]).at(-1) || '') : '';
+  const finalSentence = index >= 0 ? finalSubstantiveClosingSentence(list[index]) : '';
   const conditionalMatch = CONDITIONAL_WELCOME_CLOSE.exec(finalSentence);
-  if (conditionalMatch) observations.push(`paragraph ${index + 1} uses a conditional or deferential invitation (“${boundedDetailValue(conditionalMatch[0])}”); make the invitation direct and name the specific work or contribution to discuss`);
+  if (conditionalMatch) {
+    observations.push(`paragraph ${index + 1}'s final substantive sentence opens with a conditional or deferential `
+      + `invitation (“${boundedDetailValue(conditionalMatch[0])}”); delete that opening modal and make the invitation `
+      + 'direct, in the present tense — do not rewrite the clause after it, since the modal itself is what fails '
+      + `this check, not the clause it introduces. Once the modal is gone the sentence is graded as a direct `
+      + `invitation, so ${candidateContributionRequirement(ALL_CONTRIBUTION_HALVES, companyName)}`);
+  }
+  // Computed once and reused by both branches below: they read the identical
+  // finalSentence/companyName pair, and missingContributionHalves is a pure
+  // function of that pair.
+  const missing = missingContributionHalves(finalSentence, companyName);
   const selfDirectedMatch = SELF_DIRECTED_CONVERSATION_CLOSE.exec(finalSentence)
     || LOOK_FORWARD_CONVERSATION_CLOSE.exec(finalSentence);
-  if (selfDirectedMatch && !hasCandidateContributionClose(finalSentence)) {
-    observations.push(`paragraph ${index + 1} ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; ${CANDIDATE_CONTRIBUTION_REMEDIATION}`);
+  if (selfDirectedMatch && missing.length) {
+    observations.push(`paragraph ${index + 1}'s final substantive sentence ends with conversation or learning intent (“${boundedDetailValue(selfDirectedMatch[0])}”) but no candidate contribution; the invitation wording itself is correct, so keep it; ${candidateContributionRequirement(missing, companyName)}`);
   }
   const directConversation = DIRECT_CONVERSATION_CLOSE.exec(finalSentence);
   const employerChoice = EMPLOYER_CHOICE_CLOSE.exec(finalSentence);
   if (employerChoice) {
-    observations.push(`paragraph ${index + 1} asks the employer to choose between initiatives (“${boundedDetailValue(employerChoice[0])}”); close with the candidate's concrete contribution to the target work instead of posing an employer-facing prototype question`);
-    // Both branches read the FINAL SENTENCE, deliberately. STYLE.md §11.2 is
-    // explicit that "its final sentence should connect the candidate's
-    // relevant contribution to the target work", and grading the two
-    // invitation shapes at different scopes made the rule unlearnable: the
+    observations.push(`paragraph ${index + 1}'s final substantive sentence asks the employer to choose between initiatives (“${boundedDetailValue(employerChoice[0])}”); close with the candidate's concrete contribution to the target work instead of posing an employer-facing prototype question`);
+    // Both branches read the FINAL SUBSTANTIVE SENTENCE, deliberately. STYLE.md
+    // §11.2 is explicit that "its final sentence should connect the
+    // candidate's relevant contribution to the target work", and grading the
+    // two invitation shapes at different scopes made the rule unlearnable: the
     // same closing paragraph passed with "I welcome a conversation about that
     // work" and failed with "I look forward to discussing that work", decided
     // only by which verb the last sentence happened to use.
-  } else if (directConversation && !hasCandidateContributionClose(finalSentence)) {
-    observations.push(`paragraph ${index + 1} uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; ${CANDIDATE_CONTRIBUTION_REMEDIATION}`);
+  } else if (directConversation && missing.length) {
+    observations.push(`paragraph ${index + 1}'s final substantive sentence uses a direct conversation invitation (“${boundedDetailValue(directConversation[0])}”) but never connects a candidate asset to the employer's work; the invitation wording itself is correct, so keep it; ${candidateContributionRequirement(missing, companyName)}`);
   }
   return observationResult('direct-welcome-closing', observations, MAX_COPY_PRECISION_OBSERVATIONS,
     `${list.length} paragraph(s) use a direct, specific invitation when they close with “welcome”`);
@@ -2840,7 +3219,11 @@ const EMPLOYER_ORGANIZATION_LABELS = new Set([
 ]);
 const OPENING_EMPLOYER_SHORTHAND = /^the\s+(?:school\s+)?([\p{L}’'-]+)\b/iu;
 
-/** Flags a vague employer shorthand at a paragraph boundary without prescribing repetition. */
+/**
+ * Flags a vague employer shorthand at a paragraph boundary without prescribing
+ * repetition. `employer` is curly-quoted below — see checkPriorEmployerOpening's
+ * comment above.
+ */
 export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   const employers = (Array.isArray(employerNames) ? employerNames : []).map(text).filter(Boolean);
@@ -2861,7 +3244,7 @@ export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = [
     // 2026-09-23 opened two of its four paragraphs with exactly that cue. The
     // employer's own name stays: it is the candidate's employer, already in the
     // letter, and it is what makes the observation locatable.
-    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming ${employer} in the prior paragraph; open instead on whatever this paragraph is actually about, whether that is the candidate, the work itself, or ${employer} named in full where another employer or role could be the referent`);
+    observations.push(`paragraph ${index + 1} opens with employer shorthand (“${leadingWordsSnippet(paragraph, 3)}”) after naming “${employer}” in the prior paragraph; open instead on whatever this paragraph is actually about, whether that is the candidate, the work itself, or “${employer}” named in full where another employer or role could be the referent`);
     if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
   }
   return observationResult('opening-employer-shorthand', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
@@ -2872,7 +3255,8 @@ export function checkOpeningEmployerShorthand(paragraphs = [], employerNames = [
  * Full-name repetition in consecutive evidence paragraphs is usually
  * unnecessary after a single clear employer mention. Keep the guard narrow:
  * it applies only when the candidate begins the next sentence with the same
- * employer, and ignores contexts that name multiple employers.
+ * employer, and ignores contexts that name multiple employers. `employer` is
+ * curly-quoted below — see checkPriorEmployerOpening's comment above.
  */
 export function checkAdjacentEmployerRepetition(paragraphs = [], employerNames = []) {
   const list = Array.isArray(paragraphs) ? paragraphs : [];
@@ -2894,7 +3278,7 @@ export function checkAdjacentEmployerRepetition(paragraphs = [], employerNames =
     // Same rule as the message above, and the same repair: describe what the
     // opening should be about and stop. A named cue here is a phrase the letter
     // will contain, which is how two of four paragraphs came to share one.
-    observations.push(`paragraph ${index + 1} repeats ${employer} in its opening immediately after paragraph ${index}; one established employer needs no re-introduction, so let the opening start from this paragraph's own subject and keep ${employer} only where another employer or role could be the referent`);
+    observations.push(`paragraph ${index + 1} repeats “${employer}” in its opening immediately after paragraph ${index}; one established employer needs no re-introduction, so let the opening start from this paragraph's own subject and keep “${employer}” only where another employer or role could be the referent`);
     if (observations.length >= MAX_EXPERIENCE_FRAMING_OBSERVATIONS) break;
   }
   return observationResult('adjacent-employer-repetition', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
@@ -3687,7 +4071,6 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkParallelStructure(paragraphs),
     checkPriorEmployerOpening(paragraphs, priorEmployers),
     checkNamedArtifactIntroduction(paragraphs, (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name)),
-    checkArtifactActionCompleteness(paragraphs),
     checkOpeningArtifactContext(
       paragraphs,
       (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name),
@@ -3713,7 +4096,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkPlainRegister(paragraphs),
     checkIntroductoryWorkplaceComma(paragraphs, priorEmployers),
     checkVisualReferencePrecision(paragraphs),
-    checkDirectWelcomeClosing(paragraphs),
+    checkDirectWelcomeClosing(paragraphs, companyName),
     checkOpeningDemonstrative(paragraphs),
     checkOpeningEmployerShorthand(paragraphs, priorEmployers),
     checkAdjacentEmployerRepetition(paragraphs, priorEmployers),

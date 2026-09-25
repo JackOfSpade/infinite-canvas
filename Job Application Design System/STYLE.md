@@ -1669,6 +1669,17 @@ Six failure modes show up together often enough in generated
 letters that they get one gate. All six are about *how* true,
 relevant evidence gets said, not about inventing or hiding evidence.
 
+**Paragraph structure is not a sentence template.** Give each paragraph one
+argumentative job, not a prescribed number of sentences. Use as many sentences
+as clarity requires, and split separate claims, action steps, or relevance
+links when a combined sentence is harder to parse. A sentence may introduce an
+artifact and the next may explain its supported trigger or follow-up action.
+Do not force every supported feature into the introduction. Likewise, do not
+insert a standalone abstract sentence merely to label a "problem shape" or say
+that the work was difficult. Explain the evidence-to-role relationship only
+when the proof and transfer do not already make it clear, using concrete
+actors, artifacts, and actions wherever they help the reader.
+
 **Scope.** Rule 1 (volunteered weaknesses) and the closing
 synthesis rule are cover-letter rules — the résumé has no prose in
 which to commit them. Rules 2, 3, 4, and 5 (colon-led inventories,
@@ -1899,17 +1910,29 @@ to be thorough is weaker than one that explains one system well.
 
 **Close by connecting contribution to work.** When the final paragraph invites
 a conversation, its final sentence should connect the candidate's relevant
-contribution to the target work. A sentence that ends only on what the candidate
-wants to learn, hear, or discuss leaves the argument pointed inward; revise it
-so the invitation carries the role-facing contribution forward. Keep the
-invitation direct and present-tense without relying on conditional or deferential
-boilerplate: “I welcome a conversation” is direct; “I would welcome a
-conversation” or “I would welcome a discussion” is not. Two halves carry that
-connection: name the asset with a possessive, an authorship clause, or a
+contribution to the target work. The sentence graded is the paragraph's final
+*substantive* sentence — a trailing courtesy line (“Thank you for your
+consideration.”, “I am available at your convenience.”) carries no invitation
+of its own and is skipped when finding it, so a letter that closes on one of
+those still has to satisfy this rule on the sentence before it. A sentence
+that ends only on what the candidate wants to learn, hear, or discuss leaves
+the argument pointed inward; revise it so the invitation carries the
+role-facing contribution forward. Keep the invitation direct and present-tense
+without relying on conditional or deferential boilerplate: “I welcome a
+conversation” is direct; “I would welcome a conversation” or “I would welcome
+a discussion” is not. Three things carry that connection, all inside the same
+sentence: name the asset with a possessive, an authorship clause, or a
 demonstrative carrying its own descriptor (“my integration work”, “the
 connector I built”, “that MCP server experience”) rather than a bare
-demonstrative (“that work”), and say what it does for the target work
-(“… could support …”, “… supports …”, “applying … to …”).
+demonstrative (“that work”); say what it does (“… could support …”, “…
+supports …”, “applying … to …”); and reach the employer's own side of that
+action with an explicit target — “your …”, “the” or “this” plus a work noun
+(“the platform”, “this team”, “the roadmap”), a reader noun (“customers”,
+“users”, “clients”), or the employer's own name. A sentence that names only
+the candidate's asset and what it does — with no employer-facing target in
+that same sentence — does not pass, however specific the asset is; naming the
+target earlier in the paragraph and leaving this sentence to close on the
+asset alone does not satisfy it either.
 
 ### 11.3 Accent &amp; the close
 
