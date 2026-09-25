@@ -8,17 +8,47 @@
 // checkIds below stands on the same ground: a check id is the pipeline's own
 // name for a rule (PASTE_CHECK_PROSE_UNITS in electron/ipc/localAiApplication.js
 // is the frozen, total enumeration, and the caller filters to it), never the
-// detail text that names a paragraph, a quote, or a field.
+// detail text that names a paragraph, a quote, or a field. checkFingerprints
+// stands on the same ground too, one rung further down: a check id alone
+// cannot say WHICH BRANCH of a multi-branch check fired (measured on
+// coverLetterChecks.js's checkDirectWelcomeClosing, which has four), so the
+// caller (pasteRejectionCheckIds, checkObservationFingerprint, both in
+// electron/ipc/localAiApplication.js) also derives a short digest per id from
+// the observation's detail — but only after stripping every curly-quoted
+// span (the letter's own quoted evidence, which changes every revision) and
+// collapsing the varying paragraph/passage ordinal. What is stored here is
+// that digest alone: eight hex characters, never the detail text it was
+// computed from.
 const RING_LIMIT = 40;
 const MAX_CHECK_IDS = 16;
 // A backstop on the shape the caller already guarantees by vocabulary.
 const CHECK_ID_RE = /^[a-z][a-z0-9-]{0,39}$/u;
+// checkObservationFingerprint (electron/ipc/localAiApplication.js) truncates
+// its digest to this many hex characters; restated here rather than imported
+// because this file deliberately carries zero imports (see its own header,
+// "Do not add prompts, responses, ... here" — a dependency-free module is
+// easier to audit for exactly that promise). A cross-file test pins the two
+// widths together.
+const CHECK_FINGERPRINT_HEX_CHARS = 8;
+const CHECK_FINGERPRINT_RE = new RegExp(`^[0-9a-f]{${CHECK_FINGERPRINT_HEX_CHARS}}$`, 'u');
 const REPORT_LIMIT = 20;
 
 const SAFE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
 const SAFE_OUTCOMES = new Set(['accepted', 'rejected']);
 const SAFE_REASONS = new Set([
   'INVALID_JSON',
+  // The residual classification, and only the residual classification: what a
+  // rejected round gets when some validator failed and the caller's own named
+  // check id vocabulary (checkIds below) names none of them — pasteRejectionCheckIds's
+  // own header in electron/ipc/localAiApplication.js. Before pasteRejectionReason
+  // existed, every content-rule rejection landed here regardless of whether a
+  // check id was known, which is how 16 consecutive rejections of a measured
+  // incident (PASTE_REJECTION_ESCALATION_STREAK's own header in
+  // electron/ipc/localAiApplication.js) were filed under "unknown cause" while
+  // every one of them named check id "direct-welcome-closing" by exact id. A
+  // round whose items name a known check now takes VALIDATION_FAILED instead
+  // (below); this code means what it always said it meant: nothing about the
+  // failure was named.
   'SCHEMA_INVALID',
   'DOMAIN_VALIDATION_FAILED',
   // Replaces the single overloaded STALE_HANDOFF (nothing else in the tree
@@ -50,6 +80,14 @@ const SAFE_REASONS = new Set([
   // INVALID_JSON lets a reader of this report see that distinction without
   // re-deriving it from parser positions.
   'TRUNCATED_JSON',
+  // A validator failed AND the caller can name which rule: pasteRejectionReason
+  // (electron/ipc/localAiApplication.js) assigns this whenever the rejected
+  // round's items name at least one id from the frozen check-id vocabulary,
+  // reserving SCHEMA_INVALID (above) for the genuinely nameless case. Before
+  // that function existed this value was assigned nowhere in the app —
+  // reachable only as recordPasteHandoffDiagnostic's own defensive fallback
+  // for a `reason` string outside this whole enum, which no caller ever
+  // passed.
   'VALIDATION_FAILED',
 ]);
 
@@ -90,6 +128,22 @@ function boundedCheckIds(value) {
   return ids.length ? ids.slice(0, MAX_CHECK_IDS) : null;
 }
 
+// Which BRANCH of a named rule fired, keyed by the same check id boundedCheckIds
+// already validated. Validated with the same discipline as every other field
+// this file keeps: only a plain object, only entries whose key is itself a
+// valid check id and whose value is exactly CHECK_FINGERPRINT_HEX_CHARS lowercase
+// hex characters (checkObservationFingerprint's own output shape, never
+// re-derived here, only pattern-checked), and capped at MAX_CHECK_IDS entries —
+// the same ceiling boundedCheckIds applies, since there is never more than one
+// fingerprint per id.
+function boundedCheckFingerprints(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value)
+    .filter(([id, fingerprint]) => CHECK_ID_RE.test(id) && typeof fingerprint === 'string' && CHECK_FINGERPRINT_RE.test(fingerprint))
+    .slice(0, MAX_CHECK_IDS);
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
 /**
  * Record a Local Application paste handoff result.
  *
@@ -102,10 +156,23 @@ function boundedCheckIds(value) {
  * scoped review-round delta carries none of those anyway
  * (electron/ipc/pasteReviewDelta.js). `errorCount` is how many validation
  * items the round produced, `checkIds` names the rules behind them, drawn by
- * the caller from the pipeline's own frozen check vocabulary, and
- * `uncodedErrors` counts the items that named no rule — counts and rule
- * names, never the items themselves. This does not persist across
- * restart.
+ * the caller from the pipeline's own frozen check vocabulary, `checkFingerprints`
+ * names WHICH BRANCH of each of those rules fired (an object keyed by check
+ * id, each value an 8-hex-char digest computed by the caller's
+ * checkObservationFingerprint — never detail text, never the letter's own
+ * wording), and `uncodedErrors` counts the items that named no rule — counts,
+ * rule names, and opaque digests, never the items themselves. `rejectionStreak`
+ * is the caller's own already-computed consecutive-rejection count
+ * (electron/ipc/localAiApplication.js's bumpPasteRejectionStreak — the SET-
+ * keyed streak, an integer like every other count here) and `escalated` is a
+ * plain boolean: whether this same round's correction prompt carried an
+ * escalation block at all (a check id individually crossed
+ * PASTE_REJECTION_ESCALATION_STREAK) — never the escalation text itself, and
+ * never assumed from `rejectionStreak` reaching that threshold, because the
+ * two can diverge (see this file's own SAFE_REASONS header on VALIDATION_FAILED
+ * for the incident: a failing-check SET that shrinks while the one check that
+ * matters keeps failing can escalate before the set-keyed count catches up).
+ * This does not persist across restart.
  */
 export function recordPasteHandoffDiagnostic({
   stage,
@@ -123,7 +190,10 @@ export function recordPasteHandoffDiagnostic({
   patchCount,
   errorCount,
   checkIds,
+  checkFingerprints,
   uncodedErrors,
+  rejectionStreak,
+  escalated,
 } = {}) {
   const item = {
     at: Date.now(),
@@ -148,10 +218,22 @@ export function recordPasteHandoffDiagnostic({
     patchCount: boundedInteger(patchCount, 1_000),
     errorCount: boundedInteger(errorCount, 10_000),
     checkIds: boundedCheckIds(checkIds),
+    // Which branch of each id in checkIds fired, so a repeated rejection at
+    // one revision can be read as "the same branch again" versus "a different
+    // branch of the same rule" — see this file's own header and
+    // pasteRejectionCheckIds' header in electron/ipc/localAiApplication.js.
+    checkFingerprints: boundedCheckFingerprints(checkFingerprints),
     // How many of those items named no rule at all. Without it, "6 items ·
     // failed checks redundancy" cannot be read: six instances of one rule and
     // one rule plus five unnamed structural failures need different repairs.
     uncodedErrors: boundedInteger(uncodedErrors, 10_000),
+    // The caller's own consecutive-rejection count for this job/stage, and
+    // whether this round's correction prompt actually carried an escalation
+    // block — this file's own header on the two params explains why
+    // `escalated` is read from the caller rather than derived here by
+    // comparing `rejectionStreak` to a threshold.
+    rejectionStreak: boundedInteger(rejectionStreak, 10_000),
+    escalated: typeof escalated === 'boolean' ? escalated : null,
   };
   // Successful submissions need no rejection metadata — except the one reason
   // value an acceptance can itself carry: STALE_ECHO_TOLERATED records that
@@ -165,7 +247,10 @@ export function recordPasteHandoffDiagnostic({
     item.artifactCandidates = null;
     item.errorCount = null;
     item.checkIds = null;
+    item.checkFingerprints = null;
     item.uncodedErrors = null;
+    item.rejectionStreak = null;
+    item.escalated = null;
   }
   receipts.push(item);
   if (receipts.length > RING_LIMIT) receipts.shift();
@@ -173,7 +258,11 @@ export function recordPasteHandoffDiagnostic({
 
 export function getPasteHandoffDiagnosticsSnapshot() {
   const total = receipts.length;
-  const shown = receipts.slice(-REPORT_LIMIT).map(item => ({ ...item, checkIds: item.checkIds ? [...item.checkIds] : null }));
+  const shown = receipts.slice(-REPORT_LIMIT).map(item => ({
+    ...item,
+    checkIds: item.checkIds ? [...item.checkIds] : null,
+    checkFingerprints: item.checkFingerprints ? { ...item.checkFingerprints } : null,
+  }));
   return { receipts: shown, total, omitted: Math.max(0, total - shown.length), limit: REPORT_LIMIT, sourceLimit: RING_LIMIT };
 }
 
@@ -238,11 +327,28 @@ export function buildPasteHandoffDiagnosticsMarkdown() {
     // round also produced structural items that carry no check id.
     const errorCount = item.outcome === 'rejected' && Number.isInteger(item.errorCount)
       ? ` · ${item.errorCount} validation item(s)` : '';
+    // Each id carries its fingerprint in parens when one was recorded, so a
+    // reader sees which rule AND which of that rule's branches fired — e.g.
+    // "failed checks direct-welcome-closing (a1b2c3d4)" — without disturbing
+    // the base "failed checks <id>, <id>" shape existing reports and tests
+    // already recognize when no fingerprint was supplied.
     const checks = item.outcome === 'rejected' && item.checkIds?.length
-      ? ` · failed checks ${item.checkIds.join(', ')}` : '';
+      ? ` · failed checks ${item.checkIds.map(id => `${id}${item.checkFingerprints?.[id] ? ` (${item.checkFingerprints[id]})` : ''}`).join(', ')}` : '';
     const uncoded = item.outcome === 'rejected' && item.uncodedErrors
       ? ` · ${item.uncodedErrors} item(s) named no rule` : '';
-    lines.push(`- ${at} · stage \`${item.stage}\` · ${item.outcome}${reason}${size}${revision}${logCount}${delta}${echo}${errorCount}${checks}${uncoded}${location}${artifacts}`);
+    // The consecutive-rejection count, and whether THIS round's correction
+    // prompt actually carried an escalation block — the field a filed report
+    // of a stuck streak never had (recordPasteHandoffDiagnostic's own header:
+    // `grep -c streak` on one such report was 0). "(escalation sent)" prints
+    // only when `escalated` is true, never derived from `rejectionStreak`
+    // reaching a threshold here — the two are read from the caller
+    // independently because they can diverge (same header). Without the
+    // marker, a reader cannot tell "escalation fired and the writer still
+    // repeated the branch" from "escalation never fired" — both look like a
+    // rising streak number on their own.
+    const streak = item.outcome === 'rejected' && Number.isInteger(item.rejectionStreak)
+      ? ` · streak ${item.rejectionStreak}${item.escalated ? ' (escalation sent)' : ''}` : '';
+    lines.push(`- ${at} · stage \`${item.stage}\` · ${item.outcome}${reason}${size}${revision}${logCount}${delta}${echo}${errorCount}${checks}${uncoded}${streak}${location}${artifacts}`);
   }
   return `\n${lines.join('\n')}\n`;
 }

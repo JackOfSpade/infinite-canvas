@@ -182,7 +182,7 @@ export function applicationStageLabel(stage) {
  *
  * `handoff` is exactly what getLocalApplicationHandoff returns:
  * { jobId, stage, revision, handoffCode, baseHashes, prompt, draft,
- *   corrections?, correctionPrompt? }.
+ *   corrections?, correctionPrompt?, rejectionEscalation?, correctionsRecovered? }.
  *
  * Field choices that matter to the dock's existing logic:
  *  - `runId` is the job id, and `task` is the stage. Advancing a stage keeps
@@ -196,6 +196,26 @@ export function applicationStageLabel(stage) {
  *    numbering the dock already shows for unnumbered prompts.
  *  - `isCorrection` follows the presence of corrections, so the dock's
  *    existing correction banner and Copy-correction-prompt label apply.
+ *  - `rejectionEscalation` is copied straight off `handoff`, never recomputed
+ *    here: electron/ipc/localAiApplication.js already tracks a per-check-id
+ *    consecutive-failure count (PASTE_REJECTION_ESCALATION_STREAK) and hands
+ *    back { active, checkIds, streak, trimmedFromPrompt } whenever a
+ *    correction prompt exists, so re-deriving it from `corrections` here
+ *    would only be a second, driftable copy of that math. Normalized to
+ *    `null` for anything else — an older cached record, a build that predates
+ *    the field, or a malformed payload — so NonApiAiDialog can treat its
+ *    absence as "nothing to show" with one check instead of a shape guard per
+ *    consumer, and a non-correction round (where the main process never sets
+ *    it at all) renders exactly as it did before this field existed.
+ *  - `correctionsRecovered` is threaded the same way, for the same reason:
+ *    electron/ipc/localAiApplication.js sets it only when a restart discarded
+ *    the in-memory `pasteCorrectionsByJob` entry (electron/ipc/localAiApplication.js's
+ *    own header on THE BUG this exists for) and this process rehydrated the
+ *    outstanding-correction COUNT from the durable rejection trace instead of
+ *    ever having seen the live items — never on an ordinary round, and never
+ *    on a live correction round in the same process. Copied verbatim, not
+ *    recomputed, and normalized to `null` the same way for the same set of
+ *    "this build/record does not have it" cases.
  */
 export function applicationDockRequest({ node, handoff, canvasFilePath = null }) {
   const local = node?.data?.localApplication;
@@ -219,6 +239,12 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
     corrections,
     correctionPrompt: typeof handoff.correctionPrompt === 'string' ? handoff.correctionPrompt : '',
     isCorrection: corrections.length > 0,
+    rejectionEscalation: (handoff.rejectionEscalation && typeof handoff.rejectionEscalation === 'object')
+      ? handoff.rejectionEscalation
+      : null,
+    correctionsRecovered: (handoff.correctionsRecovered && typeof handoff.correctionsRecovered === 'object')
+      ? handoff.correctionsRecovered
+      : null,
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
   };
@@ -256,6 +282,8 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
     corrections: [],
     correctionPrompt: '',
     isCorrection: false,
+    rejectionEscalation: null,
+    correctionsRecovered: null,
     integrityMessage: text,
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
@@ -296,6 +324,8 @@ export function workingApplicationDockRequest({ node, canvasFilePath = null, sta
     corrections: [],
     correctionPrompt: '',
     isCorrection: false,
+    rejectionEscalation: null,
+    correctionsRecovered: null,
     working: true,
     workingState: applicationDockItemState(status),
     label: company || title || 'Application',

@@ -163,6 +163,105 @@ const dockItemSummary = (request) => {
   return requestLabel(request);
 };
 
+// Single source of truth for "which check ids does this escalation actually
+// name" — every caller below (the gate, the headline, and the singular/plural
+// wording in the panel banner) must agree on this list, because a
+// `checkIds` entry that is falsy-but-present (e.g. `['']` or `[null]`, which
+// nothing in electron/ipc/localAiApplication.js currently sends, but this
+// file must not trust that) is not a name at all. Filtering once here means
+// the gate and the render can never see a different count than each other.
+const escalationCheckIds = (escalation) => (
+  Array.isArray(escalation?.checkIds) ? escalation.checkIds.filter(Boolean) : []
+);
+
+// True only for a `rejectionEscalation` that actually says something: the
+// object exists, `active` is true, and it names at least one check id (after
+// the falsy-filtering above). Every call site below gates on this rather
+// than on `request.rejectionEscalation` alone, because a defensive
+// `{ active: true, checkIds: [] }` — or one whose ids are all falsy — would
+// otherwise pass a truthy check and then render an empty subject in
+// `escalationHeadline`.
+const hasActiveEscalation = (escalation) => (
+  escalation?.active === true && escalationCheckIds(escalation).length > 0
+);
+
+// One sentence naming WHICH check is stuck and HOW MANY times in a row, in
+// the same wording pasteRejectionEscalationBlock (electron/ipc/localAiApplication.js)
+// puts inside the correction prompt itself — so a person who has already read
+// that paragraph in a prior round recognizes this badge/banner as the same
+// fact, not a second, differently-worded claim about their own stuck loop.
+// Deliberately reimplemented rather than imported: that function lives in the
+// main process and builds a multi-paragraph instruction block; this is a
+// single human-facing headline for a renderer badge, and importing main-
+// process prompt machinery into the renderer is not a trade worth making for
+// one shared sentence.
+const escalationHeadline = (escalation) => {
+  const ids = escalationCheckIds(escalation);
+  if (!ids.length) return '';
+  const subject = ids.length === 1 ? `Check "${ids[0]}"` : `Checks ${ids.map(id => `"${id}"`).join(', ')}`;
+  const verb = ids.length === 1 ? 'has' : 'have';
+  const streak = Number.isFinite(escalation?.streak) ? escalation.streak : 0;
+  return `${subject} ${verb} now rejected ${streak} consecutive response${streak === 1 ? '' : 's'} in a row.`;
+};
+
+// Same falsy-filtering discipline as escalationCheckIds, and for the same
+// reason: `correctionsRecovered.checkIds` is a durable-trace echo (electron/
+// ipc/localAiApplication.js), copied onto the dock item verbatim, never
+// computed in this file — so a defensive-but-empty array, or one holding only
+// falsy entries, must not be read as "named checks" here either. UNLIKE
+// escalationCheckIds' own gate (hasActiveEscalation), an empty result here
+// does NOT disqualify the notice: the contract itself documents `checkIds` as
+// "may be empty" — a rejection round can be entirely uncoded (see
+// pasteRejectionCheckIds' own `uncodedErrors`) and a restart can genuinely
+// recover "N rejections, 0 named checks", which is still worth saying, just
+// without a checks clause (see correctionsRecoveredSummary below).
+const correctionsRecoveredCheckIds = (recovered) => (
+  Array.isArray(recovered?.checkIds) ? recovered.checkIds.filter(Boolean) : []
+);
+
+// True only for a `correctionsRecovered` that the main process actually set
+// this round: electron/ipc/localAiApplication.js sets `active: true` only
+// when THIS field exists at all (see applicationHandoffDock.js's own comment
+// on the field) — there is no "present but inactive" shape to additionally
+// guard against the way `rejectionEscalation` has, so the object existing and
+// `active === true` is the whole gate.
+const hasActiveCorrectionsRecovered = (recovered) => recovered?.active === true;
+
+// `lastAt` is the durable trace's own ISO timestamp (Paste Rejections.json),
+// never something this file computed, so an unparsable value must degrade to
+// omitting the clause it feeds, not to rendering "Invalid Date" or throwing.
+const formatCorrectionsRecoveredAt = (lastAt) => {
+  if (typeof lastAt !== 'string' || !lastAt) return '';
+  const date = new Date(lastAt);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '';
+};
+
+// The notice's one sentence of fact, read directly off the durable-trace
+// fields the main process rehydrated (active, itemCount, checkIds,
+// rejectionCount, lastAt — see localAiApplication.js's correctionsRecovered
+// doc comment for what each one is). Every field is read defensively,
+// independently of the others, because this object crossed a process
+// restart via disk rather than living memory: a partial or malformed shape
+// must degrade the one clause it feeds and leave the rest of the sentence
+// intact, never throw and never block the notice from rendering at all.
+const correctionsRecoveredSummary = (recovered) => {
+  const ids = correctionsRecoveredCheckIds(recovered);
+  const rejectionCount = Number.isFinite(recovered?.rejectionCount) ? recovered.rejectionCount : null;
+  const itemCount = Number.isFinite(recovered?.itemCount) ? recovered.itemCount : null;
+  const lastAt = formatCorrectionsRecoveredAt(recovered?.lastAt);
+  const itemClause = itemCount != null
+    ? `${itemCount} outstanding correction item${itemCount === 1 ? '' : 's'}`
+    : 'outstanding corrections';
+  const rejectionClause = rejectionCount != null
+    ? `rejected ${rejectionCount} time${rejectionCount === 1 ? '' : 's'} in a row`
+    : 'rejected before this restart';
+  const checkClause = ids.length
+    ? ` on ${ids.length === 1 ? `check "${ids[0]}"` : `checks ${ids.map(id => `"${id}"`).join(', ')}`}`
+    : '';
+  const atClause = lastAt ? `, most recently at ${lastAt}` : '';
+  return `This stage already has ${itemClause} from before a restart — ${rejectionClause}${checkClause}${atClause}.`;
+};
+
 // What the person is being asked to fix this round. A correction round keeps
 // its stage's handoff code, so this is what distinguishes one round from the
 // next for the same prompt.
@@ -505,6 +604,26 @@ export function NonApiAiDialog() {
   const correctionGuidance = isCorrection
     ? correctionGuidanceFor(validationCode, activeRequest?.validationDiagnostic)
     : '';
+  // Set only for an application round whose correction prompt actually
+  // carried an escalation block — never recomputed, only read off the item
+  // applicationDockRequest copied it onto (see that function's own header).
+  // Independent of showingFullRestartPrompt below: switching to the full
+  // stage prompt changes which TEXT is on screen, not whether this round is
+  // the one where a check got stuck, so the banner has to survive that
+  // toggle rather than disappear the moment someone reaches for the escape
+  // hatch.
+  const activeRejectionEscalation = isApplicationRequest && hasActiveEscalation(activeRequest?.rejectionEscalation)
+    ? activeRequest.rejectionEscalation
+    : null;
+  // Mirrors activeRejectionEscalation immediately above: gated on
+  // isApplicationRequest first so a non-application request never reads this
+  // field at all, then on hasActiveCorrectionsRecovered so an absent,
+  // undefined, or `active`-false payload — including every build that
+  // predates this field — resolves to null and the notice below simply does
+  // not render, exactly as if this field did not exist.
+  const activeCorrectionsRecovered = isApplicationRequest && hasActiveCorrectionsRecovered(activeRequest?.correctionsRecovered)
+    ? activeRequest.correctionsRecovered
+    : null;
 
   useEffect(() => {
     const api = window.electronAPI;
@@ -1486,6 +1605,16 @@ export function NonApiAiDialog() {
                 // separate because it outlives any one action and is the
                 // reason this chip is still on screen at all.
                 const isBundleSaving = Boolean(request.working);
+                // A chip whose round got stuck on the SAME check three (or
+                // more) times running — see hasActiveEscalation's own header.
+                // Rendered as a ring + icon rather than folded into the plain
+                // hasError dot below: a correction round already turns that
+                // dot red, so a THIRD rejection of the same check would look
+                // identical to a first, which is exactly the invisibility
+                // this exists to fix (see this file's module header for the
+                // measured incident: 16 rounds on one check, nothing on
+                // screen told the person their loop was the same one).
+                const isEscalated = hasActiveEscalation(request.rejectionEscalation);
                 // A full handoff code is already shown in the prompt header.
                 // These controls only select a queued prompt, so one batch
                 // number per button keeps ten concurrent prompts visible. The
@@ -1495,6 +1624,11 @@ export function NonApiAiDialog() {
                 const ownerBadge = multipleHubQueue ? ownerBadgeForNode(request.nodeId) : null;
                 const chipLabel = ownerBadge ? `${ownerBadge} · ${label}` : label;
                 const statusLabel = [
+                  // Leads the list: a stuck check outranks every other status
+                  // word here, and the ring on the button itself carries no
+                  // text of its own, so the accessible name is the only place
+                  // this sentence exists at all for someone who cannot see it.
+                  isEscalated ? `stuck — ${escalationHeadline(request.rejectionEscalation)}` : null,
                   isBundleSaving
                     ? (request.workingState === 'blocked' ? 'needs a layout retry' : 'still saving')
                     : null,
@@ -1526,7 +1660,13 @@ export function NonApiAiDialog() {
                     title={selectorDescription}
                     className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${selected
                       ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
-                      : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
+                      : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}${
+                      // A ring survives the button's own selected/unselected
+                      // color swap above, so the same chip still reads as
+                      // stuck whether or not it is the one currently open —
+                      // the failure this exists for is a person who never
+                      // reopens it because nothing here told them to.
+                      isEscalated ? ' ring-2 ring-red-400/80 ring-offset-1 ring-offset-neutral-900' : ''}`}
                   >
                     <span>{selectorLabel}</span>
                     {/*
@@ -1539,6 +1679,12 @@ export function NonApiAiDialog() {
                       request.workingState === 'blocked'
                         ? <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-amber-300" />
                         : <LoaderCircle size={10} className="animate-spin text-violet-200" aria-hidden="true" />
+                    ) : isEscalated ? (
+                      // A triangle rather than the plain color dot below: an
+                      // ordinary correction already turns that dot red, so
+                      // the THIRD rejection of the same check needs a shape
+                      // that does not already mean "needs correction".
+                      <AlertTriangle size={10} className="shrink-0 text-red-300" aria-hidden="true" />
                     ) : (hasDraft || isWorking || hasError) && (
                       <span
                         aria-hidden="true"
@@ -1608,6 +1754,86 @@ export function NonApiAiDialog() {
             </div>
           ) : (
             <>
+              {activeCorrectionsRecovered && (
+                // THE BUG this notice exists for: a restart discards the
+                // in-memory `pasteCorrectionsByJob` entry (electron/ipc/
+                // localAiApplication.js's own header), so the person is
+                // otherwise handed a clean-looking prompt with no sign this
+                // stage was already rejected N times — and the chat they'd
+                // normally continue is not known to still be open, so
+                // pasting the correction as if it were is not safe advice
+                // either. Amber, not the escalation banner's red below: this
+                // reports a STATE (what this process inherited from disk),
+                // not a live gate failing again in front of the person right
+                // now, and it needs to read as a different KIND of notice,
+                // not a redder or calmer version of the same one. Placed
+                // first and `role="alert"` for the same reason as the
+                // escalation banner — the first thing on screen, announced
+                // unprompted — but see that banner's own updated gate just
+                // below for why the two never render together: this one's
+                // summary sentence already carries the rejection count and
+                // the check id(s) the escalation banner would otherwise
+                // repeat, and showing both would print the same numbers
+                // twice, in two different colors, for one restart.
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-3 text-xs leading-relaxed text-amber-100"
+                >
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0 text-amber-300" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-amber-50">
+                      Corrections carried over from before a restart
+                    </div>
+                    <div className="mt-1 text-amber-100/80">
+                      {correctionsRecoveredSummary(activeCorrectionsRecovered)}
+                    </div>
+                    <div className="mt-1.5 font-semibold text-amber-50">
+                      The chat that produced that earlier draft is not known to still be open. The prompt below is
+                      the self-contained version meant for a NEW chat — not a continuation of that one.
+                    </div>
+                  </div>
+                </div>
+              )}
+              {activeRejectionEscalation && !activeCorrectionsRecovered && (
+                // The one thing on this panel a skim cannot miss: red (not
+                // the amber this file uses for an ordinary correction),
+                // `role="alert"` so a screen reader announces it unprompted,
+                // and placed ABOVE the intro paragraph so it is the first
+                // thing on screen — not spliced into prose that already
+                // looked identical to the last three rounds. See
+                // hasActiveEscalation's own header for why this is gated on
+                // the escalation being ACTIVE, not merely present. Also gated
+                // on !activeCorrectionsRecovered — see that notice's own
+                // comment for why the two must not stack.
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-lg border border-red-400/40 bg-red-500/15 px-3 py-3 text-xs leading-relaxed text-red-100"
+                >
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0 text-red-300" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-red-50">
+                      Stuck on the same check: {escalationHeadline(activeRejectionEscalation)}
+                    </div>
+                    <div className="mt-1 text-red-100/80">
+                      Re-reading the same feedback and rewriting the prose around it has not worked. Make a literal
+                      edit to exactly what {escalationCheckIds(activeRejectionEscalation).length === 1 ? 'that check names' : 'those checks name'},
+                      not a rewrite of the paragraph or bullet it lives in.
+                    </div>
+                    {activeRejectionEscalation.trimmedFromPrompt && (
+                      // The one case the copied prompt text cannot say this
+                      // itself — see localAiApplication.js's rejectionEscalation
+                      // doc comment (escalationTrimmed): the block was cut to
+                      // fit the stage-prompt length budget, so this sentence
+                      // in the UI is the ONLY place the guidance above still
+                      // reaches the person before they paste.
+                      <div className="mt-1.5 font-semibold text-amber-200">
+                        This guidance was cut from the copied prompt to keep it a reasonable length — it is not in the
+                        text below. Read it here before you copy and paste.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               <p className="text-sm leading-relaxed text-white/70">
                 {isCorrection
                   ? 'The previous answer did not validate. Copy this correction prompt into the same AI chat, then replace the response below with the complete regenerated answer.'
@@ -1651,6 +1877,25 @@ export function NonApiAiDialog() {
                     {isApplicationRequest && showingApplicationCorrection && !showingFullRestartPrompt && (
                       <span className="inline-flex rounded border border-amber-400/30 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
                         {activeApplicationCorrections.length === 1 ? '1 fix to send' : `${activeApplicationCorrections.length} fixes to send`}
+                      </span>
+                    )}
+                    {/*
+                      A second badge, not a swap of the one above: "N fixes to
+                      send" answers "how much text is this round", which is
+                      still true and still useful, while this answers a
+                      different question — "have I seen this exact fix
+                      before" — that badge cannot answer because it reads the
+                      same on round 1 and round 4 of the identical check. Red
+                      rather than amber so it cannot be mistaken for a variant
+                      of the count badge it sits beside.
+                    */}
+                    {activeRejectionEscalation && !showingFullRestartPrompt && (
+                      <span
+                        title={escalationHeadline(activeRejectionEscalation)}
+                        className="inline-flex items-center gap-1 rounded border border-red-400/40 bg-red-500/20 px-2 py-0.5 text-[11px] font-semibold text-red-100"
+                      >
+                        <AlertTriangle size={11} aria-hidden="true" />
+                        Stuck{Number.isFinite(activeRejectionEscalation.streak) ? ` ×${activeRejectionEscalation.streak}` : ''}
                       </span>
                     )}
                   </div>

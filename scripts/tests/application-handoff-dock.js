@@ -927,6 +927,487 @@ export default [
     },
   },
   {
+    name: 'application dock: rejectionEscalation threads onto dock items exactly as the handoff sent it',
+    run: () => {
+      const node = jobCard('card-1', pasteJob('job-1'));
+      // Mirrors the shape pasteHandoffRecord (electron/ipc/localAiApplication.js)
+      // writes onto record.rejectionEscalation when a check individually
+      // crossed PASTE_REJECTION_ESCALATION_STREAK.
+      const escalation = { active: true, checkIds: ['direct-welcome-closing'], streak: 3, trimmedFromPrompt: false };
+      const item = applicationDockRequest({
+        node,
+        handoff: handoffRecord({
+          corrections: ['Says the letter closes by naming the employer.'],
+          correctionPrompt: 'Fix only this.',
+          rejectionEscalation: escalation,
+        }),
+      });
+      assert(
+        item.rejectionEscalation === escalation,
+        'the dock item must carry the SAME object the handoff sent — applicationDockRequest must never recompute it (see its own doc comment)',
+      );
+
+      // A fresh (non-correction) round never carries the field at all — the
+      // main process only sets it alongside a correction prompt.
+      const fresh = applicationDockRequest({ node, handoff: handoffRecord() });
+      assert(fresh.rejectionEscalation === null, 'a fresh stage with no escalation field must normalize to null, not undefined');
+
+      // A malformed or missing field must degrade to null rather than be
+      // passed through as-is: NonApiAiDialog's hasActiveEscalation trusts
+      // `rejectionEscalation` to be either an object or null, never a stray
+      // primitive a future caller could send.
+      for (const malformed of [undefined, null, 'active', 42, true]) {
+        const bad = applicationDockRequest({ node, handoff: handoffRecord({ rejectionEscalation: malformed }) });
+        assert(bad.rejectionEscalation === null, `a malformed rejectionEscalation (${JSON.stringify(malformed)}) must normalize to null`);
+      }
+
+      // The broken and working variants never see a handoff at all, so they
+      // must declare the same null EXPLICITLY — consistent with every other
+      // field these two already mirror from applicationDockRequest's shape.
+      const broken = brokenApplicationDockRequest({ node, message: 'x' });
+      const working = workingApplicationDockRequest({ node, status: 'importing' });
+      assert(broken.rejectionEscalation === null, 'a broken bundle carries no escalation');
+      assert(working.rejectionEscalation === null, 'a working bundle carries no escalation');
+    },
+  },
+  {
+    name: 'application dock: an active escalation renders a hard-to-skim signal naming the check id(s) and streak',
+    run: () => {
+      // NonApiAiDialog is never mounted by this suite (no render-phase
+      // coverage exists here — see the project's own known blind spot), so
+      // this locks the RENDER LOGIC the same way every other conditional-
+      // render fact in this file is locked: by asserting the exact source
+      // that gates it is present, in the right shape. A future edit that
+      // silently drops the gate, or folds it into the ordinary hasError
+      // dot/badge it exists to be distinct from, fails this test.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+
+      // The gate itself: true only when active AND at least one check id is
+      // named, so a defensive-but-empty payload cannot render a blank claim.
+      // Routed through escalationCheckIds (shared with escalationHeadline
+      // below) rather than a raw `.checkIds.length` so a falsy-only array
+      // (`['']`/`[null]`) can never pass the gate and then render nothing —
+      // see the dedicated agreement test below.
+      assert(
+        dock.includes('escalation?.active === true && escalationCheckIds(escalation).length > 0'),
+        'hasActiveEscalation must require both an active flag and a non-empty (post-falsy-filter) checkIds list',
+      );
+      // The headline sentence must name the check id and the streak count —
+      // the two facts the bug report says are invisible today.
+      assert(
+        dock.includes('now rejected ${streak} consecutive response'),
+        'escalationHeadline must state the consecutive-rejection count in its own sentence',
+      );
+      assert(
+        dock.includes('`Check "${ids[0]}"`') && dock.includes('Checks ${ids.map(id => `"${id}"`).join(\', \')}'),
+        'escalationHeadline must name the stuck check id(s) verbatim',
+      );
+
+      // The panel banner: role="alert" (announced unprompted, unlike the
+      // amber role="status" bundle-saving block above it), red rather than
+      // the amber this file already uses for an ordinary correction, and
+      // gated on the escalation being ACTIVE — not merely on isCorrection,
+      // or every ordinary correction round would show it.
+      const bannerIndex = dock.indexOf('{activeRejectionEscalation && !activeCorrectionsRecovered && (');
+      assert(bannerIndex >= 0, 'the panel must render a block gated on activeRejectionEscalation');
+      const bannerSlice = dock.slice(bannerIndex, bannerIndex + 1600);
+      assert(bannerSlice.includes('role="alert"'), 'the escalation banner must be role="alert", not a passive status region');
+      assert(bannerSlice.includes('border-red-400/40'), 'the escalation banner must use red, not the amber vocabulary of an ordinary correction');
+      assert(bannerSlice.includes('Stuck on the same check: {escalationHeadline(activeRejectionEscalation)}'), 'the banner must state plainly which check is stuck and print its own headline sentence');
+      // It must be positioned ABOVE the ordinary correction paragraph, not
+      // spliced into it — the exact failure mode the bug report describes
+      // (a signal buried mid-prompt that a skim never reaches).
+      const introIndex = dock.indexOf('The previous answer did not validate');
+      assert(introIndex > bannerIndex, 'the escalation banner must render before the ordinary correction intro paragraph, not after it');
+
+      // The chip strip: a ring distinct from the selected/unselected border
+      // colors, and a triangle icon replacing the plain color dot so a
+      // THIRD rejection cannot look identical to a first (the dot is already
+      // red for any hasError chip).
+      assert(dock.includes("isEscalated ? ' ring-2 ring-red-400/80 ring-offset-1 ring-offset-neutral-900' : ''"), 'an escalated chip must carry a ring distinct from its selected/unselected border colors');
+      assert(dock.includes(') : isEscalated ? (') && dock.includes('<AlertTriangle size={10} className="shrink-0 text-red-300" aria-hidden="true" />'), 'an escalated chip must swap its status dot for a triangle icon, not reuse the plain hasError dot');
+      // And the accessible name (aria-label/title both read selectorDescription)
+      // must carry the fact too, for anyone who cannot see the ring.
+      assert(
+        dock.includes('isEscalated ? `stuck — ${escalationHeadline(request.rejectionEscalation)}` : null,'),
+        'the chip\'s accessible description must lead with the escalation sentence, not bury it after the ordinary status words',
+      );
+
+      // The second, dedicated "Stuck ×N" badge beside the existing fix-count
+      // chip — the exact line the bug report names ("the dock chip reads
+      // '1 fix to send' identically whether the streak is 1, 2 or 3").
+      assert(
+        dock.includes('Stuck{Number.isFinite(activeRejectionEscalation.streak) ? ` ×${activeRejectionEscalation.streak}` : \'\'}'),
+        'a dedicated Stuck ×N badge must sit beside the fix-count chip so streak 1/2/3 no longer render identically',
+      );
+    },
+  },
+  {
+    // Executes the real gate/headline logic (not just a string match) by
+    // pulling the three verbatim const declarations out of the component
+    // source and evaluating them — same technique job-role-lock-regressions.js
+    // and solve-ipc-failure.js already use to exercise renderer-only pure
+    // logic without mounting React (see this file's own known blind spot,
+    // noted above). Proves the bug directly: hasActiveEscalation and
+    // escalationHeadline must agree on every shape, including a `checkIds`
+    // array whose entries are ALL falsy (e.g. `['']`/`[null]`) — before the
+    // fix, that shape passed the gate (non-empty array) and then rendered a
+    // headline naming nothing, because escalationHeadline filtered falsy
+    // entries and the gate did not.
+    name: 'application dock: hasActiveEscalation and escalationHeadline agree on every checkIds shape, including falsy-only entries',
+    run: () => {
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const start = dock.indexOf('const escalationCheckIds = (escalation) => (');
+      assert(start >= 0, 'could not locate the escalationCheckIds declaration to extract -- has it been renamed?');
+      const headlineStart = dock.indexOf('const escalationHeadline = (escalation) => {', start);
+      assert(headlineStart > start, 'could not locate the escalationHeadline declaration after escalationCheckIds -- has ordering changed?');
+      const end = dock.indexOf('\n};', headlineStart);
+      assert(end > headlineStart, 'could not find escalationHeadline\'s closing brace to bound the extracted source');
+      const body = dock.slice(start, end + 3);
+      const { escalationCheckIds, hasActiveEscalation, escalationHeadline } = new Function(
+        `${body}\nreturn { escalationCheckIds, hasActiveEscalation, escalationHeadline };`,
+      )();
+
+      // The exact shape the bug report names: every entry falsy, so the OLD
+      // gate (`Array.isArray(checkIds) && checkIds.length > 0`) passed on the
+      // raw array length while escalationHeadline's own internal filter threw
+      // every entry away and returned ''. Both must now say "no" together.
+      for (const checkIds of [[''], [null], [undefined], [0], [false], ['', null, 0, false]]) {
+        const escalation = { active: true, checkIds, streak: 4 };
+        assert(hasActiveEscalation(escalation) === false,
+          `a checkIds array of only falsy entries (${JSON.stringify(checkIds)}) must not gate as an active escalation`);
+        assert(escalationHeadline(escalation) === '',
+          `escalationHeadline must return '' (never a blank-subject sentence) for an all-falsy checkIds array, got ${JSON.stringify(escalationHeadline(escalation))}`);
+      }
+
+      // A normal, real escalation must still render exactly as before --
+      // this fix must not have narrowed the gate past legitimate payloads.
+      const real = { active: true, checkIds: ['direct-welcome-closing'], streak: 3 };
+      assert(hasActiveEscalation(real) === true, 'a real, active, named escalation must still gate as active');
+      assert(escalationHeadline(real) === 'Check "direct-welcome-closing" has now rejected 3 consecutive responses in a row.',
+        `escalationHeadline must still name the real check id and streak verbatim, got ${JSON.stringify(escalationHeadline(real))}`);
+
+      // A mixed array (some falsy, some real) must gate as active and name
+      // ONLY the real id(s) -- escalationCheckIds is the single filter both
+      // the gate and the headline read, so they cannot possibly diverge here.
+      const mixed = { active: true, checkIds: ['', 'redundancy', null], streak: 2 };
+      assert(hasActiveEscalation(mixed) === true, 'a checkIds array mixing falsy entries with one real id must still gate as active');
+      assert(escalationHeadline(mixed) === 'Check "redundancy" has now rejected 2 consecutive responses in a row.',
+        `escalationHeadline must name only the real id(s) from a mixed array, never a blank one, got ${JSON.stringify(escalationHeadline(mixed))}`);
+      assert(JSON.stringify(escalationCheckIds(mixed)) === JSON.stringify(['redundancy']),
+        'escalationCheckIds must filter falsy entries out for any caller, not just escalationHeadline');
+
+      // Sweep restricted to active:true -- the only condition under which any
+      // call site in this file actually invokes escalationHeadline (every
+      // call site gates on hasActiveEscalation first, per this function's own
+      // header comment). escalationHeadline itself never reads `active` --
+      // that split is intentional, so an inactive-but-checkIds-populated
+      // shape is deliberately excluded here rather than asserted equal; the
+      // invariant this fix establishes is narrower and exact: for any active
+      // escalation, the gate says yes if and only if the headline says
+      // something, regardless of how malformed checkIds is.
+      const sweep = [
+        { active: true, checkIds: ['direct-welcome-closing'], streak: 3 },
+        { active: true, checkIds: [], streak: 1 },
+        { active: true, checkIds: null, streak: 1 },
+        { active: true, checkIds: undefined, streak: 1 },
+        { active: true },
+      ];
+      for (const escalation of sweep) {
+        const gated = hasActiveEscalation(escalation);
+        const headlineIsBlank = escalationHeadline(escalation) === '';
+        assert(gated === !headlineIsBlank,
+          `hasActiveEscalation and escalationHeadline disagreed on ${JSON.stringify(escalation)}: gate=${gated}, headline blank=${headlineIsBlank}`);
+      }
+      // The gate must still independently reject an inactive escalation even
+      // though escalationHeadline (asked directly, bypassing the gate, which
+      // no real call site does) would still describe its checkIds.
+      assert(hasActiveEscalation({ active: false, checkIds: ['direct-welcome-closing'], streak: 1 }) === false,
+        'an inactive escalation must never gate as active, regardless of what its checkIds contain');
+      assert(hasActiveEscalation(null) === false && hasActiveEscalation(undefined) === false,
+        'a missing escalation must never gate as active');
+
+      return { falsyOnlyGated: false, realEscalationStillGates: true, agreementSwept: sweep.length };
+    },
+  },
+  {
+    name: 'application dock: trimmedFromPrompt renders the stronger variant, naming that the copied prompt lacks the guidance',
+    run: () => {
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      // trimmedFromPrompt is the case pasteHandoffRecord's own doc comment
+      // calls out as the one path where the copied prompt text CANNOT say
+      // this itself (escalationTrimmed cut the block for length) — so the
+      // UI has to be the only place the guidance still reaches the person,
+      // and has to say so explicitly rather than silently showing nothing
+      // extra.
+      const trimmedIndex = dock.indexOf('{activeRejectionEscalation.trimmedFromPrompt && (');
+      assert(trimmedIndex >= 0, 'the banner must branch explicitly on trimmedFromPrompt');
+      // Collapse JSX's own line-wrapping whitespace before matching prose —
+      // the source wraps this sentence across lines like every other
+      // paragraph in this file, so a literal-phrase match would be broken by
+      // reformatting alone rather than by an actual change in meaning.
+      const trimmedProse = dock.slice(trimmedIndex, trimmedIndex + 1200).replace(/\s+/g, ' ');
+      assert(
+        /cut from the copied prompt/i.test(trimmedProse) && /not in the text below/i.test(trimmedProse),
+        'the trimmed variant must say plainly that the guidance is missing from the copied prompt text, not just repeat the ordinary banner',
+      );
+      // It must render INSIDE the same alert (nested under the trimmedFromPrompt
+      // branch above), i.e. additive to the ordinary banner rather than a
+      // silent swap — someone still needs the "which check, how many times"
+      // headline even in the trimmed case.
+      const bannerIndex = dock.indexOf('{activeRejectionEscalation && !activeCorrectionsRecovered && (');
+      assert(bannerIndex >= 0 && bannerIndex < trimmedIndex, 'the trimmed-variant branch must live inside the main escalation banner, not replace it');
+    },
+  },
+  {
+    name: 'application dock: absent or inactive rejectionEscalation renders exactly as before this field existed',
+    run: () => {
+      // Every non-correction round (no corrections at all), and any cached
+      // record from a build that predates this field, must produce an item
+      // whose escalation UI is fully inert — no thrown error, no banner, no
+      // chip ring — because activeRejectionEscalation collapses to null.
+      const node = jobCard('card-1', pasteJob('job-1'));
+      assert(
+        applicationDockRequest({ node, handoff: handoffRecord() }).rejectionEscalation === null,
+        'a non-correction round must carry a null escalation, never undefined or a stray truthy placeholder',
+      );
+      // An escalation object that exists but never actually fired (the main
+      // process always sends active:false with an empty checkIds array for
+      // "nothing qualified this round" — see pasteRejectionEscalatedIds'
+      // own header) must be exactly as inert as a null one.
+      const inactiveShapes = [
+        { active: false, checkIds: [], streak: 0, trimmedFromPrompt: false },
+        { active: true, checkIds: [], streak: 0, trimmedFromPrompt: false }, // defensive: active with nothing named
+      ];
+      for (const shape of inactiveShapes) {
+        const item = applicationDockRequest({
+          node,
+          handoff: handoffRecord({ corrections: ['x'], correctionPrompt: 'y', rejectionEscalation: shape }),
+        });
+        // applicationDockRequest itself must pass the object through unchanged
+        // (it is not this function's job to interpret active/checkIds) — the
+        // inertness is NonApiAiDialog's hasActiveEscalation gate, asserted
+        // below by source.
+        assert(item.rejectionEscalation === shape, 'applicationDockRequest must not reinterpret the escalation object, only normalize its outer shape');
+      }
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      // The gate that makes both shapes above inert on screen: requires
+      // active === true AND a non-empty checkIds array, so neither
+      // `{active:false,...}` nor `{active:true, checkIds:[]}` can light the
+      // banner, the chip ring, or the Stuck badge.
+      assert(
+        dock.includes('escalation?.active === true && escalationCheckIds(escalation).length > 0'),
+        'the escalation gate must reject an inactive or emptily-active payload, not just a missing one',
+      );
+    },
+  },
+  {
+    name: 'application dock: correctionsRecovered threads onto dock items exactly as the handoff sent it',
+    run: () => {
+      const node = jobCard('card-1', pasteJob('job-1'));
+      // Mirrors the shape electron/ipc/localAiApplication.js's correctionsRecovered
+      // doc comment describes: set only when a restart discarded the in-memory
+      // pasteCorrectionsByJob entry and this process rehydrated the count from
+      // the durable rejection trace instead of ever seeing the items live.
+      const recovered = {
+        active: true,
+        itemCount: 2,
+        checkIds: ['direct-welcome-closing'],
+        rejectionCount: 4,
+        lastAt: '2026-09-24T08:23:19.000Z',
+      };
+      const item = applicationDockRequest({
+        node,
+        handoff: handoffRecord({ correctionsRecovered: recovered }),
+      });
+      assert(
+        item.correctionsRecovered === recovered,
+        'the dock item must carry the SAME object the handoff sent — applicationDockRequest must never recompute it',
+      );
+
+      // An ordinary round — including a live correction round in the same
+      // process — never carries the field at all.
+      const fresh = applicationDockRequest({
+        node,
+        handoff: handoffRecord({ corrections: ['x'], correctionPrompt: 'y' }),
+      });
+      assert(fresh.correctionsRecovered === null, 'a round with no correctionsRecovered field must normalize to null, not undefined');
+
+      // A malformed or missing field must degrade to null rather than pass
+      // through as-is, the same discipline rejectionEscalation already has.
+      for (const malformed of [undefined, null, 'active', 42, true]) {
+        const bad = applicationDockRequest({ node, handoff: handoffRecord({ correctionsRecovered: malformed }) });
+        assert(bad.correctionsRecovered === null, `a malformed correctionsRecovered (${JSON.stringify(malformed)}) must normalize to null`);
+      }
+
+      // The broken and working variants never see a handoff at all, so they
+      // must declare the same null EXPLICITLY, for shape consistency with
+      // every other field applicationDockRequest's items carry.
+      const broken = brokenApplicationDockRequest({ node, message: 'x' });
+      const working = workingApplicationDockRequest({ node, status: 'importing' });
+      assert(broken.correctionsRecovered === null, 'a broken bundle carries no recovered corrections');
+      assert(working.correctionsRecovered === null, 'a working bundle carries no recovered corrections');
+    },
+  },
+  {
+    name: 'application dock: an active correctionsRecovered renders a notice naming the count and check id(s), leading over an active escalation',
+    run: () => {
+      // Same technique as the rejectionEscalation render-logic tests above:
+      // NonApiAiDialog is never mounted by this suite, so the gate and the
+      // banner are locked by asserting the exact source that produces them.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+
+      assert(
+        dock.includes('const hasActiveCorrectionsRecovered = (recovered) => recovered?.active === true;'),
+        'hasActiveCorrectionsRecovered must gate on active === true alone',
+      );
+      assert(
+        dock.includes("return `This stage already has ${itemClause} from before a restart — ${rejectionClause}${checkClause}${atClause}.`;"),
+        'correctionsRecoveredSummary must assemble its sentence from itemClause/rejectionClause/checkClause/atClause',
+      );
+
+      // The panel banner: role="alert", amber (not the escalation banner's
+      // red, and not a bare paragraph like the ordinary correction intro),
+      // gated on activeCorrectionsRecovered, and placed above the ordinary
+      // correction intro paragraph.
+      const bannerIndex = dock.indexOf('{activeCorrectionsRecovered && (');
+      assert(bannerIndex >= 0, 'the panel must render a block gated on activeCorrectionsRecovered');
+      const bannerSlice = dock.slice(bannerIndex, bannerIndex + 2800);
+      assert(bannerSlice.includes('role="alert"'), 'the correctionsRecovered notice must be role="alert", not a passive status region');
+      assert(bannerSlice.includes('border-amber-400/40'), 'the correctionsRecovered notice must use amber, distinct from the escalation banner\'s red');
+      assert(bannerSlice.includes('Corrections carried over from before a restart'), 'the notice must name what it is plainly');
+      assert(bannerSlice.includes('{correctionsRecoveredSummary(activeCorrectionsRecovered)}'), 'the notice must print the rejection-count/check-id summary sentence');
+      assert(
+        /self-contained version meant for a NEW chat/.test(bannerSlice.replace(/\s+/g, ' ')),
+        'the notice must state plainly that the shown prompt is the self-contained one meant for a new chat',
+      );
+      const introIndex = dock.indexOf('The previous answer did not validate');
+      assert(introIndex > bannerIndex, 'the correctionsRecovered notice must render before the ordinary correction intro paragraph, not after it');
+
+      // The two notices must not stack: the escalation banner's own gate must
+      // now also exclude an active correctionsRecovered, so a round where the
+      // main process somehow set both never prints the same rejection count
+      // and check id(s) twice in two colors.
+      assert(
+        dock.includes('{activeRejectionEscalation && !activeCorrectionsRecovered && ('),
+        'the escalation banner must be gated OFF when correctionsRecovered is active, so the two notices never stack',
+      );
+    },
+  },
+  {
+    name: 'application dock: correctionsRecoveredSummary never renders a blank check-id claim for falsy-only, non-array, or empty checkIds',
+    run: () => {
+      // Executes the real gate/summary logic (not just a string match) by
+      // pulling the verbatim const declarations out of the component source
+      // and evaluating them — same technique the escalation agreement test
+      // above uses. Proves directly that an empty or falsy-only checkIds
+      // never produces a dangling "on check """ style clause, the exact bug
+      // class this session's audit found in a sibling helper.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const start = dock.indexOf('const correctionsRecoveredCheckIds = (recovered) => (');
+      assert(start >= 0, 'could not locate the correctionsRecoveredCheckIds declaration to extract -- has it been renamed?');
+      const end = dock.indexOf('\n};', dock.indexOf('const correctionsRecoveredSummary = (recovered) => {', start));
+      assert(end > start, 'could not find correctionsRecoveredSummary\'s closing brace to bound the extracted source');
+      const body = dock.slice(start, end + 3);
+      const {
+        correctionsRecoveredCheckIds, hasActiveCorrectionsRecovered, correctionsRecoveredSummary,
+      } = new Function(
+        `${body}\nreturn { correctionsRecoveredCheckIds, hasActiveCorrectionsRecovered, correctionsRecoveredSummary };`,
+      )();
+
+      // checkIds absent, not an array, empty, or holding only falsy entries —
+      // every shape the task calls out by name. `active` still gates true in
+      // every case: unlike rejectionEscalation, an empty checkIds list does
+      // NOT disqualify correctionsRecovered (the contract documents it as
+      // "may be empty" — see hasActiveCorrectionsRecovered's own header).
+      const blankShapes = [
+        { active: true, itemCount: 3, rejectionCount: 4 }, // checkIds absent entirely
+        { active: true, itemCount: 3, rejectionCount: 4, checkIds: null },
+        { active: true, itemCount: 3, rejectionCount: 4, checkIds: 'direct-welcome-closing' }, // not an array
+        { active: true, itemCount: 3, rejectionCount: 4, checkIds: [] },
+        { active: true, itemCount: 3, rejectionCount: 4, checkIds: [''] },
+        { active: true, itemCount: 3, rejectionCount: 4, checkIds: [null, undefined, 0, false] },
+      ];
+      for (const shape of blankShapes) {
+        assert(hasActiveCorrectionsRecovered(shape) === true, `active:true must still gate active regardless of checkIds shape (${JSON.stringify(shape)})`);
+        assert(JSON.stringify(correctionsRecoveredCheckIds(shape)) === '[]', `a falsy-only/absent/non-array checkIds (${JSON.stringify(shape.checkIds)}) must filter to []`);
+        const summary = correctionsRecoveredSummary(shape);
+        assert(!/on check/.test(summary) && !/on checks/.test(summary), `a blank checkIds must never render a "on check(s)" clause, got ${JSON.stringify(summary)}`);
+        assert(!/""/.test(summary) && !summary.includes('check "'), `a blank checkIds must never leave a dangling empty-quoted name, got ${JSON.stringify(summary)}`);
+        assert(/^This stage already has 3 outstanding correction items from before a restart — rejected 4 times in a row\.$/.test(summary),
+          `the itemCount/rejectionCount clauses must still render for a blank-checkIds shape, got ${JSON.stringify(summary)}`);
+      }
+
+      // A real, named checkIds (single and plural) must still render the
+      // clause correctly, and a mixed falsy/real array must name only the
+      // real id(s) — the same agreement invariant escalationCheckIds already
+      // has to hold.
+      const single = correctionsRecoveredSummary({ active: true, itemCount: 1, rejectionCount: 1, checkIds: ['direct-welcome-closing'] });
+      assert(single.includes('on check "direct-welcome-closing"'), `a single real checkIds entry must be named, got ${JSON.stringify(single)}`);
+      const plural = correctionsRecoveredSummary({ active: true, itemCount: 2, rejectionCount: 2, checkIds: ['a', 'b'] });
+      assert(plural.includes('on checks "a", "b"'), `multiple real checkIds entries must all be named, got ${JSON.stringify(plural)}`);
+      const mixed = correctionsRecoveredSummary({ active: true, itemCount: 1, rejectionCount: 1, checkIds: ['', 'redundancy', null] });
+      assert(mixed.includes('on check "redundancy"') && !mixed.includes('""'), `a mixed array must name only the real id(s), got ${JSON.stringify(mixed)}`);
+
+      // Missing/non-finite itemCount and rejectionCount must degrade their
+      // own clause without throwing and without blocking the rest of the
+      // sentence — the same "one clause degrades, the rest survives" rule
+      // the header comment states.
+      const noCounts = correctionsRecoveredSummary({ active: true, checkIds: ['x'] });
+      assert(
+        noCounts === 'This stage already has outstanding corrections from before a restart — rejected before this restart on check "x".',
+        `missing itemCount/rejectionCount must fall back to generic clauses without throwing, got ${JSON.stringify(noCounts)}`,
+      );
+
+      // An unparsable lastAt must omit its clause rather than render
+      // "Invalid Date" or throw.
+      const badDate = correctionsRecoveredSummary({ active: true, itemCount: 1, rejectionCount: 1, lastAt: 'not-a-date' });
+      assert(!/Invalid Date/.test(badDate) && !/most recently at/.test(badDate), `an unparsable lastAt must omit its clause entirely, got ${JSON.stringify(badDate)}`);
+      const goodDate = correctionsRecoveredSummary({ active: true, itemCount: 1, rejectionCount: 1, lastAt: '2026-09-24T08:23:19.000Z' });
+      assert(/most recently at/.test(goodDate), `a well-formed ISO lastAt must render its clause, got ${JSON.stringify(goodDate)}`);
+
+      // hasActiveCorrectionsRecovered must reject everything that is not
+      // exactly active:true, without throwing on a non-object.
+      for (const inactive of [null, undefined, {}, { active: false }, { active: 'true' }, 'active', 42]) {
+        assert(hasActiveCorrectionsRecovered(inactive) === false, `only an object with active===true may gate active, got ${JSON.stringify(inactive)} gated true`);
+      }
+    },
+  },
+  {
+    name: 'application dock: absent, undefined, or malformed correctionsRecovered — and every non-application request — renders exactly as today',
+    run: () => {
+      const node = jobCard('card-1', pasteJob('job-1'));
+      // applicationDockRequest's own normalization, re-asserted here in the
+      // same shape the render gate reads it in: undefined/null/a stray
+      // primitive must all collapse to the same null the field's total
+      // absence produces, so NonApiAiDialog's gate sees one inert value no
+      // matter which of these a caller (or an older cached record) sends.
+      for (const malformed of [undefined, null, {}, { active: false }, 'x', 7]) {
+        const item = applicationDockRequest({ node, handoff: handoffRecord({ correctionsRecovered: malformed }) });
+        if (malformed && typeof malformed === 'object') {
+          // applicationDockRequest only normalizes the OUTER shape (object or
+          // not); an object with active:false is passed through unchanged,
+          // exactly as rejectionEscalation's own equivalent case works —
+          // inertness for that shape is NonApiAiDialog's gate, not this
+          // function's job to interpret.
+          assert(item.correctionsRecovered === malformed, `an object-shaped correctionsRecovered (${JSON.stringify(malformed)}) must pass through unchanged, not be reinterpreted`);
+        } else {
+          assert(item.correctionsRecovered === null, `a non-object correctionsRecovered (${JSON.stringify(malformed)}) must normalize to null`);
+        }
+      }
+
+      // The render gate itself: isApplicationRequest must be checked first,
+      // so a non-application request (kind !== 'application') never even
+      // reads request.correctionsRecovered, let alone renders a notice for
+      // it — the same guard order activeRejectionEscalation already uses.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert(
+        dock.includes('const activeCorrectionsRecovered = isApplicationRequest && hasActiveCorrectionsRecovered(activeRequest?.correctionsRecovered)'),
+        'activeCorrectionsRecovered must gate on isApplicationRequest before ever reading the field, so a non-application request renders unchanged',
+      );
+    },
+  },
+  {
     name: 'application dock: the full-screen application modals are gone and unreferenced',
     run: () => {
       // The whole point of the change: one queue, no per-card modal. A dangling

@@ -22,9 +22,12 @@ import { shortId, redactReportUrl, redactReportUrlsInText, redactReportEventHist
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
+import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTraceRollup.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
+import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
+import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../src/utils/jobSearchDateWindow.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -948,7 +951,14 @@ ${rows}
 `;
 }
 
-function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted) {
+function localCalendarDateLabel(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'invalid';
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, edges, options, sectionOmitted) {
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
@@ -1005,6 +1015,25 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       }
       nodesToRender.push(n);
     }
+    // width (prop) / height (prop) / style.width / style.height are ReactFlow's
+    // explicit-size fields. The large majority of this app's node types are
+    // content/CSS-sized and measured into node.measured by ResizeObserver — they
+    // never touch these fields, so on most canvases all four columns render "—"
+    // in every row, structurally, pushing the genuinely useful measured/
+    // currentSize columns off the table's readable width for no diagnostic
+    // return. But two node types DO set them explicitly, and the banner's stated
+    // job (spot a prop-vs-measured divergence) is real for both: CanvasNode
+    // writes width/height/style on every resize-drag frame and on the resize-
+    // drop correction (useDragCorrections.js explicitly withholds `measured`
+    // there — "it races with RF's ResizeObserver and causes size to compound
+    // between sessions" — this table's whole reason to exist), and DocumentNode
+    // writes them on expand/collapse for video/image/markdown/text documents.
+    // So render the four columns only when at least one node in THIS report
+    // actually carries one of them — the diagnostic survives for the node types
+    // that use it, without four dead columns on every canvas that has none.
+    const hasExplicitSize = nodesToRender.some(n =>
+      n.width_prop != null || n.height_prop != null || n.style_width != null || n.style_height != null
+    );
     const rows = nodesToRender.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
@@ -1047,15 +1076,77 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         const dropLock = getHubDropLockReason({ type: 'jobhub', data: d });
         previewParts.push(`careerIdentity: ${hubHasAcceptedInitialDrop({ type: 'jobhub', data: d }) ? 'present' : 'none'}`);
         previewParts.push(`dropLock: ${dropLock || 'none'}`);
-        // Completion history is intentionally retained when career files are
-        // cleared. Surface its ISO value here so a report can distinguish that
-        // historical state from a hub which has never completed a run, without
-        // exposing any career-file or job payload.
+        // Surface completion history without exposing career-file or job
+        // payload. Clearing career identity retains these timestamps as module
+        // history, and replacement searches continue from that history.
         if (d.lastCompletedRunAt != null) {
           const completionIso = completionTimestampIso(d.lastCompletedRunAt);
           previewParts.push(completionIso
             ? `lastCompletedRunAt: ${completionIso}`
             : 'lastCompletedRunAt: invalid');
+        }
+        if (d.lastSearchCoverageStartedAt != null) {
+          const coverageIso = completionTimestampIso(d.lastSearchCoverageStartedAt);
+          previewParts.push(coverageIso
+            ? `lastSearchCoverageStartedAt: ${coverageIso}`
+            : 'lastSearchCoverageStartedAt: invalid');
+        }
+        // Re-scan availability used to be impossible to establish from a FULL
+        // report: a connected Board suppressed the button, yet the report only
+        // showed terminal hub state. Record both the exact UI ownership gate
+        // and the automatically-derived inclusive date boundary. A plain idle
+        // Board connection is deliberately NOT a blocker; only an active,
+        // durable Board recovery still owns this action.
+        const recoveryOwner = (() => {
+          try { return findJobSearchBoardActiveRecoveryOwner(n.id, nodes, edges); }
+          catch { return null; }
+        })();
+        const cleanupPending = !!d.terminalFinalizationRecovery
+          || !!d.manualAiResume?.retirementPending
+          || (Array.isArray(d.manualAiCleanupReceipts) && d.manualAiCleanupReceipts.length > 0);
+        const rescanReadiness = d.hubState !== 'done'
+          ? `unavailable (hubState=${d.hubState || 'unknown'})`
+          : recoveryOwner
+            ? 'blocked (active Job Board recovery owns this Search)'
+            : d.locked || d.queuedModuleRun || cleanupPending
+              ? 'blocked (Search is busy or completing saved cleanup)'
+              : 'available on Job Search card';
+        const nextAnchor = jobSearchNextAnchor(d, n.id);
+        const initialLookbackDays = normalizeJobSearchInitialLookbackDays(
+          d.initialLookbackDays ?? d.maxAgeDays,
+        );
+        const nextWindow = resolveJobSearchDateWindow(nextAnchor.timestamp, new Date(), initialLookbackDays);
+        previewParts.push(
+          `re-scan: ${rescanReadiness}`
+          + `; next window: ${localCalendarDateLabel(nextWindow.startDate)} through now (inclusive)`
+          + `; anchor: ${nextAnchor.source}`
+          + `${nextAnchor.timestamp == null ? `; initial lookback: ${initialLookbackDays}d` : ''}`
+          + `${nextWindow.capped ? `/${nextWindow.capReason || 'safety-cap'}` : ''}`,
+        );
+        const persistedWindowStart = completionTimestampIso(d.searchWindow?.startTimestamp);
+        if (persistedWindowStart) {
+          previewParts.push(
+            `run window: ${localCalendarDateLabel(d.searchWindow.startTimestamp)} inclusive`
+            + `; provider horizon: ${Number.isSafeInteger(d.searchWindow.providerLookbackDays)
+              && d.searchWindow.providerLookbackDays > 0
+              ? `${d.searchWindow.providerLookbackDays}d`
+              : 'not retained'}`,
+          );
+        }
+        const pendingCompletionIso = completionTimestampIso(
+          d.pendingCollectionCompletion?.collectionCompletedAt,
+        );
+        if (pendingCompletionIso) {
+          const pendingCoverageIso = completionTimestampIso(
+            d.pendingCollectionCompletion?.collectionStartedAt,
+          );
+          previewParts.push(
+            `collection anchor pending terminal success: ${pendingCompletionIso}`
+            + `${pendingCoverageIso ? `; coverage started=${pendingCoverageIso}` : ''}`
+            + `; run=${d.pendingCollectionCompletion?.runId
+              ? shortId(d.pendingCollectionCompletion.runId)
+              : 'unknown'}`,
+          );
         }
         // A locked hub refuses its own Cancel/Reset. Without this field a
         // report cannot separate "the user pressed Cancel and the hub declined"
@@ -1309,6 +1400,18 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       }
       const dataPreview = previewParts.join(', ');
 
+      // Present only when the report has at least one node carrying an explicit
+      // prop/style size — see hasExplicitSize above. Keeping this as a single
+      // block (rather than four independent `hasExplicitSize ? … : ''` cells)
+      // makes it impossible for the row's column count to drift from the
+      // header's if only some of the four were toggled by mistake.
+      const sizePropCells = hasExplicitSize
+        ? `| ${n.width_prop ?? '—'} ` +
+          `| ${n.height_prop ?? '—'} ` +
+          `| ${n.style_width ?? '—'} ` +
+          `| ${n.style_height ?? '—'} `
+        : '';
+
       return (
         `| \`${shortId(n.id)}\` ` +
         `| ${n.type} ` +
@@ -1317,10 +1420,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         `| ${n.fontSize ?? '—'}/${n.fontFamily ?? '—'} ` +
         `| ${n.textColor ?? '—'} ` +
         `| ${n.backgroundColor ?? '—'} ` +
-        `| ${n.width_prop ?? '—'} ` +
-        `| ${n.height_prop ?? '—'} ` +
-        `| ${n.style_width ?? '—'} ` +
-        `| ${n.style_height ?? '—'} ` +
+        sizePropCells +
         `| ${n.measured_width ?? '—'} ` +
         `| ${n.measured_height ?? '—'} ` +
         `| ${cs.size ?? '—'} ` +
@@ -1328,13 +1428,19 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         `| ${dataPreview || '—'} |`
       );
     }).join('\n');
+    // Header/separator are built from the same hasExplicitSize toggle so they
+    // can never drift out of sync with the row cells above.
+    const sizePropHeaderCols = hasExplicitSize ? ' width (prop) | height (prop) | style.width | style.height |' : '';
+    const sizePropSepCols = hasExplicitSize ? '---|---|---|---|' : '';
     nodeDiagMarkdown = `
 ## Node Diagnostics
-> **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
+> **Size columns**: ${hasExplicitSize
+        ? 'width (prop)/height (prop)/style.width/style.height are shown because at least one node below sets them explicitly (a mid-resize CanvasNode, or an expanded DocumentNode) — a divergence from measured.width/height there is the signature of a ResizeObserver/setNodes race (see useDragCorrections.js\'s "do NOT set measured" comment). Every other node type is content/CSS-sized and never touches these fields.'
+        : 'width (prop)/height (prop)/style.width/style.height are omitted — no node below sets an explicit ReactFlow size right now (only a mid-resize CanvasNode or an expanded DocumentNode ever do). measured.width/height are what every node actually renders at, via ResizeObserver.'}
 > **Component state**: React state at the moment the report was generated.
 
-| ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | height (prop) | style.width | style.height | measured.width | measured.height | currentSize | state flags | data preview |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ID | Type | Selected | Position | Font | T-Color | B-Color |${sizePropHeaderCols} measured.width | measured.height | currentSize | state flags | data preview |
+|---|---|---|---|---|---|---|${sizePropSepCols}---|---|---|---|---|
 ${rows}
 ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
@@ -2082,7 +2188,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // (the exact kind of state a bug report is filed about), so it must never take
   // down every other section if one node's shape throws (e.g. a non-numeric
   // position/size field hitting `.toFixed`).
-  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, options, sectionOmitted); }
+  try { nodeDiagMarkdown = buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes, edges, options, sectionOmitted); }
   catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
 
   // ── Media player state section ────────────────────────────────────────────
@@ -2423,6 +2529,21 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     catch { /* never break the report on diagnostic failure */ }
   }
 
+  // The durable counterpart to the section immediately above: that section is
+  // a process-local ring, wiped on restart, so a report filed after a restart
+  // mid-loop showed zero receipts while each affected job's own
+  // "Paste Rejections.json" sidecar still had the whole history. Same gate as
+  // pasteHandoffMarkdown (its durable data answers the same APPLICATION/HANDOFF
+  // question), and the same localApplications/canvasFilePath this function
+  // already resolved above for "Local AI Job State" — see
+  // buildPasteRejectionTraceMarkdown's own header for why no second job-
+  // discovery path was built for this.
+  let pasteRejectionTraceMarkdown = '';
+  if (isFullReport || reportCodes.has('APPLICATION') || reportCodes.has('HANDOFF')) {
+    try { pasteRejectionTraceMarkdown = buildPasteRejectionTraceMarkdown(canvasFilePath, localApplications); }
+    catch { /* never break the report on diagnostic failure */ }
+  }
+
   let jobLinkMarkdown = '';
   if (isFullReport || reportCodes.has('JOBLINK')) {
     try { jobLinkMarkdown = buildJobLinkSnapshot(nodes); }
@@ -2640,7 +2761,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

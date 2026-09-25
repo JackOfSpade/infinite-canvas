@@ -28,6 +28,7 @@ import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_search_locations from './tests/job-search-locations.js';
 import job_title_match from './tests/job-title-match.js';
 import job_posted_date from './tests/job-posted-date.js';
+import job_search_date_window from './tests/job-search-date-window.js';
 import job_board_provider from './tests/job-board-provider.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
@@ -46,6 +47,7 @@ import job_role_lock_regressions from './tests/job-role-lock-regressions.js';
 import application_handoff_dock from './tests/application-handoff-dock.js';
 import paste_identity_guard from './tests/paste-identity-guard.js';
 import paste_review_delta from './tests/paste-review-delta.js';
+import event_log_deletion_batching from './tests/event-log-deletion-batching.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -79,6 +81,7 @@ const testGroups = [
   ['job-search-locations.js', job_search_locations],
   ['job-title-match.js', job_title_match],
   ['job-posted-date.js', job_posted_date],
+  ['job-search-date-window.js', job_search_date_window],
   ['job-board-provider.js', job_board_provider],
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
@@ -97,6 +100,7 @@ const testGroups = [
   ['application-handoff-dock.js', application_handoff_dock],
   ['paste-identity-guard.js', paste_identity_guard],
   ['paste-review-delta.js', paste_review_delta],
+  ['event-log-deletion-batching.js', event_log_deletion_batching],
 ];
 
 function validateTestRegistry(groups) {

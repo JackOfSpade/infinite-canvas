@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, getJobSearchTransientKeysForSave, COL_X, assert, applyBugReportCode, buildCoverLetterDocument, buildJobRecoverySnapshot, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, calibratedScoreForJob, canonicalSalaryRangeLabel, chunkScoringBatches, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, dedupAgainstHistory, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, assertRetainedResumeRoleBullets, extractExecutedGoogleQueryStrings, extractSalaryFromText, extractVariantAttrs, extractZipRecruiterDomSalaryText, filterHandledJobSourceWarnings, filterJobsByDescriptionEvidence, formatGlassdoorCacheProvenance, formatJsonLdSalary, formatPipelineState, formatSourceEvent, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getGlassdoorLocIdCache, getJobAnalysisPaths, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, inspectJobBoardRoleByIndex, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, linkedInSameIpRetryDecision, looksLikeMoney, mergeExpandedJobDetail, mergeRecoveredScoreRows, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeJobBoardRoleByIndex, normalizeRangesWithRepairs, parseSalaryToNumeric, path, planJobCardDeletionCleanup, prepareLiveScoringResults, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobSourceProgress, recordJobsBoardScope, recordJobsSourceScope, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordManualScraperTelemetry, resetManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, retainedResumeRolesWithoutBullets, salaryRangeAnomaly, salaryRangeMetadata, sanitizeJobTaxonomy, saveGlassdoorLocId, scoringAuditRowsFromBatches, shouldNavigateForDescription, descriptionNavigationDecision, isUnavailableDetailPage, shouldReflowMeasuredJobCard, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, tryGetStore, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn, validateJobBoardRoleTaxonomy, validateJobScoringSubmission, zipRecruiterRetryAfterMs } from '../test-dependencies.js';
 import { clearRestoredJobTreeLayout } from '../test-dependencies.js';
 import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
@@ -21,6 +21,11 @@ import { buildAuthLifecycleTableMarkdown, buildNativeChallengeSessionMarkdown, f
 import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
+// Imported directly rather than through test-dependencies.js (a file this
+// task must not touch): pasteRejectionTraceRollup.js has zero electron/module
+// dependencies beyond fs/path/pathSafety, mirroring the clipboardCap.js
+// direct-import rationale above.
+import { buildPasteRejectionTraceMarkdown } from '../../electron/ipc/bugReport/pasteRejectionTraceRollup.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
 import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterDetailErrorShell, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs, zipRecruiterDetailErrorShellBackoffMs } from '../test-dependencies.js';
@@ -185,6 +190,247 @@ export default [
     },
   },
   {
+    // The durable counterpart to the receipts above: THE INCIDENT this section
+    // exists to make diagnosable (electron/ipc/localAiApplication.js's own
+    // PASTE_REJECTION_TRACE_FILE header) is a real trace pulled off disk —
+    // 4 cover-letter rejections at 13:08:05Z-13:10:40Z, the first ALSO naming
+    // "redundancy" alongside "direct-welcome-closing". The true consecutive
+    // same-cause run is 4, not 3: direct-welcome-closing failed in every one
+    // of the four rows, and the fact that row 1 ALSO tripped an unrelated
+    // second check must not cost that row its place in the run — a run is
+    // tracked per check id, so a co-occurring check that only shows up once
+    // cannot shorten the streak of the check that never stopped failing. The
+    // process-local receipts above cannot answer this after a restart; this
+    // reads the durable sidecar directly.
+    name: 'the durable paste rejection trace renders a looping job\'s longest same-cause run without leaking detail text',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-trace-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '394d73d6-d008-460c-8771-301c013fbcf2';
+      const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
+      fs.mkdirSync(jobDir, { recursive: true });
+      const rows = [
+        {
+          at: '2026-09-24T13:08:05.377Z', jobId, revision: 2, stage: 'cover-letter', reason: 'VALIDATION_FAILED',
+          checkIds: ['direct-welcome-closing', 'redundancy'], errorCount: 2, uncodedErrors: 0, rejectionStreak: 1,
+          checkFingerprints: { 'direct-welcome-closing': '752d8241', redundancy: '117fe591' },
+          // Fields no real writer ever produces (appendPasteRejectionTrace's
+          // row shape has none of these) but must be proven inert even if a
+          // tampered or future-format file carried them.
+          response: 'PRIVATE_PASTED_RESPONSE', prompt: 'PRIVATE_PROMPT_TEXT', quote: 'PRIVATE_QUOTE_SPAN',
+        },
+        {
+          at: '2026-09-24T13:09:20.764Z', jobId, revision: 2, stage: 'cover-letter', reason: 'VALIDATION_FAILED',
+          checkIds: ['direct-welcome-closing'], errorCount: 1, uncodedErrors: 0, rejectionStreak: 1,
+          checkFingerprints: { 'direct-welcome-closing': '752d8241' },
+        },
+        {
+          at: '2026-09-24T13:10:07.697Z', jobId, revision: 2, stage: 'cover-letter', reason: 'VALIDATION_FAILED',
+          checkIds: ['direct-welcome-closing'], errorCount: 1, uncodedErrors: 0, rejectionStreak: 2,
+          checkFingerprints: { 'direct-welcome-closing': '752d8241' },
+        },
+        {
+          at: '2026-09-24T13:10:40.367Z', jobId, revision: 2, stage: 'cover-letter', reason: 'VALIDATION_FAILED',
+          checkIds: ['direct-welcome-closing'], errorCount: 1, uncodedErrors: 0, rejectionStreak: 3,
+          checkFingerprints: { 'direct-welcome-closing': '752d8241' },
+        },
+      ];
+      fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify(rows));
+      try {
+        const localApplications = [{
+          nodeId: 'node-1', title: 'Integration Engineer', company: 'Micromart',
+          localApplication: { id: jobId, canvasFilePath: canvas, status: 'revision-required' },
+        }];
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
+        assert(markdown.includes('## Local Application Paste Rejection Trace (durable)'),
+          'the durable trace renders under its own heading');
+        assert(markdown.includes('4 rejection(s) retained'), `all 4 durable rows are counted, got: ${markdown}`);
+        assert(/longest same-cause run: 4 consecutive rejection\(s\).*stage `cover-letter`, check direct-welcome-closing \(752d8241\)/.test(markdown),
+          `the true run length (4 — row 1's extra "redundancy" check must not break the run for direct-welcome-closing, which failed in every row) must be surfaced plainly, got: ${markdown}`);
+        // "redundancy" itself only ever failed once (row 1), so it must never be
+        // named as part of the reported run — proves the run is tracked per
+        // check id rather than merged into direct-welcome-closing's line.
+        assert(!/check[s]? redundancy/.test(markdown), `redundancy failed only once and must not appear in the run summary, got: ${markdown}`);
+        assert(markdown.includes('streak 3'), 'each row\'s own stored rejectionStreak is still rendered alongside the recomputed run');
+        for (const leak of ['PRIVATE_PASTED_RESPONSE', 'PRIVATE_PROMPT_TEXT', 'PRIVATE_QUOTE_SPAN']) {
+          assert(!markdown.includes(leak), `only the fixed metadata whitelist may render; ${leak} leaked into ${markdown}`);
+        }
+        return { runLength: 4 };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'the durable paste rejection trace reports "not retained" for a missing sidecar and never throws on a corrupt one',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-trace-missing-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const missingJobId = '11111111-1111-4111-8111-111111111111';
+      const corruptJobId = '22222222-2222-4222-8222-222222222222';
+      fs.mkdirSync(path.join(dir, '.local-ai', 'jobs', corruptJobId), { recursive: true });
+      // Torn/garbage write, e.g. a crash mid-write despite atomicJson's
+      // normal guarantees — the reader must treat this as unreadable, not throw.
+      fs.writeFileSync(path.join(dir, '.local-ai', 'jobs', corruptJobId, 'Paste Rejections.json'), '{not valid json[');
+      try {
+        const localApplications = [
+          { nodeId: 'n1', title: 'Missing Job', company: 'Acme', localApplication: { id: missingJobId, canvasFilePath: canvas, status: 'queued' } },
+          { nodeId: 'n2', title: 'Corrupt Job', company: 'Acme', localApplication: { id: corruptJobId, canvasFilePath: canvas, status: 'queued' } },
+        ];
+        let markdown;
+        try {
+          markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
+        } catch (error) {
+          assert(false, `a corrupt sidecar must never throw, got ${error?.message || error}`);
+        }
+        assert(markdown.includes('Missing Job') && markdown.includes('not retained (no rejection trace on disk'),
+          `a job with no sidecar at all renders "not retained" rather than an empty success, got: ${markdown}`);
+        assert(markdown.includes('Corrupt Job') && markdown.includes('not retained (rejection trace file could not be read'),
+          `a corrupt sidecar renders "not retained" rather than throwing or an empty success, got: ${markdown}`);
+        return { missingHandled: true, corruptHandled: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'the durable paste rejection trace discloses its own row and job scan caps whenever they truncate',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-trace-caps-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '33333333-3333-4333-8333-333333333333';
+      const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
+      fs.mkdirSync(jobDir, { recursive: true });
+      // 12 retained rows, alternating cause so no single run swallows the
+      // count — the display cap (8) must cut the list independent of any run.
+      const rows = Array.from({ length: 12 }, (_, i) => ({
+        at: new Date(Date.UTC(2026, 8, 24, 12, i)).toISOString(),
+        jobId, revision: 1, stage: 'resume', reason: 'SCHEMA_INVALID',
+        checkIds: [i % 2 === 0 ? 'evidence-grounding' : 'priority-alignment'],
+        errorCount: 1, uncodedErrors: 0, rejectionStreak: 1,
+        checkFingerprints: { [i % 2 === 0 ? 'evidence-grounding' : 'priority-alignment']: 'aaaaaaaa' },
+      }));
+      fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify(rows));
+      // 20 filler cards with distinct, well-formed job ids and no sidecar of
+      // their own — enough to push the total past the 20-job scan cap
+      // alongside the one real job above (21 candidates total).
+      const filler = Array.from({ length: 20 }, (_, i) => ({
+        nodeId: `filler-${i}`, title: 'Filler', company: 'Filler',
+        localApplication: { id: `44444444-4444-4444-8444-44444444${i.toString(16).padStart(4, '0')}`, canvasFilePath: canvas, status: 'queued' },
+      }));
+      try {
+        const localApplications = [
+          { nodeId: 'n1', title: 'Looping Job', company: 'Acme', localApplication: { id: jobId, canvasFilePath: canvas, status: 'revision-required' } },
+          ...filler,
+        ];
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
+        assert(markdown.includes('12 rejection(s) retained'), `every durable row is counted before the display cap, got: ${markdown}`);
+        assert(markdown.includes('older rejection(s) omitted (cap 8 shown of 12 total)'),
+          `the per-job row cap must be disclosed when it truncates, got: ${markdown}`);
+        assert(markdown.includes('additional job card(s) with a Local AI id were not scanned (report safety limit 20)'),
+          `the job-scan cap must be disclosed when it truncates, got: ${markdown}`);
+        return { rowsTruncated: true, jobsTruncated: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // 'Paste Correction Items.json' (electron/ipc/localAiApplication.js's
+    // own PASTE_CORRECTIONS_SIDECAR_FILE) is a SEPARATE sidecar from
+    // 'Paste Rejections.json', deliberately named to look nothing like it,
+    // because it holds a different privacy class of data: its `corrections`
+    // array IS the validation/observation text a correction round prints —
+    // derived from, and in places quoting, the user's own letter — kept only
+    // so a fresh process can hand a job's outstanding correction items back
+    // after pasteCorrectionsByJob is lost to a restart. Both this file's own
+    // header (above, "never the letter text, prompts, pasted responses...")
+    // and PASTE_CORRECTIONS_SIDECAR_FILE's own header promise that nothing
+    // under electron/ipc/bugReport/ ever reads it. This is a static tripwire
+    // for that promise: every module in the directory (source text, not
+    // behavior) is grepped for the sidecar's literal filename and its own
+    // constant name, so a future change that wires the file in — by literal
+    // path or by importing the constant — fails this test the moment the
+    // reference is typed, before it ever reaches a real report.
+    name: 'nothing under electron/ipc/bugReport/ names the paste-correction-items sidecar by literal filename or constant',
+    run: () => {
+      const bugReportDir = path.resolve('electron/ipc/bugReport');
+      const files = fs.readdirSync(bugReportDir).filter(entry => entry.endsWith('.js'));
+      assert(files.length >= 8, `sanity: the bugReport module directory must actually be scanned, found only ${files.length} file(s)`);
+      // electron/ipc/bugReport.js (the top-level report aggregator that
+      // imports from the directory above) is checked alongside it: it is the
+      // one other place a stray `fs.readFileSync`/directory scan of a job
+      // folder could be added directly, without ever touching a file inside
+      // electron/ipc/bugReport/ at all.
+      const aggregatorPath = path.resolve('electron/ipc/bugReport.js');
+      const scanned = [...files.map(entry => path.join(bugReportDir, entry)), aggregatorPath];
+      for (const filePath of scanned) {
+        const src = fs.readFileSync(filePath, 'utf8');
+        assert(!src.includes('Paste Correction Items.json'),
+          `${path.relative(process.cwd(), filePath)} must never name the paste-correction-items sidecar by its literal filename — that sidecar holds letter-derived observation text, a privacy class the bug report never carries`);
+        assert(!src.includes('PASTE_CORRECTIONS_SIDECAR_FILE'),
+          `${path.relative(process.cwd(), filePath)} must never reference PASTE_CORRECTIONS_SIDECAR_FILE — importing the constant would leak the same file just as surely as spelling its name out`);
+      }
+      return { filesScanned: scanned.length };
+    },
+  },
+  {
+    // Behavioural counterpart to the source-text tripwire above: a job folder
+    // carrying BOTH sidecars side by side, the corrections sidecar holding
+    // obviously-identifiable planted text in the exact shape
+    // writePasteCorrectionsSidecar (electron/ipc/localAiApplication.js) writes
+    // — {version, jobId, handoffCode, stage, revision, at, corrections: [...]}
+    // — run through the REAL rollup. buildPasteRejectionTraceMarkdown must
+    // never look inside 'Paste Correction Items.json' at all (it resolves
+    // 'Paste Rejections.json' by an exact joined path, never a directory
+    // listing — see this test's own name), so the sentinel must appear
+    // nowhere in the rendered markdown while the metadata-only trace beside
+    // it renders exactly as it would with no corrections sidecar present at
+    // all. This also proves requirement (4): the new sidecar sitting in the
+    // same job folder does not confuse job/sidecar discovery.
+    name: 'the durable paste rejection trace never leaks the paste-correction-items sidecar sitting beside it in the same job folder',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-correction-privacy-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '394d73d6-d008-460c-8771-301c013fbcf2';
+      const jobDir = path.join(dir, '.local-ai', 'jobs', jobId);
+      fs.mkdirSync(jobDir, { recursive: true });
+      // The metadata-only trace: identical in shape to every other test
+      // above, retained here so the assertion below can prove it renders
+      // UNCHANGED with the letter-text sidecar sitting right beside it.
+      fs.writeFileSync(path.join(jobDir, 'Paste Rejections.json'), JSON.stringify([
+        { at: '2026-09-24T13:10:40.367Z', jobId, revision: 2, stage: 'cover-letter', reason: 'VALIDATION_FAILED',
+          checkIds: ['direct-welcome-closing'], errorCount: 1, uncodedErrors: 0, rejectionStreak: 3,
+          checkFingerprints: { 'direct-welcome-closing': '752d8241' } },
+      ]));
+      // The letter-text sidecar, in writePasteCorrectionsSidecar's own
+      // documented shape — the sentinel stands in for the real thing this
+      // file actually carries: quoted spans of the user's own cover letter.
+      fs.writeFileSync(path.join(jobDir, 'Paste Correction Items.json'), JSON.stringify({
+        version: 1, jobId, handoffCode: 'PRIVATE_LETTER_SENTINEL_HANDOFF', stage: 'cover-letter', revision: 2,
+        at: '2026-09-24T13:10:41.000Z',
+        corrections: ['PRIVATE_LETTER_SENTINEL: the closing paragraph repeats "PRIVATE_LETTER_SENTINEL_QUOTE" from paragraph 2.'],
+      }));
+      try {
+        const localApplications = [{
+          nodeId: 'node-1', title: 'Integration Engineer', company: 'Micromart',
+          localApplication: { id: jobId, canvasFilePath: canvas, status: 'revision-required' },
+        }];
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, localApplications);
+        assert(markdown.includes('## Local Application Paste Rejection Trace (durable)'),
+          'the durable trace still renders under its own heading with the corrections sidecar present');
+        assert(markdown.includes('1 rejection(s) retained') && markdown.includes('streak 3'),
+          `the metadata-only trace renders exactly as it would with no corrections sidecar beside it, got: ${markdown}`);
+        for (const leak of ['PRIVATE_LETTER_SENTINEL', 'PRIVATE_LETTER_SENTINEL_QUOTE', 'PRIVATE_LETTER_SENTINEL_HANDOFF']) {
+          assert(!markdown.includes(leak), `the paste-correction-items sidecar must never be read; ${leak} leaked into ${markdown}`);
+        }
+        return { sidecarsCoexist: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'job diagnostics never joins ambiguous terminal receipts to another hub snapshot',
     run: () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-receipt-snapshot-join-'));
@@ -220,6 +466,89 @@ export default [
         fs.rmSync(dir, { recursive: true, force: true });
       }
       return { receiptScopes: 2 };
+    },
+  },
+  {
+    // The 2026-09-24 defect: a report confirmed across 6 open Job Search hubs
+    // fell straight to readReceiptForCurrentHubs' ambiguous branch and printed
+    // INDETERMINATE, even though a connected Job Board had already resolved a
+    // single source hub for the run — the funnel reconciliation could then
+    // prove nothing about a run that was in fact fine. This asserts the board
+    // seed recovers exactly the one case it is safe to recover, and stays
+    // INDETERMINATE everywhere else.
+    name: 'job diagnostics seed the receipt owner from a Board\'s resolved connected source hub when telemetry has none',
+    run: () => {
+      __resetJobsTelemetryForTests();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-board-owner-seed-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubA = 'board-owner-seed-hub-a';
+      const hubB = 'board-owner-seed-hub-b';
+      const writeGeneration = (hubId, runId, count) => {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({ runId, sourceHubId: hubId, canvasFilePath: canvas, jobs: Array.from({ length: count }, () => ({})) }));
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({
+          runId, nodeId: hubId, terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: count }, cleanup: { attempted: true, cleared: true },
+        }));
+      };
+      try {
+        writeGeneration(hubA, 'board-seed-run-a', 3);
+        writeGeneration(hubB, 'board-seed-run-b', 12);
+        const hubs = new Set([hubA, hubB]);
+
+        // One Board, one connected source hub: the only fact this seed is
+        // allowed to use, and enough to resolve what would otherwise be two
+        // equally-plausible completed receipts.
+        const singleBoard = [{ id: 'owner-seed-board', hubState: 'done', connectedSourceHubIds: [hubA] }];
+        const boardJoined = buildJobCompletionAssessment(canvas, hubs, singleBoard, singleBoard.length, hubs);
+        const boardJoinedReceiptLine = boardJoined.split('\n').find(line => line.startsWith('- Terminal receipt:'));
+        assert(boardJoined.includes('Saved score-ready snapshot: 3 job(s)')
+          && boardJoined.includes('run `board-seed-run-a`')
+          && !boardJoined.includes('12 job(s)')
+          && !boardJoined.includes('ambiguous')
+          && boardJoinedReceiptLine?.includes('owner resolved via a connected Job Board\'s already-resolved source hub, not live telemetry'),
+        `an unambiguous connected source hub must join its own receipt/snapshot and say so, got:\n${boardJoinedReceiptLine}`);
+
+        // Two Boards resolving to two DIFFERENT hubs: this seed must not guess
+        // "the first" — the ambiguous branch stays exactly as before.
+        const twoHubBoards = [
+          { id: 'owner-seed-board-a', hubState: 'done', connectedSourceHubIds: [hubA] },
+          { id: 'owner-seed-board-b', hubState: 'done', connectedSourceHubIds: [hubB] },
+        ];
+        const twoHubAssessment = buildJobCompletionAssessment(canvas, hubs, twoHubBoards, twoHubBoards.length, hubs);
+        assert(twoHubAssessment.includes('Terminal receipt: ⚠️ ambiguous across 2 current Job Search hubs')
+          && twoHubAssessment.includes('Saved score-ready snapshot: ambiguous terminal receipts')
+          && !twoHubAssessment.includes('owner resolved via a connected Job Board'),
+        'Boards resolving to two distinct source hubs must not seed either one as the owner');
+
+        // A Board present but connected to nothing resolvable: same fail-closed
+        // outcome as no Boards at all.
+        const emptyBoard = [{ id: 'owner-seed-board-empty', hubState: 'empty', connectedSourceHubIds: [] }];
+        const emptyBoardAssessment = buildJobCompletionAssessment(canvas, hubs, emptyBoard, emptyBoard.length, hubs);
+        assert(emptyBoardAssessment.includes('Terminal receipt: ⚠️ ambiguous across 2 current Job Search hubs')
+          && !emptyBoardAssessment.includes('owner resolved via a connected Job Board'),
+        'zero resolved Board source hubs must stay ambiguous, not fall back to a guess');
+
+        // Live telemetry still wins even when it disagrees with the Board.
+        const telemetry = getJobsTelemetry();
+        Object.assign(telemetry, {
+          nodeId: hubB, search: null, resolves: {}, scoring: null, bucketing: null, pipeline: null, history: null,
+        });
+        try {
+          const telemetryWins = buildJobCompletionAssessment(canvas, hubs, singleBoard, singleBoard.length, hubs);
+          assert(telemetryWins.includes('Saved score-ready snapshot: 12 job(s)')
+            && telemetryWins.includes('run `board-seed-run-b`')
+            && !telemetryWins.includes('3 job(s)')
+            && !telemetryWins.includes('owner resolved via a connected Job Board'),
+          'live telemetry names an owner, so the Board seed must never override it');
+        } finally {
+          __resetJobsTelemetryForTests();
+        }
+
+        return { boardJoinedReceiptLine };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        __resetJobsTelemetryForTests();
+      }
     },
   },
   {
@@ -3639,6 +3968,11 @@ export default [
             hubState: 'done', gatheredCount: 31, scrapedCount: 3, resultCount: 3,
             scoredJobs: [{}, {}, {}], enabledSourceIds: ['indeed', 'linkedin'],
             lastCompletedRunAt: Date.UTC(2026, 8, 7, 14, 30, 0),
+            lastSearchCoverageStartedAt: Date.UTC(2026, 8, 6, 23, 30, 0),
+            searchWindow: {
+              startTimestamp: new Date(2026, 8, 7).getTime(),
+              providerLookbackDays: 400,
+            },
           },
         }],
         edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
@@ -3650,8 +3984,24 @@ export default [
       assert(report.includes('scraped: 31 → kept: 3')
         && report.includes('enabledSourceIds: indeed,linkedin')
         && report.includes('lastCompletedRunAt: 2026-09-07T14:30:00.000Z')
+        && report.includes('lastSearchCoverageStartedAt: 2026-09-06T23:30:00.000Z')
+        && report.includes('re-scan: available on Job Search card')
+        && report.includes('next window: 2026-09-06 through now (inclusive); anchor: last-coverage-start')
+        && report.includes('run window: 2026-09-07 inclusive; provider horizon: 400d')
         && !report.includes('hubState: done, scraped: 3, results: 3'),
-      'Node Diagnostics must keep post-filter counts, source selection, and a safe ISO completion date visible');
+      'Node Diagnostics must keep post-filter counts, source selection, completion history, the effective run boundary, and re-scan readiness visible');
+      const retainedHistoryReport = generateMarkdown({
+        description: 'Retained history fixture.',
+        nodes: [{ id: 'full-lookback-job-hub', type: 'jobhub', data: {
+          hubState: 'empty', initialLookbackDays: 180,
+          lastCompletedRunAt: Date.UTC(2026, 8, 7, 14, 30, 0),
+        } }],
+        edges: [], drawings: [], frontEndState: {}, nodeComponentStates: [],
+        nodeInternals: [{ id: 'full-lookback-job-hub', type: 'jobhub', position: { x: 0, y: 0 }, measured: { width: 260, height: 140 } }],
+      }).markdown;
+      assert(retainedHistoryReport.includes('anchor: last-completed')
+        && !retainedHistoryReport.includes('initial lookback: 180d'),
+        'Node Diagnostics must show that retained history overrides a first-scan preference');
       const legacyDefaultReport = generateMarkdown({
         description: 'Legacy source-selection default fixture.',
         nodes: [{ id: 'legacy-job-hub', type: 'jobhub', data: { hubState: 'done', scoredJobs: [] } }],
@@ -6546,7 +6896,7 @@ export default [
       const pipelineEnd = renderer.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipelinePath = renderer.slice(pipelineStart, pipelineEnd);
       const queueAcquireAt = pipelinePath.indexOf('lease = await moduleRunQueue.acquireModuleRun');
-      const queuedOwnershipAt = pipelinePath.indexOf('if (standaloneBecameBoardManaged)', queueAcquireAt);
+      const queuedOwnershipAt = pipelinePath.indexOf('if (standaloneBecameBoardRecoveryManaged)', queueAcquireAt);
       const processingStartAt = pipelinePath.indexOf('processingToken = processingRunsRef.current.start();', queuedOwnershipAt);
       const processingBusyAt = pipelinePath.indexOf("return searchRunOutcome('busy'", processingStartAt);
       const gatheredResetAt = pipelinePath.indexOf('gatheredCountRef.current = 0', processingBusyAt);
@@ -6554,7 +6904,7 @@ export default [
         && queueAcquireAt >= 0 && queuedOwnershipAt > queueAcquireAt
         && processingStartAt > queuedOwnershipAt && processingBusyAt > processingStartAt
         && gatheredResetAt > processingBusyAt,
-      'a post-run USAJobs append preserves the aggregate gathered counter, while a top-level pipeline resets it only after queue admission, the live Board-ownership refusal, and its processing-token gate');
+      'a post-run USAJobs append preserves the aggregate gathered counter, while a top-level pipeline resets it only after queue admission, the durable Board-recovery refusal, and its processing-token gate');
       assert(preferenceEvaluationStart >= 0 && preferenceEvaluationStart < backgroundStart
         && backgroundPath.includes('evaluatePreferencesForRun'),
       'the background USAJobs callback may depend on Job Preferences evaluation only after that callback has initialized, avoiding a render-time temporal-dead-zone crash');
@@ -6582,11 +6932,14 @@ export default [
     name: 'Job search locations: remote company scope and worker residence are labeled separately',
     run: () => {
       const fields = fs.readFileSync(path.resolve('src/components/JobSearchLocationFields.jsx'), 'utf8');
-      assert(fields.includes('Company location for remote job: United States')
-        && fields.includes('where you will live while working remotely')
+      assert(fields.includes('Remote salary location')
+        && fields.includes('U.S. employer')
+        && fields.includes('Canadian employer')
+        && fields.includes('Other / worldwide employer')
+        && fields.includes('Where you will live while working remotely')
         && fields.includes('Your city while working remotely')
         && !fields.includes('Remote role scope:'),
-      'remote salary fields must identify the company country separately from the worker residence');
+      'remote salary fields must compactly distinguish the employer location buckets from the worker residence');
       return { clearLabels: true };
     },
   },
@@ -7814,12 +8167,15 @@ export default [
       'done hubs expose Re-evaluate Saved Jobs only when the module is unlocked');
       assert(search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
         && handler.includes('getNode(id)?.data?.terminalFinalizationRecovery'),
-        'the completed standalone search hub wires its re-analysis action into the done state while connected Searches leave continuation to their Job Board');
+        'the completed standalone search hub wires re-analysis only when no Board-owned or terminal-finalization recovery is active');
       assert(search.includes("val.slice(0, 4000)")
         && (search.match(/maxLength=\{4000\}/g) || []).length >= 1
         && (doneState.match(/maxLength=\{4000\}/g) || []).length >= 1
-        && doneState.includes('Job Preferences'),
-      'Job Preferences preserve the backend-supported 4,000-character limit in both renderer states');
+        && search.includes('Search Brief')
+        && doneState.includes('Search Brief')
+        && doneState.includes('jobPreferences')
+        && doneState.includes('setJobPreferences'),
+      'the Search Brief keeps the backend jobPreferences wiring and 4,000-character limit in both renderer states');
 
       // The saved cards are the scoring input. A re-analysis must never call a
       // search endpoint or the board-owned seen-history writer; otherwise the
@@ -8043,7 +8399,17 @@ export default [
       });
       assert(finalDedup.reconciled && finalDedup.expectedKept === 5 && finalDedup.finalDedupDropped === 1,
         `a final enrichment-ready dedup must be an explicit reconciled funnel stage, got ${JSON.stringify(finalDedup)}`);
-      return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped };
+      const windowFirst = reconcileSearchFunnel({
+        raw: 10, relevanceDropped: 0, windowEligible: 8, ageDropped: 2,
+        deduped: 7, roleDropped: 1, historyDropped: 1,
+        descriptionEvidenceDropped: { total: 1 }, finalDedupDropped: 1, kept: 3,
+      });
+      assert(windowFirst.reconciled
+        && windowFirst.expectedWindowEligible === 8
+        && windowFirst.dedupDropped === 1
+        && windowFirst.expectedKept === 3,
+      `a window-before-dedup funnel must count age and duplicate drops exactly once, got ${JSON.stringify(windowFirst)}`);
+      return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped, windowBeforeDedup: true };
     },
   },
 {
@@ -10598,6 +10964,156 @@ export default [
     },
   },
 {
+    // Regression coverage for the 2026-09-24 deletion-path unification: there
+    // used to be THREE ways to delete a job card (the card's own X button,
+    // keyboard Backspace/Delete, right-click Delete) and only the X button
+    // (JobCardNode's dismissCard) ran the tree reflow + board stats recompute
+    // deriveBoardCardStats needs a live caller for. The other two just let
+    // ReactFlow drop the node, leaving the board's PERSISTED resultCount/
+    // finalSourceCounts stale (survives a restart) and skipping the reflow.
+    // planJobCardDeletionCleanup (src/utils/jobCardDeletionCleanup.js) is the
+    // pure logic now shared by all three paths via ReactFlow's onNodesDelete
+    // (see useCanvasOSDeletion.js) — this fixture is the SAME one used by the
+    // "deriveBoardCardStats reconciles dismissed cards" test just above, so a
+    // matching result here is proof the shared path reproduces dismissCard's
+    // exact pre-refactor output.
+    name: 'planJobCardDeletionCleanup: single-card delete matches dismissCard\'s original stats',
+    run: () => {
+      const board = { id: 'board', type: 'jobboard', position: { x: 0, y: 0 }, data: {} };
+      const cardA = { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board', source: 'indeed', matchScore: 82 } };
+      const cardB = { id: 'b', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board', source: 'linkedin', matchScore: 90 } };
+      const nodes = [board, cardA, cardB];
+      const nodesAfterRemoval = nodes.filter(n => n.id !== 'b');
+      const { treeNodes, boardUpdates } = planJobCardDeletionCleanup(
+        [cardB],
+        nodesAfterRemoval,
+        (hubId) => nodes.find(n => n.id === hubId) || null,
+      );
+      assert(boardUpdates.length === 1 && boardUpdates[0].hubId === 'board', 'exactly one board is affected by a single-card delete');
+      assert(boardUpdates[0].cardIds.length === 1 && boardUpdates[0].cardIds[0] === 'b', 'the removed card id is attributed to its board');
+      assert(boardUpdates[0].stats.resultCount === 1, 'board stats: only the surviving board-owned card counts');
+      assert(JSON.stringify(boardUpdates[0].stats.finalSourceCounts) === JSON.stringify({ indeed: 1 }), 'board stats: source counts drop the deleted card');
+      assert(treeNodes.some(n => n.id === 'a') && !treeNodes.some(n => n.id === 'b'), 'reflowed tree keeps the surviving card and excludes the deleted one');
+      return { ok: true };
+    },
+  },
+{
+    name: 'planJobCardDeletionCleanup: a multi-card delete spanning two boards updates BOTH',
+    run: () => {
+      const boardX = { id: 'board-x', type: 'jobboard', position: { x: 0, y: 0 }, data: {} };
+      const boardY = { id: 'board-y', type: 'jobboard', position: { x: 0, y: 0 }, data: {} };
+      const nodes = [
+        boardX,
+        boardY,
+        { id: 'x1', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board-x', source: 'indeed', matchScore: 70 } },
+        { id: 'x2', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board-x', source: 'indeed', matchScore: 95 } },
+        { id: 'y1', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board-y', source: 'dice', matchScore: 60 } },
+        { id: 'y2', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board-y', source: 'lever', matchScore: 80 } },
+      ];
+      // A selection can span several boards at once (e.g. a box-select
+      // Backspace, or right-click Delete on a multi-selection): x2 and y1 are
+      // deleted together here.
+      const deletedIds = new Set(['x2', 'y1']);
+      const deletedNodes = nodes.filter(n => deletedIds.has(n.id));
+      const nodesAfterRemoval = nodes.filter(n => !deletedIds.has(n.id));
+      const { boardUpdates } = planJobCardDeletionCleanup(
+        deletedNodes,
+        nodesAfterRemoval,
+        (hubId) => nodes.find(n => n.id === hubId) || null,
+      );
+      assert(boardUpdates.length === 2, 'both affected boards are reported for a cross-board multi-delete');
+      const byHub = Object.fromEntries(boardUpdates.map(update => [update.hubId, update]));
+      assert(byHub['board-x'].stats.resultCount === 1 && byHub['board-x'].cardIds.join(',') === 'x2',
+        'board X loses exactly the card selected from it and nothing else');
+      assert(byHub['board-y'].stats.resultCount === 1 && byHub['board-y'].cardIds.join(',') === 'y1',
+        'board Y loses exactly the card selected from it, independent of board X');
+      return { ok: true };
+    },
+  },
+{
+    name: 'planJobCardDeletionCleanup: deleting a non-jobcard node touches no board',
+    run: () => {
+      const board = { id: 'board', type: 'jobboard', position: { x: 0, y: 0 }, data: {} };
+      const cardA = { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'board', source: 'indeed', matchScore: 82 } };
+      const note = { id: 'note-1', type: 'textnode', position: { x: 0, y: 0 }, data: {} };
+      const nodes = [board, cardA, note];
+      const nodesAfterRemoval = nodes.filter(n => n.id !== 'note-1');
+      let resolverCalls = 0;
+      const { treeNodes, boardUpdates } = planJobCardDeletionCleanup(
+        [note],
+        nodesAfterRemoval,
+        (hubId) => { resolverCalls += 1; return nodes.find(n => n.id === hubId) || null; },
+      );
+      assert(boardUpdates.length === 0, 'a non-jobcard deletion produces no board updates');
+      assert(resolverCalls === 0, 'a non-jobcard deletion never looks up a board — no board lookups, no extra work');
+      assert(treeNodes === nodesAfterRemoval, 'the node list is returned unchanged (same reference) when no job card was deleted');
+      return { ok: true };
+    },
+  },
+{
+    name: 'planJobCardDeletionCleanup: a card whose hub is missing does not throw',
+    run: () => {
+      // The board can be gone by the time this runs (deleted in the very same
+      // multi-select transaction, or unresolvable across a nested-canvas
+      // level) — this must degrade to "nothing to update", never a crash.
+      const orphanCard = { id: 'orphan-card', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'ghost-board', source: 'indeed', matchScore: 82 } };
+      const nodesAfterRemoval = [];
+      let threw = false;
+      let result = null;
+      try {
+        result = planJobCardDeletionCleanup([orphanCard], nodesAfterRemoval, () => null);
+      } catch {
+        threw = true;
+      }
+      assert(!threw, 'a card whose board cannot be resolved must not throw');
+      assert(result.boardUpdates.length === 0, 'an unresolvable board gets no stats write');
+      assert(result.treeNodes === nodesAfterRemoval, 'the node list passes through unchanged when every affected board is unresolvable');
+      return { ok: true };
+    },
+  },
+{
+    // useCanvasOSDeletion.js's onNodesDelete is the ONE ReactFlow seam that
+    // fires for every deletion trigger (keyboard, context menu, and
+    // dismissCard's own deleteElements call alike), which is why the shared
+    // cleanup is wired in there instead of duplicated at each call site. This
+    // locks the wiring itself down: a regression that keeps the pure helper
+    // correct but forgets to call it (or stops threading the board-data
+    // resolver through) would not be caught by the pure-function tests above.
+    name: 'Job card deletion cleanup is wired into the single shared onNodesDelete seam, once',
+    run: () => {
+      const deletion = fs.readFileSync(path.resolve('src/hooks/useCanvasOSDeletion.js'), 'utf8');
+      const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
+      const card = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      assert(deletion.includes("import { planJobCardDeletionCleanup } from '../utils/jobCardDeletionCleanup';")
+        && deletion.includes('planJobCardDeletionCleanup(deletedNodes, nodesAfterRemoval, getHubNode)'),
+      'onNodesDelete must call the shared pure helper rather than re-implementing the reflow/stats logic inline');
+      assert((deletion.match(/onNodesDelete = useCallback/g) || []).length === 1,
+        'there must be exactly one onNodesDelete handler for Canvas.jsx to pass to ReactFlow, not a second one added alongside it');
+      assert(canvasSource.includes('onNodesDelete={onNodesDelete}')
+        && canvasSource.includes('updateNodeDataGlobally: navigation.updateNodeDataGlobally,'),
+      'Canvas.jsx must wire the cross-level board-data resolver into the one onNodesDelete handler it already passes to ReactFlow');
+      assert(deletion.includes("moduleRunQueue.cancelQueuedRunsForNode(cardId, 'Job card dismissed before generation started');"),
+      'every deleted job card must have its queued-run lease cancelled, independent of which path triggered the deletion');
+      // dismissCard becomes cancel-lease + delete only; the reflow/stats write
+      // itself must live in exactly one place (the shared handler above) or a
+      // dismiss via the X button would write the board's stats twice from two
+      // different node snapshots — a race, not a redundancy.
+      const dismissStart = card.indexOf('const dismissCard = useCallback(async () => {');
+      const dismissEnd = card.indexOf('\n  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);');
+      const dismissScope = card.slice(dismissStart, dismissEnd);
+      assert(dismissStart >= 0 && dismissEnd > dismissStart, 'dismissCard must still exist with its expected cancel-lease + delete dependency list');
+      assert(dismissScope.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
+        && dismissScope.includes('await deleteElements({ nodes: [{ id }] });')
+        && !dismissScope.includes('deriveBoardCardStats')
+        && !dismissScope.includes('computeJobTreeView')
+        && !dismissScope.includes('updateGlobal('),
+      'dismissCard must not independently recompute or write board stats — that is now the shared handler\'s job alone');
+      assert(dismissScope.includes('if (data.locked || getLiveNode(data.hubId)?.data?.locked) return;'),
+      'dismissCard must keep gating on both its own lock and its board\'s lock');
+      return { ok: true };
+    },
+  },
+{
     name: 'Job Board: combineSignature is order-independent over modules',
     run: () => {
       const m1 = { id: 'A', fingerprint: '5.10' };
@@ -10773,10 +11289,10 @@ export default [
         && jobsBackendSource.includes('rawCount: relevanceFunnel.raw'),
       'terminal empty job searches clear stale jobCount while preserving the provider-level gathered funnel');
       assert(jobSearchSource.includes("runOrigin: 'rerun-button'")
-        && jobSearchSource.includes('Re-run button clicked; career input=')
+        && jobSearchSource.includes('Re-scan requested; career input=')
         && jobsBackendSource.includes('runOrigin: normalizedRunOrigin')
         && jobsBackendSource.includes('profileInputMode: normalizedProfileInputMode'),
-      'Re-run Search carries explicit button and career-input provenance into main-process diagnostics');
+      'Re-scan carries explicit button and career-input provenance into main-process diagnostics');
       return { reason: staleReason(previous, completedZero), zeroSignature: combineSignature(completedZero) };
     },
   },
@@ -12850,7 +13366,16 @@ export default [
             ts: Date.now(), runId: `${nodeId}-1`, nodeId, runOrigin: 'initial',
             profileInputMode: 'fresh-files', queries: 1, queryStrings: ['System Architect'],
             selectedSourceIds: ['google', 'linkedin', 'ziprecruiter'],
-            maxAgeDays: 14, collectionLimits: {}, location: 'United States',
+            searchWindow: {
+              startTimestamp: new Date(2026, 8, 3).getTime(),
+              anchorTimestamp: new Date(2026, 8, 3).getTime(),
+              completionTimestamp: new Date(2026, 8, 3, 14).getTime(),
+              providerLookbackDays: 400,
+              capped: false,
+              capReason: null,
+              anchorSource: 'last-completed',
+            },
+            collectionLimits: {}, location: 'United States',
           },
         });
         const pipeline = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
@@ -12861,7 +13386,9 @@ export default [
           'the aborted search states what it is missing rather than implying nothing ran');
         assert(pipeline.includes('1 query: `System Architect`')
           && pipeline.includes('3 selected source(s): `google`, `linkedin`, `ziprecruiter`')
-          && pipeline.includes('Max posting age 14d · location `United States`'),
+          && pipeline.includes('Posting date window: 2026-09-03 local midnight through launch time, inclusive')
+          && pipeline.includes('provider retrieval horizon 400d')
+          && pipeline.includes('Location `United States`'),
           `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
         assert(pipeline.includes('Last stage error: `Cancelled by user — clicked Reset on this hub`')
           && !pipeline.includes('Last stage error: `Node deleted`'),
@@ -13750,7 +14277,7 @@ export default [
           id: freshId,
           type: 'jobhub',
           data: {
-            hubState: 'empty', careerFilePaths: [privatePath],
+            hubState: 'empty', careerFilePaths: [privatePath], nextSearchWindowMode: 'full-lookback',
             careerImportGeneration: freshCapability,
             careerImportFreshCapability: freshCapability,
             careerImportConsumption: null,
@@ -13798,6 +14325,7 @@ export default [
         && report.includes('fresh-capability=present') && report.includes('fresh-capability=absent')
         && report.includes('consumption-origin=job-board')
         && report.includes('admission-version=absent') && report.includes('admission-version=2')
+        && report.includes('/initial-lookback/initial-21d/no-completion')
         && report.includes('scan-active') && report.includes('scan-selected'),
       `FULL Board diagnostics must retain redacted persisted admission gates and recovery claims, got:\n${report}`);
       assert(!report.includes(boardId) && !report.includes(freshId)
@@ -13826,7 +14354,9 @@ export default [
       ], [{ source: defaultBoard, target: terminalSource }]);
       assert(defaultReport.includes('selected=yes')
         && defaultReport.includes('admission=reuse-terminal')
-        && defaultReport.includes('selector-ready=yes'),
+        && defaultReport.includes('selector-ready=yes')
+        && defaultReport.includes('re-scan=available on Job Search card')
+        && defaultReport.includes('/initial-lookback/initial-21d/no-completion'),
       `a missing selection allow-list defaults to every connected source and preserves a redacted positive terminal, got:\n${defaultReport}`);
 
       const malformedSelectionReports = [{ stale: 'selection-object-private' }, 'selection-string-private']

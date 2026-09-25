@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
-import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, boundedRejectionError, localAiHandoffEvent, pasteRejectionChangeDocuments, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
+import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC } from '../../electron/ipc/jobApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
+import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 
 async function createCanvasProject() {
   const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-canvas-')));
@@ -309,10 +310,10 @@ export default [
       'Local AI résumé generation must apply the same bounded compressed-evidence synthesis rule as API generation');
       assert(normalizedRoutineSource.includes('State completed work with yourself as the grammatical subject of the action')
         && normalizedRoutineSource.includes('graded by none of the argument rules and ships unexamined')
-        && normalizedRoutineSource.includes('state what the described work required, one level of abstraction above the artifact')
-        && normalizedRoutineSource.includes('introduces no fact the evidence did not already contain')
-        && normalizedRoutineSource.includes('must not announce that a generalization follows'),
-      'the routine must require first-person agency for completed work and the abstraction beat between evidence and transfer');
+        && normalizedRoutineSource.includes('Explain the relationship between concrete evidence and the target work only when the proof and transfer do not already make it clear')
+        && normalizedRoutineSource.includes('Do not insert a mandatory standalone warrant or problem-shape sentence')
+        && normalizedRoutineSource.includes('If removing the explanation leaves the same clear evidence-to-need connection, remove it'),
+      'the routine must require first-person agency while keeping any evidence-to-transfer explanation concrete, optional, and useful');
       const checklistBlock = new RegExp(`Canonical checklist, version ${APPLICATION_QUALITY_CHECKLIST_VERSION}:\\s*([\\s\\S]*?)\\n\\s*Use the full requirements`).exec(routineSource)?.[1] || '';
       const routineChecklistIds = [...checklistBlock.matchAll(/`([^`]+)`/g)].map(match => match[1]);
       const compactReviewStart = localSource.indexOf('function compactLocalAiQualityReview');
@@ -383,20 +384,17 @@ export default [
         && localSource.includes('COVER_LETTER_COHESION_REVISION_RULE')
         && localSource.includes('COVER_LETTER_CANDIDATE_AGENCY_RULE')
         && localSource.includes('COVER_LETTER_WARRANT_RULE')
+        && localSource.includes('COVER_LETTER_SENTENCE_FLEXIBILITY_RULE')
         && localSource.includes('grammatical subject of the action')
         && localSource.includes('graded by none of the argument rules and ships unexamined')
-        && localSource.includes('one level of abstraction above the artifact')
-        && localSource.includes('introduces no fact the evidence did not already contain')
-        // The warrant rule used to be satisfied by a category name: "The work
-        // lay mainly in coordinating dependent activities during validation and
-        // transition" assigns a class of activity and states no dependency, and
-        // it shipped. The rule now demands the relation itself, and there is no
-        // gate to pin instead — see the comment above the constant for why one
-        // cannot exist — so this assertion is the only guard on that demand.
-        && localSource.includes('name it as a relation between the things the work had to hold together')
-        && localSource.includes('what depended on what, what had to stay fixed while something else moved')
-        && localSource.includes('assigns the work to a category and says nothing about what made it hard')
-        && localSource.includes('stay true if a different project of the same shape were substituted')
+        && localSource.includes('Do not insert a mandatory standalone warrant or problem-shape sentence')
+        && localSource.includes('Keep concrete actors, artifacts, actions, and supported domain details')
+        && localSource.includes('turn a clear action into an abstract obligation')
+        && localSource.includes('Give every paragraph one argumentative job, not a prescribed number of sentences')
+        && localSource.includes('use an immediately following causal sentence for a trigger or follow-up action')
+        && localSource.includes('The audit records the sentences the prose needs; it does not allocate one sentence to each planning field')
+        && localSource.includes('${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} context.criteria')
+        && localSource.includes('${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} Any experience span')
         && localSource.includes('one controlling throughline')
         && localSource.includes('minimum-sufficient evidence')
         && localSource.includes('résumé owns breadth')
@@ -432,7 +430,16 @@ export default [
         && localSource.includes('concrete actor, artifact, and action')
         && localSource.includes('distinguish metaphorical reference from visible on-screen indication')
         && localSource.includes('use direct present-tense language')
-        && localSource.includes('connect the candidate’s relevant contribution to the specific target work')
+        // The closing-invitation rule now states the THREE parts the check
+        // (coverLetterChecks.js's candidateContributionRequirement) actually
+        // enforces, not two, and says the employer's own name satisfies the
+        // employer-facing third part exactly as "your …" does — see this
+        // file's own comment above COVER_LETTER_COPY_PRECISION_RULE for the
+        // incident (four rejected rounds, 2026-09-24) this rewrite answers.
+        && localSource.includes('build that one sentence from three parts, all three required')
+        && localSource.includes('the employer’s own name exactly as this letter already spells it')
+        && localSource.includes('Naming the employer by name is not a fallback or a weaker option')
+        && localSource.includes('this rule is read against the sentence before it, not the sign-off itself')
         && localSource.includes('source document—not the target position—the grammatical subject')
         && localSource.includes('position attached to the application with a proximal determiner')
         && localSource.includes('communication verbs attached to an actual document or speaker')
@@ -2111,12 +2118,97 @@ export default [
         const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath });
         await fs.promises.rm(queued.folder, { recursive: true, force: true });
         const status = await localApplicationStatus(queued.id, project.canvasFilePath);
-        assert(status.status === 'failed' && /no longer available|cleaned up/i.test(status.message),
+        // The message states the OBSERVATION (folder gone, no completion
+        // receipt found) rather than asserting which of discard, retention
+        // pruning, or an aborted import removed it — this surface cannot tell
+        // those apart, and a measured incident found the message that used to
+        // assert one of them naming the one cause that had NOT happened.
+        assert(status.status === 'failed' && /is gone/i.test(status.message) && /receipt/i.test(status.message),
           'a removed private job folder produces a terminal, actionable status instead of propagating ENOENT through the IPC handler');
         const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
         assert(cardSource.includes("!['saved', 'failed'].includes(localApplication.status)"),
           'the card does not offer a folder-open action after the app reports that the folder is gone');
         return { status: status.status };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: the "folder is gone" message names the recorded phase, and admits ignorance when none was ever stamped',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const phaseStampPath = jobId => path.join(project.root, '.local-ai', 'phase-stamps', `${jobId}.json`);
+
+        // GENERATING: a filesystem-transport job stamps 'generating' at
+        // creation (queueLocalApplicationJob's own phase stamp). Removing the
+        // folder directly — no discard, no prune, no save — leaves that
+        // creation-time stamp as the only record of what this job was doing.
+        const generating = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        assert(fs.existsSync(phaseStampPath(generating.id)), 'fixture sanity: job creation stamps a phase file');
+        await fs.promises.rm(generating.folder, { recursive: true, force: true });
+        const generatingStatus = await localApplicationStatus(generating.id, project.canvasFilePath);
+        assert(generatingStatus.status === 'failed' && generatingStatus.message.includes('"generating"')
+          && generatingStatus.message.includes('no later discard or cleanup ever recorded'),
+        `the message names the last recorded in-progress phase, not a guess among three causes (message=${JSON.stringify(generatingStatus.message)})`);
+
+        // DISCARDED: an explicit discard both removes the folder and stamps
+        // 'discarded' — the message must name the actual recorded cause.
+        const discarded = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        await discardLocalApplicationJob(discarded.id, project.canvasFilePath);
+        const discardedStatus = await localApplicationStatus(discarded.id, project.canvasFilePath);
+        assert(discardedStatus.status === 'failed' && discardedStatus.message.includes('"discarded"'),
+          `the message names an explicit discard (message=${JSON.stringify(discardedStatus.message)})`);
+
+        // PRUNED: age-based retention removal stamps 'pruned', a cause
+        // distinct from an explicit discard. Backdate this job's manifest the
+        // same way the existing retention test does (below), then trigger a
+        // sweep by queuing another job.
+        const pruned = await queueLocalApplicationJob({
+          job: { title: 'Old Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        const prunedManifestPath = path.join(pruned.folder, 'manifest.json');
+        const prunedManifest = JSON.parse(await fs.promises.readFile(prunedManifestPath, 'utf8'));
+        await fs.promises.writeFile(prunedManifestPath, `${JSON.stringify({
+          ...prunedManifest, status: 'imported', createdAt: '2000-01-01T00:00:00.000Z',
+        })}\n`, 'utf8');
+        await queueLocalApplicationJob({
+          job: { title: 'New Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        assert(!fs.existsSync(pruned.folder), 'fixture sanity: the backdated job must actually be pruned to exercise this phase');
+        const prunedStatus = await localApplicationStatus(pruned.id, project.canvasFilePath);
+        assert(prunedStatus.status === 'failed' && prunedStatus.message.includes('"pruned"')
+          && prunedStatus.message.includes('retention window'),
+        `the message names age-based retention pruning, distinct from an explicit discard (message=${JSON.stringify(prunedStatus.message)})`);
+
+        // ABSENT: a job that predates this feature never got a phase stamp.
+        // Delete the stamp this job's own creation wrote, then remove the
+        // folder the same way, and the message must admit ignorance rather
+        // than guess a phase it never observed.
+        const predatesFeature = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        await fs.promises.rm(phaseStampPath(predatesFeature.id), { force: true });
+        await fs.promises.rm(predatesFeature.folder, { recursive: true, force: true });
+        const noPhaseStatus = await localApplicationStatus(predatesFeature.id, project.canvasFilePath);
+        assert(noPhaseStatus.status === 'failed' && /no phase history was recorded/i.test(noPhaseStatus.message)
+          && !/"(?:awaiting-paste|generating|saved|discarded|pruned)"/.test(noPhaseStatus.message),
+        `a genuinely absent phase stamp is admitted, never guessed (message=${JSON.stringify(noPhaseStatus.message)})`);
+
+        return {
+          generatingMessage: generatingStatus.message, discardedMessage: discardedStatus.message,
+          prunedMessage: prunedStatus.message, noPhaseMessage: noPhaseStatus.message,
+        };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -5785,6 +5877,1475 @@ Personal Projects`;
       assert(MIN_SHARED_SOURCE_TERMS === 2,
         'the fixture relies on the shared-term floor the gate applies');
       return { sentenceConjunctions: conjunctions(sentenceMessage), qualifierConjunctions: conjunctions(qualifierMessage) };
+    },
+  },
+  {
+    name: 'pasteRejectionReason: a rejection whose items name a known check id is VALIDATION_FAILED, not the residual SCHEMA_INVALID bucket',
+    run() {
+      // THE INCIDENT this answers for: 16 consecutive rejections, all reason
+      // SCHEMA_INVALID, all naming check id "direct-welcome-closing" by exact
+      // id — the residual code assigned even though the failing rule was
+      // known by name. pasteRejectionCheckIds is the same computation the app
+      // already ran; this only asks whether the reason now consults it.
+      const namedItems = ['direct-welcome-closing: the opening restates a welcome instead of the job-specific connection.'];
+      const { checkIds: namedIds } = pasteRejectionCheckIds(namedItems);
+      assert(namedIds.length === 1 && namedIds[0] === 'direct-welcome-closing',
+        `fixture sanity: pasteRejectionCheckIds must still name the check (ids=${JSON.stringify(namedIds)})`);
+      assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: namedItems, checkIds: namedIds }) === 'VALIDATION_FAILED',
+        'a rejection whose items name a known check takes VALIDATION_FAILED');
+
+      // The genuinely nameless case keeps the old, residual code: nothing in
+      // PASTE_CHECK_PROSE_UNITS or APPLICATION_QUALITY_CRITERIA names this
+      // structural message, so pasteRejectionCheckIds returns no ids for it.
+      const uncodedItems = ['Evidence plan needs at least one prioritized requirement.'];
+      const { checkIds: uncodedIds } = pasteRejectionCheckIds(uncodedItems);
+      assert(uncodedIds.length === 0, `fixture sanity: this message must name no known check (ids=${JSON.stringify(uncodedIds)})`);
+      assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: uncodedItems, checkIds: uncodedIds }) === 'SCHEMA_INVALID',
+        'a rejection whose items name no known check stays the residual SCHEMA_INVALID');
+
+      // STALE_HANDOFF_ECHO and DOMAIN_VALIDATION_FAILED keep exactly the
+      // precedence they had before pasteRejectionReason existed: an envelope
+      // mismatch wins regardless of what the items say, and the domain probe
+      // fires ahead of a named check id.
+      assert(pasteRejectionReason({ envelopeMismatch: true, validationErrors: namedItems, checkIds: namedIds }) === 'STALE_HANDOFF_ECHO',
+        'an envelope mismatch is reported as itself even when the items also name a known check');
+      const domainItems = ['This quote does not occur in the frozen career-data corpus.'];
+      assert(pasteRejectionReason({ envelopeMismatch: false, validationErrors: domainItems, checkIds: [] }) === 'DOMAIN_VALIDATION_FAILED',
+        'a domain/grounding failure is still detected by its own raw-text probe ahead of the named-check fallback');
+      return { namedIds, uncodedIds };
+    },
+  },
+  {
+    name: 'pasteRejectionCheckIds: the per-check fingerprint tells branches of one check apart without ever storing letter text',
+    run() {
+      // THE NEXT RUNG of THE INCIDENT (see the streak test above and
+      // PASTE_REJECTION_ESCALATION_STREAK's own header): every one of 16
+      // rejected rounds named check id "direct-welcome-closing" by exact id,
+      // but checkDirectWelcomeClosing has FOUR structurally different failure
+      // branches with four different repairs, and the id alone cannot say
+      // which one fired or whether it changed mid-streak. These four
+      // sentences are the exact fixtures the "documented shape" test above
+      // already uses for these four branches (conditional register,
+      // employer-choice close, inward-facing close, direct-conversation
+      // close), reused here rather than invented so this test tracks the
+      // real check if its wording or regexes ever change.
+      const conditional = checkDirectWelcomeClosing(['I would welcome a conversation about how that combination could support the WAVES rebuild.']);
+      const employerChoice = checkDirectWelcomeClosing(['I welcome a conversation about whether the voice assistant or browser agent should be the first prototype.']);
+      const selfDirected = checkDirectWelcomeClosing(['I look forward to learning more about the team.']);
+      const directNoContribution = checkDirectWelcomeClosing(['I welcome a conversation about using my experience.']);
+      for (const observation of [conditional, employerChoice, selfDirected, directNoContribution]) {
+        assert(!observation.passed && observation.id === 'direct-welcome-closing',
+          `fixture sanity: all four must fail the same check id (got ${JSON.stringify(observation)})`);
+      }
+      const fingerprintOf = observation => pasteRejectionCheckIds([`${observation.id}: ${observation.detail}`]).checkFingerprints[observation.id];
+      const fpConditional = fingerprintOf(conditional);
+      const fpEmployerChoice = fingerprintOf(employerChoice);
+      const fpSelfDirected = fingerprintOf(selfDirected);
+      const fpDirectNoContribution = fingerprintOf(directNoContribution);
+      const fingerprintHex = /^[0-9a-f]{8}$/;
+      for (const fp of [fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution]) {
+        assert(fingerprintHex.test(fp), `a fingerprint is an 8-char lowercase hex digest, got ${JSON.stringify(fp)}`);
+      }
+      assert(new Set([fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution]).size === 4,
+        `four different branches of one check must fingerprint differently, got ${JSON.stringify({ fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution })}`);
+
+      // Same branch (the inward-facing "look forward"/"want to" close),
+      // different letter text: the quoted evidence span differs every round
+      // even when the rule is stuck on the identical branch, so a fingerprint
+      // that did not strip it would never repeat and this feature would be
+      // useless for exactly the case it exists for.
+      const selfDirectedAgain = checkDirectWelcomeClosing(['I look forward to exploring the engineering roadmap in far more depth than we have covered so far.']);
+      assert(!selfDirectedAgain.passed && selfDirectedAgain.detail !== selfDirected.detail,
+        'fixture sanity: the second letter must trip the same branch with genuinely different quoted text');
+      assert(fingerprintOf(selfDirectedAgain) === fpSelfDirected,
+        'the same branch on different letter text must fingerprint identically');
+
+      // Same branch, different paragraph ordinal: an earlier paragraph being
+      // rewritten in a later revision can shift which paragraph is last
+      // without changing which rule fires or why.
+      const selfDirectedLaterParagraph = checkDirectWelcomeClosing([
+        'This filler paragraph stands in for an earlier one that changed between revisions.',
+        'I look forward to learning more about the team.',
+      ]);
+      assert(!selfDirectedLaterParagraph.passed && selfDirectedLaterParagraph.detail.includes('paragraph 2')
+        && selfDirected.detail.includes('paragraph 1'),
+      `fixture sanity: the two must differ only by paragraph ordinal, got ${JSON.stringify({ one: selfDirected.detail, two: selfDirectedLaterParagraph.detail })}`);
+      assert(fingerprintOf(selfDirectedLaterParagraph) === fpSelfDirected,
+        'the same branch firing on a different paragraph ordinal must fingerprint identically');
+      return { fpConditional, fpEmployerChoice, fpSelfDirected, fpDirectNoContribution };
+    },
+  },
+  {
+    name: 'recordPasteHandoffDiagnostic + buildPasteHandoffDiagnosticsMarkdown: a check fingerprint renders beside its check id and never carries the letter\'s own quoted evidence',
+    run() {
+      _resetPasteHandoffDiagnostics();
+      try {
+        // Unlike the other three branches, the employer-choice close's own
+        // regex (EMPLOYER_CHOICE_CLOSE) quotes a bounded span of whatever the
+        // letter wrote between "whether" and "or"/"versus" verbatim — real
+        // letter content, not fixed check vocabulary — so this fixture is the
+        // one that actually exercises the curly-quote strip end to end
+        // instead of only ever quoting the check's own constant wording.
+        const marker = 'UNIQUEWORD08';
+        const observation = checkDirectWelcomeClosing([`I welcome a conversation about whether the ${marker} prototype or the browser agent should be the first priority.`]);
+        assert(!observation.passed && observation.detail.includes(marker),
+          `fixture sanity: the employer-choice close must fail and quote the letter's own marker word (detail=${JSON.stringify(observation.detail)})`);
+        const { checkIds, checkFingerprints } = pasteRejectionCheckIds([`${observation.id}: ${observation.detail}`]);
+        recordPasteHandoffDiagnostic({
+          stage: 'cover-letter', outcome: 'rejected', reason: 'VALIDATION_FAILED',
+          responseChars: 4302, revision: 2, logCount: 2,
+          errorCount: 1, checkIds, checkFingerprints,
+        });
+        const fp = checkFingerprints['direct-welcome-closing'];
+        assert(/^[0-9a-f]{8}$/.test(fp) && !fp.includes(marker), `the fingerprint itself is opaque hex, got ${JSON.stringify(fp)}`);
+        const snapshot = getPasteHandoffDiagnosticsSnapshot();
+        const stored = snapshot.receipts.at(-1);
+        assert(JSON.stringify(stored).includes(fp) && !JSON.stringify(stored).includes(marker),
+          `the stored receipt fields must carry the fingerprint but never the letter's marker word, got ${JSON.stringify(stored)}`);
+        const markdown = buildPasteHandoffDiagnosticsMarkdown();
+        assert(markdown.includes(`failed checks direct-welcome-closing (${fp})`),
+          `the receipt line must attach the fingerprint to its check id, got ${markdown}`);
+        assert(!markdown.includes(marker) && !markdown.includes(observation.detail),
+          `the rendered receipt must never carry the letter's own quoted text, got ${markdown}`);
+        return { line: markdown.split('\n').find(line => line.includes('failed checks')) };
+      } finally {
+        _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a consecutive same-check rejection streak escalates at the threshold, resets on a different check, and leaves a durable metadata-only row',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        _resetPasteHandoffDiagnostics();
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        // Overly-long bullet: exceeds RESUME_BULLET_CHARACTER_BUDGET (180)
+        // while still citing resume-proof, so this is the ONE named check —
+        // resume-bullet-length — that fails, round after round, unchanged.
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 1 of a repeated defect carries no escalation yet');
+
+        handoff = round1.handoff;
+        const round2 = await submit(handoff, tooLongResume);
+        assert(!round2.accepted && !round2.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 2 of the SAME defect still carries no escalation — below PASTE_REJECTION_ESCALATION_STREAK');
+
+        handoff = round2.handoff;
+        const round3 = await submit(handoff, tooLongResume);
+        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
+          `round 3 of the SAME defect escalates with the exact wording (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
+
+        // A dialog reopen (no new submit) must show the SAME streak, not reset
+        // it and not advance it — getLocalApplicationHandoff rebuilds the
+        // correction prompt from the recalled corrections, and the escalation
+        // has to read from the same stored count a fresh submit would.
+        const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(reopened.handoff.correctionPrompt.includes(escalation),
+          'reopening the handoff dialog shows the same escalation without counting as another round');
+
+        // A DIFFERENT defect — too many bullets on one role, each citing the
+        // same evidence id, which fails a structural rule no check id names —
+        // resets the streak: the next occurrence of the ORIGINAL check must
+        // start over at 1, not continue from 3.
+        handoff = round3.handoff;
+        const manyBullets = Array.from({ length: 7 }, (_, index) => ({ id: `bullet-${index + 1}`, text: 'Maintained supported systems.', evidenceIds: ['resume-proof'] }));
+        const differentDefectResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: manyBullets }],
+          },
+        };
+        const round4 = await submit(handoff, differentDefectResume);
+        assert(!round4.accepted && !round4.handoff.correctionPrompt.includes('consecutive responses'),
+          `a different defect resets the streak instead of continuing it (errors=${JSON.stringify(round4.validationErrors)})`);
+
+        handoff = round4.handoff;
+        const round5 = await submit(handoff, tooLongResume);
+        assert(!round5.accepted && !round5.handoff.correctionPrompt.includes('consecutive responses'),
+          'the original check\'s streak restarted at 1 rather than resuming at 3 after the interruption');
+
+        // FIX C: every one of the five rejections above left a durable,
+        // METADATA-ONLY row in the job's own Generation Log — stage, reason,
+        // check ids, an error count, and the streak count, and nothing else.
+        // Read the raw file (not through any app accessor) so this proves
+        // what is actually on disk, in the exact shape a bug report or a
+        // restart would see. The durable trace is its own sidecar file, next
+        // to but never inside Generation Log.jsonl — see
+        // PASTE_REJECTION_TRACE_FILE's own header for why a rejection cannot
+        // be allowed to consume the Generation Log's shared, strictly
+        // monotonic sequence.
+        const tracePath = path.join(queued.folder, 'Paste Rejections.json');
+        const rejections = JSON.parse(await fs.promises.readFile(tracePath, 'utf8'));
+        assert(Array.isArray(rejections) && rejections.length === 5, `every rejected round appended exactly one durable row (rows=${rejections.length})`);
+        assert(rejections.every(event => !('response' in event) && !('prompt' in event) && !('draft' in event) && !('detail' in event)
+          && !('correctionPrompt' in event) && !JSON.stringify(event).includes(bullet)),
+        `a rejection row carries no response, prompt, draft, or validation detail text, and never quotes the career-data bullet (rows=${JSON.stringify(rejections)})`);
+        assert(rejections.map(event => event.rejectionStreak).join(',') === '1,2,3,0,1',
+          `the durable streak count matches what the correction prompt escalated by (streaks=${rejections.map(event => event.rejectionStreak).join(',')})`);
+        assert(rejections.slice(0, 3).every(event => event.reason === 'VALIDATION_FAILED' && JSON.stringify(event.checkIds) === '["resume-bullet-length"]'),
+          `the three resume-bullet-length rounds are filed under VALIDATION_FAILED, not the residual bucket (rows=${JSON.stringify(rejections.slice(0, 3))})`);
+        assert(rejections[3].reason === 'SCHEMA_INVALID' && Array.isArray(rejections[3].checkIds) && rejections[3].checkIds.length === 0,
+          `the structural, nameless defect stays the residual SCHEMA_INVALID bucket (row=${JSON.stringify(rejections[3])})`);
+
+        // Every durable row also carries checkFingerprints — the same real
+        // pipeline that produced checkIds above. The three identical
+        // resume-bullet-length rounds resubmit the exact same padded bullet,
+        // so their fingerprints must agree with each other (same branch, same
+        // observation), and the row already proven to carry no response,
+        // prompt, or bullet text above proves the fingerprint itself leaked
+        // none of it either — it is 8 lowercase hex characters, nothing else.
+        const fingerprintHex = /^[0-9a-f]{8}$/;
+        const namedFingerprints = rejections.slice(0, 3).map(event => event.checkFingerprints?.['resume-bullet-length']);
+        assert(namedFingerprints.every(fp => fingerprintHex.test(fp)),
+          `each named round's checkFingerprints must key the same check id with an 8-hex digest (fingerprints=${JSON.stringify(namedFingerprints)})`);
+        assert(new Set(namedFingerprints).size === 1,
+          `the identical resubmitted defect must fingerprint identically across all three rounds (fingerprints=${JSON.stringify(namedFingerprints)})`);
+        assert(rejections[3].checkFingerprints && Object.keys(rejections[3].checkFingerprints).length === 0,
+          `the nameless structural round names no check, so it carries no fingerprint either (row=${JSON.stringify(rejections[3])})`);
+
+        // Generation Log's own strictly monotonic sequence is untouched by any
+        // of the five rejections above: only the creation record and the one
+        // accepted evidence-plan round ever landed in it, and the persisted
+        // manifest.paste.logCount/revision/stage agree — a rejection can
+        // never wedge a later acceptance the way consuming that shared
+        // sequence used to (PASTE_REJECTION_TRACE_FILE's own header).
+        const logPath = path.join(queued.folder, 'Generation Log.jsonl');
+        const events = (await fs.promises.readFile(logPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+        assert(events.length === 2 && events[0].type === 'paste-job-created' && events[1].type === 'paste-accepted',
+          `rejections never consume the Generation Log's shared sequence (types=${JSON.stringify(events.map(event => event.type))})`);
+        const manifest = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8'));
+        assert(manifest.paste.logCount === 1 && manifest.paste.revision === 1 && manifest.paste.stage === 'resume',
+          `the durable rejection trace never advances the shared log sequence, the revision, or the stage (manifest.paste=${JSON.stringify({ logCount: manifest.paste.logCount, revision: manifest.paste.revision, stage: manifest.paste.stage })})`);
+
+        // The process-local diagnostics ring buffer (wiped on restart, unlike
+        // the durable trace above) agrees with the durable rows.
+        const snapshot = getPasteHandoffDiagnosticsSnapshot();
+        const rejectedReceipts = snapshot.receipts.filter(item => item.outcome === 'rejected');
+        assert(rejectedReceipts.length === 5 && rejectedReceipts.slice(0, 3).every(item => item.reason === 'VALIDATION_FAILED'),
+          `the diagnostics snapshot reports the same non-residual reason (receipts=${JSON.stringify(rejectedReceipts)})`);
+
+        return { rejections: rejections.length, streaks: rejections.map(event => event.rejectionStreak) };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a consecutive same-check rejection streak survives an app restart by seeding from the durable trace',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        // Round 1 is the FIRST rejection this job ever records: its durable
+        // trace file (Paste Rejections.json) does not exist on disk yet when
+        // this round's bump looks for it. This is the "missing sidecar" case
+        // every job's very first rejection exercises — it must seed nothing
+        // and must not throw, which a rejected-not-thrown round 1 proves.
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 1 carries no escalation yet, and a genuinely missing trace file produced no throw');
+
+        // Round 2: the identical defect again, still below the threshold.
+        handoff = round1.handoff;
+        const round2 = await submit(handoff, tooLongResume);
+        assert(!round2.accepted && !round2.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 2 of the SAME defect still carries no escalation — below PASTE_REJECTION_ESCALATION_STREAK');
+
+        // Simulate an app restart: discard the process-local streak map
+        // WITHOUT touching the durable trace the two real rejections above
+        // already wrote to disk — exactly what quitting and reopening the app
+        // does to pasteRejectionStreakByJob.
+        _resetPasteRejectionStreakForTests();
+
+        // A dialog reopen immediately after the simulated restart, with no new
+        // submit, must show no escalation: peekPasteRejectionStreak is
+        // strictly read-only and must never itself seed or create state in the
+        // now-empty in-memory map, even though the durable trace on disk
+        // already holds two real rounds.
+        const reopenedAfterRestart = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(!reopenedAfterRestart.handoff.correctionPrompt.includes('consecutive responses')
+          && reopenedAfterRestart.handoff.rejectionEscalation.active === false,
+        'reopening the handoff dialog right after a simulated restart must not itself create or advance streak state');
+
+        // Round 3, in the "fresh process": had the streak actually reset to 1
+        // (the bug this seeding fixes), this round would show no escalation —
+        // 1 is below PASTE_REJECTION_ESCALATION_STREAK. Seeded correctly from
+        // the durable trace's two real rounds, this is consecutive round 3 for
+        // the identical check and must escalate HERE, the exact round an
+        // uninterrupted process would have escalated on — not one round later.
+        handoff = round2.handoff;
+        const round3 = await submit(handoff, tooLongResume);
+        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
+          `round 3 after a simulated restart escalates exactly as an uninterrupted process would (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
+        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['resume-bullet-length'], streak: 3, trimmedFromPrompt: false }),
+          `the restart-seeded streak reports the same escalation state an uninterrupted process would have (rejectionEscalation=${JSON.stringify(round3.handoff.rejectionEscalation)})`);
+
+        // The durable trace itself proves the seed reproduced the SAME streak
+        // numbers an uninterrupted process would have written — 1, 2, 3 —
+        // never a restart back down to 1.
+        const tracePath = path.join(queued.folder, 'Paste Rejections.json');
+        const rejections = JSON.parse(await fs.promises.readFile(tracePath, 'utf8'));
+        assert(rejections.map(event => event.rejectionStreak).join(',') === '1,2,3',
+          `the durable streak sequence is unbroken across the simulated restart (streaks=${rejections.map(event => event.rejectionStreak).join(',')})`);
+
+        return { escalatedAfterRestart: true, streaks: rejections.map(event => event.rejectionStreak) };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a per-check-id streak does not bridge across an accepted review round into the next epoch after a restart, even though the accept leaves stage at \'review\' too',
+    async run() {
+      // FLAW A (adversarial review of the streak-restart fix above): the
+      // sibling test's top-level gate check (seedPasteRejectionStreakFromTrace's
+      // own header) constrains only the trace's LAST row, so it stops a streak
+      // SEEDING at all once an accept has closed the epoch — but the replay
+      // loop just below that gate used to fold every row the trace held once
+      // seeding was under way, with no revision check of its own. 'review' is
+      // the one stage whose own accept (a 'revised' decision) bumps revision
+      // while leaving the stage unchanged — evidence-plan/resume/cover-letter
+      // each advance to the next stage on accept, so only a review round can
+      // reproduce "accept, same stage, new epoch" at all — which is exactly
+      // what makes this shape distinct from the sibling test above (that one
+      // never accepts anything mid-run).
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const revisionBullet = 'Maintained reliable internal systems with supported delivery practices.';
+        const letterParagraph = 'My experience delivering supported systems is a relevant capability. In my engineering role at Acme, I updated supported systems for internal users. I would apply my experience delivering supported systems to reliable system delivery this role requires.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}\n${revisionBullet}\n${letterParagraph}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        // Walk to the review stage — evidence-plan, then a valid résumé, then
+        // a valid cover letter, each accepted in turn. This is the only path
+        // there, and 'review' is the only stage an accept can return to.
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'revision-proof', sourceId: 'career-data', quote: revisionBullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'letter-proof', sourceId: 'career-data', quote: letterParagraph, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        handoff = plan.handoff;
+        const firstResume = { schemaVersion: 'structured-resume.v1', identity, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: bullet, evidenceIds: ['resume-proof'] }] }] };
+        const resumeAccepted = await submit(handoff, { resume: firstResume });
+        assert(resumeAccepted.accepted, `fixture sanity: the résumé must be accepted (errors=${JSON.stringify(resumeAccepted.validationErrors || [])})`);
+
+        handoff = resumeAccepted.handoff;
+        const letter = {
+          name: identity.name, contact: identity.contact,
+          paragraphs: [{ id: 'paragraph-1', text: letterParagraph, evidenceIds: ['letter-proof', 'job-proof'] }],
+          roleThesis: 'Reliable system delivery is the supported capability this engineering role needs.',
+          coverLetterArgument: { primaryEvidence: { evidence: bullet, evidenceRole: 'Engineer at Acme', relationToThesis: 'The systems work establishes the delivery capability named in the thesis.' } },
+        };
+        const letterAccepted = await submit(handoff, { coverLetter: letter });
+        assert(letterAccepted.accepted && letterAccepted.handoff.stage === 'review',
+          `fixture sanity: an accepted cover letter reaches the review stage (accepted=${letterAccepted.accepted}, stage=${letterAccepted.handoff?.stage}, errors=${JSON.stringify(letterAccepted.validationErrors || [])})`);
+
+        const checklist = () => APPLICATION_QUALITY_CRITERIA.map(({ id }) => ({ id, status: 'pass', detail: `Reviewed ${id} against the final documents.` }));
+        const findings = () => [{ id: 'review-1', document: 'resume', targetId: 'bullet-1', issue: 'Tighten the delivery bullet.', fix: 'Use the concise wording.' }];
+        // Every round below carries decision:'revised' and never 'pass', so
+        // qualityReview/generationAudit (required only for a pass) are never
+        // needed. coverLetter is deliberately omitted from every round: a
+        // 'revised' round that carries a coverLetter must change it from the
+        // accepted one (validatePasteResponse's own rule), which this fixture
+        // has no reason to exercise — résumé alone already satisfies `changes`.
+        // pasteReplacementResumeArgumentRebindErrors, the check that grades a
+        // résumé-only replacement against the ACCEPTED letter's argument, stays
+        // silent throughout because the accepted letter's
+        // coverLetterArgument.primaryEvidence.evidence (`bullet`) is a
+        // token-coverage match (argumentEvidenceMatchesBullet) against every
+        // résumé bullet variant below — the too-long one and the revised one
+        // alike both retain every one of `bullet`'s words.
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongReview = handoffNow => submit(handoffNow, {
+          decision: 'revised', checklist: checklist(), findings: findings(),
+          resume: { schemaVersion: 'structured-resume.v1', identity, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }] },
+        });
+
+        // Rounds 1-2: "2 rejections at revision N" — the review stage's FIRST
+        // revision — both failing resume-bullet-length alone (the same defect
+        // the plain résumé-stage restart test above uses, now reached through
+        // a review-stage résumé REPLACEMENT, which wraps the identical
+        // completion-twin message in PASTE_RESUME_REPLACEMENT_PREFIX).
+        handoff = letterAccepted.handoff;
+        const round1 = await tooLongReview(handoff);
+        assert(!round1.accepted && round1.validationErrors.some(message => message.includes('resume-bullet-length:')),
+          `fixture sanity: round 1 must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        handoff = round1.handoff;
+        const round2 = await tooLongReview(handoff);
+        assert(!round2.accepted && round2.validationErrors.some(message => message.includes('resume-bullet-length:')),
+          `fixture sanity: round 2 repeats the identical defect (errors=${JSON.stringify(round2.validationErrors)})`);
+        assert(!round2.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 2 carries no escalation yet — below PASTE_REJECTION_ESCALATION_STREAK');
+
+        // "An accept bumping to N+1 with the stage unchanged": a genuinely
+        // different, evidence-backed résumé bullet (not a cosmetic edit, so it
+        // clears validatePasteResponse's own must-actually-change gate) is
+        // accepted at the review stage and lands back on 'review' — revision
+        // N -> N+1, stage held. clearPasteRejectionStreak(jobId) runs here
+        // (submitLocalApplicationHandoff's own unconditional call on every
+        // acceptance, both call sites), which already clears the in-memory
+        // entry regardless of any later restart — the restarts below are
+        // still simulated for narrative fidelity with a real app session, but
+        // the first one is a no-op for THIS entry precisely because the accept
+        // already emptied it.
+        handoff = round2.handoff;
+        const revisedResume = { schemaVersion: 'structured-resume.v1', identity, roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: revisionBullet, evidenceIds: ['revision-proof'] }] }] };
+        const accepted = await submit(handoff, { decision: 'revised', checklist: checklist(), findings: findings(), resume: revisedResume });
+        assert(accepted.accepted && accepted.handoff.stage === 'review',
+          `fixture sanity: the review-stage accept must land back on the review stage (accepted=${accepted.accepted}, stage=${accepted.handoff?.stage}, errors=${JSON.stringify(accepted.validationErrors || [])})`);
+
+        // Simulated restart #1. The very next rejection (round 3, "a
+        // rejection") is the FIRST of the new epoch: the durable trace's last
+        // row is still round 2, at the OLD revision, so seedPasteRejectionStreakFromTrace's
+        // top-level gate correctly refuses to seed anything — this round
+        // starts a fresh count of 1 either way, with or without the fix below,
+        // so it does not by itself distinguish them. It does leave a row of
+        // its own in the trace at the NEW revision, which is what round 4
+        // needs.
+        _resetPasteRejectionStreakForTests();
+        handoff = accepted.handoff;
+        const round3 = await tooLongReview(handoff);
+        assert(!round3.accepted && !round3.handoff.correctionPrompt.includes('consecutive responses'),
+          `round 3 (first rejection of the new epoch) carries no escalation (errors=${JSON.stringify(round3.validationErrors)})`);
+
+        // Simulated restart #2, then "another rejection" (round 4). This is
+        // the round FLAW A broke: the trace's last row is now round 3, which
+        // DOES share this round's (jobId, stage, revision) — the top-level
+        // gate passes and seeding proceeds. Before this fix, the replay loop
+        // folded every row the trace held with no revision check of its own:
+        // rounds 1 and 2 (2 old-epoch rejections, already closed by the accept
+        // above) plus round 3 (1 new-epoch rejection) summed to a seeded
+        // idCounts of 3, and this round's own live bump made it 4 — an
+        // escalation block claiming "4 consecutive responses" on what is only
+        // the SECOND rejection the new epoch has actually had. Fixed, the
+        // loop resets on round 3's own revision (N+1) not matching rounds 1-2's
+        // revision (N), so it seeds idCounts=1 (round 3 alone) and this
+        // round's bump makes it 2 — the true count, still below
+        // PASTE_REJECTION_ESCALATION_STREAK (3), so no escalation block is
+        // appended.
+        _resetPasteRejectionStreakForTests();
+        handoff = round3.handoff;
+        const round4 = await tooLongReview(handoff);
+        assert(!round4.accepted, `fixture sanity: round 4 must still fail resume-bullet-length (errors=${JSON.stringify(round4.validationErrors)})`);
+        assert(round4.handoff.rejectionEscalation.active === false && !round4.handoff.correctionPrompt.includes('consecutive responses'),
+          `the per-id count after 2 restarts is the 2 genuine new-epoch rejections, NOT 4 bridged in from the closed epoch — a bridged streak would escalate here and it must not (rejectionEscalation=${JSON.stringify(round4.handoff.rejectionEscalation)})`);
+
+        // escalatedIds only reports a count once it reaches the threshold, so
+        // "2, not 4" has no direct getter below that line — but one more LIVE
+        // rejection (same process, no further restart) pins the exact number:
+        // it escalates at streak 3 only if round 4's seeded-plus-own count was
+        // 2 (making this round the 3rd); a bridged 4 would instead reach 5
+        // here. This is the same escalation text and threshold the sibling
+        // restart test above proves for the single-restart case.
+        handoff = round4.handoff;
+        const round5 = await tooLongReview(handoff);
+        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round5.accepted && round5.handoff.correctionPrompt.includes(escalation),
+          `round 5 escalates at exactly streak 3, proving the seeded count going into round 4 was 2 and not 4 (which would reach 5 here) (correction=${JSON.stringify(round5.handoff.correctionPrompt)})`);
+
+        return { newEpochStreakAtEscalation: 3 };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: outstanding correction items survive an app restart via a durable sidecar, and the recovered round hands over a self-contained full prompt naming every outstanding item',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+
+        // The durable sidecar — a SEPARATE file from Paste Rejections.json,
+        // per PASTE_CORRECTIONS_SIDECAR_FILE's own header — mirrors
+        // pasteCorrectionsByJob's shape onto disk. Read it directly (not
+        // through any app accessor) to prove what a fresh process would
+        // actually find there.
+        const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
+        const sidecar = JSON.parse(await fs.promises.readFile(sidecarPath, 'utf8'));
+        assert(sidecar.version === 1 && sidecar.jobId === queued.id && sidecar.stage === 'resume'
+          && sidecar.revision === round1.handoff.revision && sidecar.handoffCode === round1.handoff.handoffCode,
+          `the sidecar mirrors the exact round it was written for (sidecar=${JSON.stringify(sidecar)})`);
+        assert(Array.isArray(sidecar.corrections) && sidecar.corrections.length === 1 && sidecar.corrections[0].startsWith('resume-bullet-length:'),
+          `the sidecar carries the same validation text the correction prompt would print (corrections=${JSON.stringify(sidecar.corrections)})`);
+
+        // Simulate a full app restart: discard BOTH in-memory maps a live
+        // process would otherwise still be holding (the corrections map and
+        // the separate rejection-streak map), without touching either
+        // durable file the rejection above just wrote.
+        _resetPasteRejectionStreakForTests();
+        _resetPasteCorrectionsForTests();
+
+        // A dialog reopen in the fresh process — getLocalApplicationHandoff,
+        // exactly what reopening the handoff dialog after relaunching the
+        // app triggers.
+        const recovered = await current();
+        assert(Array.isArray(recovered.corrections) && recovered.corrections.length === 1 && recovered.corrections[0].startsWith('resume-bullet-length:'),
+          `the recovered handoff restores the same outstanding item from disk (corrections=${JSON.stringify(recovered.corrections)})`);
+        assert(JSON.stringify({ ...recovered.correctionsRecovered, lastAt: undefined }) === JSON.stringify({
+          active: true, itemCount: 1, checkIds: ['resume-bullet-length'], rejectionCount: 1, lastAt: undefined,
+        }), `correctionsRecovered reports the exact restored item count and the durable trace's own checkIds/rejectionCount (correctionsRecovered=${JSON.stringify(recovered.correctionsRecovered)})`);
+        assert(typeof recovered.correctionsRecovered.lastAt === 'string' && !Number.isNaN(Date.parse(recovered.correctionsRecovered.lastAt)),
+          `lastAt is a real ISO timestamp read off the durable rejection trace (lastAt=${JSON.stringify(recovered.correctionsRecovered.lastAt)})`);
+
+        // SELF-CONTAINED, not a delta: the recovered round's correctionPrompt
+        // embeds the complete stage prompt verbatim (record.prompt) rather
+        // than the "fixes only" delta pasteCorrectionPrompt builds for a chat
+        // that still holds the draft — see pasteRecoveredHandoffPrompt's own
+        // header for why a restart makes the delta the wrong prompt.
+        assert(recovered.correctionPrompt.includes(recovered.prompt),
+          'the recovered correction prompt embeds the complete stage prompt verbatim, not a delta');
+        assert(recovered.correctionPrompt.startsWith('Infinite Canvas structured application handoff — recovered round.'),
+          `the recovered prompt is visibly distinct from an ordinary correction round (correctionPrompt starts: ${JSON.stringify(recovered.correctionPrompt.slice(0, 120))})`);
+        assert(recovered.correctionPrompt.includes(round1.validationErrors[0]),
+          'the recovered prompt names the exact outstanding item, not merely a summary of it');
+        assert(recovered.correctionPrompt.includes('no live memory') && recovered.correctionPrompt.includes('cannot tell whether the AI chat'),
+          'the recovered prompt honestly states what was and was not observed, without asserting a restart as an observed fact');
+        assert(!recovered.correctionPrompt.includes('Fix this, reported by the app that read your response'),
+          'the recovered prompt never reads like the ordinary delta correction prompt');
+
+        // The recovered round is still answerable: submitting a corrected
+        // résumé against the SAME still-outstanding handoffCode must be
+        // accepted, proving the recovery path did not corrupt the round's
+        // own envelope.
+        const fixedResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: bullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+        const accepted = await submit(recovered, fixedResume);
+        assert(accepted.accepted, `the recovered round's envelope still answers a fixed response (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+
+        return { recoveredItemCount: recovered.correctionsRecovered.itemCount };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a dialog reopen with live in-process memory of a rejection never sets correctionsRecovered',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+
+        // No restart simulated — this process still holds the live entry
+        // rememberPasteCorrections just wrote. Reopening the dialog here
+        // must resolve from THAT live memory, never touching (or needing)
+        // the durable sidecar at all.
+        const reopened = await current();
+        assert(Array.isArray(reopened.corrections) && reopened.corrections.length === 1,
+          `a live-memory reopen still answers with the outstanding item (corrections=${JSON.stringify(reopened.corrections)})`);
+        assert(reopened.correctionsRecovered === undefined,
+          `a live in-process recall must never report correctionsRecovered — it is present ONLY on the disk-fallback path (correctionsRecovered=${JSON.stringify(reopened.correctionsRecovered)})`);
+        assert(reopened.correctionPrompt.startsWith('Infinite Canvas structured application handoff — correction round.'),
+          `a live-memory reopen still gets the ordinary DELTA correction prompt, not the recovered full-prompt form (correctionPrompt starts: ${JSON.stringify(reopened.correctionPrompt.slice(0, 120))})`);
+
+        return { liveRecallNeverRecovered: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: an accepted round clears the outstanding-corrections sidecar, and even a stale copy left over from the closed epoch is never restored into the next one',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+
+        const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
+        const staleSidecarRaw = await fs.promises.readFile(sidecarPath, 'utf8');
+
+        // Accept a corrected résumé: this bumps revision, rotates
+        // handoffCode, and advances the stage — closing the epoch the
+        // rejection above belonged to.
+        handoff = round1.handoff;
+        const fixedResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: bullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+        const accepted = await submit(handoff, fixedResume);
+        assert(accepted.accepted && accepted.handoff.stage === 'cover-letter',
+          `fixture sanity: the fixed résumé must be accepted onto the cover-letter stage (errors=${JSON.stringify(accepted.validationErrors || [])})`);
+
+        const clearedExists = await fs.promises.access(sidecarPath).then(() => true, () => false);
+        assert(!clearedExists,
+          'an accepted round deletes the outstanding-corrections sidecar outright, mirroring the in-memory map\'s own .delete(jobId) on every call');
+
+        // Manually restore the STALE, closed-epoch sidecar — simulating a
+        // best-effort delete that somehow failed to land — so the assertion
+        // below proves the CONTINUITY GATE itself refuses it, independent of
+        // whether the delete happened to succeed.
+        await fs.promises.writeFile(sidecarPath, staleSidecarRaw, 'utf8');
+
+        _resetPasteRejectionStreakForTests();
+        _resetPasteCorrectionsForTests();
+
+        const reopened = await current();
+        assert(!reopened.corrections || reopened.corrections.length === 0,
+          `a stale sidecar from a closed epoch (old stage/revision/handoffCode) must never be restored into the next one (corrections=${JSON.stringify(reopened.corrections)})`);
+        assert(reopened.correctionsRecovered === undefined,
+          `correctionsRecovered must be absent when the continuity gate refuses the stale sidecar (correctionsRecovered=${JSON.stringify(reopened.correctionsRecovered)})`);
+        assert(reopened.correctionPrompt === undefined, 'with nothing restored, no correction prompt is built at all');
+
+        return { staleSidecarRefused: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a sidecar whose handoffCode does not match the round about to be handed off is never restored, even when jobId/stage/revision all agree',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+
+        const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
+        const sidecar = JSON.parse(await fs.promises.readFile(sidecarPath, 'utf8'));
+        // jobId/stage/revision are left exactly as they were — the round
+        // this sidecar was written for is still open (round1 was rejected,
+        // not accepted) — only handoffCode is tampered, isolating that one
+        // dimension of the continuity gate from the other three.
+        await fs.promises.writeFile(sidecarPath, JSON.stringify({ ...sidecar, handoffCode: `${sidecar.handoffCode}-tampered` }), 'utf8');
+
+        _resetPasteRejectionStreakForTests();
+        _resetPasteCorrectionsForTests();
+
+        const reopened = await current();
+        assert(!reopened.corrections || reopened.corrections.length === 0,
+          `a handoffCode mismatch alone must block the restore even though jobId/stage/revision all still agree (corrections=${JSON.stringify(reopened.corrections)})`);
+        assert(reopened.correctionsRecovered === undefined, 'no correctionsRecovered when the handoffCode does not match');
+
+        return { handoffCodeMismatchRefused: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a missing or corrupt outstanding-corrections sidecar never throws and restores nothing',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted, `fixture sanity: the padded bullet must be rejected (errors=${JSON.stringify(round1.validationErrors)})`);
+
+        const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
+
+        // MISSING: the file the rejection above wrote is gone by the time a
+        // fresh process looks for it.
+        await fs.promises.unlink(sidecarPath);
+        _resetPasteRejectionStreakForTests();
+        _resetPasteCorrectionsForTests();
+        const missingReopen = await current();
+        assert(!missingReopen.corrections || missingReopen.corrections.length === 0, 'a missing sidecar restores nothing');
+        assert(missingReopen.correctionsRecovered === undefined, 'a missing sidecar sets no correctionsRecovered');
+        assert(typeof missingReopen.prompt === 'string' && missingReopen.prompt.length > 0,
+          'a missing sidecar never throws — the ordinary full stage prompt is still returned');
+
+        // Reject the identical defect again (the missing-sidecar reopen above
+        // still carries the same still-open handoffCode) to get a fresh,
+        // genuinely-written sidecar on disk.
+        const round2 = await submit(missingReopen, tooLongResume);
+        assert(!round2.accepted, `fixture sanity: round 2 must still fail resume-bullet-length (errors=${JSON.stringify(round2.validationErrors)})`);
+
+        // CORRUPT: the file exists but is not valid JSON — a torn write.
+        _resetPasteRejectionStreakForTests();
+        _resetPasteCorrectionsForTests();
+        await fs.promises.writeFile(sidecarPath, '{ this is not valid json', 'utf8');
+        const corruptReopen = await current();
+        assert(!corruptReopen.corrections || corruptReopen.corrections.length === 0, 'a corrupt sidecar restores nothing');
+        assert(corruptReopen.correctionsRecovered === undefined, 'a corrupt sidecar sets no correctionsRecovered');
+        assert(typeof corruptReopen.prompt === 'string' && corruptReopen.prompt.length > 0,
+          'a corrupt sidecar never throws — the ordinary full stage prompt is still returned');
+
+        return { missingAndCorruptTolerated: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a failure to write the outstanding-corrections sidecar never fails the rejection it accompanies',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted, `fixture sanity: the evidence plan must be accepted (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        // Pre-occupy the sidecar's own path with a DIRECTORY, so the atomic
+        // write's rename(tempFile, targetPath) step fails with EISDIR — a
+        // portable way to force a genuine write fault without relying on OS
+        // permission semantics (verified: renaming a regular file onto an
+        // existing directory always fails on POSIX, empty or not).
+        const sidecarPath = path.join(queued.folder, 'Paste Correction Items.json');
+        await fs.promises.mkdir(sidecarPath);
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+          `the rejection itself completes normally despite the sidecar write failing underneath it (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(Array.isArray(round1.handoff.corrections) && round1.handoff.corrections.length === 1,
+          'the in-memory correction (and its correction prompt) is unaffected by the sidecar write failure');
+        assert(round1.handoff.correctionPrompt.startsWith('Infinite Canvas structured application handoff — correction round.'),
+          'the live in-process correction round still builds the ordinary delta prompt, unaffected by the sidecar write fault');
+
+        const stillADirectory = await fs.promises.lstat(sidecarPath).then(stat => stat.isDirectory()).catch(() => false);
+        assert(stillADirectory, 'the write failure left the pre-existing directory untouched rather than partially overwriting it');
+
+        return { writeFailureTolerated: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: the escalation block reads the SAME check ids bumpPasteRejectionStreak stored, not a wider set recomputed from a lingering host finding',
+    async run() {
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
+
+        // Plant a REVIEW-stage host-validation finding directly onto durable
+        // state, the same shape a real host-validation-failed rejection
+        // leaves in state.findings (submitLocalApplicationHandoff's
+        // recovery.findings, id `host-validation-<revision>-<index>`, issue a
+        // review-criterion `<id>: detail` string) — this test plants it
+        // rather than driving the whole final-assembly failure that normally
+        // produces it, to isolate the one mechanism FLAW 2 broke. Host
+        // findings persist in state.findings across every later round until
+        // the next acceptance clears them (pasteHandoffRecord's own comment
+        // on `measured`), regardless of what stage is current, so it is
+        // still read at the 'resume' stage below exactly as it would be at
+        // 'review'. Its issue names a DIFFERENT review criterion
+        // ("cover-register") than the check this test now rejects on every
+        // round ("resume-bullet-length").
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        manifest.paste.findings = [{
+          id: 'host-validation-1-1', document: 'resume', targetId: 'host-validation',
+          issue: 'cover-register: paragraph 1 closes on a deferential invitation.',
+          fix: 'Correct the affected structured document, editorial review, or generation-audit mapping, then return the complete corrected review response.',
+        }];
+        await fs.promises.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
+
+        // Same repeated single-check defect as the streak test above: an
+        // overly-long bullet that fails resume-bullet-length alone, round
+        // after round, unchanged.
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        const tooLongResume = {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text: longBullet, evidenceIds: ['resume-proof'] }] }],
+          },
+        };
+
+        handoff = plan.handoff;
+        const round1 = await submit(handoff, tooLongResume);
+        assert(!round1.accepted && round1.validationErrors.length === 1 && round1.validationErrors[0].startsWith('resume-bullet-length:'),
+          `fixture sanity: the padded bullet must fail resume-bullet-length alone (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.handoff.correctionPrompt.includes('consecutive responses'), 'round 1 carries no escalation yet');
+        // The lingering host finding still prints in the ordinary numbered
+        // item list — only the ESCALATION block's check-id computation is
+        // under test here, not whether the finding is surfaced at all.
+        assert(round1.handoff.correctionPrompt.includes('cover-register'),
+          'the lingering host finding still appears as an ordinary outstanding item');
+
+        handoff = round1.handoff;
+        const round2 = await submit(handoff, tooLongResume);
+        assert(!round2.accepted && !round2.handoff.correctionPrompt.includes('consecutive responses'),
+          'round 2 of the same defect still carries no escalation — below PASTE_REJECTION_ESCALATION_STREAK');
+
+        // Round 3 is the one FLAW 2 broke. bumpPasteRejectionStreak stored a
+        // streak of 3 keyed on {resume-bullet-length} alone (this round's own
+        // validationErrors). The OLD pasteHandoffRecord recomputed its own
+        // checkIds from measured+recalled instead of reading that store back
+        // — a wider set, {cover-register, resume-bullet-length}, because the
+        // lingering host finding above is always in `measured` — so the
+        // peek's key never matched the bump's key and peekPasteRejectionStreak
+        // silently returned 0. The escalation block therefore never fired no
+        // matter how long the streak ran, exactly the silent gap PROBLEM 2
+        // describes: the durable trace still recorded the true streak, but
+        // the in-chat escalation the user actually sees never appeared. The
+        // fix removes the second computation and reads the checkIds
+        // bumpPasteRejectionStreak stored, so this now escalates exactly like
+        // the streak test above despite the unrelated lingering finding.
+        handoff = round2.handoff;
+        const round3 = await submit(handoff, tooLongResume);
+        const escalation = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation),
+          `round 3 escalates even with an unrelated host finding still persisted in state.findings (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
+
+        // A dialog reopen still reads back the same stored streak and check
+        // ids without advancing or losing either — the same property the
+        // streak test above pins, now proven with a lingering host finding in
+        // the mix too.
+        const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(reopened.handoff.correctionPrompt.includes(escalation),
+          'reopening the handoff dialog shows the same escalation, read from the same stored streak and check ids');
+
+        return { escalated: true };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: a per-check-id streak escalates one round earlier than the shrinking failing-check SET, the bug-report receipt shows the streak and an escalation marker, and a genuinely different defect resets both',
+    async run() {
+      // Reproduces the measured shape of the incident that motivated per-id
+      // tracking: round 1 fails TWO checks together, rounds 2-4 fail only ONE
+      // of them, unchanged — direct-welcome-closing/redundancy on the live
+      // job, resume-bullet-self-containment/resume-bullet-length here (both
+      // résumé-stage checks, reliably reproducible without the cover-letter
+      // stage's much larger contract). The set-keyed streak the app already
+      // had goes 1, 1, 2, 3 either way (round 2's narrower set differs from
+      // round 1's, so it restarts); escalation used to require that SET
+      // streak to reach 3, which happened only on round 4 — one paste later
+      // than the check that was actually stuck (resume-bullet-length, never
+      // clearing) deserved. The fix tracks each check id's own count
+      // independently: it runs 1, 2, 3, 4 and crosses the threshold on round 3.
+      const project = await createCanvasProject();
+      try {
+        const identity = { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: 'Engineer', credential: '' };
+        const bullet = 'Maintained internal systems with supported delivery practices.';
+        const careerData = `Ada Lovelace\nada@example.test\nEngineer\n${bullet}`;
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath, careerData,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const reply = (handoff, fields) => ({
+          protocol: 1, jobId: handoff.jobId, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes || {}, ...fields,
+        });
+        const current = async () => (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+        const submit = async (handoff, fields) => submitLocalApplicationHandoff({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: JSON.stringify(reply(handoff, fields)),
+        });
+
+        _resetPasteHandoffDiagnostics();
+        let handoff = await current();
+        const plan = await submit(handoff, {
+          identity,
+          evidence: [
+            { id: 'resume-proof', sourceId: 'career-data', quote: bullet, requirement: 'Reliable system delivery', priority: 'highest' },
+            { id: 'job-proof', sourceId: 'job-listing', quote: 'reliable system delivery', requirement: 'Reliable system delivery', priority: 'highest' },
+          ],
+          requirements: [{ id: 'need-1', text: 'Reliable system delivery', priority: 'highest', evidenceIds: ['resume-proof', 'job-proof'] }],
+        });
+        assert(plan.accepted && plan.handoff.stage === 'resume', `fixture sanity: the evidence plan must be accepted to reach the resume stage (errors=${JSON.stringify(plan.validationErrors || [])})`);
+        handoff = plan.handoff;
+
+        const longBullet = `${bullet} Maintained internal systems with supported delivery practices across every deployed environment and every supported release for the whole engineering organization.`;
+        // Adds a DEPENDENT reference ("those pipelines") that names a system
+        // noun DEPENDENT_RESUME_SYSTEM_REFERENCE recognizes and that never
+        // occurred earlier in the bullet, so checkResumeBulletSelfContainment
+        // fires alongside checkResumeBulletLength on round 1 only.
+        const withDependentReference = `${longBullet} It also extended those pipelines across the company.`;
+        const submitBullet = async (text) => {
+          const round = await submit(handoff, {
+            resume: {
+              schemaVersion: 'structured-resume.v1', identity,
+              roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: [{ id: 'bullet-1', text, evidenceIds: ['resume-proof'] }] }],
+            },
+          });
+          handoff = round.handoff;
+          return round;
+        };
+
+        const round1 = await submitBullet(withDependentReference);
+        assert(!round1.accepted && JSON.stringify(round1.validationErrors.map(item => item.split(':')[0]).sort()) === '["resume-bullet-length","resume-bullet-self-containment"]',
+          `fixture sanity: round 1 must fail both checks together (errors=${JSON.stringify(round1.validationErrors)})`);
+        assert(!round1.handoff.correctionPrompt.includes('consecutive responses') && round1.handoff.rejectionEscalation.active === false,
+          `round 1 carries no escalation yet (rejectionEscalation=${JSON.stringify(round1.handoff.rejectionEscalation)})`);
+
+        const round2 = await submitBullet(longBullet);
+        assert(!round2.accepted && round2.validationErrors.length === 1 && round2.validationErrors[0].startsWith('resume-bullet-length:'),
+          `fixture sanity: round 2 drops the self-containment defect and keeps only resume-bullet-length (errors=${JSON.stringify(round2.validationErrors)})`);
+        assert(!round2.handoff.correctionPrompt.includes('consecutive responses') && round2.handoff.rejectionEscalation.active === false,
+          'round 2 of the now-narrower set still carries no escalation — its own per-id count is only 2');
+
+        // ROUND 3 is the one the old set-keyed-only design got wrong: the SET
+        // streak here is only 2 (round 2's narrower set differs from round
+        // 1's wider one, so the set-keyed count restarted), but
+        // resume-bullet-length's OWN count is 3 — its third consecutive
+        // round — so escalation must fire now, naming resume-bullet-length
+        // alone, never resume-bullet-self-containment (which cleared).
+        const round3 = await submitBullet(longBullet);
+        const escalation3 = 'Check "resume-bullet-length" has now rejected 3 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round3.accepted && round3.handoff.correctionPrompt.includes(escalation3),
+          `round 3 escalates on resume-bullet-length's own 3rd consecutive failure, even though the SET streak is only 2 (correction=${JSON.stringify(round3.handoff.correctionPrompt)})`);
+        assert(!round3.handoff.correctionPrompt.includes('resume-bullet-self-containment'),
+          'the escalation names only the check that is still failing, never the one that cleared after round 1');
+        assert(JSON.stringify(round3.handoff.rejectionEscalation) === JSON.stringify({ active: true, checkIds: ['resume-bullet-length'], streak: 3, trimmedFromPrompt: false }),
+          `the handoff payload exposes the same escalation state for the renderer (rejectionEscalation=${JSON.stringify(round3.handoff.rejectionEscalation)})`);
+
+        // A dialog reopen must show the identical escalation without
+        // advancing it.
+        const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(reopened.handoff.correctionPrompt.includes(escalation3),
+          'reopening the handoff dialog shows the same escalation without counting as another round');
+        assert(JSON.stringify(reopened.handoff.rejectionEscalation) === JSON.stringify(round3.handoff.rejectionEscalation),
+          'a reopen reads back the identical rejectionEscalation, not a recomputed or advanced one');
+
+        // Round 4: the same unresolved defect, one round further — the
+        // per-id count keeps climbing and the escalation wording keeps pace.
+        const round4 = await submitBullet(longBullet);
+        const escalation4 = 'Check "resume-bullet-length" has now rejected 4 consecutive responses in this round. Re-reading the same observation and rewriting the prose around it has not worked. The repair is a literal edit to the exact sentence, phrase, or word the observation above names — not a rewrite of the paragraph, bullet, or clause it lives in. Change only what that item says is wrong and return the rest of it exactly as it was.';
+        assert(!round4.accepted && round4.handoff.correctionPrompt.includes(escalation4),
+          `round 4 keeps escalating with its own climbing count (correction=${JSON.stringify(round4.handoff.correctionPrompt)})`);
+
+        // A GENUINELY different, structural defect (too many bullets on one
+        // role, no check id at all) resets both the set-keyed streak and
+        // every per-id count — the next occurrence of the original check must
+        // start over at 1, not resume at 4.
+        const manyBullets = Array.from({ length: 7 }, (_, index) => ({ id: `bullet-${index + 1}`, text: 'Maintained supported systems.', evidenceIds: ['resume-proof'] }));
+        const round5 = await submit(handoff, {
+          resume: {
+            schemaVersion: 'structured-resume.v1', identity,
+            roles: [{ id: 'role-1', title: 'Engineer', company: 'Acme', dates: '', location: '', bullets: manyBullets }],
+          },
+        });
+        handoff = round5.handoff;
+        assert(!round5.accepted && !round5.handoff.correctionPrompt.includes('consecutive responses') && round5.handoff.rejectionEscalation.active === false,
+          `a different, nameless defect resets every per-id count (errors=${JSON.stringify(round5.validationErrors)})`);
+
+        const round6 = await submitBullet(longBullet);
+        assert(!round6.accepted && !round6.handoff.correctionPrompt.includes('consecutive responses') && round6.handoff.rejectionEscalation.active === false,
+          'resume-bullet-length\'s per-id count restarted at 1 after the interruption, rather than resuming at 4');
+
+        // The bug-report receipt (electron/ipc/pasteHandoffDiagnostics.js)
+        // shows the exact gap this whole fix closes: round 3's receipt must
+        // carry rejectionStreak 2 (the set-keyed count, unchanged) together
+        // with the escalation marker, proving a reader can tell "escalation
+        // fired" apart from "the set-keyed streak alone would suggest it
+        // had not" — the field a filed report of this exact incident had no
+        // way to show before this fix (recordPasteHandoffDiagnostic's own
+        // header: `grep -c streak` on that report was 0).
+        const snapshot = getPasteHandoffDiagnosticsSnapshot();
+        const rejected = snapshot.receipts.filter(item => item.outcome === 'rejected');
+        assert(rejected.length === 6, `every rejected round left a receipt (count=${rejected.length})`);
+        assert(rejected.map(item => item.rejectionStreak).join(',') === '1,1,2,3,0,1',
+          `the receipt's own rejectionStreak column matches the set-keyed sequence (streaks=${rejected.map(item => item.rejectionStreak).join(',')})`);
+        assert(rejected.map(item => item.escalated).join(',') === 'false,false,true,true,false,false',
+          `the receipt's escalated column shows escalation active from round 3 on, one round before the set-keyed streak alone reaches the threshold (escalated=${rejected.map(item => item.escalated).join(',')})`);
+        const markdown = buildPasteHandoffDiagnosticsMarkdown();
+        const lines = markdown.split('\n').filter(line => line.includes('· stage `resume` · rejected'));
+        assert(lines[2].includes('· streak 2 (escalation sent)') && !lines[1].includes('escalation sent') && !lines[0].includes('escalation sent'),
+          `round 3's receipt line shows "streak 2 (escalation sent)" — the streak number the set-keyed count actually reached, with escalation visibly ahead of it (line=${JSON.stringify(lines[2])})`);
+        assert(lines[3].includes('· streak 3 (escalation sent)'), `round 4's receipt line keeps the marker as the set-keyed count catches up (line=${JSON.stringify(lines[3])})`);
+        assert(!lines[4].includes('escalation sent') && !lines[5].includes('escalation sent'),
+          'the reset round and its single-round follow-up carry no escalation marker');
+
+        return { rejectedReceipts: rejected.length };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI application: escalation survives the correction-prompt trim ladder ahead of the repair brief, and a budget too small even for the brief-less prompt drops escalation with that fact recorded',
+    async run() {
+      // pasteCorrectionPrompt is exercised directly (not through a live
+      // submit round) so the trim ladder's three bands — nothing dropped,
+      // brief dropped, escalation also dropped — can each be forced with an
+      // explicit stagePromptChars rather than fabricating a prompt whose
+      // REAL length happens to sit in each band. All four calls below share
+      // one fixed (state, input, corrections, escalatedIds): only
+      // stagePromptChars and, in the last check, escalatedIds itself vary.
+      const state = { stage: 'resume', handoffCode: 'test-handoff', baseHashes: {}, reviewBaseline: null, findings: [] };
+      const input = { jobId: 'trim-ladder-job', qualityChecklist: { criteria: [] } };
+      const corrections = ['resume-bullet-length: Acme bullet 1 is 226 visible characters (budget 180); cut it to 180 or fewer'];
+      const escalatedIds = [{ id: 'resume-bullet-length', streak: 3 }];
+
+      // Unbounded (stagePromptChars: 0) takes the ladder's own early-return
+      // shortcut and never trims anything — the baseline both other lengths
+      // below are measured against.
+      const full = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: 0, escalatedIds });
+      const withoutEscalation = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: 0, escalatedIds: [] });
+      assert(full.prompt.length > withoutEscalation.prompt.length,
+        `fixture sanity: the escalation block must add real length (${full.prompt.length} vs ${withoutEscalation.prompt.length})`);
+      assert(!full.escalationTrimmed && !withoutEscalation.escalationTrimmed, 'an unbounded budget never trims anything');
+
+      // A large, explicit budget that still comfortably fits the full
+      // assembled correction: the ladder's first check (full fits) returns
+      // it untouched, exercising that branch instead of only the
+      // stagePromptChars:0 shortcut above.
+      const stagePromptCharsForBudget = budget => Math.ceil(budget / MAX_CORRECTION_STAGE_PROMPT_SHARE);
+      const roomy = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: stagePromptCharsForBudget(full.prompt.length * 2), escalatedIds });
+      assert(!roomy.escalationTrimmed && roomy.prompt === full.prompt, 'a budget that fits the full assembled correction returns it exactly, untrimmed');
+
+      // A budget strictly between "the escalation-only prompt fits" and "the
+      // full prompt fits" forces the ladder to drop the repair brief while
+      // KEEPING escalation — the behavior PROBLEM 4a exists for: escalation
+      // must survive in preference to the repair brief, never the reverse.
+      const midBudget = Math.round((withoutEscalation.prompt.length + full.prompt.length) / 2);
+      const briefDropped = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: stagePromptCharsForBudget(midBudget), escalatedIds });
+      assert(!briefDropped.escalationTrimmed && briefDropped.prompt.includes('consecutive responses') && !briefDropped.prompt.includes('Rules that govern this repair'),
+        `a mid-sized budget must drop the repair brief and keep the escalation block (length=${briefDropped.prompt.length}, trimmed=${briefDropped.escalationTrimmed})`);
+
+      // A vanishingly small budget forces the ladder past even that: the
+      // escalation block itself has to go, and the caller must be TOLD it
+      // did — escalationTrimmed distinguishes this from "no check
+      // individually qualified this round", which looks identical in the
+      // returned prompt text alone (neither carries "consecutive responses").
+      const escalationDropped = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: 4, escalatedIds });
+      assert(escalationDropped.escalationTrimmed && !escalationDropped.prompt.includes('consecutive responses'),
+        `a budget too small even for the brief-less prompt must drop escalation and report escalationTrimmed=true (trimmed=${escalationDropped.escalationTrimmed})`);
+
+      // The same vanishingly small budget with NOTHING escalated this round
+      // must never claim a trim that did not happen: escalationTrimmed stays
+      // false regardless of how aggressively the rest of the prompt is cut.
+      const nothingQualified = pasteCorrectionPrompt({ input, state, corrections, stagePromptChars: 4, escalatedIds: [] });
+      assert(!nothingQualified.escalationTrimmed && !nothingQualified.prompt.includes('consecutive responses'),
+        'escalationTrimmed must stay false when no check individually qualified this round, however small the budget');
+
+      return {
+        fullLength: full.prompt.length, withoutEscalationLength: withoutEscalation.prompt.length,
+        briefDroppedLength: briefDropped.prompt.length, escalationDroppedLength: escalationDropped.prompt.length,
+      };
+    },
+  },
+  {
+    name: 'Application save destination: a different job never silently overwrites another job\'s saved bundle at the same sanitized company/location/title path',
+    run: async () => {
+      // Reproduces the filed bug report's exact collision text (2026-09-24):
+      // two distinct job cards both "Software Development Engineer 2, Amazon
+      // Kids" at "Toronto, Ontario, Canada" sanitized to the identical
+      // destination directory. See resolveApplicationExportDirectory's own
+      // comment in jobApplication.js for why this compares by the ORIGINAL
+      // JOB LISTING bytes rather than a per-generation job id: regenerating
+      // an already-'saved' card (canRegenerateLocalApplication) mints a
+      // brand-new Local AI job id every time, so an id-keyed check would
+      // misfire on the ordinary regenerate-and-resave flow this test also
+      // covers.
+      const project = await createCanvasProject();
+      const company = 'Amazon Kids';
+      const location = 'Toronto, Ontario, Canada';
+      const jobTitle = 'Software Development Engineer 2';
+      const baseDir = path.join(project.root, 'Applied Jobs', company, location, jobTitle);
+      const resumeHtmlFor = variant => `<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>${variant} resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>${variant} cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
+      const jobListingFor = listingLabel => `# ${listingLabel} listing\n\nScraped listing text unique to ${listingLabel}.\n`;
+      const sender = id => ({ id, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} });
+
+      const saveJob = async ({ variant, listingLabel, senderId, workDirName }) => {
+        const workDir = path.join(project.root, workDirName);
+        const resumeHtmlPath = path.join(workDir, 'Application.html');
+        const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+        const resumeHtml = resumeHtmlFor(variant);
+        const jobListing = jobListingFor(listingLabel);
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company, resumeHtmlPath, jobListingPath,
+          artifactData: { resumeHtml, jobListing },
+        });
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saved = await saveApplication({ sender: sender(senderId) }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null,
+          jobListingPath, generationAuditPath: null, workDir,
+          jobTitle, location, canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        return { saved, resumeHtml, jobListing };
+      };
+
+      try {
+        registerJobApplicationHandlers();
+
+        // Job A's first save lands on the sanitized base path.
+        const jobA = await saveJob({ variant: 'Job A v1', listingLabel: 'Job A', senderId: 9601, workDirName: 'job-a-workspace' });
+        assert(jobA.saved?.success === true && jobA.saved.saved === true && jobA.saved.dir === baseDir,
+          `job A's first save must land on the sanitized base path, got ${JSON.stringify(jobA.saved)}`);
+
+        // Job A regenerated (identical job listing, a fresh workspace exactly
+        // like a real Local AI regeneration mints, different résumé output)
+        // and re-saved must land on the SAME folder — the design constraint
+        // this fix must not break — and its new bytes must actually have
+        // replaced the old ones there.
+        const jobARegenerated = await saveJob({ variant: 'Job A v2 regenerated', listingLabel: 'Job A', senderId: 9602, workDirName: 'job-a-regenerated-workspace' });
+        assert(jobARegenerated.saved?.success === true && jobARegenerated.saved.dir === baseDir,
+          `regenerating and re-saving the SAME job must reuse its existing folder, got ${JSON.stringify(jobARegenerated.saved)}`);
+        const htmlAfterRegeneration = await fs.promises.readFile(path.join(baseDir, 'Application.html'), 'utf8');
+        assert(htmlAfterRegeneration.includes('Job A v2 regenerated resume') && !htmlAfterRegeneration.includes('Job A v1 resume'),
+          'the base folder must hold the REGENERATED bytes, not the stale first-save bytes, proving this was an in-place overwrite and not a fresh sibling');
+
+        // Job B: a DIFFERENT job (different listing content) that sanitizes
+        // to the identical company/location/title path must be disambiguated
+        // into a distinct sibling folder instead of overwriting job A.
+        const jobB = await saveJob({ variant: 'Job B v1', listingLabel: 'Job B', senderId: 9603, workDirName: 'job-b-workspace' });
+        assert(jobB.saved?.success === true && jobB.saved.saved === true && jobB.saved.dir !== baseDir
+          && /^.* \([0-9a-f]{8}\)$/.test(path.basename(jobB.saved.dir)),
+        `a different job colliding on the same sanitized path must be saved to a distinct, job-derived sibling folder, got ${JSON.stringify(jobB.saved)}`);
+
+        // Job A's own files at the base path are untouched by job B's save.
+        const finalBaseHtml = await fs.promises.readFile(path.join(baseDir, 'Application.html'), 'utf8');
+        const finalBaseListing = await fs.promises.readFile(path.join(baseDir, 'Original Job Listing.md'), 'utf8');
+        assert(finalBaseHtml === htmlAfterRegeneration && finalBaseListing === jobARegenerated.jobListing,
+          'job A\'s saved files must remain exactly as its own regeneration left them after job B\'s colliding save');
+
+        // Job B regenerated must reuse ITS OWN disambiguated folder
+        // deterministically (same collision, same derived suffix) rather
+        // than drifting to a third folder on every save.
+        const jobBRegenerated = await saveJob({ variant: 'Job B v2 regenerated', listingLabel: 'Job B', senderId: 9604, workDirName: 'job-b-regenerated-workspace' });
+        assert(jobBRegenerated.saved?.dir === jobB.saved.dir,
+          `job B's own regeneration must reuse its disambiguated folder deterministically, got ${JSON.stringify({ first: jobB.saved.dir, again: jobBRegenerated.saved.dir })}`);
+        const disambiguatedHtml = await fs.promises.readFile(path.join(jobB.saved.dir, 'Application.html'), 'utf8');
+        assert(disambiguatedHtml.includes('Job B v2 regenerated resume'),
+          'job B\'s disambiguated folder reflects its own regeneration, overwritten in place exactly like job A\'s base folder did');
+
+        return { baseDir, disambiguatedDir: jobB.saved.dir };
+      } finally {
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
     },
   },
 ];
