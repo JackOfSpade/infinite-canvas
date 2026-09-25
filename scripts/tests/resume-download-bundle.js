@@ -28,6 +28,7 @@ import {
   sanitizeApplicationBundlePart,
 } from '../test-dependencies.js';
 import { __assertApplicationSyncWorkspaceSnapshotForTests } from '../../electron/ipc/applicationSync.js';
+import { __pruneEmptyExportDirectoriesForTests, __resolveApplicationExportDirectoryForTests } from '../../electron/ipc/jobApplication.js';
 
 const sha256 = value => value == null
   ? null
@@ -992,6 +993,168 @@ export default [
       } finally {
         await __resetApplicationSyncWorkspacesForTests();
         await fs.promises.unlink(stateFile).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // Regression (filed bug report, 2026-09-24): two DIFFERENT jobs whose
+    // sanitized company/location/title collide ran resolveApplicationExport-
+    // Directory's occupant check BEFORE the write lock, so both concurrent
+    // saves could observe the destination as empty and both choose it — the
+    // later writer silently overwriting the earlier one's saved bundle. The
+    // dock runs up to 10 handoffs concurrently, so this is reachable, not
+    // theoretical. Fired concurrently here (not sequentially) so this test
+    // exercises the actual race window, not merely the sequential collision
+    // path already covered by __resolveApplicationExportDirectoryForTests.
+    name: 'application save: two different jobs racing onto the same sanitized destination resolve and write as one atomic unit',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-export-atomicity-'));
+      const outputRoot = path.join(root, 'applications');
+      const htmlFor = (label) => `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">${label} resume</main></section><section data-ic-document-panel="cover"><main class="page">${label} cover</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
+      const jobs = ['A', 'B'].map(label => ({
+        label,
+        dir: path.join(root, `source-${label}`),
+        html: htmlFor(label),
+        listing: `# Systems Architect\n\nJob ${label} — a distinct posting that happens to sanitize to the same Company/Location/Role path.\n`,
+      }));
+      const senderId = 913;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      try {
+        await fs.promises.mkdir(outputRoot, { recursive: true });
+        await Promise.all(jobs.map(async job => {
+          await fs.promises.mkdir(job.dir, { recursive: true });
+          await fs.promises.writeFile(path.join(job.dir, 'Application.html'), job.html);
+          await fs.promises.writeFile(path.join(job.dir, 'Original Job Listing.md'), job.listing);
+        }));
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saveArgsFor = (job) => {
+          const resumeHtmlPath = path.join(job.dir, 'Application.html');
+          const jobListingPath = path.join(job.dir, 'Original Job Listing.md');
+          registerPendingApplicationWorkspace({
+            workDir: job.dir, senderId, company: 'Collision Co', applicationRoot: outputRoot,
+            resumeHtmlPath, jobListingPath,
+            cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+            artifactData: { resumeHtml: job.html, jobListing: job.listing },
+          });
+          return {
+            resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+            generationAuditPath: null, workDir: job.dir,
+            jobTitle: 'Systems Architect', location: 'Toronto, ON',
+            canvasFilePath: path.join(root, 'canvas.json'), suppressReveal: true,
+          };
+        };
+        const [savedA, savedB] = await Promise.all([
+          saveApplication({ sender }, saveArgsFor(jobs[0])),
+          saveApplication({ sender }, saveArgsFor(jobs[1])),
+        ]);
+        assert(savedA.success && savedA.saved && savedB.success && savedB.saved,
+          `two genuinely different jobs sharing a sanitized destination must both save successfully (A: ${savedA.error || 'ok'}, B: ${savedB.error || 'ok'})`);
+        assert(savedA.dir !== savedB.dir,
+          'two DIFFERENT jobs colliding on the same sanitized Company/Location/Role path must land in two DISTINCT directories, never the same one — an undetected race would let both resolve to the identical destination');
+        const [listingAOnDisk, listingBOnDisk] = await Promise.all([
+          fs.promises.readFile(path.join(savedA.dir, 'Original Job Listing.md'), 'utf8'),
+          fs.promises.readFile(path.join(savedB.dir, 'Original Job Listing.md'), 'utf8'),
+        ]);
+        assert(listingAOnDisk === jobs[0].listing && listingBOnDisk === jobs[1].listing,
+          'each job’s own saved bundle must retain its own listing bytes — the bug this closes let the later concurrent writer silently overwrite the earlier one’s already-saved Application.html/Resume.pdf/Cover Letter.pdf with no warning');
+        return { savedA: savedA.dir, savedB: savedB.dir };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // Regression (filed bug report, 2026-09-24): sanitizeFilePart caps every
+    // part at 100 code points. Concatenating an already-100-char base name
+    // with " (xxxxxxxx)" and re-capping the RESULT chopped the suffix off
+    // instead of the base, so a genuinely resolvable collision on a long
+    // title (the report's own repro: "Software Development Engineer 2,
+    // Amazon Kids, Amazon Kids") hard-failed instead of disambiguating.
+    name: 'application export destination: a disambiguation suffix survives even when the base name sits at the sanitized 100-character cap',
+    run: async () => {
+      // /tmp itself is a platform symlink on macOS; ensureDirectoryWithinRoot
+      // rejects a root that traverses one, so canonicalize before using it.
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-export-suffix-cap-'));
+      const outputRoot = path.join(root, 'applications');
+      try {
+        await fs.promises.mkdir(outputRoot, { recursive: true });
+        const longRole = sanitizeApplicationBundlePart('A'.repeat(150), 'Role');
+        assert(longRole.length === 100, 'this fixture needs a base name AT the 100-code-point cap, or it is not exercising the bug');
+        const baseDir = path.join(outputRoot, 'Amazon', 'Toronto, Ontario, Canada', longRole);
+        const occupantListing = Buffer.from('# Software Development Engineer 2\n\nJob one — already saved at this destination.\n');
+        const newListing = Buffer.from('# Software Development Engineer 2\n\nJob two — a different posting sanitizing to the identical 100-character path.\n');
+
+        const first = await __resolveApplicationExportDirectoryForTests(outputRoot, baseDir, occupantListing);
+        assert(first.dir === baseDir && first.abandonedCandidates.length === 0,
+          'a first save with nothing yet on disk must land directly on the base destination');
+        await fs.promises.writeFile(path.join(baseDir, 'Original Job Listing.md'), occupantListing);
+
+        const second = await __resolveApplicationExportDirectoryForTests(outputRoot, baseDir, newListing);
+        assert(second.dir !== baseDir,
+          'a genuine collision at the 100-char cap must not silently fall back to reusing the occupied base directory');
+        const expectedSuffix = crypto.createHash('sha256').update(newListing).digest('hex').slice(0, 8);
+        const disambiguatedName = path.basename(second.dir);
+        assert(disambiguatedName.length <= 100 && disambiguatedName.endsWith(`(${expectedSuffix})`),
+          `the 8-hex disambiguation suffix must survive intact in the final directory name, not be truncated away (got "${disambiguatedName}")`);
+        assert(second.abandonedCandidates.length === 1 && second.abandonedCandidates[0] === baseDir,
+          'the occupied base directory must be reported back as an abandoned candidate for best-effort (safe, no-op-on-occupied) cleanup');
+        return { longRoleLength: longRole.length, disambiguatedName };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    // Regression (filed bug report, 2026-09-24): ensureCandidateDir mkdir's
+    // every candidate resolveApplicationExportDirectory inspects, but only
+    // the save-application FAILURE path pruned the one it chose — a
+    // successful save never cleaned up any candidate it probed and rejected
+    // along the way. This exercises the widen-to-16-hex path (forced by
+    // seeding the exact 8-hex slot with a third job's real bundle, since
+    // engineering an actual sha256 collision is not practical) and proves
+    // the safety property the fix depends on: every reported abandoned
+    // candidate is, by construction, occupied by a DIFFERENT job's real
+    // saved data, so best-effort pruning must never remove it.
+    name: 'application export destination: an abandoned disambiguation candidate is only ever a real, non-empty occupant — pruning it must never touch another job’s saved bundle',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-export-abandoned-candidates-'));
+      const outputRoot = path.join(root, 'applications');
+      try {
+        await fs.promises.mkdir(outputRoot, { recursive: true });
+        const baseDir = path.join(outputRoot, 'Acme', 'Remote', 'Systems Architect');
+        const listing1 = Buffer.from('# Job One\n\nAlready saved at the base destination.\n');
+        const listing2 = Buffer.from('# Job Two\n\nA genuinely different job targeting the same sanitized destination.\n');
+        const listing3 = Buffer.from('# Job Three\n\nA THIRD, unrelated job that happens to already occupy the 8-hex disambiguation slot job two would otherwise land on.\n');
+
+        await __resolveApplicationExportDirectoryForTests(outputRoot, baseDir, listing1);
+        await fs.promises.writeFile(path.join(baseDir, 'Original Job Listing.md'), listing1);
+
+        const suffix8 = crypto.createHash('sha256').update(listing2).digest('hex').slice(0, 8);
+        const hex8Dir = path.join(path.dirname(baseDir), `Systems Architect (${suffix8})`);
+        await fs.promises.mkdir(hex8Dir, { recursive: true });
+        await fs.promises.writeFile(path.join(hex8Dir, 'Original Job Listing.md'), listing3);
+
+        const resolved = await __resolveApplicationExportDirectoryForTests(outputRoot, baseDir, listing2);
+        assert(resolved.dir !== baseDir && resolved.dir !== hex8Dir,
+          'job two must widen past BOTH the occupied base directory and the occupied 8-hex slot to reach a genuinely free destination');
+        assert(resolved.abandonedCandidates.length === 2
+          && resolved.abandonedCandidates.includes(baseDir) && resolved.abandonedCandidates.includes(hex8Dir),
+        'both occupied candidates probed along the way must be reported back for the caller’s best-effort cleanup');
+
+        // The exact cleanup call save-application makes on every outcome.
+        await Promise.all(resolved.abandonedCandidates.map(
+          candidate => __pruneEmptyExportDirectoriesForTests(outputRoot, candidate),
+        ));
+        const [survivingBase, survivingHex8] = await Promise.all([
+          fs.promises.readFile(path.join(baseDir, 'Original Job Listing.md'), 'utf8'),
+          fs.promises.readFile(path.join(hex8Dir, 'Original Job Listing.md'), 'utf8'),
+        ]);
+        assert(survivingBase === listing1.toString('utf8') && survivingHex8 === listing3.toString('utf8'),
+          'best-effort pruning of an abandoned candidate must never remove another job’s real, already-saved bundle — only a directory this exact attempt itself created and then superseded is ever eligible');
+        return { widenedToHex16: true, abandonedCandidates: resolved.abandonedCandidates.length };
+      } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

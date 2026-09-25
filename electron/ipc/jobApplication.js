@@ -193,6 +193,14 @@ async function pruneEmptyExportDirectories(outputRoot, exportDir) {
   }
 }
 
+// Test seam: exercises the exact best-effort cleanup save-application uses
+// for a resolveApplicationExportDirectory candidate it did not end up
+// choosing, without registering a real pending workspace or driving a full
+// save through the IPC handler.
+export function __pruneEmptyExportDirectoriesForTests(outputRoot, exportDir) {
+  return pruneEmptyExportDirectories(outputRoot, exportDir);
+}
+
 /**
  * Register an already-built, app-owned application workspace for the normal
  * save-application IPC. Local-AI imports use this after *this process* has
@@ -1446,6 +1454,13 @@ function sanitizeFilePart(s, fallback) {
   return sanitizeApplicationBundlePart(s, fallback);
 }
 
+// sanitizeApplicationBundlePart caps every part at 100 code points
+// ([...cleaned].slice(0, 100), electron/ipc/applicationBundle.js:23) and
+// does not re-export that number. resolveApplicationExportDirectory's
+// disambiguation suffix (below) needs it to reserve room for the suffix
+// BEFORE concatenating, not after — see that function for why.
+const SANITIZED_PART_CAP = 100;
+
 function isGenerationAuditObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1813,6 +1828,137 @@ function updateApplicationTelemetryForAttempt(attemptId, changes = {}) {
   return true;
 }
 
+/**
+ * Resolve the ACTUAL directory one save should write into, disambiguating it
+ * from a different job's already-saved bundle when the sanitized
+ * company/location/title path collides.
+ *
+ * VERIFIED (filed bug report, 2026-09-24 13:08–13:10 UTC): two distinct job
+ * cards — job c48be7de… (status: saved) and job eeb6303c… (status: failed) —
+ * were both "Software Development Engineer 2, Amazon Kids, Amazon Kids @
+ * Amazon" at "Toronto, Ontario, Canada", and sanitizeFilePart(company) /
+ * sanitizeFilePart(location) / sanitizeFilePart(jobTitle) reduced them to the
+ * identical destination directory. Had the second job's save reached this
+ * far, it would have silently overwritten the first job's already-saved
+ * Application.html / Resume.pdf / Cover Letter.pdf with no warning — it did
+ * not happen here only because the second job failed earlier in the
+ * pipeline, by chance, before reaching save.
+ *
+ * The identity this compares by is deliberately the ORIGINAL JOB LISTING
+ * bytes about to be saved (formatOriginalJobListingMarkdown's output), not a
+ * per-generation job id: queueLocalApplicationJob mints a brand-new id on
+ * every call, including an intentional Local AI regeneration of a card
+ * that is already 'saved' (canRegenerateLocalApplication in
+ * src/utils/localAiApplicationLifecycle.js allows exactly that) — so an
+ * id-keyed check would treat every ordinary regenerate-and-resave of the
+ * SAME card as a different job and reshuffle its already-saved folder on
+ * every save, which is the one thing the design constraint below forbids.
+ * The job listing content, by contrast, is built from the card's OWN job
+ * fields and is unchanged across a regeneration (only the AI's résumé/letter
+ * output differs); a genuinely different job posting almost always differs
+ * somewhere in that text (title, company, location, url, or description),
+ * even when it happens to sanitize to the identical file-path.
+ *
+ * Regenerating and re-saving THE SAME job must keep landing on its existing
+ * folder: that folder is reported back to the card as its "Saved to …" state
+ * and drives the discard/cleanup pairing, so relocating it on every save
+ * would break both. A destination whose own saved "Original Job Listing.md"
+ * already matches these exact bytes is a re-save of the same job and reuses
+ * the folder unchanged; one whose saved listing differs is a genuine
+ * collision and gets a deterministic, listing-derived sibling folder
+ * instead — one short enough to stay legible, widened once if even that
+ * exact suffix happens to already belong to a THIRD distinct job. A
+ * destination with no readable listing at all (nothing saved there yet, or a
+ * folder predating this check, or one this save cannot itself compare
+ * against) is left exactly as it is today — not treated as a collision — so
+ * nothing already on disk gets reshuffled the next time it is resaved; only
+ * a job this function CAN identify is protected from silently replacing a
+ * different one.
+ *
+ * The check above and the write it gates are only atomic if the CALLER holds
+ * a lock across both, keyed on `baseDir` (the deterministic sanitized path,
+ * before disambiguation) — this function only ever reads what is on disk at
+ * the instant it is called, so two unsynchronized calls for two different
+ * jobs that share a baseDir can both observe it as empty/matching and both
+ * "safely" choose it. See save-application's own comment at its call site.
+ *
+ * Returns `{ dir, abandonedCandidates }`: every candidate directory this
+ * call created-or-touched (via ensureCandidateDir) that was NOT the one
+ * returned. Every one of them is, by construction, non-empty (that is
+ * exactly why it was rejected — see collidesWithADifferentJob), so it is
+ * always safe for the caller to best-effort prune them: a real occupant is
+ * never at risk, and this only ever removes a candidate the SAME resolve
+ * call itself created and then superseded.
+ */
+async function resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData) {
+  const currentListing = currentJobListingData == null ? null
+    : Buffer.isBuffer(currentJobListingData) ? currentJobListingData : Buffer.from(currentJobListingData);
+  const probedCandidates = [];
+  // ensureDirectoryWithinRoot both creates a not-yet-existing candidate and
+  // rejects one that escapes the root or traverses a symlink component, so
+  // every readdir/readFile below runs only on an already-validated path —
+  // never on a component this save has not itself proven safe.
+  const ensureCandidateDir = async (candidateDir) => {
+    await ensureDirectoryWithinRoot(applicationOutputRoot, candidateDir, {
+      mode: 0o700,
+      label: 'Application destination',
+    });
+    probedCandidates.push(candidateDir);
+    return fs.promises.readdir(candidateDir);
+  };
+  const resolved = (dir) => ({ dir, abandonedCandidates: probedCandidates.filter(candidate => candidate !== dir) });
+  if (!currentListing) {
+    // No content to compare an occupant against or to disambiguate a
+    // collision by — collision detection cannot run at all, so this falls
+    // back to exactly the pre-existing behavior (reuse the sanitized path
+    // as-is). Never expected in practice: registerPendingApplicationWorkspace
+    // requires a job listing for every registered workspace.
+    await ensureCandidateDir(baseDir);
+    return resolved(baseDir);
+  }
+  const collidesWithADifferentJob = async (candidateDir) => {
+    const entries = await ensureCandidateDir(candidateDir);
+    if (entries.length === 0) return false; // Freshly created, or a pruned failed save.
+    let occupantListing;
+    try {
+      occupantListing = await fs.promises.readFile(path.join(candidateDir, 'Original Job Listing.md'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false; // No readable listing — see the comment above.
+      throw error;
+    }
+    return !occupantListing.equals(currentListing);
+  };
+  if (!(await collidesWithADifferentJob(baseDir))) return resolved(baseDir);
+  const baseName = path.basename(baseDir);
+  for (const hexLength of [8, 16]) {
+    const suffix = crypto.createHash('sha256').update(currentListing).digest('hex').slice(0, hexLength);
+    const suffixWrapper = ` (${suffix})`;
+    // Reserve room for the suffix BEFORE sanitizeFilePart's cap runs, not
+    // after: concatenating an already-100-code-point baseName with
+    // suffixWrapper and letting the CONCATENATED result get re-capped to 100
+    // chops the suffix off instead of the (already over-length) base — at
+    // exactly 100 base chars both hexLength candidates below collapsed onto
+    // the identical, still-colliding name and a genuinely resolvable
+    // collision hard-failed (filed report: "Software Development Engineer 2,
+    // Amazon Kids, Amazon Kids" is long enough to hit this). Slicing by code
+    // point (not by UTF-16 unit) matches sanitizeApplicationBundlePart's own
+    // [...cleaned].slice(...), so a surrogate pair is never split either.
+    const truncatedBase = [...baseName].slice(0, Math.max(0, SANITIZED_PART_CAP - suffixWrapper.length)).join('');
+    const disambiguated = path.join(path.dirname(baseDir), sanitizeFilePart(`${truncatedBase}${suffixWrapper}`, `Application (${suffix})`));
+    if (!(await collidesWithADifferentJob(disambiguated))) return resolved(disambiguated);
+  }
+  throw new Error('A different job’s saved application already occupies this destination, and no distinct folder name could be found for this job either.');
+}
+
+// Test seam: exercises collision resolution and disambiguation directly —
+// including the abandonedCandidates it hands back for cleanup — without
+// registering a pending workspace or driving a full save through the IPC
+// handler. Does NOT reproduce the save-application call site's own
+// baseDir-keyed lock; a caller testing that atomicity must go through the
+// real 'save-application' handler instead (see resume-download-bundle.js).
+export function __resolveApplicationExportDirectoryForTests(applicationOutputRoot, baseDir, currentJobListingData) {
+  return resolveApplicationExportDirectory(applicationOutputRoot, baseDir, currentJobListingData);
+}
 
 export function registerJobApplicationHandlers() {
   // A card may be deleted after generation has produced a registered temp
@@ -1912,21 +2058,69 @@ export function registerJobApplicationHandlers() {
         label: 'Applied Jobs folder',
       });
     }
-    const dir = path.join(applicationOutputRoot, where, whereLocation, role);
-    exportDir = dir;
-    exportRoot = applicationOutputRoot;
-    await ensureDirectoryWithinRoot(applicationOutputRoot, dir, {
-      mode: 0o700,
-      label: 'Application destination',
-    });
-
     const listingSource = jobListingPath || (workDir ? path.join(workDir, 'original-job-listing.md') : '');
-    const applicationFile = path.join(dir, 'Application.html');
-    const resumeFile = path.join(dir, 'Resume.pdf');
-    const coverLetterFile = path.join(dir, 'Cover Letter.pdf');
-    const jobListingFile = path.join(dir, 'Original Job Listing.md');
-    const generationAuditFile = path.join(dir, 'Generation Audit.json');
-    const generationLogFile = path.join(dir, 'Generation Log.jsonl');
+    // A quick, unverified peek at the job listing's current bytes, read
+    // before the destination directory below is resolved. This is
+    // deliberately separate from the sha256-verified, workspace-bound read of
+    // the same file in the Promise.all further down — that authoritative read
+    // still runs in its existing position and still decides whether the save
+    // itself succeeds. A miss or an error here only means
+    // resolveApplicationExportDirectory cannot compare content, so it leaves
+    // collision detection off for this save (see its own comment) rather than
+    // surfacing a second, earlier failure for the same file.
+    let precheckJobListingData = null;
+    if (listingSource) {
+      try { precheckJobListingData = await fs.promises.readFile(listingSource); }
+      catch { precheckJobListingData = null; }
+    }
+    const baseDir = path.join(applicationOutputRoot, where, whereLocation, role);
+    exportRoot = applicationOutputRoot;
+    // Collision resolution and the destination write must be ONE atomic unit
+    // under a single lock keyed on this deterministic BASE path (the
+    // sanitized company/location/title, before disambiguation) — not on
+    // whichever directory resolveApplicationExportDirectory ends up
+    // choosing. That function's occupant check only reads whatever is on
+    // disk at the instant it runs, so resolving it outside a lock (the prior
+    // design) left the read-then-decide window unlocked: two concurrent
+    // saves of two DIFFERENT jobs sharing this baseDir could both observe
+    // the destination as empty or matching and both "safely" choose to
+    // write there, and the later writer would silently overwrite the
+    // earlier one's already-saved bundle — exactly the collision this whole
+    // mechanism exists to close (see resolveApplicationExportDirectory's own
+    // header). The dock runs up to 10 handoffs concurrently, so that window
+    // is reachable, not theoretical. Locking only the final write (below, as
+    // before) closed nothing: both savers would already have committed to
+    // the same `dir` before either one ever reached it.
+    let dir, applicationFile, resumeFile, coverLetterFile, jobListingFile,
+      generationAuditFile, generationLogFile, hasPdf, hasCoverLetterPdf,
+      hasListing, hasGenerationAudit;
+    const manifest = await withApplicationSyncWorkspaceLock(baseDir, async () => {
+    // resolveApplicationExportDirectory both validates/creates whichever
+    // candidate it returns and disambiguates it from a different job's
+    // bundle already sitting at the sanitized path — see its own comment for
+    // the collision this closes. No separate ensureDirectoryWithinRoot call
+    // is needed here: every candidate it inspects is validated internally.
+    const resolution = await resolveApplicationExportDirectory(applicationOutputRoot, baseDir, precheckJobListingData);
+    dir = resolution.dir;
+    exportDir = dir;
+    // Best-effort: remove any sibling candidate this resolution touched but
+    // did not choose, if it is still empty. resolveApplicationExportDirectory
+    // guarantees every one of them is non-empty BY CONSTRUCTION (that is why
+    // it was rejected), so this can only ever remove a directory THIS exact
+    // attempt created and then superseded — never another job's real bundle.
+    // pruneEmptyExportDirectories in the catch block below already covers
+    // the chosen `dir` on a FAILED save; this covers every OTHER probed
+    // candidate, regardless of how this save ultimately turns out.
+    await Promise.all(resolution.abandonedCandidates.map(
+      candidate => pruneEmptyExportDirectories(applicationOutputRoot, candidate),
+    ));
+
+    applicationFile = path.join(dir, 'Application.html');
+    resumeFile = path.join(dir, 'Resume.pdf');
+    coverLetterFile = path.join(dir, 'Cover Letter.pdf');
+    jobListingFile = path.join(dir, 'Original Job Listing.md');
+    generationAuditFile = path.join(dir, 'Generation Audit.json');
+    generationLogFile = path.join(dir, 'Generation Log.jsonl');
     exportPhase = 'reading generated artifacts';
     const registeredReadOptions = {
       workspaceIdentity: pending.workspaceIdentity,
@@ -1979,10 +2173,10 @@ export function registerJobApplicationHandlers() {
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume' }),
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover' }),
     ]);
-    const hasPdf = resumePdfData != null;
-    const hasCoverLetterPdf = coverLetterPdfData != null;
-    const hasListing = jobListingData != null;
-    const hasGenerationAudit = generationAuditData != null;
+    hasPdf = resumePdfData != null;
+    hasCoverLetterPdf = coverLetterPdfData != null;
+    hasListing = jobListingData != null;
+    hasGenerationAudit = generationAuditData != null;
     // Embed a fresh capability before the transaction, but do not revoke the
     // previous saved workspace until every file has been promoted and passed
     // readback. Registration runs inside the transaction verifier, so a
@@ -2019,7 +2213,7 @@ export function registerJobApplicationHandlers() {
     // predecessors, while any promotion/readback failure restores the complete
     // prior generation instead of leaving a mixed bundle.
     exportPhase = 'writing and verifying destination bundle';
-    const manifest = await withApplicationSyncWorkspaceLock(dir, async () => {
+    const writeBundle = async () => {
       const finalizedGenerationLogData = await mergeApplicationGenerationLogs(generationLogFile, generationLogData);
       return replaceApplicationBundleAtomically([
         { destination: applicationFile, data: generatedHtml },
@@ -2062,6 +2256,16 @@ export function registerJobApplicationHandlers() {
           return readback;
         },
       });
+    };
+    // `dir` equals `baseDir` whenever this save did not need to disambiguate
+    // (the common case) — the outer acquire above already serializes that
+    // exact key, and calling withApplicationSyncWorkspaceLock again with the
+    // SAME key from inside its own still-pending callback would await a
+    // tail that cannot settle until this very callback returns: a permanent
+    // self-deadlock. Only a genuinely disambiguated `dir` (a different key)
+    // needs its own acquire here, to still serialize against a Sync edit
+    // already in flight on that sibling job's existing saved folder.
+    return dir === baseDir ? await writeBundle() : await withApplicationSyncWorkspaceLock(dir, writeBundle);
     });
     const missingFiles = [!hasPdf && 'résumé PDF', !hasCoverLetterPdf && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
     const syncStatus = applicationSyncStatusSnapshot();
