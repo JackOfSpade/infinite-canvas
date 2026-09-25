@@ -521,9 +521,9 @@ function nonMergeableSearchMessage(sourceData) {
     sourceData?.resultDisposition === 'collection-only'
     || isExplicitlyUnscoredModule(sourceData)
   ) {
-    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.';
+    return 'It completed without hiring-fit scoring, so its results cannot be combined. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on its Job Search card before using the Board.';
   }
-  return 'It completed without mergeable hiring-fit results. Manually clear career data and import fresh files in Job Search before using the Board.';
+  return 'It completed without mergeable hiring-fit results. Choose Re-scan for New Jobs on its Job Search card before using the Board.';
 }
 
 // Capture the mergeable terminal inputs from the live canvas. A Combine can
@@ -1358,7 +1358,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
   const clearBoardChildren = useCallback(() => {
-    deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubId: id, childTypes: ['jobcard', 'jobgroup'] });
+    deleteChildrenByHubId({
+      getNodes, getEdges, deleteElements, hubId: id, childTypes: ['jobcard', 'jobgroup'],
+      // The compact row is registered before React Flow settles deletion, so
+      // describe the exact requested scope rather than claiming every removal
+      // succeeded. Ordinary deletions remain itemized by EventLogger.
+      removalLogSummary: `[JobBoard] child cascade requested id=${id}`,
+    });
   }, [id, getNodes, getEdges, deleteElements]);
 
   const requestEmptyReplacement = useCallback(() => {
@@ -3263,7 +3269,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         description: pausedOnly
           ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
           : nonMergeableOnly
-            ? `${labels} completed without hiring-fit scoring. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.`
+            ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on each Job Search card before using the Board.`
             : `${labels} did not finish. Review those modules, then run the board again.`,
         type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
       });
@@ -4641,7 +4647,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           description: pausedOnly
             ? `${labels} paused. Resolve or skip their blocked sources, then run the board again.`
             : nonMergeableOnly
-              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode, manually clear career data, and import fresh files in Job Search before using the Board.`
+              ? `${labels} completed without hiring-fit scoring. Turn off Test Mode if enabled, then choose Re-scan for New Jobs on each Job Search card before using the Board.`
               : `${labels} did not finish. Review those modules, then run the board again.`,
           type: (pausedOnly || nonMergeableOnly) ? 'info' : 'error',
         });

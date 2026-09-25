@@ -10,7 +10,6 @@ import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
-import { deriveBoardCardStats } from './jobboard/mergeJobs';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
@@ -193,7 +192,7 @@ function compactHiringFitAudit(assessment) {
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
-  const { deleteElements, getNode, getNodes, setNodes, updateNodeData } = useReactFlow();
+  const { deleteElements, getNode, setNodes, updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
@@ -472,33 +471,32 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [addToast, id]);
 
-  // Dismiss = delete this card, then re-derive the tree view so the column
-  // tightens and the role leaf's pagination window backfills the next matching
-  // card (the group badges are live via their own store selector). Lock is
-  // checked at click time against BOTH this card and the owning board — a
-  // render-time read would go stale on already-mounted cards.
+  // Dismiss = cancel this card's own waiting lease, then delete it. The tree
+  // reflow (column tightens, the role leaf's pagination window backfills the
+  // next matching card) and the board's persisted stats recompute used to
+  // happen right here, inline — they now happen once, in Canvas.jsx's shared
+  // ReactFlow onNodesDelete handler (see planJobCardDeletionCleanup), which
+  // fires for EVERY deletion path (this X button, keyboard Backspace/Delete,
+  // and the right-click context menu alike). deleteElements below is what
+  // triggers that handler, so redoing the reflow/stats write here too would
+  // write the board's stats twice from two different node snapshots — a
+  // race, not a redundancy. Lock is checked at click time against BOTH this
+  // card and the owning board — a render-time read would go stale on
+  // already-mounted cards.
   const dismissCard = useCallback(async () => {
     if (data.locked || getLiveNode(data.hubId)?.data?.locked) return;
     // A hidden/collapsed card may unmount while it remains a canvas node, so
     // unmount is not cancellation. Explicit dismissal is: remove only this
     // card's waiting lease; an already-running IPC operation is left intact.
+    // (The shared handler below cancels this same lease again, unconditionally,
+    // for every deleted card — cancelling an already-cancelled/absent lease is
+    // a no-op, so the duplication is harmless. This call stays because it is
+    // the synchronous, locally-observable half of dismissal: a caller awaiting
+    // this function should never be able to observe a queued run still owning
+    // this id, even for the instant before deleteElements' async cleanup runs.)
     cancelQueuedRunsForNode(id, 'Job card dismissed before generation started');
     await deleteElements({ nodes: [{ id }] });
-    // Read the board's own config the same way the lock check above does, and
-    // the same way `updateGlobal` below writes it back — cross-level. A
-    // level-scoped miss here would silently degrade to `{}`, which changes
-    // which cards the filter keeps and what the stats are derived from.
-    const hubData = getLiveNode(data.hubId)?.data || {};
-    const filter = hubCardFilter(hubData);
-    setNodes((nodes) => computeJobTreeView(nodes, data.hubId, filter));
-    // getNodes() stays level-scoped here on purpose: these stats count the
-    // cards present on THIS board's level, and absorption's closure keeps a
-    // board and its cards together, so widening this to the whole graph would
-    // change what the statistic means rather than fix a bug.
-    const stats = deriveBoardCardStats(getNodes().filter((node) => node.id !== id), data.hubId, hubData);
-    updateGlobal(data.hubId, stats);
-    EventLogger.log(`[JobCard] dismissed id=${id} board=${data.hubId} remaining=${stats.resultCount}`);
-  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, getNodes, setNodes, updateGlobal, cancelQueuedRunsForNode]);
+  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);
 
   // A completed Local AI job is converted into the exact same capability-bound
   // workspace that the API flow creates, then saved through saveApplication.

@@ -83,7 +83,7 @@ function safeStringify(obj) {
   }
 }
 
-class EventLoggerSingleton {
+export class EventLoggerSingleton {
   constructor() {
     this.logs = [];
     this.currentBytes = 0;
@@ -91,6 +91,12 @@ class EventLoggerSingleton {
     this._lastMsg   = null;
     this._lastCount = 0;
     this._resizeRun = null;
+    // Known bulk removals are registered just before React Flow applies them.
+    // Keep this opt-in and ID-scoped: normal user deletes must remain fully
+    // visible in bug reports.
+    this._suppressedNodeRemovalIds = new Map();
+    this._suppressedEdgeRemovalIds = new Map();
+    this._suppressedJobCardDismissalIds = new Map();
     this._nodeStates = new Map();
     this._lastSaveError = null;
     this._installErrorCapture();
@@ -148,6 +154,65 @@ class EventLoggerSingleton {
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
       this.currentBytes -= utf8ByteLength(this.logs.shift());
     }
+  }
+
+  /**
+   * Replace a known cascade's many low-signal child removal rows with one
+   * summary. The caller must register the exact IDs before deleteElements(),
+   * because React Flow delivers its remove changes synchronously or in its
+   * next controlled batch.
+   */
+  beginRemovalBatch({ nodeIds = [], edgeIds = [], jobCardDismissalIds = [], summary }) {
+    const nodes = [...new Set(nodeIds.filter(id => typeof id === 'string' && id))];
+    const edges = [...new Set(edgeIds.filter(id => typeof id === 'string' && id))];
+    const dismissals = [...new Set(jobCardDismissalIds.filter(id => typeof id === 'string' && id))];
+    if (nodes.length === 0 && edges.length === 0 && dismissals.length === 0) return null;
+
+    const batch = { nodes, edges, dismissals };
+    nodes.forEach(id => this._suppressedNodeRemovalIds.set(id, batch));
+    edges.forEach(id => this._suppressedEdgeRemovalIds.set(id, batch));
+    dismissals.forEach(id => this._suppressedJobCardDismissalIds.set(id, batch));
+    this.log(`${summary || 'bulk removal'} nodes=${nodes.length} edges=${edges.length} dismissals=${dismissals.length} (individual removal events suppressed)`);
+    return batch;
+  }
+
+  /**
+   * Drop any IDs that did not produce a controlled deletion callback. This is
+   * called when deleteElements settles, so a cancelled/partial deletion cannot
+   * leave a stale suppression behind for an ID restored by Undo.
+   */
+  endRemovalBatch(batch) {
+    if (!batch) return;
+    batch.nodes.forEach(id => {
+      if (this._suppressedNodeRemovalIds.get(id) === batch) this._suppressedNodeRemovalIds.delete(id);
+    });
+    batch.edges.forEach(id => {
+      if (this._suppressedEdgeRemovalIds.get(id) === batch) this._suppressedEdgeRemovalIds.delete(id);
+    });
+    batch.dismissals.forEach(id => {
+      if (this._suppressedJobCardDismissalIds.get(id) === batch) this._suppressedJobCardDismissalIds.delete(id);
+    });
+  }
+
+  /** Log an ordinary node deletion unless it belongs to a registered cascade. */
+  logNodeRemoval(id) {
+    if (this._suppressedNodeRemovalIds.delete(id)) return false;
+    this.log(`node removed id=${id}`);
+    return true;
+  }
+
+  /** Log an ordinary edge deletion unless it belongs to a registered cascade. */
+  logEdgeRemoval(id) {
+    if (this._suppressedEdgeRemovalIds.delete(id)) return false;
+    this.log(`edge removed id=${id}`);
+    return true;
+  }
+
+  /** Log a manual Job Card dismissal unless its board is clearing it in bulk. */
+  logJobCardDismissal(id, boardId, remaining) {
+    if (this._suppressedJobCardDismissalIds.delete(id)) return false;
+    this.log(`[JobCard] dismissed id=${id} board=${boardId} remaining=${remaining}`);
+    return true;
   }
 
   /** Overwrite the newest ring entry, keeping the byte accounting honest. */

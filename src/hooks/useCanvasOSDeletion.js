@@ -15,6 +15,7 @@ import {
   collectSurvivingRepresentedPaths,
   collectTrashEligiblePaths,
 } from '../utils/osDeletionPaths';
+import { planJobCardDeletionCleanup } from '../utils/jobCardDeletionCleanup';
 import { textDocumentSessions } from '../utils/textDocumentSessions';
 import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
@@ -47,6 +48,7 @@ export function useCanvasOSDeletion({
   getNodes = null,
   getEdges = null,
   setNodes = null,
+  updateNodeDataGlobally = null,
 }) {
   const jobSearchCoordinator = useJobSearchCoordinator();
   const moduleRunQueue = useModuleRunQueue();
@@ -353,6 +355,49 @@ export function useCanvasOSDeletion({
     // durable manual-AI registry snapshot above.
     cancelNodeTasksRecursively(deletedNodes, deletedWorkflowIds);
 
+    // A deleted job card owns a waiting module-run lease independent of its
+    // board (cancelled unconditionally, even for a card whose board is also
+    // gone) and can leave its board's PERSISTED resultCount/finalSourceCounts/
+    // score-range fields stale otherwise — see planJobCardDeletionCleanup for
+    // the full rationale. `deletedNodes` here is only ever the nodes actually
+    // REQUESTED for deletion (a deleted jobboard's owned cards are swept
+    // separately by `committedIds` above and never appear here as `jobcard`
+    // entries), so this never re-runs the board-deletion cascade above for
+    // cards that were only auto-removed alongside their board.
+    const deletedJobCardIds = deletedNodes
+      .filter(node => node?.type === 'jobcard' && node.id)
+      .map(node => node.id);
+    deletedJobCardIds.forEach((cardId) => {
+      moduleRunQueue.cancelQueuedRunsForNode(cardId, 'Job card dismissed before generation started');
+    });
+    if (deletedJobCardIds.length > 0 && typeof setNodes === 'function' && typeof updateNodeDataGlobally === 'function') {
+      const nodesAfterRemoval = (getNodes?.() ?? []).filter(node => !committedIds.has(node.id));
+      // Cross-level, exactly like JobCardNode's own getLiveNode: nested-canvas
+      // absorption can put a board one level away from its cards, and a
+      // level-scoped miss here would silently degrade to `{}` and change
+      // which cards the filter keeps. A board deleted in THIS SAME
+      // transaction is deliberately excluded (`committedIds.has(hubId)`) —
+      // that board's own removal is the cascade above's job, not this one's,
+      // and restating a board that is itself vanishing is pure waste.
+      const getHubNode = (hubId) => {
+        if (committedIds.has(hubId)) return null;
+        return enumerateAllNodes?.().find(node => node.id === hubId)
+          || nodesAfterRemoval.find(node => node.id === hubId)
+          || null;
+      };
+      const { treeNodes, boardUpdates } = planJobCardDeletionCleanup(deletedNodes, nodesAfterRemoval, getHubNode);
+      if (treeNodes !== nodesAfterRemoval) setNodes(treeNodes);
+      boardUpdates.forEach(({ hubId, cardIds, stats }) => {
+        updateNodeDataGlobally(hubId, stats);
+        // Mirrors dismissCard's own audit line (now emitted for every
+        // deletion path, not only the X button, since they now share this
+        // one cleanup).
+        cardIds.forEach((cardId) => {
+          EventLogger.logJobCardDismissal(cardId, hubId, stats.resultCount);
+        });
+      });
+    }
+
     let analysisCleanupWarningShown = false;
     const showJobCleanupWarning = () => {
       if (analysisCleanupWarningShown) return;
@@ -376,7 +421,7 @@ export function useCanvasOSDeletion({
     // changes. Keep the guard through that commit so component unmount cleanup
     // cannot duplicate or broaden the exact transaction above.
     setTimeout(() => settleJobWorkflowDeletion(pendingWorkflowIds), 0);
-  }, [addToast, canvasFilePath, setNodes]);
+  }, [addToast, canvasFilePath, enumerateAllNodes, getNodes, moduleRunQueue, setNodes, updateNodeDataGlobally]);
 
   return { onBeforeDelete, onNodesDelete };
 }
