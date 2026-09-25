@@ -14,6 +14,31 @@ export function JobSearchProcessingState({
   chromeLaunchInfo,
   queuedRun,
 }) {
+  const primaryStatus = hubState === 'searching' && activeSourceId
+    ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...`
+    : statusLabel;
+  const queuedStatus = hubState === 'queued'
+    ? `${queuedRun?.label || 'Job search'} · Position ${queuedRun?.position || 1}`
+    : null;
+  const collectedStatus = hubState === 'searching' && totalSourceJobs > 0
+    ? `${totalSourceJobs} listing${totalSourceJobs === 1 ? '' : 's'} collected so far (before de-duplication)`
+    : null;
+  const scoringStatus = hubState === 'scoring' && scoringProgress?.total > 0
+    ? <>
+        {scoringProgress.scored} / {scoringProgress.total} scored
+        {scoringProgress.batch != null && scoringProgress.batchTotal != null && (
+          <> · batch {scoringProgress.batch}/{scoringProgress.batchTotal}</>
+        )}
+        {scoringProgress.phase === 'running' && scoringProgress.attemptSize != null && (
+          <> · scoring {scoringProgress.attemptSize} job{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
+        )}
+        {scoringProgress.phase === 'splitting' && <> · retrying smaller batch…</>}
+        {scoringProgress.phase === 'recovering-missing-rows' && scoringProgress.attemptSize != null && (
+          <> · recovering {scoringProgress.attemptSize} unresolved score row{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
+        )}
+      </>
+    : null;
+
   const handleCopy = () => {
     if (chromeLaunchInfo?.terminalCommand) {
       navigator.clipboard.writeText(chromeLaunchInfo.terminalCommand).catch(() => {
@@ -59,7 +84,7 @@ export function JobSearchProcessingState({
             {chromeLaunchInfo.terminalCommand}
           </span>
         </button>
-        <div className="flex items-center gap-1.5 text-white/25" role="status" aria-live="polite">
+        <div className="flex items-center gap-1.5 text-white/25" role="status" aria-live="polite" aria-atomic="true">
           <Loader2 size={10} className="animate-spin shrink-0" />
           <span className="text-[9px]">Waiting for Chrome on port {chromeLaunchInfo.port}…</span>
         </div>
@@ -81,54 +106,27 @@ export function JobSearchProcessingState({
           <XCircle size={14} />
         </button>
       )}
-      <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
-      <p className="text-white/60 text-xs font-medium" role="status" aria-live="polite">
-        {hubState === 'searching' && activeSourceId
-          ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...`
-          : statusLabel}
-      </p>
-      {hubState === 'queued' && (
-        <p className="text-blue-400/60 text-[10px] mt-1" role="status" aria-live="polite">
-          {(queuedRun?.label || 'Job search')} · Position {queuedRun?.position || 1}
+      <div className="flex flex-col items-center">
+        <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
+        {/* Only the compact phase/source label is live. Collection counts and
+            browser-detail updates can change many times per minute; keeping
+            them outside this atomic region prevents a screen reader from
+            repeatedly re-announcing the entire progress block. */}
+        <p className="text-white/60 text-xs font-medium" role="status" aria-live="polite" aria-atomic="true">
+          {primaryStatus}
         </p>
-      )}
-      {/* The live step the scraper is on. Browser sources spend most of a run
-          inside a per-card description walk that produces no countable jobs for
-          minutes, so gating every signal behind `totalSourceJobs > 0` left the
-          hub showing nothing but a spinner — which is what "processing stuck"
-          reports were actually describing. This line changes every few seconds
-          for the whole walk. */}
-      {hubState === 'searching' && activeSourceDetail && (
-        <p className="text-white/35 text-[10px] mt-1 text-center px-2 leading-snug" role="status" aria-live="polite">
-          {activeSourceDetail}
-        </p>
-      )}
-      {hubState === 'searching' && totalSourceJobs > 0 && (
-        <p className="text-blue-400/60 text-[10px] mt-1" role="status" aria-live="polite">
-          {totalSourceJobs} listing{totalSourceJobs === 1 ? '' : 's'} collected so far (before de-duplication)
-        </p>
-      )}
-      {hubState === 'scoring' && scoringProgress?.total > 0 && (
-        <p className="text-blue-400/60 text-[10px] mt-1" role="status" aria-live="polite">
-          {scoringProgress.scored} / {scoringProgress.total} scored
-          {scoringProgress.batch != null && scoringProgress.batchTotal != null && (
-            <> · batch {scoringProgress.batch}/{scoringProgress.batchTotal}</>
-          )}
-          {scoringProgress.phase === 'running' && scoringProgress.attemptSize != null && (
-            <> · scoring {scoringProgress.attemptSize} job{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
-          )}
-          {scoringProgress.phase === 'splitting' && (
-            <> · retrying smaller batch…</>
-          )}
-          {scoringProgress.phase === 'recovering-missing-rows' && scoringProgress.attemptSize != null && (
-            <> · recovering {scoringProgress.attemptSize} unresolved score row{scoringProgress.attemptSize === 1 ? '' : 's'}…</>
-          )}
-        </p>
-      )}
+        {queuedStatus && <p className="text-blue-400/60 text-[10px] mt-1">{queuedStatus}</p>}
+        {/* Browser description walks can take minutes without increasing the
+            collection count, so expose the current step visually without
+            competing with the compact live status announcement above. */}
+        {hubState === 'searching' && activeSourceDetail && (
+          <p className="text-white/35 text-[10px] mt-1 text-center px-2 leading-snug">{activeSourceDetail}</p>
+        )}
+        {collectedStatus && <p className="text-blue-400/60 text-[10px] mt-1">{collectedStatus}</p>}
+        {scoringStatus && <p className="text-blue-400/60 text-[10px] mt-1">{scoringStatus}</p>}
+      </div>
       {resumeSummary && (
-        <p className="text-white/25 text-[10px] mt-2 text-center truncate max-w-full">
-          {resumeSummary}
-        </p>
+        <p className="text-white/25 text-[10px] mt-2 text-center truncate max-w-full">{resumeSummary}</p>
       )}
     </div>
   );

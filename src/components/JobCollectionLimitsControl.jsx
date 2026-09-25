@@ -50,8 +50,8 @@ export function JobCollectionLimitsControl({ collectionLimits, setCollectionLimi
           />
         </label>
       </div>
-      <p id={jobsHelpId} className="mt-1 text-[8px] leading-snug text-white/25">Leave jobs blank for all in-window matches.</p>
-      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Per generated search on browser boards. Leave blank to keep paging until results run out or fall outside the look-back.</p>
+      <p id={jobsHelpId} className="mt-1 text-[8px] leading-snug text-white/25">Blank = all in-window matches.</p>
+      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Browser boards only. Blank = continue until results end or leave the date window.</p>
     </fieldset>
   );
 }

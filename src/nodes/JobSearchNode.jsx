@@ -70,6 +70,12 @@ import { exactInterruptedRecoveryBackendFailure } from '../utils/jobBoardRecover
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { moduleFingerprint } from './jobboard/mergeJobs';
+import {
+  jobSearchHistoricalAnchor,
+  jobSearchNextAnchor,
+  normalizeJobSearchInitialLookbackDays,
+  resolveJobSearchDateWindow,
+} from '../utils/jobSearchDateWindow';
 
 // ─── TESTING: optionally skip AI scoring after collection ────────────────────
 // Collection limits are always user-controlled; this switch affects scoring only.
@@ -83,13 +89,6 @@ const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && JOB_SEARCH_TEST_MODE
 // we hold scoring rather than burn AI tokens on description-less LinkedIn jobs;
 // the user can still Skip to score with what we have. Everything else (info,
 // transient throttles on other sources) flows straight through to scoring.
-// Job freshness window (days). Default mirrors electron DEFAULT_MAX_AGE_DAYS;
-// the cap bounds the user-set slider. NOTE: auto-widening this on thin results
-// would need a search refetch (filterJobsByAge runs post-fetch, so date-param
-// sources won't already have older jobs in the pool) — left as a follow-up.
-const JOB_DEFAULT_AGE_DAYS   = 21;
-const JOB_MAX_AGE_DAYS_LIMIT = 180;
-
 const STATE_LABELS = {
   empty: null,
   parsing: 'Reading resume...',
@@ -107,6 +106,50 @@ const PROCESSING_STATES = ['queued', 'parsing', 'interpreting-preferences', 'que
 const BOARD_BUSY_SEARCH_STATES = new Set(PROCESSING_STATES);
 const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set(['resume-saved-scrape', 'append-scored-jobs']);
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
+
+function serializedJobSearchWindow(window, anchorSource) {
+  return {
+    startTimestamp: window.startTimestamp,
+    anchorTimestamp: window.anchorTimestamp,
+    completionTimestamp: window.completionTimestamp,
+    capped: window.capped,
+    capReason: window.capReason,
+    providerLookbackDays: window.providerLookbackDays,
+    anchorSource,
+  };
+}
+
+function initialJobSearchLookbackDays(data) {
+  // A canvas saved before this dedicated field existed may still have its
+  // pre-first-run preference in the retired maxAgeDays slot. Migrate on read;
+  // new edits persist only initialLookbackDays.
+  return normalizeJobSearchInitialLookbackDays(data?.initialLookbackDays ?? data?.maxAgeDays);
+}
+
+function nextJobSearchWindow(data, nodeId) {
+  const anchor = jobSearchNextAnchor(data, nodeId);
+  return {
+    anchor,
+    window: resolveJobSearchDateWindow(
+      anchor.timestamp,
+      new Date(),
+      initialJobSearchLookbackDays(data),
+    ),
+  };
+}
+
+// Clearing career input removes jobRunId, but older completed hubs may have
+// recorded their only usable scan history in that id or in the run window.
+// Promote only a conservative coverage boundary before the clear. A legacy run
+// *start* is not a completion instant, so it must never be written as
+// lastCompletedRunAt.
+function materializedSearchHistoryOnCareerClear(data, nodeId) {
+  const coverageStartedAt = normalizeCompletionTimestamp(data?.lastSearchCoverageStartedAt);
+  const coverageAnchor = jobSearchHistoricalAnchor(data, nodeId).timestamp;
+  return coverageStartedAt == null && coverageAnchor != null
+    ? { lastSearchCoverageStartedAt: coverageAnchor }
+    : {};
+}
 
 function createManualAiRunId(nodeId) {
   const entropy = globalThis.crypto?.randomUUID?.()
@@ -412,14 +455,15 @@ function savedAnalysisRoleTitles(snapshot) {
 // minus — kept verbatim inside the AI's resolved list — goes to every job
 // board VERBATIM, with no other chokepoint that would ever catch it. This
 // is advisory only — never blocks, cancels, or retries a search, exactly like
-// SearchBriefAdvisories below, whose amber/role="status" visual contract this
+// SearchBriefAdvisories below, whose amber advisory visual contract this
 // deliberately mirrors so the two read as one family. Kept as a SEPARATE
 // plain function rather than folded into SearchBriefAdvisories itself:
 // SearchBriefAdvisories lives in JobSearchDoneState.jsx (out of this file's
 // edit scope) and only accepts a `searchBriefPlan` plan object, with no slot
 // for a client-side detector's output — this is called as a plain expression
-// (`{titleOperatorAdvisory(...)}`, not a JSX `<Tag/>`) immediately next to
-// every SearchBriefAdvisories call site in this file's render tree.
+// (`{titleOperatorAdvisory(...)}`, not a JSX `<Tag/>`) next to the draft
+// SearchBriefAdvisories call site. The completed state receives the detected
+// tokens as data and decides how to present its saved-plan note.
 // DELIBERATELY lowercase, not a capitalized `<TitleOperatorAdvisory/>` JSX
 // component: this file's single default export is one enormous component
 // (JobSearchNode), and React Compiler's eslint plugin analyzes every
@@ -432,20 +476,27 @@ function savedAnalysisRoleTitles(snapshot) {
 // patterns into real errors. A lowercase plain function returning a React
 // element is invisible to that heuristic and sidesteps the whole class of
 // failure.
-function titleOperatorAdvisory(titles) {
+function titleOperatorHits(titles) {
   const hits = new Set();
   for (const title of (Array.isArray(titles) ? titles : [])) {
     for (const hit of detectQueryOperators(title)) hits.add(hit);
   }
-  if (hits.size === 0) return null;
+  return [...hits];
+}
+
+function titleOperatorAdvisory(hits, locked = false) {
+  if (!Array.isArray(hits) || hits.length === 0) return null;
   return (
     <div
-      className="w-full rounded-md border border-amber-400/25 bg-amber-400/5 px-2 py-1.5 text-[9px] leading-snug text-amber-100/80"
-      role="status"
+      className={`w-full rounded-md border px-2 py-1.5 text-[9px] leading-snug ${locked
+        ? 'border-white/10 bg-white/5 text-white/40'
+        : 'border-amber-400/25 bg-amber-400/5 text-amber-100/80'}`}
     >
-      <p className="font-medium text-amber-200/85 mb-1">Title may not search as typed</p>
+      <p className={`font-medium mb-1 ${locked ? 'text-white/60' : 'text-amber-200/85'}`}>
+        {locked ? 'Saved search-title note' : 'Title may not search as typed'}
+      </p>
       <p>
-        Boolean/operator syntax ({[...hits].join(', ')}) in a resolved title is sent to job boards
+        Boolean/operator syntax ({hits.join(', ')}) in a resolved title is sent to job boards
         as literal words, not honored as a search operator — measured behavior is boards ignore it,
         return zero rows, or invert the intent.
       </p>
@@ -1187,14 +1238,33 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updatedAt: Date.now(),
     } : null;
     const recordFinalizationState = (failed) => {
-      if (!completionCanvasFilePath || !canPublish()) return;
+      if (!canPublish()) return;
       updateGlobal(id, (node) => {
         if (!canPublish()) return null;
         const existing = node?.data?.terminalFinalizationRecovery;
-        if (failed) return { terminalFinalizationRecovery: finalizationRecovery };
-        return existing?.runId === runId
-          ? { terminalFinalizationRecovery: null }
-          : null;
+        if (failed) {
+          return finalizationRecovery
+            ? { terminalFinalizationRecovery: finalizationRecovery }
+            : null;
+        }
+        const pendingCompletion = node?.data?.pendingCollectionCompletion;
+        const commitsSuccessfulCollection = terminalStatus === 'completed'
+          && pendingCompletion?.runId === runId
+          && normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt) != null;
+        const patch = {};
+        if (existing?.runId === runId) patch.terminalFinalizationRecovery = null;
+        if (commitsSuccessfulCollection) {
+          patch.lastCompletedRunAt = normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt);
+          patch.lastSearchCoverageStartedAt = normalizeCompletionTimestamp(
+            pendingCompletion.collectionStartedAt,
+          ) ?? normalizeCompletionTimestamp(pendingCompletion.searchWindow?.startTimestamp)
+            ?? normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt);
+          patch.pendingCollectionCompletion = null;
+          if (pendingCompletion.searchWindow && typeof pendingCompletion.searchWindow === 'object') {
+            patch.searchWindow = pendingCompletion.searchWindow;
+          }
+        }
+        return Object.keys(patch).length > 0 ? patch : null;
       });
     };
     if (!window.electronAPI?.completeJobRun) {
@@ -1211,7 +1281,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scoreReadyCount,
       });
       if (!canPublish()) return result;
-      if (result?.ok !== true || (completionCanvasFilePath && result?.cleared !== true)) {
+      // Saved canvases require the durable receipt + verified sidecar cleanup.
+      // An unsaved canvas has no sidecar path by design, so the successful
+      // renderer terminal transaction itself is authoritative for its
+      // in-memory next-scan anchor.
+      if (completionCanvasFilePath && (result?.ok !== true || result?.cleared !== true)) {
         recordFinalizationState(true);
         EventLogger.error(
           `[JobSearch][${id}] Job-run completion receipt/cleanup was not fully recorded`
@@ -1226,16 +1300,33 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return null;
     }
   }, [canvasFilePath, id, updateGlobal]);
-  // The displayed completion history is collection history: scoring,
-  // preference evaluation, and terminal receipt cleanup can take much longer
-  // than the last platform scrape, so none of them may move this timestamp.
+  // Stage the scrape interval, but do not advance either durable timestamp
+  // until this exact run finishes its full terminal
+  // transaction. Scoring or finalization can still fail after collection; if
+  // that happens, the next fresh scan must retain the older successful anchor
+  // so none of the newly gathered-but-unpublished interval can be skipped.
   // Older main processes lack `collectionCompletedAt`; receiving a successful
   // search response still proves collection just completed, so Date.now() is a
   // safe compatibility fallback.
   const recordCollectionCompletion = useCallback((searchResult, isCancelled = () => false) => {
     if (isCancelled?.()) return;
     const collectionCompletedAt = normalizeCompletionTimestamp(searchResult?.collectionCompletedAt) ?? Date.now();
-    updateGlobal(id, () => (isCancelled?.() ? null : { lastCompletedRunAt: collectionCompletedAt }));
+    const collectionStartedAt = normalizeCompletionTimestamp(searchResult?.collectionStartedAt)
+      ?? normalizeCompletionTimestamp(searchResult?.searchWindow?.startTimestamp)
+      ?? collectionCompletedAt;
+    updateGlobal(id, () => (isCancelled?.() ? null : {
+      pendingCollectionCompletion: {
+        runId: searchResult?.runId || null,
+        collectionStartedAt,
+        collectionCompletedAt,
+        // Prefer the main process's normalized receipt when available. Fresh
+        // runs already persist their renderer-computed window before provider
+        // work starts, so older main processes simply leave that value intact.
+        searchWindow: searchResult?.searchWindow && typeof searchResult.searchWindow === 'object'
+          ? searchResult.searchWindow
+          : null,
+      },
+    }));
   }, [id, updateGlobal]);
   const retryTerminalFinalization = useCallback(async (descriptor, cancelled = () => false) => {
     const runId = typeof descriptor?.runId === 'string' ? descriptor.runId : '';
@@ -1402,6 +1493,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const platformsVerifyingRef = useRef(platformsVerifying);
   platformsVerifyingRef.current = platformsVerifying;
   const lastCompletedRunAtText = formatCompletionTimestamp(data.lastCompletedRunAt);
+  // Use the same compatibility resolver as the run itself so an older canvas
+  // whose only surviving anchor is its saved window continues automatically
+  // from that boundary after upgrading.
+  const hasRetainedSearchHistory = jobSearchHistoricalAnchor(data, id).timestamp != null;
+  const canChooseInitialLookback = hubState === 'empty' && !hasRetainedSearchHistory;
+  const upcomingSearchWindow = nextJobSearchWindow(data, id);
+  const upcomingSearchBoundary = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
+    .format(upcomingSearchWindow.window.startDate);
+  const nextSearchWindowDescription = `from ${upcomingSearchBoundary}${
+    upcomingSearchWindow.window.capped
+      ? upcomingSearchWindow.anchor.timestamp == null
+        ? ` (${initialJobSearchLookbackDays(data)}-day first scan)`
+        : ' (365-day safety cap)'
+      : upcomingSearchWindow.anchor.source === 'legacy-run-start'
+        ? ' (safe legacy overlap)'
+        : ''
+  }`;
 
   useEffect(() => {
     if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
@@ -2196,7 +2304,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         sourceId: 'usajobs',
         // Use the post-queue live snapshot rather than the render that scheduled
         // this refresh; a foreground/Board run may have finished while it waited.
-        maxAgeDays: refreshData.maxAgeDays || 21,
+        searchWindow: refreshData.searchWindow || null,
         collectionLimits: refreshCollectionLimits,
         enabledSourceIds: refreshEnabledSourceIds,
         canvasFilePath,
@@ -2613,16 +2721,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // (Results-cascade filters — score slider + per-source — moved to the Job Board
   // Module, which now owns the displayed cards. The Job Search Module has no cards
   // to filter.)
-
-  // How far back to look for postings on each search. Persisted on node data
-  // so it survives saves and applies to re-runs. 21 days = three weeks; sits
-  // between the "freshest" applicant pool and the ~30-day mark where ~43% of
-  // postings have been filled (see job-listing-age research notes).
-  const maxAgeDays = data.maxAgeDays || 21;
-  const setMaxAgeDays = useCallback((val) => {
-    const n = Math.max(1, Math.min(JOB_MAX_AGE_DAYS_LIMIT, Math.floor(Number(val) || JOB_DEFAULT_AGE_DAYS)));
-    updateGlobal(id, { maxAgeDays: n });
-  }, [id, updateGlobal]);
 
   // Phase B merged the old standalone Target role box into this one Search
   // Brief field — the AI now determines the roles to search from whatever is
@@ -3595,7 +3693,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const cancelled = () => locallyCancelled()
       || (typeof parentCancelled === 'function' && parentCancelled());
     let lease = null;
-    let standaloneBecameBoardManaged = false;
+    let standaloneBecameBoardRecoveryManaged = false;
     let deletionBlockedAtLaneStart = false;
     try {
       if (!queueManagedByBoard) {
@@ -3618,15 +3716,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           onStart: () => {
             if (isJobWorkflowDeletionPending(currentId)) deletionBlockedAtLaneStart = true;
             if (cancelled() || isJobWorkflowDeletionPending(currentId)) throw new Error('Node deleted');
-            // Ownership is live graph state. A Search that was standalone when
-            // queued may now belong to a Board; consume this lease only long
-            // enough to restore its pre-queue snapshot, then let the Board's
-            // already-queued transaction start with an untouched child.
-            if (
-              isJobSearchConnectedToBoard(currentId, getNodes(), getEdges())
-              || findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
-            ) {
-              standaloneBecameBoardManaged = true;
+            // An idle Board connection does not own this explicit re-scan.
+            // Only a durable interrupted Board transaction can reserve the
+            // child while this request waits in the shared lane.
+            if (findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())) {
+              standaloneBecameBoardRecoveryManaged = true;
               return;
             }
             updateGlobal(currentId, { queuedModuleRun: null });
@@ -3638,32 +3732,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         EventLogger.log(`[JobSearch][${currentId}] Queue delegated to Job Board ${orchestratorNodeId}`);
       }
 
-      if (standaloneBecameBoardManaged) {
+      if (standaloneBecameBoardRecoveryManaged) {
         // Queue presentation changed only this transient receipt. Preserve
         // every live edit made while waiting instead of replacing the whole
         // node with a click-time snapshot.
         updateGlobal(currentId, { queuedModuleRun: null });
         EventLogger.log(
-          `[JobSearch][${currentId}] Queued direct run declined — a connected Job Board now owns search admission`,
+          `[JobSearch][${currentId}] Queued direct run declined — an interrupted Job Board recovery now owns search admission`,
         );
         addToast({
-          title: 'Run from Job Board',
-          description: 'This queued search was kept unchanged. Use Search selected & combine on its connected Job Board.',
+          title: 'Job Board recovery in progress',
+          description: 'This queued re-scan was kept unchanged. Finish or cancel the interrupted Job Board run first.',
           type: 'info',
         });
-        return searchRunOutcome('not-ready', { error: 'Run this connected search from its Job Board.' });
+        return searchRunOutcome('paused', { error: 'This Job Search is reserved by an interrupted Job Board run.' });
       }
 
       if (
         !queueManagedByBoard
-        && (
-          isJobSearchConnectedToBoard(currentId, getNodes(), getEdges())
-          || findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
-        )
+        && findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
       ) {
         updateGlobal(currentId, { queuedModuleRun: null });
         EventLogger.log(
-          `[JobSearch][${currentId}] Direct run declined after queue admission — a Job Board now owns this Search`,
+          `[JobSearch][${currentId}] Direct run declined after queue admission — an interrupted Job Board recovery now owns this Search`,
         );
         addToast({
           title: 'Run from Job Board',
@@ -3716,6 +3807,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           error: 'Select at least one job platform before running the search.',
         });
       }
+      const completionAnchor = jobSearchNextAnchor(laneTurnData, currentId);
+      const resolvedSearchWindow = resolveJobSearchDateWindow(
+        completionAnchor.timestamp,
+        new Date(),
+        initialJobSearchLookbackDays(laneTurnData),
+      );
+      const runSearchWindow = serializedJobSearchWindow(resolvedSearchWindow, completionAnchor.source);
+      EventLogger.log(
+        `[JobSearch][${currentId}] Search window start=${new Date(runSearchWindow.startTimestamp).toISOString()}`
+        + ` anchor=${completionAnchor.source} capped=${runSearchWindow.capped ? 'yes' : 'no'}`,
+      );
 
       // Authenticate before spending a fresh-import capability. A rejected
       // login preflight has not started a provider run or changed the career
@@ -3839,6 +3941,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pinnedTitles: [],
         scrapeWarnings: [],
         jobRunId: null,
+        // A staged collection belongs to one exact backend generation. A new
+        // fresh run deliberately abandons any failed predecessor, while the
+        // durable successful anchor above remains unchanged.
+        pendingCollectionCompletion: null,
         // A previous collection-only/Test Mode completion is terminal, but its
         // unscored provenance belongs only to that generation. Clear it at the
         // fresh-run boundary so a later ordinary scored (or authoritative
@@ -3850,6 +3956,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         rerunOutcome: null,
         rerunNotice: null,
         reanalysisNotice: null,
+        // Freeze this run's exact inclusive boundary before any provider or AI
+        // work. Paused-source recovery and crash resume reuse this receipt.
+        searchWindow: runSearchWindow,
       });
 
       cancelCleanSourceCardDismiss();
@@ -3933,9 +4042,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const activeJobPreferences = String(laneTurnData.jobPreferences || '').trim();
       // ROLE LOCKING: resolveSearchRoles' two-pass resolution is the single
       // most expensive — and most important — AI work this module does, so it
-      // must happen EXACTLY ONCE per hub, ever, and every later scan reuses
-      // its output verbatim (no re-interpretation, no re-audit, no variance
-      // between runs). `laneTurnData.resolvedRoles` is that durable lock:
+      // must happen exactly once per locked setup generation, and every later
+      // scan reuses its output verbatim (no re-interpretation, no re-audit,
+      // no variance between runs). `laneTurnData.resolvedRoles` is that
+      // durable lock:
       // once non-empty it wins outright and this run spends zero
       // interpretation calls. Only a hub that has never locked (fresh, or
       // just had its career data cleared — see handleClearCareerFiles/
@@ -4130,7 +4240,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
         nodeId: currentId,
-        maxAgeDays: laneTurnData.maxAgeDays || 21,
+        lastCompletedRunAt: completionAnchor.timestamp,
+        initialLookbackDays: initialJobSearchLookbackDays(laneTurnData),
+        searchWindow: runSearchWindow,
         collectionLimits: runCollectionLimits,
         enabledSourceIds: runEnabledSourceIds,
         canvasFilePath,
@@ -5501,7 +5613,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const searchResult = await window.electronAPI.searchJobs({
         queries,
         nodeId: currentId,
-        maxAgeDays: liveData.maxAgeDays || 21,
+        // Resume the exact boundary frozen into this staged generation. The
+        // manifest is authoritative; live hub data is only a compatibility
+        // fallback for early windows created before it was stored there.
+        searchWindow: offer.searchWindow || liveData.searchWindow || null,
         collectionLimits,
         enabledSourceIds,
         canvasFilePath: cfp,
@@ -6732,7 +6847,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // Also clear filePath. The one-shot auto-start latch prevents a failed run
     // from recursively launching itself, but Reset is an explicit abandonment
     // of the input — the user clicked Cancel, not Retry. Once parsing produced a
-    // reusable profile, the empty state still exposes an explicit Re-run Search
+    // reusable profile, the empty state still exposes an explicit Re-scan
     // action backed by that profile.
     lastDroppedPathsRef.current = null;
     const resetRunId = jobRunIdRef.current || resetData.jobRunId || null;
@@ -6761,6 +6876,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       jobAnalysisClearedAt: resetData.jobAnalysisClearedAt ?? null,
       jobAnalysisClearedRunId: resetData.jobAnalysisClearedRunId ?? null,
     });
+    const resetSearchHistoryPatch = {
+      ...materializedSearchHistoryOnCareerClear(resetData, id),
+      ...(resetHasReusableCareerProfile ? {} : { searchWindow: null }),
+    };
     // ROLE LOCKING: the lock is a career-data-scoped decision, so it clears
     // exactly when the career profile it was derived from also clears here
     // (the same condition guarding retainedCareerData above) — never on a
@@ -6785,6 +6904,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       retryOperationFor: null,
       manualAiResume: null,
       terminalFinalizationRecovery: null,
+      pendingCollectionCompletion: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
       preferenceMatchedCount: null, preferenceFilteredCount: null,
@@ -6802,6 +6922,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       locationSnapshot: null,
       _boardRollbackSourceProgressFence: null,
       ...retainedCareerData,
+      ...resetSearchHistoryPatch,
       ...roleLockClearPatch,
     });
     jobRunIdRef.current = null;
@@ -7077,14 +7198,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         error: 'Finish the interrupted job-run cleanup before starting another search.',
       });
     }
-    if (!queueManagedByBoard && deferDirectSearchToBoard('Direct re-run')) {
-      return searchRunOutcome('not-ready', { error: 'Run this connected search from its Job Board.' });
-    }
     if (platformsVerifying) {
-      EventLogger.log(`[JobSearch][${id}] Re-run deferred — selected platform connection verification is still pending`);
+      EventLogger.log(`[JobSearch][${id}] Re-scan deferred — selected platform connection verification is still pending`);
       addToast({
         title: 'Checking Connections',
-        description: 'Wait for the selected job platform connection check to finish, then re-run the search.',
+        description: 'Wait for the selected job platform connection check to finish, then re-scan.',
         type: 'info',
       });
       return searchRunOutcome('not-ready', {
@@ -7094,9 +7212,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
     if (activeEnabledSourceIds.length === 0) {
       const message = 'Select at least one job platform before running the search.';
-      // Logged BEFORE the "Re-run button clicked" line this handler emits later,
+      // Logged BEFORE the "Re-scan requested" line this handler emits later,
       // so a report cannot show the click without the reason the banner appeared.
-      EventLogger.log(`[JobSearch][${id}] Re-run refused — error banner raised: ${message}`);
+      EventLogger.log(`[JobSearch][${id}] Re-scan refused — error banner raised: ${message}`);
       updateGlobal(id, { errorMessage: message, rerunOutcome: null, rerunNotice: null });
       addToast({ title: 'Choose a Job Platform', description: message, type: 'error' });
       return searchRunOutcome('not-ready', { error: message });
@@ -7124,7 +7242,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const profileInputMode = effectivePaths.length > 0 ? 'fresh-files' : 'stored-profile';
     EventLogger.log(queueManagedByBoard
       ? `[JobSearch][${id}] Job Board requested search; career input=${profileInputMode}`
-      : `[JobSearch][${id}] Re-run button clicked; career input=${profileInputMode}`);
+      : `[JobSearch][${id}] Re-scan requested; career input=${profileInputMode}`);
     if (effectivePaths.length > 0) {
       // Files still accessible — re-parse for freshness then run full pipeline
       if (typeof startProcessingRef.current !== 'function') {
@@ -7143,7 +7261,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     } else {
       // Files gone but profile is persisted — run from query step onward
       if (!queueManagedByBoard) {
-        addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
+        addToast({ title: 'Re-scanning for New Jobs', description: 'Using stored career profile — original files not needed.', type: 'info' });
       }
       return startProcessingWithProfile(data.resumeProfile, {
         frameSourceCards,
@@ -7156,7 +7274,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         freshImportCapability,
       });
     }
-  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getNode, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, deferDirectSearchToBoard, platformsVerifying]);
+  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getNode, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, platformsVerifying]);
 
   const cancelBoardRun = useCallback(async ({
     orchestratorNodeId,
@@ -8357,7 +8475,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   // Re-score the currently displayed listings without invoking any search,
   // scrape, seen-history, or job-run lifecycle work. This is deliberately
-  // separate from Re-run Search: existing listings are often history-filtered
+  // separate from Re-scan: existing listings are often history-filtered
   // on a fresh scrape and therefore cannot be safely revisited that way.
   const handleReanalyze = useCallback(async () => {
     if (isJobWorkflowDeletionPending(id)) return;
@@ -8378,7 +8496,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       return;
     }
-
     if (deferDirectSearchToBoard('Saved-job re-evaluation')) return;
 
     const requestedRecoveryOwner = findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
@@ -8760,6 +8877,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (!liveNode) return;
     const liveData = liveNode.data || data;
     if (liveData.locked) return;
+    const retainedLastScanDate = jobSearchHistoricalAnchor(liveData, id).timestamp != null;
+    const materializedSearchHistory = materializedSearchHistoryOnCareerClear(liveData, id);
     const durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(
       id,
       getNodes(),
@@ -8866,12 +8985,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // recovery for work this reset just discarded.
       retryOperation: null,
       retryOperationFor: null,
+      pendingCollectionCompletion: null,
+      // Date history is module history, not career-derived data. Replacement
+      // files or a changed Search Brief continue from this retained boundary.
+      ...materializedSearchHistory,
+      searchWindow: null,
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
       activeTargetRole: null,
       pinnedTitles: null,
-      // ROLE LOCKING: Clear career files is the canonical unlock — the whole
+      // ROLE LOCKING: Clear career data is the canonical unlock — the whole
       // reason the brief is safe to freeze read-only (see the Search Brief
       // render in both states) is that clearing career data is the one
       // guaranteed way back to an editable brief. Must ship in the SAME
@@ -8897,7 +9021,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           type: 'error',
         });
       } else {
-        addToast({ title: 'Career Files Cleared', description: 'Search settings kept — drop fresh career files to run again.', type: 'info' });
+        addToast({
+          title: 'Career Files Cleared',
+          description: retainedLastScanDate
+            ? 'Search settings and the last scan date were kept — the next scan will continue from that date after you add fresh career files.'
+            : 'Search settings were kept — choose the first scan lookback, then drop fresh career files.',
+          type: 'info',
+        });
       }
     });
   }, [data, id, canvasFilePath, resumeOffer, epoch, moduleRunQueue, updateGlobal, cancelCleanSourceCardDismiss, resetSourceProgress, cleanupAllJobChildren, addToast, getNode, getNodes, getEdges]);
@@ -8922,11 +9052,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || (controlsLocked ? 'Busy' : null);
   const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;
   // SETTINGS LOCKING: PERMANENT freeze of every user-configurable setting
-  // (Search Brief, location, remote residences, look-back window, jobs/pages
-  // depth, and enabled platforms) once roles have been resolved — distinct
+  // (Search Brief, location, remote residences, jobs/pages depth, and enabled
+  // platforms) once roles have been resolved — distinct
   // from controlsLocked/errorControlsLocked above (those mean "busy right
   // now": a queued run, a hub lock, cleanup pending — and clear on their
-  // own). settingsFrozen only ever clears via Clear career files or a
+  // own). settingsFrozen clears only through Clear career data or a
   // career-data-wiping Reset (see roleLockClearPatch / handleClearCareerFiles)
   // — never on a timer, a completed run, or an unlock toggle. Do NOT merge
   // these two concepts: a future "busy OR frozen" collapse would silently
@@ -9826,7 +9956,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // handleRerun — so a user who hit a login wall while RESUMING, logged in,
     // and clicked Try again silently got a fresh multi-source scrape instead of
     // the resume they asked for. The deliberate fresh-scan entry points (the
-    // done-state "Re-run Search" button and the resume banner) are untouched;
+    // done-state "Re-scan for New Jobs" button and the resume banner) are untouched;
     // only this error-banner retry becomes operation-aware.
     // Honour the tag ONLY if it still describes the error on screen. About
     // twenty places raise this banner and most do not tag themselves, so an
@@ -9872,6 +10002,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     handleRerun({ frameSourceCards: false });
   }, [addToast, canvasFilePath, data.locked, deferDirectSearchToBoard, epoch, getEdges, getNode, getNodes, id, moduleRunQueue, retryTerminalFinalization, settleManualAiRetirement, updateGlobal, handleResumeRun, handleResumeSavedScrape, resumeScoring, handleRerun]);
 
+  const resolvedTitleOperatorHits = titleOperatorHits(resolvedRoles);
   const savedAnalysisWarning = getSavedAnalysisWarning(savedAnalysisMeta, id, canvasFilePath);
   const savedScoreReadyCount = Math.max(0, Number(savedAnalysisMeta?.gatheredJobCount) || 0);
   const savedSourceGatheredCount = Number.isFinite(Number(savedAnalysisMeta?.sourceGatheredCount))
@@ -9882,6 +10013,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // belongs to this exact run token.
   const savedAnalysisMatchesCurrentRun = !!savedAnalysisMeta?.runId
     && savedAnalysisMeta.runId === data.jobRunId;
+  const compactSavedRunTools = hubState === 'done' && savedAnalysisMatchesCurrentRun;
   const doneGatheredCount = savedAnalysisMatchesCurrentRun
     ? Math.max(Number(data.gatheredCount) || 0, savedSourceGatheredCount)
     : data.gatheredCount;
@@ -9896,6 +10028,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     && (hubState === 'empty' || hubState === 'done')
   );
   const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;
+  // A current completed run already has the Done-state “Re-evaluate Saved
+  // Jobs” action. Do not put a second, ambiguously named snapshot re-score
+  // beside it; this compact panel is audit-only (prompt and/or warning).
+  const hasCompactSavedRunTool = !!savedAnalysisMeta?.promptPath || !!savedAnalysisWarning;
   // FIX 4: prefer the resolved Search Brief titles (folded into meta by the
   // getLastJobAnalysisSnapshot effect above — see savedAnalysisRoleTitles);
   // fall back to the legacy meta.targetRole only for a snapshot saved before
@@ -9904,7 +10040,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     && savedAnalysisMeta.resolvedRoleTitles.length > 0
     ? savedAnalysisMeta.resolvedRoleTitles.join(', ')
     : String(savedAnalysisMeta?.targetRole || '').trim();
-  const savedAnalysisPanel = shouldShowSavedAnalysisPanel ? (
+  const savedAnalysisPanel = shouldShowSavedAnalysisPanel && compactSavedRunTools && hasCompactSavedRunTool ? (
+    <details className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-left">
+      <summary className="cursor-pointer text-[9px] uppercase tracking-[0.14em] text-white/35">
+        Saved run tools
+      </summary>
+      <div className="mt-1.5">
+        {!!savedAnalysisWarning && (
+          <div className="mb-1.5 text-[9px] text-amber-300/80">{savedAnalysisWarning}</div>
+        )}
+        {savedAnalysisMeta.promptPath && (
+          <button
+            className="nodrag w-full rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] text-white/55 hover:bg-white/10"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={handleOpenSavedPrompt}
+            type="button"
+            title="Open the saved AI scoring prompt"
+          >
+            Open prompt
+          </button>
+        )}
+      </div>
+    </details>
+  ) : shouldShowSavedAnalysisPanel && !compactSavedRunTools ? (
     <div className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-2 text-left">
       <div className="text-[9px] uppercase tracking-[0.14em] text-white/25">Saved Scrape</div>
       <div className="mt-1 text-[10px] text-white/65">
@@ -9927,8 +10085,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       {boardRecoveryOwnsActions && (
         <div className="mt-2 text-[9px] leading-snug text-white/35">
           {managedByJobBoard
-            ? 'Saved results are kept for reference. Start searches from the connected Job Board with Search selected & combine.'
-            : 'Saved results are kept for reference while the previous Job Board recovery settles. Direct scoring returns when that recovery finishes or is cancelled.'}
+            ? 'Saved results remain available for reference on the connected Job Board.'
+            : 'Saved results remain available while Job Board recovery finishes.'}
         </div>
       )}
       <div className="mt-2 flex gap-1.5">
@@ -10065,12 +10223,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                       subtitle must not name them — it would describe buttons
                       that aren't there. */}
                   <p className="text-white/25 text-[10px] mt-1 text-center">{controlsLocked
-                    ? (data.locked ? 'Unlock this module to re-run it or change its files' : 'Queued work will start automatically')
+                    ? (data.locked ? 'Unlock this module to re-scan or change its files' : 'Queued work will start automatically')
                     : boardRecoveryOwnsActions
                       ? (managedByJobBoard
                         ? 'Ready — run it from the connected Job Board, or clear these files'
                         : 'A Job Board recovery is settling. Direct search controls return when it finishes or is cancelled.')
-                      : 'Re-run with these files, or clear them to search with different ones'}</p>
+                      : 'Re-scan with these files, or clear them to search with different ones'}</p>
                   {hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && (
                     <button
                       type="button"
@@ -10078,7 +10236,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => { e.stopPropagation(); handleRerun(); }}
                     >
-                      {hasReusableCareerProfile ? 'Re-run Search' : 'Run Search'}
+                      {hasReusableCareerProfile ? 'Re-scan for New Jobs' : 'Run Search'}
                     </button>
                   )}
                   {/* Not gated on hasReusableCareerProfile — a partially-wedged
@@ -10105,9 +10263,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     : 'Résumé, portfolio, project notes — any number of files'}</p>
                 </>
               )}
-              {/* Completion history belongs to this module, not its current career
-                  files. Keep it visible after Clear career files so the user can
-                  distinguish an intentionally cleared hub from one that never ran. */}
+              {/* Clearing career data retains the module's scan history, and
+                  replacement files automatically continue from that date. */}
               {!!lastCompletedRunAtText && (
                 <p className="text-white/35 text-[9px] mt-1">Last scraped: {lastCompletedRunAtText}</p>
               )}
@@ -10138,29 +10295,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                       lock and the same unlock path. */}
                   <span id={jobPreferencesHelpId} className="text-[9px] leading-snug text-white/25">
                     {settingsFrozen
-                      ? 'All settings — brief, location, look-back window, search depth, and platforms — locked after your first search, so every re-scan is reproducible. Clear career data to unlock them and start over.'
-                      : 'AI determines which roles to search from what you write here — explicit titles, a general direction, or nothing about roles at all. Tell it what to prioritize, avoid, or independently verify; “must,” “only,” and “no” are strict. Location, look-back window, search depth, and platforms are set by the controls below, not by this text.'}
+                      ? 'All settings — brief, location, look-back window, search depth, and platforms — are locked after your first search, so every re-scan is reproducible. Clear career data to unlock them and start over.'
+                      : 'AI turns this brief into roles and fit criteria. “Must,” “only,” and “no” are strict.'}
                   </span>
                   {/* Trusting one AI decision for every future scan deserves to
                       be visible, not just implied by the disabled textarea. */}
                   {settingsFrozen && (
                     <p className="text-[9px] leading-snug text-emerald-300/55">
-                      Locked roles: {resolvedRoles.join(', ')}
+                      {resolvedRoles.length > 0
+                        ? `Locked roles: ${resolvedRoles.join(', ')}`
+                        : 'No specific roles were saved, so searches are not narrowed to a role list.'}
                     </p>
                   )}
-                  {/* Most useful HERE, before the first run: a Reset that
-                      retains a reusable career profile lands back in this
-                      draft/empty state while keeping the locked plan (see
-                      roleLockClearPatch), so a settingConflict caught now is
-                      still fixable by clearing career files — after the
-                      first run every setting it would point at is frozen. */}
-                  <SearchBriefAdvisories searchBriefPlan={data.searchBriefPlan || null} />
+                  <SearchBriefAdvisories
+                    searchBriefPlan={data.searchBriefPlan || null}
+                    completedLocked={settingsFrozen}
+                  />
                   {/* FIX 5: see titleOperatorAdvisory's header comment — the
                       resolved titles are what actually gets sent to job
                       boards verbatim, so this checks THEM, not the raw brief
                       text (which the AI may have transformed away from any
                       literal operator syntax it happened to contain). */}
-                  {titleOperatorAdvisory(resolvedRoles)}
+                  {titleOperatorAdvisory(resolvedTitleOperatorHits, settingsFrozen)}
                 </label>
                 <JobSearchLocationFields
                   searchLocation={searchLocation}
@@ -10169,21 +10325,38 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   setRemoteResidence={setRemoteResidence}
                   disabled={controlsLocked || settingsFrozen}
                 />
-                <label className="flex items-center justify-center gap-1.5">
-                  <span>Look back</span>
-                  <input
-                    type="number"
-                    data-native-undo="true"
-                    min={1}
-                    max={180}
-                    value={maxAgeDays}
-                    onChange={(e) => setMaxAgeDays(e.target.value)}
-                    aria-label="Maximum posting age in days"
-                    disabled={controlsLocked || settingsFrozen}
-                    className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 disabled:cursor-not-allowed disabled:opacity-50"
-                  />
-                  <span>days</span>
-                </label>
+                <p className="text-center text-[9px] leading-snug text-white/30">
+                  Next scan: {nextSearchWindowDescription} through now.
+                </p>
+                {canChooseInitialLookback && (
+                  <label className="flex items-center justify-between gap-2 text-[9px] leading-snug text-white/40">
+                    <span>
+                      First scan lookback
+                      <span className="block text-white/25">Choose how far back to look. Later scans continue from the completed scan date.</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1 text-white/55">
+                      <input
+                        type="number"
+                        min="1"
+                        max="180"
+                        step="1"
+                        inputMode="numeric"
+                        data-native-undo="true"
+                        aria-label="First scan lookback in days"
+                        value={initialJobSearchLookbackDays(data)}
+                        disabled={controlsLocked || settingsFrozen}
+                        onChange={(event) => {
+                          if (controlsLocked || settingsFrozen) return;
+                          updateGlobal(id, {
+                            initialLookbackDays: normalizeJobSearchInitialLookbackDays(event.target.value),
+                          });
+                        }}
+                        className="w-11 rounded border border-white/15 bg-white/5 px-1 py-0.5 text-right text-[10px] text-white/75 focus:border-blue-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                      days
+                    </span>
+                  </label>
+                )}
                 {!controlsLocked && (
                   <JobCollectionLimitsControl
                     collectionLimits={collectionLimits}
@@ -10265,7 +10438,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           </>
         )}
 
-        {/* Done state — shows stale results + banner above when a re-run failed */}
+        {/* Done state — shows stale results + banner above when a re-scan failed */}
         {hubState === 'done' && (
           <>
             {banner}
@@ -10283,12 +10456,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               verifyDone={verifyDone}
               verifyTotal={verifyTotal}
               managedByJobBoard={managedByJobBoard}
-              boardRecoveryPending={!managedByJobBoard && !!activeBoardRecoveryOwnerKey}
-              onRerun={boardRecoveryOwnsActions ? null : handleRerun}
+              boardRecoveryPending={!!activeBoardRecoveryOwnerKey}
+              onRerun={activeBoardRecoveryOwnerKey || data.terminalFinalizationRecovery ? null : handleRerun}
               onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}
               onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}
-              maxAgeDays={maxAgeDays}
-              setMaxAgeDays={setMaxAgeDays}
               collectionLimits={collectionLimits}
               setCollectionLimits={setCollectionLimits}
               enabledSourceIds={enabledSourceIds}
@@ -10308,6 +10479,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               // are frozen, letting the user edit controls a re-scan ignores.
               resolvedRolesMeta={data.resolvedRolesMeta || null}
               searchBriefPlan={data.searchBriefPlan || null}
+              titleOperatorWarnings={resolvedTitleOperatorHits}
               preferenceMatchedCount={data.preferenceMatchedCount}
               preferenceFilteredCount={data.preferenceFilteredCount}
               jobPreferencePlan={data.jobPreferencePlan || null}
@@ -10318,14 +10490,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               reanalysisNotice={data.reanalysisNotice || null}
               resultDisposition={data.resultDisposition || null}
               lastCompletedRunAt={data.lastCompletedRunAt || null}
+              nextSearchWindowDescription={nextSearchWindowDescription}
             />
-            {/* FIX 5: sibling to (never nested inside) JobSearchDoneState,
-                which renders its own SearchBriefAdvisories internally —
-                this file cannot add a slot to that child component, see
-                titleOperatorAdvisory's header comment. */}
-            <div className="w-full px-3" onPointerDown={(e) => e.stopPropagation()}>
-              {titleOperatorAdvisory(resolvedRoles)}
-            </div>
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>
                 {savedAnalysisPanel}

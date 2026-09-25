@@ -24,6 +24,7 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
+import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
 // builds. Keep the old decision helper only to explain those historical rejected
 // samples; current provider-trust runs do not execute a local title gate.
@@ -852,7 +853,11 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       : reconcilesTerminalInput
         ? ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} = ${scoringInput} terminal scoring input`
         : ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} recorded`;
-    lines.push(`  - Initial-search funnel: ${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    const windowFirst = nonnegativeCount(funnel.windowEligible);
+    const admissionFlow = windowFirst != null
+      ? `${funnel.raw} raw → ${windowFirst} within automatic window → ${funnel.deduped} deduped → ${funnel.kept} kept`
+      : `${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept`;
+    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -1522,6 +1527,53 @@ function nonnegativeCount(value) {
   return Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
 }
 
+function jobSearchWindowTimestamp(value) {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && Number.isFinite(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+function localCalendarDateLabel(value) {
+  const timestamp = value instanceof Date ? value.getTime() : jobSearchWindowTimestamp(value);
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'invalid';
+  const date = new Date(timestamp);
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function jobSearchWindowDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const startTimestamp = jobSearchWindowTimestamp(value.startTimestamp);
+  const providerLookbackDays = nonnegativeCount(value.providerLookbackDays);
+  if (startTimestamp == null) return null;
+  // These originate in process telemetry today, but report builders are also
+  // exercised with hand-edited fixtures. Keep the metadata token-shaped so an
+  // arbitrary string cannot inject Markdown or private prose into the report.
+  const capReason = receiptIdentifier(value.capReason, '') || null;
+  const anchorSource = receiptIdentifier(value.anchorSource, '') || null;
+  return {
+    startTimestamp,
+    providerLookbackDays,
+    capped: value.capped === true,
+    capReason,
+    anchorSource,
+  };
+}
+
+function automaticDateWindowLine(value, endLabel = 'now') {
+  const window = jobSearchWindowDiagnostic(value);
+  if (!window) return null;
+  const details = [
+    `provider retrieval horizon ${window.providerLookbackDays == null ? 'not retained' : `${window.providerLookbackDays}d`}`,
+    window.anchorSource ? `anchor ${window.anchorSource}` : null,
+    window.capped ? `capped${window.capReason ? ` (${window.capReason})` : ''}` : 'not capped',
+  ].filter(Boolean).join(' · ');
+  return `**Posting date window: ${localCalendarDateLabel(window.startTimestamp)} local midnight through ${endLabel}, inclusive** · exact client boundary ${new Date(window.startTimestamp).toISOString()} · ${details}.`;
+}
+
 // Board-clear provenance is an evidentiary boundary, not a legacy display
 // field. Never coerce false, an empty array, or a numeric-looking string into
 // a zero-card/zero-result fact that could certify a cleared board.
@@ -1629,6 +1681,46 @@ function sourceRunsFromClearProvenance(value) {
     if (sourceRuns.length === 25) break;
   }
   return sourceRuns;
+}
+
+// Both the per-Board object built in buildJobCompletionAssessment and
+// boardResolvedSourceHubId below need the identical bounded/opaque parsing of
+// a Board's two hub-linking fields. One shared parser means a Board can never
+// look "connected" to the assessment's owner-seeding search while rendering
+// as unconnected below, or vice versa.
+function boardSourceHubIds(board) {
+  const combinedSourceHubIds = boardDiagnosticSafely(
+    () => sourceHubIdsFromCombineSignature(boardDiagnosticValue(board, 'combineSignature')),
+    [],
+  );
+  const connectedSourceHubIds = boardDiagnosticSafely(() => [...new Set((boardDiagnosticArray(boardDiagnosticValue(board, 'connectedSourceHubIds')) || [])
+    // Connected ids are compared but never rendered directly. Preserve the
+    // exact bounded opaque identity so an imported `|`/`=` id can make its
+    // Board relevant to this run.
+    .map(opaqueHubIdForCorrelation)
+    .filter(Boolean))].slice(0, 25), []);
+  return { combinedSourceHubIds, connectedSourceHubIds };
+}
+
+// Seeds readReceiptForCurrentHubs' preferredOwner from a Board's ALREADY
+// RESOLVED connected/combined source hub when live telemetry supplies none.
+// jobsTelemetry is process-global and null-guards itself whenever more than
+// one Job Search hub is open (project_jobs_telemetry_is_process_global.md);
+// a report confirmed against 6 open Job Search hubs fell straight to
+// readReceiptForCurrentHubs' ambiguous branch and printed INDETERMINATE for a
+// run whose Board had already resolved a single connected source hub — the
+// funnel reconciliation could then prove nothing about a run that was in fact
+// fine. Only ever return an id when every Board's combined/connected fields
+// agree on exactly ONE hub across the whole set: 0 or 2+ distinct ids must
+// stay INDETERMINATE rather than guess "the first".
+function boardResolvedSourceHubId(jobBoardStates) {
+  const ids = new Set();
+  for (const board of (Array.isArray(jobBoardStates) ? jobBoardStates : []).slice(0, 25)) {
+    const { combinedSourceHubIds, connectedSourceHubIds } = boardSourceHubIds(board);
+    for (const id of combinedSourceHubIds) ids.add(id);
+    for (const id of connectedSourceHubIds) ids.add(id);
+  }
+  return ids.size === 1 ? [...ids][0] : null;
 }
 
 // `staleReason` is normally generated from these count-only renderer facts.
@@ -1980,10 +2072,22 @@ export function buildJobCompletionAssessment(
   // canvas's run to this report simply because its saved snapshot is readable.
   if (telemetry?.nodeId && !ids.has(telemetry.nodeId)) telemetry = null;
 
+  // Live telemetry keeps precedence whenever it names an owner. Only when it
+  // does not (the `!telemetry` case just above, or a live owner that named a
+  // different canvas) does a Board's own already-resolved connected/combined
+  // source hub get a chance to seed the same lookup — see
+  // boardResolvedSourceHubId's comment for the incident this recovers.
+  const boardResolvedOwner = telemetry?.nodeId ? null : boardResolvedSourceHubId(jobBoardStates);
   const receiptState = canvasFilePath
-    ? readReceiptForCurrentHubs(canvasFilePath, hubIds, telemetry?.nodeId)
+    ? readReceiptForCurrentHubs(canvasFilePath, hubIds, telemetry?.nodeId || boardResolvedOwner)
     : { exists: false };
   const receipt = receiptState?.receipt || null;
+  // Distinguish the two ways a >1-hub report can still name exactly one
+  // owner: this repo's standing rule is that a report states what it
+  // observed, and "joined via live telemetry" and "joined via a Board's
+  // resolved connection" are different observations that must not collapse
+  // into the same unqualified receipt line (see boardResolvedSourceHubId).
+  const receiptOwnerJoinedViaBoard = !!boardResolvedOwner && receiptState?.selectedOwnerId === boardResolvedOwner;
   // Snapshot ownership is hub-specific; generic canvas nodes remain relevant
   // only to telemetry/receipt presence correlation above. If several terminal
   // receipts exist without a live owner selection, do not pair any of their
@@ -2158,23 +2262,14 @@ export function buildJobCompletionAssessment(
     // can carry malformed accessors. Treat each Board field as optional so one
     // unreadable clear/signature fact cannot erase the whole completion report.
     const boardId = boardDiagnosticValue(board, 'id');
-    const rawCombineSignature = boardDiagnosticValue(board, 'combineSignature');
-    const rawConnectedSourceHubIds = boardDiagnosticValue(board, 'connectedSourceHubIds');
     const rawClear = boardDiagnosticValue(board, 'clearProvenance');
     const rawDiagnosticScope = boardDiagnosticValue(board, 'diagnosticScope');
     const rawClearedAt = boardDiagnosticValue(rawClear, 'clearedAt');
     const rawPriorCombineSignature = boardDiagnosticValue(rawClear, 'priorCombineSignature');
     const rawPriorResultCount = boardDiagnosticValue(rawClear, 'priorResultCount');
-    const combinedSourceHubIds = boardDiagnosticSafely(
-      () => sourceHubIdsFromCombineSignature(rawCombineSignature),
-      [],
-    );
-    const connectedSourceHubIds = boardDiagnosticSafely(() => [...new Set((boardDiagnosticArray(rawConnectedSourceHubIds) || [])
-      // Connected ids are compared but never rendered directly. Preserve the
-      // exact bounded opaque identity so an imported `|`/`=` id can make its
-      // Board relevant to this run.
-      .map(opaqueHubIdForCorrelation)
-      .filter(Boolean))].slice(0, 25), []);
+    // Shared with boardResolvedSourceHubId's owner-seeding search above, so a
+    // Board's hub-linking fields are parsed exactly once, the same way.
+    const { combinedSourceHubIds, connectedSourceHubIds } = boardSourceHubIds(board);
     const clearedAt = typeof rawClearedAt === 'number'
       && Number.isSafeInteger(rawClearedAt)
       && rawClearedAt > 0
@@ -2725,7 +2820,7 @@ export function buildJobCompletionAssessment(
       ? `- Terminal receipt: ⚠️ ambiguous across ${receiptState.count || 2} current Job Search hubs — no receipt/snapshot generation was selected or joined.`
     : !receipt
       ? '- Terminal receipt: present but invalid.'
-      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''}${receiptRecovery != null ? ` · recovery net ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}.`;
+      : `- Terminal receipt: ${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · run \`${receiptIdentifier(receipt.runId)}\`${receiptScoreReady != null ? ` · terminal score-ready ${receiptScoreReady}` : ''}${receipt.funnel ? ` · initial funnel kept ${receipt.funnel.kept}` : ''}${receiptRecovery != null ? ` · recovery net ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)}` : ''} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}${postCompletionAppend ? ` · ℹ️ a late source appended ${scored - receiptScoreReady} job(s) after this receipt was written, so it understates the run by design` : ''}${receiptOwnerJoinedViaBoard ? ' · ℹ️ owner resolved via a connected Job Board\'s already-resolved source hub, not live telemetry' : ''}.`;
   const snapshotLine = snapshot.state === 'parseable'
     ? `- Saved score-ready snapshot: ${snapshot.jobs ?? '?'} job(s)${snapshot.candidatePoolJobs != null && snapshot.candidatePoolJobs !== snapshot.jobs ? ` · ${snapshot.candidatePoolJobs} retained for preference re-evaluation` : ''} · run \`${snapshotRunIdentifier(snapshot.runId)}\`${snapshot.canvasMatches === false ? ' · ⚠️ canvas differs' : ''}${snapshot.hubPresent === false ? ' · ⚠️ hub missing' : ''}.`
     : `- Saved score-ready snapshot: ${snapshot.state === 'unavailable' ? 'unavailable (no saved canvas path)' : snapshot.state}.`;
@@ -3070,7 +3165,29 @@ function connectedSourceDiagnosticSummary(source, selected, claimsByScope, scope
     .slice(0, MAX_BOARD_DIAGNOSTIC_IDS)
     .map(claim => `${boardDiagnosticIdList([claim.boardId], labelContext)}:${claim.category}`)
     .join(', ');
-  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(boardDiagnosticValue(data, 'hubState'), 'not retained')} · admission=${admissionKind} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
+  const hubState = boardDiagnosticValue(data, 'hubState');
+  const rescanReadiness = hubState !== 'done'
+    ? `unavailable (${receiptIdentifier(hubState, 'unknown')})`
+    : claimSummary
+      ? 'blocked (Board recovery owns source)'
+      : boardDiagnosticValue(data, 'locked') === true
+        ? 'blocked (Search busy/locked)'
+        : 'available on Job Search card';
+  const rawSearchWindow = boardDiagnosticValue(data, 'searchWindow');
+  const safeNextWindowData = {
+    hubState,
+    jobRunId: boardDiagnosticValue(data, 'jobRunId'),
+    lastSearchCoverageStartedAt: boardDiagnosticValue(data, 'lastSearchCoverageStartedAt'),
+    lastCompletedRunAt: boardDiagnosticValue(data, 'lastCompletedRunAt'),
+    searchWindow: { completionTimestamp: boardDiagnosticValue(rawSearchWindow, 'completionTimestamp') },
+    initialLookbackDays: boardDiagnosticValue(data, 'initialLookbackDays')
+      ?? boardDiagnosticValue(data, 'maxAgeDays'),
+  };
+  const nextAnchor = jobSearchNextAnchor(safeNextWindowData, sourceId);
+  const initialLookbackDays = normalizeJobSearchInitialLookbackDays(safeNextWindowData.initialLookbackDays);
+  const nextWindow = resolveJobSearchDateWindow(nextAnchor.timestamp, new Date(), initialLookbackDays);
+  const nextWindowSummary = `${localCalendarDateLabel(nextWindow.startTimestamp)}→now/${nextAnchor.source}${nextAnchor.timestamp == null ? `/initial-${initialLookbackDays}d` : ''}${nextWindow.capped ? `/${nextWindow.capReason || 'cap'}` : ''}`;
+  return `${boardDiagnosticIdList([sourceId], labelContext)} · selected=${selected.has(sourceId) ? 'yes' : 'no'} · hub-state=${receiptIdentifier(hubState, 'not retained')} · admission=${admissionKind} · selector-ready=${selector.ready === true ? 'yes' : selector.ready === false ? 'no' : 'not reproducible'} · selector-status=${selector.status} · selector-reason=${selector.reason} · re-scan=${rescanReadiness} · next-window=${nextWindowSummary} · fresh-capability=${consumption.freshCapability ? 'present' : 'absent'} · consumption-origin=${consumption.consumptionOrigin} · admission-version=${consumption.admissionVersion} · recovery-claim=${claimSummary || 'none'}`;
 }
 
 function diagnosticOpaqueIds(values, max = MAX_BOARD_DIAGNOSTIC_IDS) {
@@ -4701,8 +4818,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const roleStage = Number(s.roleDropped) > 0
       ? ` → role-screen-dropped: ${s.roleDropped}`
       : '';
+    const windowFirst = nonnegativeCount(s.windowEligible);
+    const admissionFlow = windowFirst != null
+      ? ` → within automatic window: ${windowFirst} (age-dropped: ${s.ageDropped}) → after dedup: ${s.deduped}`
+      : ` → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped}`;
     lines.push(
-      `- Found (raw): ${s.raw}${relevanceStage} → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped}${roleStage} → ` +
+      `- Found (raw): ${s.raw}${relevanceStage}${admissionFlow}${roleStage} → ` +
       `history-dropped: ${s.historyDropped}${evidenceStage}`,
     );
     if (Number(s.roleDropped) > 0) {
@@ -4745,15 +4866,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (dedup.omitted > 0) lines.push(`  - _${dedup.omitted} additional dedup drop(s) omitted from this bounded trace._`);
     }
     lines.push(...historyDropEvidenceLines(s.historyDropSamples, s.historyDropped));
-    // Look-back window the run actually used + a per-platform verdict on whether
-    // it bound each source. The window is enforced two ways: a server-side date
-    // param (the source never serves out-of-window rows) AND a global client-side
-    // filterJobsByAge over the merged results — but the client filter KEEPS any
-    // job with an unparseable `posted`, so a source with neither a server param
-    // nor a parseable per-job date is only bounded by its own query limits.
-    // This block makes "did 7 days apply to ALL platforms?" answerable at a glance.
-    if (s.maxAgeDays != null) {
-      lines.push(`- **Look-back window: ${s.maxAgeDays} day(s)** — enforced server-side where the source takes a date param, and re-applied as a global client-side filter (the client filter can only bound a source that carries a parseable \`posted\` date).`);
+    // The exact automatically-derived window this run used + a per-platform
+    // verdict on whether it bound each source. Providers intentionally receive
+    // a broad whole-day horizon, then the merged rows are filtered at the exact
+    // inclusive local-midnight boundary. Unparseable `posted` values remain
+    // visible and are called out below rather than silently treated as old.
+    const effectiveSearchWindow = jobSearchWindowDiagnostic(s.searchWindow);
+    const automaticWindowLine = automaticDateWindowLine(s.searchWindow, 'this run');
+    if (automaticWindowLine) {
+      lines.push(`- ${automaticWindowLine}`);
+      if (Number.isSafeInteger(s.appliedInitialLookbackDays)) {
+        lines.push(`- First-scan lookback applied: ${s.appliedInitialLookbackDays} day(s)`);
+      }
+    } else if (s.maxAgeDays != null) {
+      // Compatibility for telemetry from an older running bundle/report fixture.
+      // This is not a current user-configurable setting and must not be labelled
+      // as one: old telemetry retained only the provider's relative-age input.
+      lines.push(`- **Legacy provider age input: ${s.maxAgeDays} day(s)** — this run predates exact automatic-window telemetry, so its local-midnight boundary and completion anchor were not retained.`);
     }
     const collectionLimits = s.collectionLimits;
     if (collectionLimits && typeof collectionLimits === 'object') {
@@ -4771,14 +4900,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         if ((a.kept || 0) === 0 && (a.dropped || 0) === 0) continue;
         const oldest = a.oldestKeptRaw ? `"${a.oldestKeptRaw}" (${a.oldestKeptDays}d)` : '—';
         let flag;
-        if (a.oldestKeptDays != null && s.maxAgeDays != null && a.oldestKeptDays > s.maxAgeDays) {
+        if (!effectiveSearchWindow && a.oldestKeptDays != null && s.maxAgeDays != null && a.oldestKeptDays > s.maxAgeDays) {
           // A survivor older than the window means the client filter and the parse
           // disagree, or a source bypassed both — a genuine leak worth chasing.
-          flag = ` 🔥 LEAK — kept a posting older than the ${s.maxAgeDays}d window`;
+          flag = ` 🔥 LEAK — kept a posting older than the legacy ${s.maxAgeDays}d provider-age input`;
         } else if (a.kept > 0 && a.unparseableKept === a.kept) {
           // Every survivor had an unparseable/empty date — the client-side filter
           // was blind to this source, so its window is enforced SERVER-SIDE ONLY.
-          flag = ` ⚠️ no parseable per-job date on any survivor — window enforced by the source's date param only (client backstop blind here)`;
+          flag = ` ⚠️ no parseable per-job date on any survivor — automatic window enforced by the source's date parameter only (exact client boundary blind here)`;
         } else if (a.unparseableKept > 0) {
           flag = ` (${a.unparseableKept} survivor(s) had no parseable date — not client-checkable)`;
         } else {
@@ -5147,7 +5276,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         } else if (v.stopReason === 'age-window') {
           // Only that two consecutive served pages held nothing in-window —
           // nothing here establishes that deeper pages exist.
-          flag = ' ℹ️ (stopped by design: two consecutive pages were conclusively outside the look-back window. The walk stopped while the board was still serving rows — this is NOT an exhausted board.)';
+          flag = ' ℹ️ (stopped by design: two consecutive pages were conclusively outside the automatic date window. The walk stopped while the board was still serving rows — this is NOT an exhausted board.)';
         } else if (v.stopReason === 'no-new-jobs') {
           flag = ' ⚠️ (two consecutive pages returned only rows already gathered, so the pager stopped advancing. Whether the board ran out or re-served a page is NOT established — later results may be missing.)';
         } else if (v.stopReason === 'data-stop') {
@@ -5907,7 +6036,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - Run \`${receiptIdentifier(intent.runId, 'not recorded')}\` · origin \`${receiptIdentifier(intent.runOrigin, 'unknown')}\` · career input \`${receiptIdentifier(intent.profileInputMode, 'unknown')}\``);
       lines.push(`  - ${nonnegativeCount(intent.queries) ?? '?'} quer${intent.queries === 1 ? 'y' : 'ies'}${intentQueries.length ? `: ${intentQueries.map(q => `\`${q}\``).join(', ')}` : ''}`);
       lines.push(`  - ${intentSources.length} selected source(s)${intentSources.length ? `: ${intentSources.map(id => `\`${id}\``).join(', ')}` : ''}`);
-      lines.push(`  - Max posting age ${nonnegativeCount(intent.maxAgeDays) ?? '?'}d · location \`${historyReportValue(intent.location, 'none', 80)}\``);
+      const intentWindowLine = automaticDateWindowLine(intent.searchWindow, 'launch time');
+      if (intentWindowLine) {
+        lines.push(`  - ${intentWindowLine}`);
+        if (Number.isSafeInteger(intent.appliedInitialLookbackDays)) {
+          lines.push(`  - First-scan lookback applied: ${intent.appliedInitialLookbackDays} day(s)`);
+        }
+      } else {
+        lines.push(`  - Legacy provider age input ${nonnegativeCount(intent.maxAgeDays) ?? '?'}d (exact automatic boundary not retained) · location \`${historyReportValue(intent.location, 'none', 80)}\``);
+      }
+      if (intentWindowLine) lines.push(`  - Location \`${historyReportValue(intent.location, 'none', 80)}\``);
     } else {
       // The pointer is conditional on the section it points at. "Per-hub
       // records" renders only when at least one hub holds an independently

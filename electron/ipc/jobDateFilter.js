@@ -88,7 +88,7 @@ export function parsePostedDate(raw, now = new Date()) {
 
   // Board cards often render an absolute date without a year ("May 29").
   // V8's Date.parse assigns those to 2001, causing a current posting to be
-  // dropped by the look-back filter. Resolve this format to the most recent
+  // dropped by the date-window filter. Resolve this format to the most recent
   // occurrence instead: current year unless that calendar day is still ahead.
   const monthDay = lower.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?$/i);
   if (monthDay) {
@@ -98,6 +98,23 @@ export function parsePostedDate(raw, now = new Date()) {
     const candidate = new Date(now.getFullYear(), month, day);
     if (candidate.getMonth() !== month || candidate.getDate() !== day) return null;
     if (candidate.getTime() > now.getTime()) candidate.setFullYear(candidate.getFullYear() - 1);
+    return candidate;
+  }
+
+  // ECMAScript parses a bare ISO calendar date (`YYYY-MM-DD`) as UTC
+  // midnight. Our automatic Job Search boundary is LOCAL midnight, so in
+  // negative-offset zones a posting dated exactly on the inclusive boundary
+  // otherwise appears several hours older and is wrongly dropped. Treat the
+  // provider's date-only value as the local calendar date it represents.
+  const isoCalendarDay = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoCalendarDay) {
+    const year = Number(isoCalendarDay[1]);
+    const month = Number(isoCalendarDay[2]) - 1;
+    const day = Number(isoCalendarDay[3]);
+    const candidate = new Date(year, month, day);
+    if (candidate.getFullYear() !== year
+      || candidate.getMonth() !== month
+      || candidate.getDate() !== day) return null;
     return candidate;
   }
 
@@ -132,5 +149,29 @@ export function filterJobsByAge(jobs, maxAgeDays, now = new Date()) {
     const dateOnly = d.getHours() === 0 && d.getMinutes() === 0
       && d.getSeconds() === 0 && d.getMilliseconds() === 0;
     return d.getTime() >= (dateOnly ? dayCutoffMs : cutoff);
+  });
+}
+
+/**
+ * Keep jobs posted at or after an inclusive, exact timestamp.
+ *
+ * This is the narrow companion to a provider's intentionally broad calendar
+ * lookback. Rows with an unknown posting date remain visible: dropping those
+ * would turn a parsing gap at a provider into a silent missing-job bug.
+ *
+ * @param {Array} jobs
+ * @param {number|Date} postedSince Inclusive timestamp/date.
+ * @param {Date} [now] Clock used when parsing relative labels.
+ * @returns {Array}
+ */
+export function filterJobsByPostedSince(jobs, postedSince, now = new Date()) {
+  const startTimestamp = postedSince instanceof Date
+    ? postedSince.getTime()
+    : postedSince;
+  if (!Number.isFinite(startTimestamp)) return jobs;
+
+  return jobs.filter(job => {
+    const postedAt = parsePostedDate(job?.posted, now);
+    return !postedAt || postedAt.getTime() >= startTimestamp;
   });
 }

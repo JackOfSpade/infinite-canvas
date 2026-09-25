@@ -18,7 +18,6 @@ import { ShieldAlert, FastForward, Play, Square } from 'lucide-react';
 export function JobSearchSourcesReadyState({
   blockedCount,
   jobsAvailable,
-  resumeSummary,
   locked = false,
   onScoreCurrent,
   onClearCareerFiles = null,
@@ -46,18 +45,14 @@ export function JobSearchSourcesReadyState({
       </div>
       <p className="text-white/50 text-[11px] text-center px-2 leading-snug">
         {jobsAvailable > 0
-          ? `${jobsAvailable} job${jobsAvailable === 1 ? ' is' : 's are'} ready to score — but ${blockedCount} source${blockedCount === 1 ? ' needs' : 's need'} attention before we spend AI tokens.`
-          : 'Some sources need attention before we score results.'}
+          ? `${jobsAvailable} job${jobsAvailable === 1 ? '' : 's'} ready to score.`
+          : 'No jobs are ready to score yet.'}
       </p>
       <p className="text-white/30 text-[10px] text-center px-2 leading-snug mt-1">
         {canScoreCurrent
-          ? 'Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed. Or click below to score what we have now.'
-          : 'Solve or skip each blocked card on the canvas — scoring resumes when the last warning clears. If a Job Board started this search, it then continues automatically; no extra Board action is needed.'}
+          ? 'Resolve or skip each source card to continue. Or score the ready jobs now. Board runs continue automatically.'
+          : 'Resolve or skip each source card to continue. Board runs continue automatically.'}
       </p>
-
-      {resumeSummary && (
-        <p className="text-white/20 text-[10px] text-center mt-1">{resumeSummary}</p>
-      )}
 
       {solveAllRunning ? (
         <>

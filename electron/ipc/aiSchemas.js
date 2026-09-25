@@ -423,12 +423,19 @@ export const JOB_QUERY_GENERATION_SCHEMA = {
 // The user-authored preference text is deliberately interpreted before any job
 // listings are supplied.  This prevents untrusted listing text from changing
 // what the user asked us to prioritize or require.
+// A direction is required to copy a role criterion exactly, so both fields
+// must share one length contract. Keep this exported for the domain validator
+// and crash-recovery sanitizer; a shorter direction-only cap makes otherwise
+// valid criteria impossible to mirror.
+export const JOB_PREFERENCE_CRITERION_MAX_LENGTH = 360;
+export const JOB_PREFERENCE_TITLE_MAX_LENGTH = 180;
+const NON_BLANK_TEXT_PATTERN = '\\S';
 const JOB_PREFERENCE_ITEM_SCHEMA = {
   type: 'object',
   required: ['id', 'criterion', 'category'],
   properties: {
-    id: { type: 'string', description: 'Stable short id unique within this preference plan, e.g. "strict-1".' },
-    criterion: { type: 'string', description: 'One concrete user preference or requirement, retaining the user\'s intended meaning.' },
+    id: { type: 'string', minLength: 1, maxLength: 60, pattern: '^[a-zA-Z0-9_-]+$', description: 'Stable short id unique within this preference plan, e.g. "strict-1".' },
+    criterion: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_CRITERION_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN, description: 'One concrete user preference or requirement, retaining the user\'s intended meaning.' },
     category: { type: 'string', enum: ['role', 'company', 'perk', 'location', 'employment', 'compensation', 'other'] },
   },
 };
@@ -438,28 +445,28 @@ export const JOB_PREFERENCE_PLAN_SCHEMA = {
   required: ['version', 'summary', 'direction', 'softPreferences', 'strictRequirements', 'warnings', 'settingConflicts', 'titles'],
   properties: {
     version: { type: 'integer', enum: [1], description: 'Schema version. Always 1.' },
-    summary: { type: 'string', description: 'Short plain-language summary of the interpreted preferences.' },
+    summary: { type: 'string', maxLength: 500, description: 'Short plain-language summary of the interpreted preferences.' },
     direction: {
       type: 'object',
       required: ['summary', 'roleDirections', 'avoidDirections', 'explorationEnabled'],
       properties: {
-        summary: { type: 'string' },
+        summary: { type: 'string', maxLength: 400 },
         // This is a query-steering view, not a separate preference bucket.
         // Every string must exactly match a category="role" criterion in
         // softPreferences or strictRequirements so it is also evaluated after
         // history filtering.
-        roleDirections: { type: 'array', maxItems: 8, items: { type: 'string', description: 'Exact criterion text of a role-category soft/strict preference to explore.' } },
-        avoidDirections: { type: 'array', maxItems: 8, items: { type: 'string', description: 'Exact criterion text of a role-category soft/strict preference to avoid.' } },
+        roleDirections: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_CRITERION_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN, description: 'Exact criterion text of a role-category soft/strict preference to explore.' } },
+        avoidDirections: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_CRITERION_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN, description: 'Exact criterion text of a role-category soft/strict preference to avoid.' } },
         explorationEnabled: { type: 'boolean' },
       },
     },
     softPreferences: { type: 'array', maxItems: 24, items: JOB_PREFERENCE_ITEM_SCHEMA },
     strictRequirements: { type: 'array', maxItems: 24, items: JOB_PREFERENCE_ITEM_SCHEMA },
-    warnings: { type: 'array', maxItems: 6, items: { type: 'string' }, description: 'Genuine ambiguity or self-contradiction WITHIN the brief itself (e.g. it both requires and excludes the same thing, or gives two irreconcilable instructions). State only what was observed in the text, never an asserted cause or a guess at which reading is "right". Do NOT use this for brief text that restates a dedicated setting — that goes in settingConflicts instead. Empty is the normal case.' },
+    warnings: { type: 'array', maxItems: 6, items: { type: 'string', minLength: 1, maxLength: 300, pattern: NON_BLANK_TEXT_PATTERN }, description: 'Genuine ambiguity or self-contradiction WITHIN the brief itself (e.g. it both requires and excludes the same thing, or gives two irreconcilable instructions). State only what was observed in the text, never an asserted cause or a guess at which reading is "right". Do NOT use this for brief text that restates structured or automatic search behavior — that goes in settingConflicts instead. Empty is the normal case.' },
     // Brief-vs-setting reconciliation. The Search Brief is free text, but five
-    // pieces of search behavior have their OWN dedicated structured controls
-    // elsewhere in the UI (search location, remote salary residences, look-back
-    // window, collection depth, enabled job platforms) and are never read from
+    // pieces of search behavior are governed elsewhere by structured controls
+    // or an automatic policy (search location, remote salary residences, the
+    // first/subsequent date-window policy, collection depth, enabled job platforms) and are never read from
     // the brief. If the user nonetheless writes brief prose that restates one of
     // those — e.g. "LOCATION: Toronto only" while the Search Location control
     // says Denver — the search silently runs against the STRUCTURED setting
@@ -472,7 +479,7 @@ export const JOB_PREFERENCE_PLAN_SCHEMA = {
     settingConflicts: {
       type: 'array',
       maxItems: 6,
-      description: 'Brief prose that restates a setting governed by its own dedicated control, so the user can fix the brief or the control before they freeze together. Empty array is the normal, expected case — only report a genuine restatement of one of the five listed settings, never a false positive (see the boundary rules in the prompt).',
+      description: 'Brief prose that restates search behavior governed by a structured control or automatic policy, so the user can fix the brief before settings freeze. Empty array is the normal, expected case — only report a genuine restatement of one of the five listed behaviors, never a false positive (see the boundary rules in the prompt).',
       items: {
         type: 'object',
         required: ['wrote', 'setting', 'resolution'],
@@ -480,8 +487,8 @@ export const JOB_PREFERENCE_PLAN_SCHEMA = {
           wrote: { type: 'string', description: 'Short verbatim (or near-verbatim) quote of the offending brief text.' },
           setting: {
             type: 'string',
-            enum: ['searchLocation', 'remoteResidences', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds'],
-            description: 'Which dedicated control actually governs this: searchLocation = the structured Search location box; remoteResidences = Remote salary residences; maxAgeDays = Look back (days); collectionLimits = Jobs/platform or Browser pages/search (result-volume/depth bounds); enabledSourceIds = the Job platforms checkboxes.',
+            enum: ['searchLocation', 'remoteResidences', 'searchWindow', 'collectionLimits', 'enabledSourceIds'],
+            description: 'Which structured or automatic behavior actually governs this: searchLocation = the structured Search location box; remoteResidences = Remote salary residences; searchWindow = the first-scan Look back control, then the automatic prior-successful-scan-through-now window; collectionLimits = Jobs/platform or Browser pages/search (result-volume/depth bounds); enabledSourceIds = the Job platforms checkboxes.',
           },
           resolution: { type: 'string', description: 'One sentence telling the user what to do instead, e.g. "Set Search location to Toronto instead of writing it in the brief."' },
         },
@@ -500,7 +507,7 @@ export const JOB_PREFERENCE_PLAN_SCHEMA = {
     titles: {
       type: 'array',
       maxItems: 20,
-      items: { type: 'string' },
+      items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_TITLE_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN },
       description: 'The job titles to search, determined by you from the brief plus career data. Any job title the user wrote in the brief MUST appear in this list verbatim; add the equivalent and adjacent titles that brief implies alongside them. Generate as many as the brief genuinely requires — this cap is only a sanity bound against a malformed response, not a target.',
     },
     // Phase B: the separate "Target role" box is gone, so there is nothing
@@ -535,15 +542,16 @@ export const JOB_ROLE_AUDIT_SCHEMA = {
     // for — do not ask for a specific number of final titles.
     titles: {
       type: 'array',
+      minItems: 1,
       maxItems: 20,
-      items: { type: 'string' },
+      items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_TITLE_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN },
       description: 'The FINAL locked title list: the pass-1 draft, plus coverage additions, minus compliance removals. Not a target count — as many as the brief genuinely requires.',
     },
-    added: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'Draft titles that were ADDED for coverage (an obvious role family the draft was missing). Empty if nothing was added.' },
-    addedReason: { type: 'string', description: 'Why the added roles were missing from the draft, and why the brief implies them. Empty if `added` is empty.' },
-    removed: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'Draft titles that were REMOVED for violating an explicit exclusion or level constraint in the brief. Empty if nothing was removed.' },
-    removedReason: { type: 'string', description: 'Which brief exclusion/constraint each removed title violated. Empty if `removed` is empty.' },
-    rationale: { type: 'string', description: 'One short paragraph summarizing the audit decision.' },
+    added: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_TITLE_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN }, description: 'Draft titles that were ADDED for coverage (an obvious role family the draft was missing). Empty if nothing was added.' },
+    addedReason: { type: 'string', maxLength: 500, description: 'Why the added roles were missing from the draft, and why the brief implies them. Empty if `added` is empty.' },
+    removed: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_TITLE_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN }, description: 'Draft titles that were REMOVED for violating an explicit exclusion or level constraint in the brief. Empty if nothing was removed.' },
+    removedReason: { type: 'string', maxLength: 500, description: 'Which brief exclusion/constraint each removed title violated. Empty if `removed` is empty.' },
+    rationale: { type: 'string', maxLength: 800, description: 'One short paragraph summarizing the audit decision.' },
   },
 };
 
@@ -883,7 +891,7 @@ export const APPLICATION_COVER_LETTER_SCHEMA = {
   type: 'object',
   required: ['paragraphs'],
   properties: {
-    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields. Give each paragraph one argumentative job, while using as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose derived from the approved argument plan, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
   },
 };
 
@@ -894,7 +902,7 @@ export const APPLICATION_DIRECT_COVER_LETTER_SCHEMA = {
   type: 'object',
   required: ['paragraphs', 'argumentContract'],
   properties: {
-    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose, with no markdown or envelope fields. Give each paragraph one argumentative job, while using as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: 'Body paragraphs only: plain prose, with no markdown or envelope fields. Give each paragraph one argumentative job, not a prescribed number of sentences. Use as many sentences as clarity requires; no fixed claim-proof-relevance sentence pattern applies.' },
     argumentContract: {
       type: 'object',
       required: ['roleThesis', 'primaryEvidence', 'primaryRelationToThesis', 'secondaryNarrativeRole', 'secondaryEvidence', 'secondaryRelationToPrimary'],

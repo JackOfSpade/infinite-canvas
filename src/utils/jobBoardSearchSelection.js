@@ -975,6 +975,6 @@ export function jobBoardSelectionPresentation(selectedModules) {
         : 'Start or continue the selected Job Search state. If a source needs manual attention, resolve it there; this Board resumes and combines every connected completed result automatically.';
   const unreadyMessage = hasTokenlessPaused
     ? 'A selected paused Job Search has no recoverable run token. Resolve it from Job Search, or clear career data, re-import, then start fresh.'
-    : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to search again, clear career data and import fresh files in Job Search.';
+    : 'Finish setting up the selected sources before running this board. Completed searches are reused here; to refresh one, choose Re-scan for New Jobs on its Job Search card, then return to the Board.';
   return { freshCount, reusableCount, hasContinuation, hasTokenlessPaused, runLabel, title, unreadyMessage };
 }

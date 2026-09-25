@@ -56,16 +56,16 @@ const JOB_SEARCH_UNDOABLE_SETTING_FIELDS = [
   'searchLocation',
   'preferredLocation',
   'remoteResidences',
-  'maxAgeDays',
   'collectionLimits',
   'enabledSourceIds',
+  'initialLookbackDays',
   'locked',
 ];
 
 // FIX 11: once the two-pass role resolver has locked a Search Brief hub,
-// JobSearchNode.jsx freezes all seven Search Brief settings (search brief,
-// location, remote residences, look-back window, collection limits,
-// platforms) — but 'locked' here is a DIFFERENT, unrelated field: the
+// JobSearchNode.jsx freezes every Search setup field (brief, location, remote
+// residences, first-scan lookback, the two collection limits, and platforms) —
+// but 'locked' here is a DIFFERENT, unrelated field: the
 // generic canvas-wide "Lock Node" toggle (see useCanvasContextMenu.js),
 // which stays ordinarily undo-restorable regardless of role-lock state.
 const JOB_SEARCH_FROZEN_SETTING_FIELDS = new Set(
@@ -221,7 +221,7 @@ function mergeNonRestorableData(nodes, byId) {
       // FIX 11: make the settings freeze atomic with the role lock. Once
       // resolvedRoles/searchBriefPlan/resolvedRolesMeta are locked, those
       // three fields are already excluded from this allow-list (never
-      // undo-restorable), but the seven settings they were DERIVED FROM
+      // undo-restorable), but the eight settings they were DERIVED FROM
       // were still being overlaid from the pre-lock undo snapshot on every
       // pass through here. That desynced the visible settings (reverted)
       // from the durable lock (unchanged) while the UI stayed frozen and

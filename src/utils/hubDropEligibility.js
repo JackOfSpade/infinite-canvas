@@ -61,9 +61,10 @@ export function hubHasAcceptedInitialDrop(hub) {
 //     stays, but the next profile must receive a fresh interpretation.
 //   • canonicalLocation — inferred FROM the profile whenever preferredLocation
 //     is blank.
-// Deliberately NOT cleared: targetRole, jobPreferences, preferredLocation, searchLocation,
-// remoteResidences, maxAgeDays, collectionLimits, enabledSourceIds — the search settings the
-// user is keeping when they swap career files.
+// Deliberately NOT cleared: targetRole, jobPreferences, preferredLocation,
+// searchLocation, remoteResidences, initialLookbackDays, collectionLimits,
+// enabledSourceIds — the search settings the user is keeping when they swap
+// career files. The lookback is ignored once successful scan history exists.
 export function buildJobHubCareerClearPatch({ jobAnalysisClearedAt = null, jobAnalysisClearedRunId = null } = {}) {
   return {
     inputLocked: false,

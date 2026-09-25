@@ -126,8 +126,10 @@ export default [
         && paused.kind === 'continue-existing'
         && tokenlessPaused.kind === 'continuation-requires-run-token'
         && terminalWithoutMergeableResults.kind === 'terminal-requires-fresh-input'
-        && partialAdmission.kind === 'terminal-requires-fresh-input',
-      'terminal Job Searches must be reusable rather than fresh-scanned; only a cleared and re-imported empty hub is fresh-scan eligible; a paused source requires its exact run token to continue');
+        && partialAdmission.kind === 'terminal-requires-fresh-input'
+        && terminalWithoutMergeableResults.reason.includes('Re-scan it on the Job Search card')
+        && partialAdmission.reason.includes('Re-scan it on the Job Search card'),
+      'terminal Job Searches must be reusable rather than fresh-scanned; non-mergeable terminals direct users to the card re-scan; only a cleared and re-imported empty hub is Board fresh-scan eligible; a paused source requires its exact run token to continue');
       assert(legacyAdmission.kind === 'reuse-terminal'
         && preservedAdmission.kind === 'reuse-terminal'
         && partition.reusable.map(entry => entry.sourceId).join(',') === 'terminal-search,legacy-positive-search'
@@ -171,7 +173,7 @@ export default [
         && board.includes("title: 'Choose Job Search sources'")
         && board.includes('Waiting to start or continue selected sources')
         && board.includes('Waiting to combine saved results')
-        && board.includes('manually clear career data, and import fresh files in Job Search before using the Board')
+        && board.includes('choose Re-scan for New Jobs on its Job Search card before using the Board')
         && selection.includes('Job Search sources')
         && selection.includes('Prioritize this search earlier for recovery and result reconciliation'),
       'Board admission/UI must reuse completed inputs, classify sources-ready before fresh platform checks, fence the executor before generic rerun, and describe parallel-fanout ordering honestly');
@@ -2599,7 +2601,7 @@ export default [
     },
   },
   {
-    name: 'Connected Job Search modules defer fresh scans to their live Job Board owner',
+    name: 'Connected Job Search modules allow explicit card re-scans while active Board recovery still owns its transaction',
     run() {
       const nodes = [
         { id: 'search-a', type: 'jobhub' },
@@ -2632,8 +2634,12 @@ export default [
       const retryStart = search.indexOf('const handleRetryFailed = useCallback');
       const retryEnd = search.indexOf('const savedAnalysisWarning', retryStart);
       const retry = search.slice(retryStart, retryEnd);
+      const rerunStart = search.indexOf('const handleRerun = useCallback');
+      const rerunEnd = search.indexOf('const cancelBoardRun = useCallback', rerunStart);
+      const rerun = search.slice(rerunStart, rerunEnd);
       assert(search.includes('store => isJobSearchConnectedToBoard(id, store.nodeLookup, store.edges)')
-        && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Direct re-run')) {")
+        && rerunStart >= 0 && rerunEnd > rerunStart
+        && !rerun.includes("deferDirectSearchToBoard('Direct re-run')")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Interrupted-run resume')) {")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Saved-scrape resume')) {")
         && search.includes("deferDirectSearchToBoard(\n      'Career-file drop'")
@@ -2646,12 +2652,14 @@ export default [
         && search.includes('findJobSearchBoardPausedContinuationOwner(\n        id,\n        jobRunId,\n        store.nodeLookup,\n        store.edges,')
         && search.includes('dedupeKey: `job-search-run-from-board:${id}`,')
         && search.includes('onRetry={boardRecoveryOwnsActions ? null : handleRetryFailed}')
-        && search.includes('onRerun={boardRecoveryOwnsActions ? null : handleRerun}')
+        && search.includes('onRerun={activeBoardRecoveryOwnerKey || data.terminalFinalizationRecovery ? null : handleRerun}')
         && search.includes('onReanalyze={boardRecoveryOwnsActions || data.terminalFinalizationRecovery ? null : handleReanalyze}')
         && search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && (')
         && search.includes('|| boardRecoveryOwnsActions\n    ) return;')
         && search.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
-        && search.includes('boardRecoveryPending={!managedByJobBoard && !!activeBoardRecoveryOwnerKey}')
+        && search.includes('boardRecoveryPending={!!activeBoardRecoveryOwnerKey}')
+        && search.includes('An idle Board connection does not own this explicit re-scan.')
+        && search.includes('standaloneBecameBoardRecoveryManaged')
         && legacyAutoStart.indexOf('if (managedByJobBoard || activeBoardRecoveryOwnerKey)') >= 0
         && legacyAutoStart.indexOf('autoStartedFilePathRef.current = autoStartPath;') > legacyAutoStart.indexOf('if (managedByJobBoard || activeBoardRecoveryOwnerKey)')
         && legacyAutoStart.includes("const claimedByBoard = ['paused', 'not-ready'].includes(outcome?.status)")
@@ -2664,12 +2672,15 @@ export default [
           > retry.indexOf('const supersededCleanupReceipts = normalizeManualAiCleanupReceipts')
         && retry.indexOf("if (deferDirectSearchToBoard('Error retry')) return;")
           > retry.indexOf('if (manualRetirement?.runId && manualRetirement.retirementPending)')
-        && done.includes('The connected Job Board reuses these completed results.')
-        && done.includes('manually choose Clear career data and import fresh files in Job Search first')
+        && done.includes('Connected to Job Board · Results are ready to combine there; re-scan here to refresh them.')
+        && done.includes('Re-scan for New Jobs')
         && done.includes('boardRecoveryPending = false')
-        && done.includes('A previous Job Board recovery is settling.'),
-      'connected modules and disconnected-but-reserved recoveries must suppress every child launch/clear action, leaving the durable recovery in its owning Board while retaining standalone compatibility');
-      return { edgeDirections: 2, connectedStartsDeferred: true, standaloneCompatibility: true, disconnectRecovery: true, disconnectActionsHidden: true };
+        && done.includes('Job Board recovery is in progress. Finish or cancel it on the Board to re-enable search actions.')
+        && !done.includes('Use the connected <span className="font-medium">Job Board Module</span>')
+        && (done.match(/Connected to Job Board ·/g) || []).length === 1
+        && (done.match(/Job Board recovery is in progress\./g) || []).length === 1,
+      'an idle Board connection must leave the explicit Job Search re-scan available, while automatic starts, recovery actions, and a durable active Board transaction remain owned by the Board');
+      return { edgeDirections: 2, connectedExplicitRescan: true, automaticStartsDeferred: true, disconnectRecovery: true, disconnectActionsHidden: true };
     },
   },
   {
@@ -2707,8 +2718,9 @@ export default [
         && scoreCurrent.includes('if (liveBoardRecoveryOwner && !livePausedBoardContinuationOwner)')
         && sourcesReady.includes("const canScoreCurrent = !locked\n    && jobsAvailable > 0\n    && typeof onScoreCurrent === 'function';")
         && sourcesReady.includes('{canScoreCurrent && (')
-        && sourcesReady.includes("{canScoreCurrent\n          ? 'Solve or skip each blocked card")
-        && sourcesReady.includes("no extra Board action is needed.'}"),
+        && sourcesReady.includes("{canScoreCurrent\n          ? 'Resolve or skip each source card to continue. Or score the ready jobs now. Board runs continue automatically.'")
+        && sourcesReady.includes(": 'Resolve or skip each source card to continue. Board runs continue automatically.'}")
+        && !sourcesReady.includes('no extra Board action is needed'),
       'only the exact paused Board child keeps Score current results; stale Board-owned cards omit the callback, button, and phantom copy, while the handler re-proves ownership before mutating');
       return { exactContinuation: true, staleContinuationBlocked: true };
     },
@@ -2718,7 +2730,7 @@ export default [
     run() {
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const recoveryStart = search.indexOf('const showUnfinishedRunBanner = Boolean(');
-      const savedPanelStart = search.indexOf('const savedAnalysisPanel = shouldShowSavedAnalysisPanel ? (', recoveryStart);
+      const savedPanelStart = search.indexOf('const savedAnalysisPanel = shouldShowSavedAnalysisPanel && compactSavedRunTools && hasCompactSavedRunTool ? (', recoveryStart);
       const resumeBannerStart = search.indexOf('const resumeBanner = showUnfinishedRunBanner ? (', savedPanelStart);
       const bannerStart = search.indexOf('const banner = (', resumeBannerStart);
       const savedPanel = search.slice(savedPanelStart, resumeBannerStart);
@@ -2726,9 +2738,11 @@ export default [
       assert(recoveryStart >= 0
         && search.includes('const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;')
         && savedPanel.includes('{boardRecoveryOwnsActions && (')
-        && savedPanel.includes('Saved results are kept for reference.')
-        && savedPanel.includes('Start searches from the connected Job Board with Search selected & combine.')
-        && savedPanel.includes('previous Job Board recovery settles')
+        && savedPanel.includes('Saved results remain available for reference on the connected Job Board.')
+        && savedPanel.includes('Saved results remain available while Job Board recovery finishes.')
+        && !savedPanel.includes('Saved results are kept for reference.')
+        && !savedPanel.includes('Start searches from the connected Job Board with Search selected & combine.')
+        && (savedPanel.match(/Saved results remain available/g) || []).length === 2
         && savedPanel.includes('{!boardRecoveryOwnsActions && (')
         && savedPanel.includes('onClick={handleResumeSavedScrape}')
         && savedPanel.includes("'Re-score saved results'")
@@ -2738,6 +2752,51 @@ export default [
         && resumeBanner.includes('{!boardRecoveryOwnsActions && resumeRunActionable && <button'),
       'an unfinished-run banner must suppress the competing Saved Scrape card; a connected or still-reserved Board owns continuation, while standalone Searches keep direct recovery actions with unambiguous labels');
       return { unfinishedBannerSuppressesSavedScrape: true, boardOwnsContinuation: true, disconnectReservationSuppressesActions: true, standaloneRescore: true };
+    },
+  },
+  {
+    name: 'Saved-job re-evaluation failure copy only offers retry when the action is available',
+    run() {
+      const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
+      const noticeStart = done.indexOf("const reanalysisNoticeText = !locked && typeof onReanalyze === 'function'");
+      const noticeEnd = done.indexOf('\n\n  return (', noticeStart);
+      const notice = done.slice(noticeStart, noticeEnd);
+      assert(noticeStart >= 0 && noticeEnd > noticeStart
+        && notice.includes(String.raw`const reanalysisNoticeText = !locked && typeof onReanalyze === 'function'
+    ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Try again.'`)
+        && notice.includes(String.raw`: boardRecoveryPending
+      ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Job Board recovery is settling; re-evaluation is unavailable until it finishes or is cancelled on the Board.'`)
+        && notice.includes(String.raw`: managedByJobBoard
+        ? 'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Re-evaluation is unavailable while this search is connected to a Job Board.'`)
+        && notice.includes(String.raw`'Saved-job re-evaluation didn\'t finish. Existing results are unchanged. Re-evaluation is temporarily unavailable while Job Search is busy or finishing recovery.'`)
+        && done.includes('{reanalysisNoticeText}'),
+      'a re-evaluation failure offers Try again only with an actual re-evaluate action; Board-owned and standalone recovery states instead describe the route that can make it available');
+      return { retryGatedByAction: true, boardAlternatives: 3 };
+    },
+  },
+  {
+    name: 'Current completed snapshots expose only compact audit tools while stale recovery retains re-score',
+    run() {
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const panelStart = search.indexOf('const savedAnalysisPanel = shouldShowSavedAnalysisPanel && compactSavedRunTools && hasCompactSavedRunTool ? (');
+      const compactEnd = search.indexOf(') : shouldShowSavedAnalysisPanel && !compactSavedRunTools ? (', panelStart);
+      const panelEnd = search.indexOf('\n\n  // Non-blocking "resume an unfinished run?"', compactEnd);
+      const compact = search.slice(panelStart, compactEnd);
+      const recovery = search.slice(compactEnd, panelEnd);
+      assert(panelStart >= 0 && compactEnd > panelStart && panelEnd > compactEnd
+        && search.includes('const compactSavedRunTools = hubState === \'done\' && savedAnalysisMatchesCurrentRun;')
+        && search.includes('const hasCompactSavedRunTool = !!savedAnalysisMeta?.promptPath || !!savedAnalysisWarning;')
+        && compact.includes('Saved run tools')
+        && compact.includes('!!savedAnalysisWarning')
+        && compact.includes('savedAnalysisMeta.promptPath')
+        && !compact.includes('handleResumeSavedScrape')
+        && !compact.includes('Re-score saved results')
+        && recovery.includes('shouldShowSavedAnalysisPanel && !compactSavedRunTools')
+        && recovery.includes('{!boardRecoveryOwnsActions && (')
+        && recovery.includes('onClick={handleResumeSavedScrape}')
+        && recovery.includes("'Re-score saved results'"),
+      'the completed current run has no duplicate re-score path and hides empty snapshot tools; only a stale or non-done recovery panel retains the direct re-score action');
+      return { compactAuditOnly: true, recoveryRescoreRetained: true };
     },
   },
   {
@@ -3347,7 +3406,8 @@ export default [
         && jobBoardSelectionPresentation([]).runLabel === 'Search selected & combine'
         && jobBoardSelectionPresentation([{ boardAction: 'reuse' }]).runLabel === 'Combine saved results'
         && !selectionUi.includes('onCombineSaved')
-        && sourcesReadyUi.includes('it then continues automatically; no extra Board action is needed')
+        && sourcesReadyUi.includes('Board runs continue automatically.')
+        && !sourcesReadyUi.includes('no extra Board action is needed')
         && sourceCardUi.includes('scoring and any waiting Job Board continue automatically.'),
       'the Board must expose controlled per-connection selection, a live cancellation action, and clear automatic continuation after manual-source resolution without a second combine button');
 
@@ -3593,10 +3653,10 @@ export default [
       const pipelineEnd = search.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipeline = search.slice(pipelineStart, pipelineEnd);
       const acquireAt = pipeline.indexOf('lease = await moduleRunQueue.acquireModuleRun');
-      const ownershipAt = pipeline.indexOf('isJobSearchConnectedToBoard(currentId, getNodes(), getEdges())', acquireAt);
-      const refusalAt = pipeline.indexOf('if (standaloneBecameBoardManaged)', ownershipAt);
+      const ownershipAt = pipeline.indexOf('findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())', acquireAt);
+      const refusalAt = pipeline.indexOf('if (standaloneBecameBoardRecoveryManaged)', ownershipAt);
       const queueMarkerClearAt = pipeline.indexOf('updateGlobal(currentId, { queuedModuleRun: null });', refusalAt);
-      const refusalReturnAt = pipeline.indexOf("return searchRunOutcome('not-ready'", queueMarkerClearAt);
+      const refusalReturnAt = pipeline.indexOf("return searchRunOutcome('paused'", queueMarkerClearAt);
       const processingStartAt = pipeline.indexOf('processingToken = processingRunsRef.current.start();', refusalReturnAt);
       const destructiveSetupAt = pipeline.indexOf('scrapeWarningsRef.current = [];', processingStartAt);
       const refusalBlock = pipeline.slice(refusalAt, processingStartAt);
@@ -3606,7 +3666,7 @@ export default [
         && !pipeline.includes('restoreStandaloneQueueSnapshot')
         && !refusalBlock.includes('scoredJobs:') && !refusalBlock.includes('hubState:')
         && pipeline.indexOf('lease?.release();', destructiveSetupAt) > destructiveSetupAt,
-      'a standalone Search that becomes Board-connected while queued must clear only its queue marker, preserve every live edit/result, refuse before processing or destructive setup, and still release its lane');
+      'a standalone Search claimed by an active Board recovery while queued must clear only its queue marker, preserve every live edit/result, refuse before processing or destructive setup, and still release its lane');
 
       const interruptedResumeStart = search.indexOf('const handleResumeRun = useCallback');
       const interruptedResumeEnd = search.indexOf('resumeInterruptedRunRef.current = handleResumeRun;', interruptedResumeStart);

@@ -1802,9 +1802,12 @@ export default [
           searchLocation: { city: 'Ottawa', country: 'Canada' },
           preferredLocation: 'Ottawa, Canada',
           remoteResidences: { canada: { city: 'Ottawa', country: 'Canada' } },
+          // Legacy canvases may still carry this retired setting. It is run
+          // state now, not a user-editable field Undo may resurrect.
           maxAgeDays: 14,
           collectionLimits: { jobsPerPlatform: 25, pagesPerPlatform: 2 },
           enabledSourceIds: ['indeed'],
+          initialLookbackDays: 14,
           locked: false,
           hubState: 'searching',
           careerData: 'historical career data',
@@ -1829,6 +1832,7 @@ export default [
           maxAgeDays: 30,
           collectionLimits: { jobsPerPlatform: 100, pagesPerPlatform: 8 },
           enabledSourceIds: ['linkedin', 'indeed'],
+          initialLookbackDays: 30,
           locked: true,
           hubState: 'done',
           careerData: 'live career data',
@@ -1848,7 +1852,7 @@ export default [
       const restored = mergeNonRestorableNodeDataFromLive([historical], [live])[0];
       assert(restored.position.x === historical.position.x && restored.position.y === historical.position.y,
         'Job Search undo must still restore node-level canvas properties');
-      for (const field of ['targetRole', 'jobPreferences', 'searchLocation', 'preferredLocation', 'remoteResidences', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'locked']) {
+      for (const field of ['targetRole', 'jobPreferences', 'searchLocation', 'preferredLocation', 'remoteResidences', 'collectionLimits', 'enabledSourceIds', 'initialLookbackDays', 'locked']) {
         assert(JSON.stringify(restored.data[field]) === JSON.stringify(historical.data[field]),
           `Job Search undo must restore the historical user setting ${field}`);
       }
@@ -1858,10 +1862,23 @@ export default [
         && restored.data.scoredJobs[0].title === 'Live result'
         && restored.data.jobRunId === 'live-run'
         && restored.data.resultCount === 1
+        && restored.data.maxAgeDays === 30
         && restored.data.queryCacheKey === 'live-query-cache'
         && restored.data._boardRollbackSourceProgressFence.retiredJobRunId === 'retired-run'
         && !Object.prototype.hasOwnProperty.call(restored.data, 'manualAiResume'),
       'Job Search undo must keep the complete live run/result/career tuple and must not resurrect an absent historical recovery marker');
+
+      const roleLockedLive = {
+        ...live,
+        data: {
+          ...live.data,
+          initialLookbackDays: 30,
+          resolvedRolesMeta: { locked: true },
+        },
+      };
+      const roleLockedRestore = mergeNonRestorableNodeDataFromLive([historical], [roleLockedLive])[0];
+      assert(roleLockedRestore.data.initialLookbackDays === 30,
+        'the first-search lookback is undoable while setup is unlocked, but a role-locked Search keeps its live setting with every other frozen setting');
 
       const historicalRuntimeOnly = { ...historical, data: { ...historical.data, hubState: 'done', jobRunId: 'another-run', scoredJobs: [] } };
       const historicalSettingEdit = { ...historical, data: { ...historical.data, targetRole: 'A different setting' } };
@@ -1874,7 +1891,7 @@ export default [
         && hasActiveExternalRunState([{ id: 'pending', type: 'jobhub', data: { hubState: 'done', pendingJobs: [{ title: 'Pending' }] } }])
         && !hasActiveExternalRunState([{ id: 'settled', type: 'jobhub', data: { hubState: 'done', pendingJobs: null } }]),
       'paused and pending Search transactions must remain protected from snapshot, undo, and navigation even outside a processing hubState');
-      return { settingsRestored: 9, liveRunPreserved: true, pausedRunGuarded: true };
+      return { settingsRestored: 9, lockedModePreserved: true, liveRunPreserved: true, retiredAgeSettingNotRestored: true, pausedRunGuarded: true };
     },
   },
 {
@@ -5133,7 +5150,6 @@ export default [
         targetRole: 'ROLE',
         jobPreferences: 'Large established companies only.',
         preferredLocation: 'LOC',
-        maxAgeDays: 7,
         collectionLimits: {},
         enabledSourceIds: ['indeed'],
         batchScoring: true,
@@ -5152,13 +5168,13 @@ export default [
       assert(getHubFileDropMode({ type: 'jobhub', data: merged }) === 'initial-input',
         'a cleared hub must route the next file drop as initial input, otherwise fresh career files land as nothing at all');
 
-      for (const settingKey of ['targetRole', 'jobPreferences', 'preferredLocation', 'maxAgeDays', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
+      for (const settingKey of ['targetRole', 'jobPreferences', 'preferredLocation', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
         assert(!Object.prototype.hasOwnProperty.call(patch, settingKey),
           `clearing career files must not touch ${settingKey} — wiping search settings defeats the point of clearing in place instead of rebuilding the module`);
       }
-      assert(merged.targetRole === 'ROLE' && merged.jobPreferences === 'Large established companies only.' && merged.preferredLocation === 'LOC' && merged.maxAgeDays === 7
+      assert(merged.targetRole === 'ROLE' && merged.jobPreferences === 'Large established companies only.' && merged.preferredLocation === 'LOC'
         && merged.enabledSourceIds.length === 1 && merged.batchScoring === true,
-      'a cleared hub that loses its role, location, age window or platform selection forces the user to re-enter every search setting');
+      'a cleared hub that loses its role, location, collection depth, or platform selection forces the user to re-enter every search setting');
 
       // Career-derived caches: none of these are fingerprint-keyed, so a survivor
       // is silently reused against the NEW files. achievements is the worst case —
@@ -5243,6 +5259,8 @@ export default [
         ['epoch.bump()', 'a late-settling parse would write the old profile straight back onto the cleared hub'],
         ['cancelNodeTask', 'the backend scrape would keep running and bounce the hub out of its cleared empty state'],
         ['cancelQueuedRunsForNode', 'a queued module run would start against career files that no longer exist'],
+        ['materializedSearchHistoryOnCareerClear(liveData, id)', 'a legacy completed run id or saved search window would be cleared before its safe history could be materialized'],
+        ['...materializedSearchHistory,', 'a legacy completed run would lose its conservative no-gap coverage date when jobRunId is cleared'],
         ['resultDisposition: null', 'the empty hub would retain stale scored/empty completion provenance from the cleared run'],
         ['addToast(', 'a clear refused because a run is in flight would be a silent dead button'],
       ];
@@ -5264,8 +5282,10 @@ export default [
       const clearUpdateEnd = clear.indexOf('});', clearUpdateStart);
       const clearPatch = clear.slice(clearUpdateStart, clearUpdateEnd);
       assert(clearUpdateStart >= 0 && clearUpdateEnd > clearUpdateStart
-        && !/\blastCompletedRunAt\s*:/.test(clearPatch),
-      'clearing career files must retain lastCompletedRunAt as module history; it is not career-derived state to wipe');
+        && /\bsearchWindow\s*:\s*null/.test(clearPatch)
+        && clearPatch.includes('...materializedSearchHistory,')
+        && !clearPatch.includes('nextSearchWindowMode'),
+      'clearing career files must preserve modern history or materialize a legacy completed run before discarding run metadata, then continue replacement input from that history');
 
       // Modern peekJobRun/discardJobRun calls are keyed by canvas + hub. A
       // node-less legacy manifest remains deliberately owner-unknown.
@@ -5372,19 +5392,19 @@ export default [
       const processingStateStart = source.indexOf('{/* Processing state */}', emptyStateStart);
       const emptyState = source.slice(emptyStateStart, processingStateStart);
       assert(emptyState.includes('Career files retained')
-        && emptyState.includes('Re-run Search')
+        && emptyState.includes('Re-scan for New Jobs')
         && emptyState.includes('hasRunnableCareerInput && !controlsLocked')
         && emptyState.includes('handleRerun();'),
       'an idle, unlocked empty hub with a retained profile or retained file paths exposes the rerun path');
       assert(emptyState.includes('inputDropsBlocked && hasCareerIdentity')
-        && emptyState.includes('Re-run with these files, or clear them to search with different ones')
+        && emptyState.includes('Re-scan with these files, or clear them to search with different ones')
         && emptyState.includes('Clear career files')
         && emptyState.includes('handleClearCareerFiles(e);'),
       'a hub holding career files must offer the clear action, and a hub holding none must not claim files are retained');
       // Both empty-state branches hide their actions while controlsLocked, so both
       // must say so instead of naming buttons that aren't rendered or inviting a
       // drop that handleDrop silently refuses.
-      assert(emptyState.includes('Unlock this module to re-run it or change its files'),
+      assert(emptyState.includes('Unlock this module to re-scan or change its files'),
         'a locked retained-files hub still tells the user to re-run or clear, but both buttons are hidden behind !controlsLocked — the instruction points at nothing');
       assert(emptyState.includes('Module locked')
         && emptyState.includes('Unlock it to drop career files'),
@@ -5400,6 +5420,14 @@ export default [
         && emptyState.includes('!!lastCompletedRunAtText && (')
         && !emptyState.includes('!!lastCompletedRunAtText && hasCareerIdentity'),
       'a valid persisted completion timestamp renders on a virgin/cleared empty hub without a career-identity gate');
+      assert(emptyState.includes('canChooseInitialLookback')
+        && emptyState.includes('First scan lookback')
+        && emptyState.includes('Later scans continue from the completed scan date.')
+        && emptyState.includes('initialLookbackDays: normalizeJobSearchInitialLookbackDays(event.target.value)')
+        && emptyState.includes('min="1"')
+        && emptyState.includes('max="180"')
+        && emptyState.includes('data-native-undo="true"'),
+      'a hub without trustworthy history offers an accessible persisted 1–180 day first-scan picker, while retained history continues automatically');
       const validTimestamp = Date.UTC(2026, 8, 7, 14, 30, 0);
       const invalidCompletionTimestamps = [
         null, undefined, true, false, '', '   ', 'not-a-date', Infinity, -1, 0,
@@ -5437,24 +5465,39 @@ export default [
         source.indexOf('const retryTerminalFinalization', source.indexOf('const recordCollectionCompletion = useCallback')),
       );
       const collectionBackendSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(!completionWriter.includes('lastCompletedRunAt')
+      assert(completionWriter.includes("terminalStatus === 'completed'")
+        && completionWriter.includes('pendingCompletion?.runId === runId')
+        && completionWriter.includes('patch.lastCompletedRunAt = normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt)')
+        && completionWriter.includes('patch.lastSearchCoverageStartedAt = normalizeCompletionTimestamp(')
+        && completionWriter.includes('patch.pendingCollectionCompletion = null')
+        && !completionWriter.includes('nextSearchWindowMode')
+        && completionWriter.includes('} else recordFinalizationState(false);')
         && collectionWriter.includes('normalizeCompletionTimestamp(searchResult?.collectionCompletedAt) ?? Date.now()')
-        && collectionWriter.includes('lastCompletedRunAt: collectionCompletedAt')
+        && collectionWriter.includes('pendingCollectionCompletion: {')
+        && collectionWriter.includes('runId: searchResult?.runId || null')
+        && collectionWriter.includes('collectionStartedAt,')
+        && !collectionWriter.includes('lastCompletedRunAt')
         && collectionWriter.includes('isCancelled?.()')
-        && collectionBackendSource.includes('const collectionCompletedAt = Date.now();')
-        && collectionBackendSource.includes("setJobRunStage(canvasFilePath, 'gathered', collectionCompletedAt")
+        && collectionBackendSource.includes('const gatheredStageUpdatedAt = Date.now();')
+        && collectionBackendSource.includes('const collectionCompletedAt = resumeGatheredOnly')
+        && collectionBackendSource.includes('const collectionStartedAt = Number.isSafeInteger(persistedRunStartedAt)')
+        && collectionBackendSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
         && collectionBackendSource.includes('collectionCompletedAt,'),
-      'the displayed scrape timestamp is recorded at the all-platform gathered boundary, not at later scoring or terminal receipt completion');
+      'the run coverage interval is staged per run, then becomes the displayed completion and no-gap rescan anchors only after that run receives a successful completed receipt');
 
-      // The hub rests at 'done' after every successful run, so the clear action
-      // has to be reachable from there too — otherwise swapping career files
-      // costs a full Re-run + Reset just to reach the empty state.
+      // The hub rests at 'done' after every successful run, so the clear-data
+      // action has to be reachable from there too — otherwise changing career
+      // files costs a full Re-run + Reset just to reach the empty state.
       assert((source.match(/onClearCareerFiles=\{activeBoardRecoveryOwnerKey \? null : handleClearCareerFiles\}/g) || []).length >= 2,
         'the done and paused states retain the clear action after a successful run, except while a durable Board recovery owns the module and would reject it');
       const doneState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchDoneState.jsx'), 'utf8');
-      assert(doneState.includes('onClearCareerFiles')
-        && /!locked && onClearCareerFiles/.test(doneState),
-      'the done state must render the clear action only when the hub is unlocked — the handler bails on data.locked, so a visible button there would be a dead click');
+      const doneClearStart = doneState.indexOf('{!locked && onClearCareerFiles && (');
+      const doneClearEnd = doneState.indexOf('</button>', doneClearStart);
+      const doneClearButton = doneState.slice(doneClearStart, doneClearEnd + '</button>'.length);
+      assert(doneClearStart >= 0 && doneClearEnd > doneClearStart
+        && doneClearButton.includes('onClick={onClearCareerFiles}')
+        && doneClearButton.includes('Clear career data'),
+      'every idle completed hub must expose a visible Clear career data button wired to the existing clear handler; recovery can suppress it by omitting the callback');
       assert(doneState.includes('formatCompletionTimestamp(lastCompletedRunAt)'),
         'done-state and empty-state completion dates must share the same strict timestamp validator');
       const sourcesReadyState = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchSourcesReadyState.jsx'), 'utf8');
@@ -5493,6 +5536,10 @@ export default [
         && reset.includes('const retainedCareerData = resetHasReusableCareerProfile')
         && reset.includes('buildJobHubCareerClearPatch({')
         && reset.includes('...retainedCareerData')
+        && reset.includes('const resetSearchHistoryPatch = {')
+        && reset.includes('...materializedSearchHistoryOnCareerClear(resetData, id)')
+        && !reset.includes('nextSearchWindowMode')
+        && reset.includes('...resetSearchHistoryPatch')
         && reset.includes('initialDropAcceptedRef.current = resetHasReusableCareerProfile')
         && reset.includes('const resetRunId = jobRunIdRef.current || resetData.jobRunId || null')
         && reset.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: resetRunId })'),
@@ -5522,13 +5569,13 @@ export default [
         && rerun.includes('startProcessingWithProfile(data.resumeProfile'),
       'the retained-profile action re-enters the pipeline without requiring the cancelled run\'s file path');
       assert(rerun.includes('if (platformsVerifying)')
-        && rerun.includes('Re-run deferred — selected platform connection verification is still pending')
+        && rerun.includes('Re-scan deferred — selected platform connection verification is still pending')
         && rerun.includes("title: 'Checking Connections'"),
-      'a done-state rerun must not read the auth cache while its selected platform is still in the startup verification queue');
+      'a done-state re-scan must not read the auth cache while its selected platform is still in the startup verification queue');
       assert(source.includes('platformsVerifying={platformsVerifying}')
         && doneState.includes('disabled={platformsVerifying}')
         && doneState.includes('Checking connections'),
-      'the done-state Re-run button must expose and disable for the same verification guard enforced by the handler');
+      'the done-state Re-scan button must expose and disable for the same verification guard enforced by the handler');
 
       assert(!source.includes('const cancelBatchScoring = useCallback')
         && !source.includes('Economy scoring')
@@ -5541,7 +5588,8 @@ export default [
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
         && jobsSource.includes("reason.message === 'Node deleted'")
         && jobsSource.includes("phase: 'aborted'")
-        && jobsSource.indexOf('await throwIfSearchAborted();\n    const collectionCompletedAt = Date.now();\n    const gatheredStageAdvanced = await setJobRunStage') >= 0
+        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageUpdatedAt = Date.now();\n    const collectionCompletedAt = resumeGatheredOnly') >= 0
+        && jobsSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
         && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),
       'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
@@ -5900,7 +5948,7 @@ export default [
         'Job date parser: future yearless month-day resolves to the most recent occurrence');
       assert(filterJobsByAge([{ title: 'recent-yearless', posted: 'Aug 12' }, { title: 'old-yearless', posted: 'May 29' }], 21, fixedNow)
         .map(job => job.title).join(',') === 'recent-yearless',
-      'Job date filter: yearless dates honor the injected look-back clock');
+      'Job date filter: yearless dates honor the injected date-window clock');
       // The card-owned collection settings now default to "All" on BOTH fields
       // (stored as null): unlimited jobs per platform, and unlimited browser
       // pages (bounded only by the JOB_COLLECTION_PAGE_CEILING backstop a
@@ -6476,7 +6524,7 @@ export default [
     },
   },
 {
-    name: 'buildJobTasks: Glassdoor look-back uses supported non-narrowing buckets',
+    name: 'buildJobTasks: Glassdoor date horizon uses supported non-narrowing buckets',
     run: () => {
       assert(glassdoorPostedBucket(1) === 1 && glassdoorPostedBucket(2) === 3,
         'Glassdoor bucket helper keeps exact values and rounds up in-between values');

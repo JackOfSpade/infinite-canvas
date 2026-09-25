@@ -16,8 +16,10 @@
  *     {
  *       version, runId, startedAt, lastUpdated,
  *       stage: 'searching' | 'gathered',
+ *       collectionCompletedAt?: number,
  *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
- *                 jobPreferencePlan, canonicalLocation, maxAgeDays, nodeId },
+ *                 jobPreferencePlan, canonicalLocation, searchWindow,
+ *                 maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
  *                                queries: { [query]: { lastPage } },
  *                                collectionScopeCaveats?: [{ sourceId, code }] } }
@@ -42,6 +44,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
+import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearchDateWindow.js';
+import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } from './aiSchemas.js';
 
 const MANIFEST_VERSION = 2;
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
@@ -419,6 +423,9 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   const funnel = receipt.funnel && typeof receipt.funnel === 'object' ? {
     raw: receiptNumber(receipt.funnel.raw),
     relevanceDropped: receiptNumber(receipt.funnel.relevanceDropped),
+    ...(receipt.funnel.windowEligible != null
+      ? { windowEligible: receiptNumber(receipt.funnel.windowEligible) }
+      : {}),
     deduped: receiptNumber(receipt.funnel.deduped),
     ageDropped: receiptNumber(receipt.funnel.ageDropped),
     // Rows the AI role screen rejected (screenJobRolesByTitle, replacing the
@@ -607,12 +614,18 @@ async function readManifestFromFiles(files) {
     const inputs = manifest.inputs && typeof manifest.inputs === 'object' && !Array.isArray(manifest.inputs)
       ? manifest.inputs
       : {};
+    const { collectionCompletedAt: rawCollectionCompletedAt, ...otherManifest } = manifest;
+    const collectionCompletedAt = manifestTimestamp(rawCollectionCompletedAt);
+    const { searchWindow: rawSearchWindow, ...otherInputs } = inputs;
+    const searchWindow = sanitizeJobSearchWindow(rawSearchWindow);
     return {
-      ...manifest,
+      ...otherManifest,
+      ...(collectionCompletedAt != null ? { collectionCompletedAt } : {}),
       inputs: {
-        ...inputs,
+        ...otherInputs,
         jobPreferences: sanitizeJobPreferences(inputs.jobPreferences),
         jobPreferencePlan: sanitizeJobPreferencePlan(inputs.jobPreferencePlan),
+        ...(searchWindow ? { searchWindow } : {}),
       },
     };
   } catch {
@@ -723,8 +736,11 @@ export function sanitizeJobPreferencePlan(value) {
     : {};
   const direction = {
     summary: manifestText(directionValue.summary, 1000),
-    roleDirections: manifestTextList(directionValue.roleDirections),
-    avoidDirections: manifestTextList(directionValue.avoidDirections),
+    // Directions are exact mirrors of role criteria. Preserve the same full
+    // bound here or a crash/restart can truncate a valid accepted plan into a
+    // direction/criterion mismatch that fails recovery validation.
+    roleDirections: manifestTextList(directionValue.roleDirections, { maxItemLength: JOB_PREFERENCE_CRITERION_MAX_LENGTH }),
+    avoidDirections: manifestTextList(directionValue.avoidDirections, { maxItemLength: JOB_PREFERENCE_CRITERION_MAX_LENGTH }),
     explorationEnabled: directionValue.explorationEnabled === true,
   };
   const plan = {
@@ -748,7 +764,7 @@ export function sanitizeJobPreferencePlan(value) {
     // `titleSource` (brief vs. generated) is gone: the two-mode design was
     // removed — the AI always determines the roles now — so there is no
     // longer a "which mode produced these titles" distinction to persist.
-    titles: manifestTextList(value.titles, { maxItems: 20, maxItemLength: 180 }),
+    titles: manifestTextList(value.titles, { maxItems: 20, maxItemLength: JOB_PREFERENCE_TITLE_MAX_LENGTH }),
   };
   const meaningful = plan.summary
     || plan.direction.summary
@@ -772,12 +788,79 @@ export function sanitizeJobPreferences(value) {
   return typeof value === 'string' ? value.trim().slice(0, 4000) : '';
 }
 
+const JOB_SEARCH_WINDOW_CAP_REASONS = new Set([
+  'no-completion',
+  'invalid-completion',
+  'future-completion',
+  'older-than-max-lookback',
+  'legacy-max-age-days',
+]);
+
+function manifestTimestamp(value) {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && Number.isFinite(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+/**
+ * Return the immutable instant at which this run first reached its gathered
+ * checkpoint. Older manifests stored only `lastUpdated`; that value is a safe
+ * conservative fallback only while their stage is already `gathered`.
+ */
+export function collectionCompletedAtForManifest(manifest) {
+  const exact = manifestTimestamp(manifest?.collectionCompletedAt);
+  if (exact != null) return exact;
+  return manifest?.stage === 'gathered'
+    ? manifestTimestamp(manifest?.lastUpdated)
+    : null;
+}
+
+/**
+ * Keep the exact, data-only date boundary needed to resume an interrupted
+ * gather. Provider lookback is deliberately separate from `startTimestamp`:
+ * providers may need a broader whole-day request while the final client-side
+ * pass enforces the precise inclusive boundary.
+ */
+export function sanitizeJobSearchWindow(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const startTimestamp = manifestTimestamp(value.startTimestamp);
+  const providerLookbackDays = Number(value.providerLookbackDays);
+  if (startTimestamp == null
+    || !Number.isSafeInteger(providerLookbackDays)
+    || providerLookbackDays <= 0
+    || providerLookbackDays > JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS) return null;
+
+  const completionTimestamp = value.completionTimestamp == null
+    ? null
+    : manifestTimestamp(value.completionTimestamp);
+  if (value.completionTimestamp != null && completionTimestamp == null) return null;
+  const capReason = value.capReason == null
+    ? null
+    : String(value.capReason);
+  if (capReason != null && !JOB_SEARCH_WINDOW_CAP_REASONS.has(capReason)) return null;
+
+  return {
+    startTimestamp,
+    // `anchorTimestamp` was part of the original resolver result. Normalize it
+    // to the authoritative start so a malformed IPC payload cannot persist two
+    // contradictory exact boundaries.
+    anchorTimestamp: startTimestamp,
+    completionTimestamp,
+    capped: value.capped === true,
+    capReason,
+    providerLookbackDays,
+  };
+}
+
 /**
  * Begin a run: write a fresh manifest (stage='searching') and truncate any prior
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
+export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
   const ownerNodeId = normalizeNodeId(nodeId);
   const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
@@ -794,6 +877,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
       jobPreferences: sanitizeJobPreferences(jobPreferences),
       jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
       canonicalLocation,
+      searchWindow: sanitizeJobSearchWindow(searchWindow),
       maxAgeDays,
       collectionLimits,
       nodeId: ownerNodeId,
@@ -955,13 +1039,28 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
 }
 
 /** Advance the pipeline stage ('searching'→'gathered'; see the header). */
-export async function setStage(canvasFilePath, stage, now, { expectedRunId = null, nodeId = null } = {}) {
+export async function setStage(canvasFilePath, stage, now, {
+  expectedRunId = null,
+  nodeId = null,
+  collectionCompletedAt = null,
+} = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
   return withManifestLock(files.manifest, async () => {
     const manifest = await readManifestFromFiles(files);
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
+    // The first gathered boundary is immutable for this run. A gathered-only
+    // recovery may happen on a later calendar date; moving this timestamp to
+    // the resume time would let the next scan skip postings created between
+    // the original gather and the resume. For a pre-field manifest, preserve
+    // its gathered `lastUpdated` before refreshing that liveness timestamp.
+    if (stage === 'gathered' && manifestTimestamp(manifest.collectionCompletedAt) == null) {
+      const firstGatheredAt = manifestTimestamp(collectionCompletedAt)
+        ?? collectionCompletedAtForManifest(manifest)
+        ?? manifestTimestamp(now);
+      if (firstGatheredAt != null) manifest.collectionCompletedAt = firstGatheredAt;
+    }
     manifest.stage = stage;
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }

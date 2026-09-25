@@ -29,6 +29,7 @@ export function JobPlatformSelectionControl({
   const visibleWarning = attemptedUnsafe || persistedUnsafe;
 
   const toggle = (sourceId) => {
+    if (disabled) return;
     if (unsafeIds.has(sourceId)) {
       setAttemptedUnsafeId(sourceId);
       return;
@@ -48,7 +49,9 @@ export function JobPlatformSelectionControl({
       disabled={disabled}
     >
       <legend className="px-1 text-[9px] text-white/30">Job platforms</legend>
-      <p className="mb-1 text-[8px] leading-snug text-white/25">Choose the platforms to search on the next run.</p>
+      <p className="mb-1 text-[8px] leading-snug text-white/25">
+        {disabled ? 'Platforms are locked for this search.' : 'Platforms for the next search.'}
+      </p>
       <div className="grid grid-cols-2 gap-x-2 gap-y-1">
         {available.map((sourceId) => {
           const source = JOB_SOURCE_BY_ID[sourceId];
@@ -60,7 +63,7 @@ export function JobPlatformSelectionControl({
               htmlFor={inputId}
               className={`flex min-w-0 items-center gap-1 text-[9px] ${safety ? 'cursor-not-allowed text-amber-200/55' : 'cursor-pointer text-white/55'}`}
               title={safety?.reason || source?.name || sourceId}
-              onClick={() => { if (safety) setAttemptedUnsafeId(sourceId); }}
+              onClick={() => { if (!disabled && safety) setAttemptedUnsafeId(sourceId); }}
             >
               <input
                 id={inputId}
@@ -68,7 +71,7 @@ export function JobPlatformSelectionControl({
                 checked={selectedSet.has(sourceId) && !safety}
                 disabled={disabled || !!safety}
                 aria-disabled={!!safety}
-                aria-describedby={safety ? warningId : undefined}
+                aria-describedby={!disabled && safety ? warningId : undefined}
                 onChange={() => toggle(sourceId)}
                 className="accent-blue-400 disabled:cursor-not-allowed"
               />
@@ -78,9 +81,11 @@ export function JobPlatformSelectionControl({
         })}
       </div>
       {selected.filter(sourceId => !unsafeIds.has(sourceId)).length === 0 && (
-        <p className="mt-1 text-[8px] leading-snug text-amber-200/80" role="alert">Select at least one platform before running.</p>
+        <p className="mt-1 text-[8px] leading-snug text-amber-200/80" role={disabled ? undefined : 'alert'}>
+          {disabled ? 'No platform selected.' : 'Select at least one platform before running.'}
+        </p>
       )}
-      {visibleWarning && (
+      {visibleWarning && !disabled && (
         <p id={warningId} className="mt-1 text-[8px] leading-snug text-amber-200/80" role="alert">
           {JOB_SOURCE_BY_ID[visibleWarning.sourceId]?.name || visibleWarning.sourceId}: {visibleWarning.reason}
         </p>

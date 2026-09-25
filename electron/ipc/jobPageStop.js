@@ -9,7 +9,7 @@
  *
  *   empty-page   A page extracted zero rows. Terminal and lossless — no results
  *                exist past an empty offset.
- *   age-window   The page is decisively OUTSIDE the hub's look-back window.
+ *   age-window   The page is decisively OUTSIDE the hub's automatic date window.
  *   no-new-jobs  The pager has stopped advancing (every row already seen).
  *
  * On the age rule and why it is NOT the date-cutoff heuristic that was removed
@@ -39,7 +39,7 @@ export const MIN_DATED_EVIDENCE = 3;
 
 /**
  * @param {object}   opts
- * @param {number?}  opts.maxAgeDays  look-back window; null disables the age rule
+ * @param {number?}  opts.maxAgeDays  broad provider date horizon; null disables the age rule
  * @param {boolean}  opts.unlimited   true when the hub page count is "All"
  * @param {string}   opts.sourceLabel for the stop reason's log line
  * @param {function} opts.now         injectable clock (tests)
@@ -95,7 +95,7 @@ export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLa
           return {
             stop: true,
             reason: 'age-window',
-            detail: `${sourceLabel || 'source'} page ${pageIndex + 1}: ${STOP_STREAK} consecutive pages with no listing inside the ${days}-day look-back window (${dated}/${rows.length} rows dated)`,
+            detail: `${sourceLabel || 'source'} page ${pageIndex + 1}: ${STOP_STREAK} consecutive pages with no listing inside the ${days}-day provider date horizon (${dated}/${rows.length} rows dated)`,
           };
         }
       } else {

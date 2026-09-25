@@ -145,6 +145,8 @@ export default [
       const backend = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
+      assert(done.includes("searchWindow: 'Posting date window'"),
+        'a recency instruction advisory must name the posting-date policy, not a retired editable age control');
       assert(backend.includes('collectionScopeCaveats: collectionScopeCaveatsFromSourceResults(sourceResults)'),
         'main-process source facts are returned separately from scrape warnings');
       assert(search.includes('collectionScopeCaveats: searchResult.collectionScopeCaveats')
@@ -158,12 +160,41 @@ export default [
       'a completed source’s durable caveat is rehydrated before resumed terminal results are derived');
       assert((search.match(/collectionScopeCaveats: \[\]/g) || []).length >= 3,
         'a fresh run, Reset, and Clear career files each remove stale caveats');
-      assert(done.includes('Glassdoor country scope was not enforceable.')
-        && done.includes('may follow this machine&apos;s browsing region')
-        && done.includes('Set a city, state, or province')
-        && done.includes('role="status"'),
-      'the completed-result UI gives an always-visible, accessible non-gating disclosure');
+      assert(done.includes('Search limitations ({historicalNoticeCount})')
+        && done.includes('<details')
+        && done.includes('Glassdoor may reflect this computer&apos;s browsing region.')
+        && done.includes('This completed search had no city, state, or province')
+        && !done.includes('role="status"'),
+      'the completed-result UI keeps historical scope limitations in an opt-in disclosure without announcing static content as live status');
       return { wired: true };
+    },
+  },
+  {
+    name: 'Completed Job Search historical notices stay static, non-actionable, and diagnostically complete',
+    run: () => {
+      const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
+      const scrapePanel = readFileSync(new URL('../../src/components/ScrapeWarningsPanel.jsx', import.meta.url), 'utf8');
+      const advisoryStart = done.indexOf('export function SearchBriefAdvisories');
+      const advisoryEnd = done.indexOf('export function JobSearchDoneState', advisoryStart);
+      const advisories = done.slice(advisoryStart, advisoryEnd);
+      const titleNoteStart = done.indexOf('normalizedTitleOperatorWarnings.length > 0');
+      const titleNoteEnd = done.indexOf('</label>', titleNoteStart);
+      const titleNote = done.slice(titleNoteStart, titleNoteEnd);
+
+      assert(advisoryStart >= 0 && advisoryEnd > advisoryStart
+        && !advisories.includes('role="status"')
+        && !advisories.includes('Clear career files to change this setup.'),
+      'locked Brief advisories are static saved-plan context without an action prompt');
+      assert(titleNoteStart >= 0 && titleNoteEnd > titleNoteStart
+        && titleNote.includes('Saved search-title note')
+        && !titleNote.includes('role="status"')
+        && !titleNote.includes('Clear career files to change this setup.'),
+      'the persisted title-operator note remains a static historical note without a duplicate action prompt');
+      assert(scrapePanel.includes('!resultMode && w.suggestion')
+        && scrapePanel.includes('suggestion: ${w.suggestion}')
+        && scrapePanel.includes('Recorded during this completed search. Re-scan to try the affected source again.'),
+      'completed-result warning cards hide stale per-source instructions, retain them in Copy all diagnostics, and give a truthful re-scan path');
+      return { staticNotices: true, copiedDiagnostics: true };
     },
   },
   {
@@ -204,13 +235,13 @@ export default [
       // renders its OWN internal <SearchBriefAdvisories> for the completed
       // state. Both usages must exist — this is a shared component, not two
       // independent copies that could silently drift.
-      assert(search.includes('<SearchBriefAdvisories searchBriefPlan={data.searchBriefPlan || null} />'),
-        'JobSearchNode.jsx must render SearchBriefAdvisories directly in its own draft/empty state');
+      assert(/<SearchBriefAdvisories\s+searchBriefPlan=\{data\.searchBriefPlan \|\| null\}\s+completedLocked=\{settingsFrozen\}\s*\/>/.test(search),
+        'JobSearchNode.jsx must render SearchBriefAdvisories directly in its draft/empty state and identify a reset-retained locked plan');
       assert(search.includes('searchBriefPlan={data.searchBriefPlan || null}')
         && search.includes('<JobSearchDoneState'),
       'JobSearchNode.jsx must pass searchBriefPlan through to JobSearchDoneState');
-      assert(done.includes('<SearchBriefAdvisories searchBriefPlan={searchBriefPlan} />'),
-        'JobSearchDoneState.jsx must render SearchBriefAdvisories internally using the prop it received');
+      assert(/<SearchBriefAdvisories\s+searchBriefPlan=\{searchBriefPlan\}\s+completedLocked=\{settingsFrozen\}\s*\/>/.test(done),
+        'JobSearchDoneState.jsx must render SearchBriefAdvisories internally in locked-plan mode');
 
       return { componentFound: true, bothFieldsWired: true, bothCallSitesWired: true };
     },
@@ -242,8 +273,8 @@ export default [
         'SearchBriefAdvisories must not use HubErrorBanner\'s red failure styling');
       assert(!component.includes('onRetry') && !component.includes('onDismiss') && !component.includes('errorMessage'),
         'SearchBriefAdvisories must not accept error-path props (onRetry/onDismiss/errorMessage) — it is read-only display with no gating');
-      assert((component.match(/role="status"/g) || []).length >= 1,
-        'SearchBriefAdvisories must use the neutral role="status", not role="alert"');
+      assert(!component.includes('role="status"'),
+        'static Search Brief advisories must not misuse a live-status announcement role');
 
       // JobSearchNode.jsx's `banner` block is exactly the HubErrorBanner /
       // queued-run / test-mode-note conditional group. SearchBriefAdvisories

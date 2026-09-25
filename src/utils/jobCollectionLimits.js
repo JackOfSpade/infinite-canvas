@@ -6,7 +6,7 @@
  *   - `jobsPerPlatform: null` — no aggregate result cap.
  *   - `pagesPerPlatform: null` — no page ceiling: a browser board keeps paging
  *     until it runs out of results, until its listings fall outside the hub's
- *     look-back window (see makeJobPageStop in electron/ipc/jobPageStop.js),
+ *     automatic date window (see makeJobPageStop in electron/ipc/jobPageStop.js),
  *     or until the JOB_COLLECTION_PAGE_CEILING backstop below.
  * Feed sources (RemoteOK, WeWorkRemotely) are single un-paginated requests and
  * have no page count to limit. Dice, however, walks its API `page` parameter

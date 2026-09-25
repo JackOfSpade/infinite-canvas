@@ -29,8 +29,8 @@ export function classifyJobBoardSourceAdmission(source) {
     return {
       kind: 'terminal-requires-fresh-input',
       reason: outcome
-        ? 'This completed Job Search is not mergeable. Clear career data, import career files again, then run the Board.'
-        : 'This completed Job Search cannot be rerun from the Board. Clear career data, import career files again, then run the Board.',
+        ? 'This completed Job Search is not mergeable. Re-scan it on the Job Search card, then return to the Board.'
+        : 'This completed Job Search cannot be refreshed from the Board. Re-scan it on the Job Search card, then return to the Board.',
     };
   }
 

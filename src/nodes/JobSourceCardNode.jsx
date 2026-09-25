@@ -207,7 +207,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const rejectProgressUntilResetRef = useRef(initialProgressState.rejectUntilReset);
   // Local-only dismiss: clicking Skip on a warned card just hides the
   // Solve/Skip + warning text on this card. Doesn't touch hub state — the
-  // next Re-run Search will refetch this source fresh and re-emit progress.
+  // next Re-scan will refetch this source fresh and re-emit progress.
   const [dismissed, setDismissed] = useState(false);
 
   const applyProgressRestore = useCallback((persistedProgress, retiredJobRunId = null, rejectUnknown = false) => {
@@ -726,7 +726,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
-          maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          searchWindow: hubData.searchWindow || null,
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
@@ -755,7 +755,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
-          maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          searchWindow: hubData.searchWindow || null,
           collectionLimits,
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,

@@ -44,9 +44,9 @@ import {
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, normalizeJobRunProfileFingerprint } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume, historyPathForCanvas } from './jobsHistory.js';
-import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
+import { filterJobsByPostedSince, parsePostedDate } from './jobDateFilter.js';
 import {
   getJobsSettings,
   getRoleFamilyExperienceBands,
@@ -73,12 +73,125 @@ import { normalizeJobCollectionLimits, isUnlimitedPages, resolvePageCeiling, des
 import { getEnabledJobSourceIds, getRunnableJobSourceIds } from '../../src/utils/jobPlatformSelection.js';
 import { makeJobPageStop } from './jobPageStop.js';
 import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../../src/utils/jobSearchQueries.js';
+import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, resolveJobSearchDateWindow, startOfLocalDay } from '../../src/utils/jobSearchDateWindow.js';
 import { parseGuaranteedCashOffer, compensationAssessment, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource } from './jobCompensation.js';
 import { lazyStore } from '../utils/lazyStore.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, mapWithConcurrency, MANUAL_HANDOFF_CONCURRENCY, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
+
+function serializableJobSearchWindow(value) {
+  return sanitizeJobSearchWindow(value);
+}
+
+/** Resolve the authoritative automatic window for a fresh search request. */
+export function freshJobSearchWindow(lastCompletedRunAt, now = new Date(), initialLookbackDays = null) {
+  const resolved = serializableJobSearchWindow(resolveJobSearchDateWindow(
+    lastCompletedRunAt,
+    now,
+    normalizeJobSearchInitialLookbackDays(initialLookbackDays),
+  ));
+  if (!resolved) throw new TypeError('Could not resolve a valid Job Search date window.');
+  return resolved;
+}
+
+/**
+ * Upgrade a pre-searchWindow recovery input. The old setting was a rolling
+ * number of days; resuming from the original run's local calendar date gives
+ * it a stable, inclusive boundary and adds one broad provider day so midnight
+ * rows cannot be missed before the exact client-side filter runs.
+ */
+export function legacyJobSearchWindow(maxAgeDays, runStartedAt, now = new Date()) {
+  const parsedDays = Number(maxAgeDays);
+  const days = Number.isFinite(parsedDays) && parsedDays > 0
+    ? Math.min(365, Math.floor(parsedDays))
+    : DEFAULT_MAX_AGE_DAYS;
+  const startedAt = typeof runStartedAt === 'number' && Number.isFinite(runStartedAt)
+    ? new Date(runStartedAt)
+    : new Date(now);
+  const validStartedAt = Number.isFinite(startedAt.getTime()) ? startedAt : new Date(now);
+  const runDay = startOfLocalDay(validStartedAt);
+  let startDate = new Date(runDay.getFullYear(), runDay.getMonth(), runDay.getDate() - days);
+  // Some old/tests fixtures used tiny sentinel `startedAt` values near the
+  // Unix epoch. They were valid under the previous maxAgeDays-only schema but
+  // cannot form our positive timestamp contract; retain their recoverability
+  // with a current-day legacy boundary.
+  if (startDate.getTime() <= 0) {
+    const currentDay = startOfLocalDay(new Date(now));
+    startDate = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate() - days);
+  }
+  const upgraded = serializableJobSearchWindow({
+    startTimestamp: startDate.getTime(),
+    completionTimestamp: null,
+    capped: true,
+    capReason: 'legacy-max-age-days',
+    providerLookbackDays: Math.min(366, days + 1),
+  });
+  // `now` is valid in every production caller. Keep the fallback explicit so
+  // malformed/sentinel legacy fixtures can never turn into a later null
+  // dereference at a provider boundary.
+  return upgraded || freshJobSearchWindow(null, now);
+}
+
+/** Normalize a persisted/action window, with compatibility for old callers. */
+export function effectiveJobSearchWindow(searchWindow, maxAgeDays, runStartedAt = null, now = new Date()) {
+  const persisted = serializableJobSearchWindow(searchWindow)
+    || legacyJobSearchWindow(maxAgeDays, runStartedAt, now);
+
+  // A stored boundary belongs to the original run, but provider "N days"
+  // parameters are evaluated again at request time. Resume/Solve can happen
+  // hours later, so reusing the original relative horizon would move the
+  // provider cutoff forward and create a gap at the frozen boundary. Derive
+  // the retrieval horizon again from the immutable start: this both broadens
+  // delayed requests correctly and prevents an IPC caller from inflating the
+  // provider request while keeping an otherwise-valid boundary. The exact
+  // posted-since filter trims the deliberate overfetch.
+  const elapsedHorizon = providerLookbackDaysForStart(persisted.startTimestamp, now);
+  return {
+    ...persisted,
+    providerLookbackDays: elapsedHorizon,
+  };
+}
+
+function sameFreshJobSearchBoundary(left, right) {
+  return left?.startTimestamp === right?.startTimestamp
+    && left?.completionTimestamp === right?.completionTimestamp
+    && left?.capped === right?.capped
+    && left?.capReason === right?.capReason;
+}
+
+/**
+ * Validate and retain the renderer-frozen boundary for a fresh run.
+ *
+ * Search preparation can begin just before local midnight and reach this IPC
+ * just after it. Accept only the exact policy result for the current or prior
+ * local day; anything else is replaced by the backend's current authoritative
+ * result. The exact boundary stays frozen while the relative provider horizon
+ * is broadened to the actual dispatch time.
+ */
+export function authoritativeFreshJobSearchWindow(
+  lastCompletedRunAt,
+  initialLookbackDays,
+  requestedSearchWindow,
+  now = new Date(),
+) {
+  const clock = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  const current = freshJobSearchWindow(lastCompletedRunAt, clock, initialLookbackDays);
+  const requested = serializableJobSearchWindow(requestedSearchWindow);
+  if (!requested) return current;
+
+  const priorLocalDay = new Date(clock.getTime());
+  priorLocalDay.setDate(priorLocalDay.getDate() - 1);
+  const prior = freshJobSearchWindow(lastCompletedRunAt, priorLocalDay, initialLookbackDays);
+  if (!sameFreshJobSearchBoundary(requested, current)
+    && !sameFreshJobSearchBoundary(requested, prior)) {
+    return current;
+  }
+  // Only the exact calendar boundary is renderer-frozen. The relative provider
+  // horizon is derived data and is recomputed at the actual dispatch time.
+  return effectiveJobSearchWindow(requested, null, null, clock);
+}
 const MAX_SOURCE_RUN_HISTORY_PER_SOURCE = 3;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
@@ -2268,6 +2381,9 @@ export function reconcileSearchFunnel(search) {
   if (!search || typeof search !== 'object') return null;
   const raw = Math.max(0, Number(search.raw) || 0);
   const relevanceDropped = Math.max(0, Number(search.relevanceDropped) || 0);
+  const rawWindowEligible = Number(search.windowEligible);
+  const hasWindowFirstFunnel = search.windowEligible != null && Number.isFinite(rawWindowEligible);
+  const windowEligible = hasWindowFirstFunnel ? Math.max(0, rawWindowEligible) : null;
   const deduped = Math.max(0, Number(search.deduped) || 0);
   const ageDropped = Math.max(0, Number(search.ageDropped) || 0);
   // Rows rejected by the AI role screen (screenJobRolesByTitle, replacing the
@@ -2286,12 +2402,25 @@ export function reconcileSearchFunnel(search) {
   const finalDedupDropped = Math.max(0, Number(search.finalDedupDropped) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
-  const dedupDropped = Math.max(0, relevanceKept - deduped);
-  const expectedKept = Math.max(0, deduped - ageDropped - roleDropped - historyDropped - descriptionEvidenceDropped - finalDedupDropped);
+  const expectedWindowEligible = Math.max(0, relevanceKept - ageDropped);
+  const dedupDropped = Math.max(0, (hasWindowFirstFunnel ? windowEligible : relevanceKept) - deduped);
+  const expectedKept = Math.max(
+    0,
+    deduped
+      - (hasWindowFirstFunnel ? 0 : ageDropped)
+      - roleDropped
+      - historyDropped
+      - descriptionEvidenceDropped
+      - finalDedupDropped,
+  );
+  const windowUnexplainedDelta = hasWindowFirstFunnel
+    ? windowEligible - expectedWindowEligible
+    : 0;
   return {
     raw,
     relevanceDropped,
     relevanceKept,
+    ...(hasWindowFirstFunnel ? { windowEligible, expectedWindowEligible, windowUnexplainedDelta } : {}),
     dedupDropped,
     deduped,
     ageDropped,
@@ -2302,7 +2431,7 @@ export function reconcileSearchFunnel(search) {
     kept,
     expectedKept,
     unexplainedDelta: kept - expectedKept,
-    reconciled: kept === expectedKept,
+    reconciled: kept === expectedKept && windowUnexplainedDelta === 0,
   };
 }
 
@@ -2688,7 +2817,7 @@ function createJobsTelemetry() {
   // Keep the two identities separate or a successful Combine rewrites the
   // whole search/scoring funnel's attribution to the board that displayed it.
   boardNodeId: null,
-  search:    null, // { ts, queries, raw, deduped, ageDropped, roleDropped, historyDropped, kept }
+  search:    null, // { ts, queries, raw, windowEligible?, ageDropped, deduped, roleDropped, historyDropped, kept }
   resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, kept } }
                    // keyed so a multi-source recovery (e.g. Indeed then LinkedIn)
                    // keeps every resolve; re-resolving a source replaces its
@@ -3255,6 +3384,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
       funnel: {
         raw: search.raw,
         relevanceDropped: search.relevanceDropped,
+        ...(search.windowEligible != null ? { windowEligible: search.windowEligible } : {}),
         deduped: search.deduped,
         ageDropped: search.ageDropped,
         roleDropped: search.roleDropped,
@@ -4941,7 +5071,7 @@ function getEffectiveSourceWarning(warning, jobCount) {
 // real stop condition is the DATA, decided by makeJobPageStop
 // (electron/ipc/jobPageStop.js) per page: empty-page (terminal/lossless — no
 // results exist past an empty offset), age-window (two consecutive pages
-// decisively outside the hub's look-back window), or no-new-jobs (unlimited
+// decisively outside the hub's automatic date window), or no-new-jobs (unlimited
 // walks only — the pager has stopped advancing).
 //
 // This replaces a prior version of this policy that walked the FULL ceiling on
@@ -5286,6 +5416,25 @@ function dedupByTitleCompany(arr, options) {
   // distinct same-title/company reqs in different cities (see
   // dedupJobsAcrossSources's doc comment in jobIdentity.js).
   return dedupJobsAcrossSources(arr, options);
+}
+
+/**
+ * Enforce the exact inclusive posting boundary before first-wins identity
+ * deduplication. If an out-of-window mirror precedes an in-window copy, doing
+ * these steps in the opposite order drops the valid copy as a duplicate and
+ * then drops the retained old row by date, losing the posting entirely.
+ */
+export function filterAndDedupJobsByPostedSince(jobs, postedSince, {
+  now = new Date(),
+  onDuplicate,
+} = {}) {
+  const candidates = Array.isArray(jobs) ? jobs : [];
+  const windowEligible = filterJobsByPostedSince(candidates, postedSince, now);
+  return {
+    windowEligible,
+    deduped: dedupByTitleCompany(windowEligible, { onDuplicate }),
+    ageDropped: candidates.length - windowEligible.length,
+  };
 }
 
 function boundedDedupProvenance(entries) {
@@ -8044,7 +8193,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, profileFingerprint = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, profileFingerprint = null, runOrigin, profileInputMode }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -8085,7 +8234,21 @@ Return a JSON object with four arrays of search query strings:
         };
       }
     }
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    // Fresh searches validate the renderer-frozen boundary against the same
+    // server-side policy. Keeping the prior local day's exact result handles a
+    // run whose preparation crossed midnight without accepting an arbitrary
+    // widened window. stale maxAgeDays remains legacy-resume compatibility.
+    const normalizedInitialLookbackDays = normalizeJobSearchInitialLookbackDays(initialLookbackDays);
+    let activeSearchWindow = authoritativeFreshJobSearchWindow(
+      lastCompletedRunAt,
+      normalizedInitialLookbackDays,
+      requestedSearchWindow,
+    );
+    const appliedInitialLookbackDays = !resume
+      && activeSearchWindow.completionTimestamp == null
+      ? normalizedInitialLookbackDays
+      : null;
+    let ageDays = activeSearchWindow.providerLookbackDays;
     let activeJobPreferences = typeof jobPreferences === 'string' ? jobPreferences.slice(0, 4000) : '';
     let activeJobPreferencePlan = normalizeJobPreferencePlan(jobPreferencePlan || jobPreferencesInterpretation);
     const normalizedRunOrigin = resume
@@ -8211,6 +8374,11 @@ Return a JSON object with four arrays of search query strings:
     // This is deliberately narrower than general resume: any incomplete or
     // blocked source stays on the ordinary re-scrape recovery path below.
     let resumeGatheredOnly = false;
+    // A gathered-only recovery must report the original provider-settled
+    // boundary, not the later time at which staged rows are resumed/scored.
+    // Otherwise a midnight-crossing resume could advance the next scan past
+    // jobs posted after the original gather.
+    let resumedCollectionCompletedAt = null;
     const hasExactResumeToken = resume === true
       && typeof resumeRunId === 'string'
       && resumeRunId.length > 0;
@@ -8262,6 +8430,16 @@ Return a JSON object with four arrays of search query strings:
       }
       if (prior?.incomplete) {
         const priorInputs = prior.manifest?.inputs || {};
+        // A recovery owns the exact inclusive boundary captured when it began.
+        // Legacy manifests predate `searchWindow`; upgrade their old rolling
+        // setting once from the original run date rather than silently adopting
+        // the current hub's newly-derived completion boundary.
+        activeSearchWindow = effectiveJobSearchWindow(
+          priorInputs.searchWindow,
+          priorInputs.maxAgeDays,
+          prior.manifest?.startedAt,
+        );
+        ageDays = activeSearchWindow.providerLookbackDays;
         // A recovery continues the exact preferences that governed the
         // interrupted search. Editing the hub does not silently reinterpret
         // staged rows; the next explicit search uses the edit.
@@ -8308,6 +8486,9 @@ Return a JSON object with four arrays of search query strings:
         jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), runId: activeRunId, ts: Date.now() };
         priorRunStartedAt = prior.manifest.startedAt ?? null;
         resumeGatheredOnly = canRecoverGatheredRunDirectly(prior.manifest, queries);
+        if (resumeGatheredOnly) {
+          resumedCollectionCompletedAt = collectionCompletedAtForManifest(prior.manifest);
+        }
         resumeScope = new Set();
         resumeStartPages = {};
         for (const sid of activeSourceIds) {
@@ -8402,7 +8583,7 @@ Return a JSON object with four arrays of search query strings:
       return { success: false, notLoggedIn, error };
     }
     const limitsDescription = describeJobCollectionLimits(normalizedCollectionLimits);
-    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${activeSourceIds.length} selected source(s) (origin=${normalizedRunOrigin}, careerInput=${normalizedProfileInputMode}, maxAge=${ageDays}d, jobs/platform=${limitsDescription.jobs}, browser pages/query=${limitsDescription.pages}, location=${location || 'none'})`);
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${activeSourceIds.length} selected source(s) (origin=${normalizedRunOrigin}, careerInput=${normalizedProfileInputMode}, windowStart=${new Date(activeSearchWindow.startTimestamp).toISOString()}, providerLookback=${ageDays}d, jobs/platform=${limitsDescription.jobs}, browser pages/query=${limitsDescription.pages}, location=${location || 'none'})`);
     // `jobsTelemetry.search` is only stamped once the funnel finishes, so an
     // aborted or crashed gather left the report saying "no search recorded this
     // session" for a run whose own log proves it launched — the exact case
@@ -8418,6 +8599,8 @@ Return a JSON object with four arrays of search query strings:
       queries: queries.length,
       queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [],
       selectedSourceIds: activeSourceIds.slice(0, 25),
+      searchWindow: activeSearchWindow,
+      appliedInitialLookbackDays,
       maxAgeDays: ageDays,
       collectionLimits: normalizedCollectionLimits,
       location: location || '',
@@ -8548,6 +8731,9 @@ Return a JSON object with four arrays of search query strings:
         targetRole,
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: activeJobPreferencePlan,
+        searchWindow: activeSearchWindow,
+        // Compatibility for app versions that can read this manifest but do
+        // not yet understand its exact searchWindow object.
         maxAgeDays: ageDays,
         canonicalLocation: location,
         collectionLimits: normalizedCollectionLimits,
@@ -9242,11 +9428,20 @@ Return a JSON object with four arrays of search query strings:
       }
     }
 
+    // Providers deliberately receive a broad whole-day lookback. Enforce the
+    // exact inclusive local-calendar boundary BEFORE first-wins cross-source
+    // dedup: an old mirror must not evict a newer in-window copy and then be
+    // dropped itself. Unparseable dates remain visible.
+    //
     // Cross-source de-dup provenance is bounded but durable in the funnel: a
-    // raw→dedup count alone cannot tell a legitimate board copy from an
-    // over-broad identity rule after the original cards have gone away.
+    // count alone cannot tell a legitimate board copy from an over-broad
+    // identity rule after the original cards have gone away.
     const dedupDrops = [];
-    const deduped = dedupByTitleCompany(finalAdmission, {
+    const {
+      windowEligible,
+      deduped,
+      ageDropped,
+    } = filterAndDedupJobsByPostedSince(finalAdmission, activeSearchWindow.startTimestamp, {
       onDuplicate: (entry) => { dedupDrops.push(entry); },
     });
     // Per-source unique survivors of the dedup — lets the funnel tell a genuine
@@ -9257,15 +9452,9 @@ Return a JSON object with four arrays of search query strings:
     const uniqueBySource = {};
     for (const j of deduped) { const s = j.source || '?'; uniqueBySource[s] = (uniqueBySource[s] || 0) + 1; }
 
-    // Drop entries whose `posted` string parses to older than maxAgeDays.
-    // Sources without a URL date param rely entirely on this pass; those
-    // with a URL param re-apply it as a safety net.
-    const ageFiltered = filterJobsByAge(deduped, ageDays);
-    const ageDropped = deduped.length - ageFiltered.length;
-
     // Per-source age accounting for the bug report. The global `ageDropped`
     // above can't answer "did the N-day window actually bind platform X?" —
-    // and filterJobsByAge KEEPS any job whose `posted` is unparseable, so a
+    // and filterJobsByPostedSince KEEPS any job whose `posted` is unparseable, so a
     // source with no server-side date param AND no parseable per-job date is
     // silently un-bounded by this pass (only its source-side query limits it).
     // Record, per source: how many it contributed to the drop, how many
@@ -9274,8 +9463,8 @@ Return a JSON object with four arrays of search query strings:
     // them). The renderer turns this into a per-platform verdict; an oldest
     // survivor older than the window is a real leak (flagged 🔥).
     const ageBySource = {};
-    const keptRefs = new Set(ageFiltered);
-    for (const j of deduped) {
+    const keptRefs = new Set(windowEligible);
+    for (const j of finalAdmission) {
       const sid = j.source || '?';
       const a = ageBySource[sid] || (ageBySource[sid] = { dropped: 0, kept: 0, oldestKeptDays: null, oldestKeptRaw: null, unparseableKept: 0 });
       if (!keptRefs.has(j)) { a.dropped++; continue; }
@@ -9309,11 +9498,11 @@ Return a JSON object with four arrays of search query strings:
     const roleScreenTitles = Array.isArray(activeJobPreferencePlan?.titles)
       ? activeJobPreferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
       : [];
-    let roleScreened = ageFiltered;
+    let roleScreened = deduped;
     let roleDropped = 0;
     const roleDroppedBySource = {};
     let roleDroppedSamples = [];
-    // Only rows this run has not already judged. On a RESUME, `ageFiltered` is
+    // Only rows this run has not already judged. On a RESUME, `deduped` is
     // seeded from the crashed attempt's staged rows, which already carry a
     // `roleScreen` stamp — re-sending them would spend an extra handoff on
     // every resume (including the "recover without any network" fast path) and,
@@ -9322,7 +9511,7 @@ Return a JSON object with four arrays of search query strings:
     // for a reason the report never surfaces. Same rule the backstop in
     // evaluate-job-preferences uses; the funnel still balances because only
     // newly-judged rows can be removed here.
-    const roleUnscreened = ageFiltered.filter(job => !job?.roleScreen);
+    const roleUnscreened = deduped.filter(job => !job?.roleScreen);
     if (roleScreenTitles.length > 0 && roleUnscreened.length > 0) {
       const roleScreenMeta = {};
       const manualAiContext = getCurrentIpcRequestContext();
@@ -9347,7 +9536,7 @@ Return a JSON object with four arrays of search query strings:
       // exact order they were sent. Provider-native ids are not globally
       // unique, so keying this merge can attach one source's verdict to
       // another source's listing.
-      roleScreened = mergeRoleScreenedJobs(ageFiltered, roleScreen);
+      roleScreened = mergeRoleScreenedJobs(deduped, roleScreen);
       roleDropped = Number(roleScreen?.counts?.dropped) || roleScreenDropped.length;
       for (const job of roleScreenDropped) {
         const sid = job?.source || '?';
@@ -9745,7 +9934,7 @@ Return a JSON object with four arrays of search query strings:
     tagJobLanguages(kept);
 
     logger.info(
-      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, finalAdmission.length - deduped.length)}, ageDropped=${ageDropped}, roleDropped=${roleDropped}, historyDropped=${historyDropped}, finalDedupDropped=${finalDedupDropped})`
+      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, windowEligible=${windowEligible.length}, ageDropped=${ageDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, windowEligible.length - deduped.length)}, roleDropped=${roleDropped}, historyDropped=${historyDropped}, finalDedupDropped=${finalDedupDropped})`
     );
     // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
@@ -9903,20 +10092,21 @@ Return a JSON object with four arrays of search query strings:
       ? diceDefaultPageSize
       : Math.min(diceDefaultPageSize, normalizedCollectionLimits.jobsPerPlatform);
     const dicePageSizeFact = `pageSize ${diceEffectivePageSize}${normalizedCollectionLimits.jobsPerPlatform != null ? ' (limited by Jobs per platform)' : ''}`;
+    const clientDateBoundary = new Date(activeSearchWindow.startTimestamp).toISOString();
     const dateBounds = Object.fromEntries(activeSourceIds.map((id) => {
-      let detail = 'client-side only';
+      let detail = `client exact ≥ ${clientDateBoundary}`;
       if (id === 'dice') detail = diceBucket
-        ? `filters.postedDate=${diceBucket} (server-side; ${dicePageSizeFact})`
-        : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; ${dicePageSizeFact})`;
+        ? `filters.postedDate=${diceBucket} (server-side; ${dicePageSizeFact}); client exact ≥ ${clientDateBoundary}`
+        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request ∉ Dice's 1/3/7-day buckets; ${dicePageSizeFact})`;
       else if (id === 'glassdoor') detail = glassdoorBucket
-        ? `fromAge=${glassdoorBucket} (server bucket rounded up; client trims to ${ageDays}d)`
-        : `client-side only (${ageDays}d exceeds Glassdoor's 30-day server bucket)`;
-      else if (id === 'ziprecruiter') detail = `days=${ageDays} (server-side + client backstop)`;
-      else if (id === 'indeed') detail = `fromage=${ageDays} (server-side + client backstop)`;
-      else if (id === 'linkedin') detail = `f_TPR=r${ageDays * 86400} (server-side + client backstop)`;
+        ? `fromAge=${glassdoorBucket} (server bucket rounded up); client exact ≥ ${clientDateBoundary}`
+        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request exceeds Glassdoor's 30-day server bucket)`;
+      else if (id === 'ziprecruiter') detail = `days=${ageDays}; client exact ≥ ${clientDateBoundary}`;
+      else if (id === 'indeed') detail = `fromage=${ageDays}; client exact ≥ ${clientDateBoundary}`;
+      else if (id === 'linkedin') detail = `f_TPR=r${ageDays * 86400}; client exact ≥ ${clientDateBoundary}`;
       else if (id === 'usajobs') detail = ageDays <= 60
-        ? `DatePosted=${ageDays} (server-side + client backstop)`
-        : `client-side only (${ageDays}d exceeds USAJobs' 60-day DatePosted limit)`;
+        ? `DatePosted=${ageDays}; client exact ≥ ${clientDateBoundary}`
+        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request exceeds USAJobs' 60-day DatePosted limit)`;
       return [id, detail];
     }));
     // Location observability: the raw user input ("denvr"), the corrected param
@@ -10000,9 +10190,17 @@ Return a JSON object with four arrays of search query strings:
       googleQueryStrings: extractExecutedGoogleQueryStrings(sourceResults),
       raw: relevanceFunnel.raw,
       relevanceDropped: relevanceFunnel.relevanceDropped,
+      // New-order marker: exact-window eligibility precedes first-wins dedup so
+      // an old duplicate can never evict a valid newer row. Receipts without
+      // this field use the historical dedup→age funnel interpretation.
+      windowEligible: windowEligible.length,
       deduped: deduped.length,
       dedupProvenance,
-      maxAgeDays: ageDays, // the configured look-back window this run actually used
+      searchWindow: activeSearchWindow,
+      appliedInitialLookbackDays,
+      // Backward-compatible diagnostic alias for the intentionally broad
+      // provider request, not a user-configured date-window setting.
+      maxAgeDays: ageDays,
       collectionLimits: normalizedCollectionLimits,
       ageDropped,
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
@@ -10103,8 +10301,24 @@ Return a JSON object with four arrays of search query strings:
     // before advancing the manifest so a Reset cannot label an abandoned run
     // as gathered after it has cleared its token-scoped sidecars.
     await throwIfSearchAborted();
-    const collectionCompletedAt = Date.now();
-    const gatheredStageAdvanced = await setJobRunStage(canvasFilePath, 'gathered', collectionCompletedAt, { expectedRunId: activeRunId, nodeId });
+    const gatheredStageUpdatedAt = Date.now();
+    const collectionCompletedAt = resumeGatheredOnly
+      ? (resumedCollectionCompletedAt ?? gatheredStageUpdatedAt)
+      : gatheredStageUpdatedAt;
+    // The next successful scan uses this run's original start as its
+    // conservative coverage watermark. A partial recovery can reuse providers
+    // that finished before midnight; anchoring on the later overall completion
+    // would otherwise skip their unobserved remainder of the prior day.
+    const persistedRunStartedAt = Number(priorRunStartedAt);
+    const collectionStartedAt = Number.isSafeInteger(persistedRunStartedAt)
+      && persistedRunStartedAt > 0
+      ? persistedRunStartedAt
+      : (resumeScope ? activeSearchWindow.startTimestamp : runStartedAt);
+    const gatheredStageAdvanced = await setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt, {
+      expectedRunId: activeRunId,
+      nodeId,
+      collectionCompletedAt,
+    });
     if (hasExactResumeToken && gatheredStageAdvanced !== true) {
       const failure = await exactResumeStageFailure();
       retirePipeline('recovery-superseded', failure.error);
@@ -10151,6 +10365,8 @@ Return a JSON object with four arrays of search query strings:
       collectionScopeCaveats: collectionScopeCaveatsFromSourceResults(sourceResults),
       scrapeWarnings,
       runId: activeRunId,
+      searchWindow: activeSearchWindow,
+      collectionStartedAt,
       collectionCompletedAt,
     };
   });
@@ -10189,6 +10405,7 @@ Return a JSON object with four arrays of search query strings:
       jobPreferencePlan: state.manifest.inputs?.jobPreferencePlan || null,
       canonicalLocation: state.manifest.inputs?.canonicalLocation || '',
       locationRecorded: Object.hasOwn(state.manifest.inputs || {}, 'canonicalLocation'),
+      searchWindow: state.manifest.inputs?.searchWindow || null,
       profileFingerprint: normalizeJobRunProfileFingerprint(state.manifest.inputs?.profileFingerprint),
       profileFingerprintRecorded: Object.hasOwn(state.manifest.inputs || {}, 'profileFingerprint'),
     };
@@ -10259,7 +10476,7 @@ Return a JSON object with four arrays of search query strings:
     });
   });
 
-  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, jobRunId = null, preferredLocation, collectionLimits, enabledSourceIds }, signal) => {
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, searchWindow, maxAgeDays, canvasFilePath, nodeId, jobRunId = null, preferredLocation, collectionLimits, enabledSourceIds }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
     const emitSingleSourceProgress = (payload) => {
       if (!nodeId) return;
@@ -10275,7 +10492,8 @@ Return a JSON object with four arrays of search query strings:
       };
     }
 
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    const activeSearchWindow = effectiveJobSearchWindow(searchWindow, maxAgeDays);
+    const ageDays = activeSearchWindow.providerLookbackDays;
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     const enabledIds = getEnabledJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS);
     if (!getRunnableJobSourceIds(enabledIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
@@ -10388,19 +10606,20 @@ Return a JSON object with four arrays of search query strings:
       return { success: false, error: `Unsupported single source: ${sourceId}` };
     }
 
-    if (normalizedCollectionLimits.jobsPerPlatform != null) {
-      jobs = jobs.slice(0, normalizedCollectionLimits.jobsPerPlatform);
-    }
     const tagged = jobs.map(j => ({ ...j, source: sourceId }));
-    const deduped = dedupByTitleCompany(tagged);
-
-    const ageFiltered = filterJobsByAge(deduped, ageDays);
-    // The deterministic pinned-title gate is gone; age-filtered rows flow
+    const { deduped } = filterAndDedupJobsByPostedSince(
+      tagged,
+      activeSearchWindow.startTimestamp,
+    );
+    const capped = normalizedCollectionLimits.jobsPerPlatform != null
+      ? deduped.slice(0, normalizedCollectionLimits.jobsPerPlatform)
+      : deduped;
+    // The deterministic pinned-title gate is gone; window-filtered, deduped rows flow
     // straight into history dedup, matching the main search path.
-    let kept = ageFiltered;
+    let kept = capped;
     if (canvasFilePath) {
       const history = await loadJobsHistory(canvasFilePath);
-      const result = dedupAgainstHistory(ageFiltered, history);
+      const result = dedupAgainstHistory(capped, history);
       kept = result.kept;
     }
     // Same final-set chokepoints, in the same order, as the main gather path
@@ -11302,9 +11521,10 @@ Return a JSON object with four arrays of search query strings:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
+    const activeSearchWindow = effectiveJobSearchWindow(searchWindow, maxAgeDays);
     if (!getRunnableJobSourceIds(enabledSourceIds, ACTIVE_SOURCE_IDS, normalizedCollectionLimits).includes(sourceId)) {
       return { resolved: false, disabled: true, items: [] };
     }
@@ -11668,7 +11888,6 @@ Return a JSON object with four arrays of search query strings:
     const runGenericResolve = async () => {
     const resolveConfig = getJobSourceResolveConfig(sourceId);
     const inlineExtractorJS = resolveConfig?.extractorJS || null;
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     // Google’s visible Solve window can settle on only its first ten mounted
     // cards. Keep the original post-age/history recovery universe alongside
     // that visible slice, so a 10/10 duplicate extraction cannot erase the
@@ -11879,7 +12098,7 @@ Return a JSON object with four arrays of search query strings:
             candidates = recoverySelection.candidates;
             unavailableRecoveryRows = recoverySelection.unavailable;
           } else {
-            candidates = filterJobsByAge(providerRows, ageDays);
+            candidates = filterJobsByPostedSince(providerRows, activeSearchWindow.startTimestamp);
             if (canvasFilePath && candidates.length > 0) {
               const history = await loadJobsHistory(canvasFilePath);
               candidates = dedupAgainstHistory(candidates, history).kept;
@@ -12107,7 +12326,7 @@ Return a JSON object with four arrays of search query strings:
     // re-solved a source's captcha. This path now only applies to browser-backed
     // sources; Indeed runs through its own browser launcher and does not use
     // resolve windows.
-    const ageFiltered = filterJobsByAge(extracted, ageDays);
+    const ageFiltered = filterJobsByPostedSince(extracted, activeSearchWindow.startTimestamp);
     const ageDropped = extracted.length - ageFiltered.length;
     // The deterministic pinned-title gate is gone; age-filtered rows flow
     // straight into history dedup, matching the main search path.
@@ -12339,7 +12558,7 @@ Return a JSON object with four arrays of search query strings:
   // The user re-authenticates via Settings, then clicks Continue on the source
   // card. Runs only the remaining queries starting from the challenged page so
   // we don't repeat work already captured in pendingJobs.
-  handleSafe('resume-job-source', async (event, { sourceId, nodeId, jobRunId = null, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds } = {}, signal) => {
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, resumeState, collectionLimits, enabledSourceIds } = {}, signal) => {
     if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
     if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId))) {
       logger.info(`[Jobs][${nodeId}] Indeed Continue ignored: its durable run is no longer current`);
@@ -12365,6 +12584,8 @@ Return a JSON object with four arrays of search query strings:
       }, { nodeId, jobRunId });
     };
     const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
+    const activeSearchWindow = effectiveJobSearchWindow(searchWindow, maxAgeDays);
+    const ageDays = activeSearchWindow.providerLookbackDays;
     // The mode a "Continue"/"Log in"/"Solve" click was showing when the user
     // acted, kept for the resumeAttempts trail below even once a branch clears
     // it off effectiveResumeState. Branches that fall through into the generic
@@ -12651,7 +12872,7 @@ Return a JSON object with four arrays of search query strings:
     logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1} (location=${location || 'none'})`);
     // Same shared-profile lock — a "Continue" click could land while a full
     // search is still scraping; serialize this Indeed browser against them.
-    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location, normalizedCollectionLimits), signal, 'job Indeed resume scrape');
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, ageDays, null, null, startPage, null, location, normalizedCollectionLimits), signal, 'job Indeed resume scrape');
     // Observation of the session this resumed scrape actually ran with (see
     // BUG 3/4), plus BUG 5's cache truth check — a warning proving the
     // session is dead must downgrade the cached "connected" status.
@@ -12664,8 +12885,7 @@ Return a JSON object with four arrays of search query strings:
     // renderer so its collected counter remains in the same dimension as the
     // initial search's `gatheredCount`.
     const gathered = Math.max(0, Number(extracted.length) || 0);
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
-    const ageFiltered = filterJobsByAge(extracted, ageDays);
+    const ageFiltered = filterJobsByPostedSince(extracted, activeSearchWindow.startTimestamp);
     const ageDropped = extracted.length - ageFiltered.length;
     // The deterministic pinned-title gate is gone; age-filtered rows flow
     // straight into history dedup, matching the main search path.

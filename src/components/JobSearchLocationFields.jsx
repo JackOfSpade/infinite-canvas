@@ -60,11 +60,11 @@ export function JobSearchLocationFields({
       <LocationInputs value={searchLocation} onChange={setSearchLocation} disabled={disabled} />
 
       <div className="pt-1 border-t border-white/5">
-        <p className="text-[10px] text-blue-200/60 font-medium mb-1">Remote salary comparison</p>
-        <p className="text-[9px] text-white/35 mb-1">For each company location below, enter where you will live while working remotely. Optional; used only for salary comparison.</p>
+        <p className="text-[10px] text-blue-200/60 font-medium mb-1">Remote salary location <span className="text-white/25">(optional)</span></p>
+        <p className="text-[9px] text-white/35 mb-1">Where you will live while working remotely; used only for salary comparison.</p>
         <div className="flex flex-col gap-1.5">
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: United States</p>
+            <p className="text-[9px] text-white/35 mb-0.5">U.S. employer</p>
             <LocationInputs
               value={remoteResidences?.usa}
               onChange={(next) => setRemoteResidence?.('usa', next)}
@@ -74,7 +74,7 @@ export function JobSearchLocationFields({
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: Canada</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Canadian employer</p>
             <LocationInputs
               value={remoteResidences?.canada}
               onChange={(next) => setRemoteResidence?.('canada', next)}
@@ -84,7 +84,7 @@ export function JobSearchLocationFields({
             />
           </div>
           <div>
-            <p className="text-[9px] text-white/35 mb-0.5">Company location for remote job: elsewhere or worldwide</p>
+            <p className="text-[9px] text-white/35 mb-0.5">Other / worldwide employer</p>
             <LocationInputs
               value={remoteResidences?.other}
               onChange={(next) => setRemoteResidence?.('other', next)}

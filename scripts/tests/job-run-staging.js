@@ -11,11 +11,263 @@ import { CURRENT_SCHEMA_VERSION } from '../test-dependencies.js';
 // shared bundle import at the top stays untouched.
 import { getKnownTaskIds, resolveSearchRoles, taskMaxTokensFor } from '../test-dependencies.js';
 import { screenJobRolesByTitle } from '../test-dependencies.js';
-import { mergeRoleScreenedJobs, registerJobsHandlers } from '../../electron/ipc/jobs.js';
-import { JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
+import { interpretJobPreferences } from '../test-dependencies.js';
+import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
+import { validateResponseSchema } from '../test-dependencies.js';
+import { authoritativeFreshJobSearchWindow, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, legacyJobSearchWindow, mergeRoleScreenedJobs, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { collectionCompletedAtForManifest, markSourceStatus, sanitizeJobSearchWindow, setStage } from '../../electron/ipc/jobRunStaging.js';
+import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
 
 export default [
+  {
+    name: 'job search date window: backend derives fresh boundaries and staging preserves the exact resume window',
+    run: async () => {
+      const now = new Date(2026, 9, 10, 15, 30, 0, 0);
+      const completedAt = new Date(2026, 9, 1, 12, 45, 0, 0).getTime();
+      const fresh = freshJobSearchWindow(completedAt, now);
+      const expectedStart = new Date(2026, 9, 1, 0, 0, 0, 0).getTime();
+      assert(fresh.startTimestamp === expectedStart
+        && fresh.completionTimestamp === completedAt
+        && fresh.providerLookbackDays === 10
+        && fresh.capped === false,
+      `a fresh backend run must include the last completion's whole local date, got ${JSON.stringify(fresh)}`);
+
+      const stale = freshJobSearchWindow(new Date(2025, 7, 1, 12).getTime(), now, 1);
+      assert(stale.startTimestamp === new Date(2025, 9, 10, 0, 0, 0, 0).getTime()
+        && stale.providerLookbackDays === 366
+        && stale.capped === true
+        && stale.capReason === 'older-than-max-lookback',
+      `a fresh backend run must use the independent 365-day history safety cap, got ${JSON.stringify(stale)}`);
+      const configuredFirst = freshJobSearchWindow(null, now, 45);
+      assert(configuredFirst.startTimestamp === new Date(2026, 7, 26, 0, 0, 0, 0).getTime()
+        && configuredFirst.providerLookbackDays === 46,
+      `the backend must authoritatively apply the persisted first-search range, got ${JSON.stringify(configuredFirst)}`);
+
+      const beforeMidnight = new Date(2026, 9, 10, 23, 59, 0, 0);
+      const afterMidnight = new Date(2026, 9, 11, 0, 1, 0, 0);
+      const rendererFrozen = freshJobSearchWindow(null, beforeMidnight, 45);
+      const midnightAccepted = authoritativeFreshJobSearchWindow(
+        null,
+        45,
+        { ...rendererFrozen, providerLookbackDays: JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS },
+        afterMidnight,
+      );
+      const forged = {
+        ...rendererFrozen,
+        startTimestamp: rendererFrozen.startTimestamp - 86_400_000,
+        anchorTimestamp: rendererFrozen.startTimestamp - 86_400_000,
+      };
+      const forgedRejected = authoritativeFreshJobSearchWindow(null, 45, forged, afterMidnight);
+      const backendCurrent = freshJobSearchWindow(null, afterMidnight, 45);
+      assert(midnightAccepted.startTimestamp === rendererFrozen.startTimestamp
+        && midnightAccepted.providerLookbackDays === 47
+        && forgedRejected.startTimestamp === backendCurrent.startTimestamp,
+      'the backend preserves a valid renderer-frozen prior-day boundary across midnight, recomputes its provider horizon, and rejects any other widening');
+
+      const legacy = legacyJobSearchWindow(7, now.getTime(), now);
+      assert(legacy.startTimestamp === new Date(2026, 9, 3, 0, 0, 0, 0).getTime()
+        && legacy.providerLookbackDays === 8
+        && legacy.capReason === 'legacy-max-age-days',
+      `an old maxAgeDays manifest must upgrade to a usable inclusive date window, got ${JSON.stringify(legacy)}`);
+      assert(JSON.stringify(effectiveJobSearchWindow(fresh, 1, now.getTime(), now)) === JSON.stringify(fresh),
+        'a persisted exact searchWindow must win over a legacy maxAgeDays fallback on resume');
+      assert(effectiveJobSearchWindow({
+        ...fresh,
+        providerLookbackDays: JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS,
+      }, 1, now.getTime(), now).providerLookbackDays === fresh.providerLookbackDays,
+      'an action must recompute provider lookback from its exact boundary instead of trusting an inflated relative horizon');
+      // Resume at an exact local-midnight multiple too: ceil(elapsed / day)
+      // would be one day too narrow at this boundary.
+      const delayedResumeAt = new Date(2026, 9, 11, 0, 0, 0, 0);
+      const delayed = effectiveJobSearchWindow(fresh, 1, now.getTime(), delayedResumeAt);
+      assert(delayed.startTimestamp === fresh.startTimestamp
+        && delayed.completionTimestamp === fresh.completionTimestamp
+        && delayed.providerLookbackDays === 11,
+      `a delayed resume must preserve its exact boundary while widening the provider request, got ${JSON.stringify(delayed)}`);
+      const delayedLegacy = effectiveJobSearchWindow(null, 7, now.getTime(), delayedResumeAt);
+      assert(delayedLegacy.startTimestamp === legacy.startTimestamp
+        && delayedLegacy.completionTimestamp === legacy.completionTimestamp
+        && delayedLegacy.providerLookbackDays === 9,
+      `a delayed legacy-manifest resume must also preserve its upgraded boundary while widening the provider request, got ${JSON.stringify(delayedLegacy)}`);
+      assert(sanitizeJobSearchWindow({
+        ...fresh,
+        providerLookbackDays: JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS,
+      })?.providerLookbackDays === JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS
+        && sanitizeJobSearchWindow({
+          ...fresh,
+          providerLookbackDays: JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS + 1,
+        }) === null,
+      'the durable manifest accepts the bounded one-year DST overlap but rejects anything broader');
+
+      const duplicateWindow = filterAndDedupJobsByPostedSince([
+        { id: 'old-first', source: 'indeed', title: 'Platform Engineer', company: 'Example Co', location: 'Toronto', posted: new Date(expectedStart - 1).toISOString() },
+        { id: 'new-valid', source: 'google', title: 'Platform Engineer', company: 'Example Co', location: 'Toronto', posted: new Date(expectedStart + 60_000).toISOString() },
+        { id: 'new-duplicate', source: 'linkedin', title: 'Platform Engineer', company: 'Example Co', location: 'Toronto', posted: new Date(expectedStart + 120_000).toISOString() },
+      ], expectedStart, { now });
+      assert(duplicateWindow.ageDropped === 1
+        && duplicateWindow.windowEligible.map(job => job.id).join(',') === 'new-valid,new-duplicate'
+        && duplicateWindow.deduped.map(job => job.id).join(',') === 'new-valid',
+      `the exact window must remove an old first-seen mirror before dedup so its newer copy survives, got ${JSON.stringify(duplicateWindow)}`);
+
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-search-window-roundtrip-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      try {
+        await startRun(canvasPath, {
+          runId: 'date-window-run',
+          startedAt: now.getTime(),
+          queries: ['platform engineer'],
+          canonicalLocation: '',
+          nodeId: 'date-window-hub',
+          sourceIds: ['indeed'],
+          searchWindow: fresh,
+          // Kept only so an older binary could still recover this manifest.
+          maxAgeDays: fresh.providerLookbackDays,
+        });
+        const state = await readRunState(canvasPath, now.getTime() + 1, { nodeId: 'date-window-hub' });
+        assert(JSON.stringify(state?.manifest?.inputs?.searchWindow) === JSON.stringify(fresh),
+          `the crash-resume manifest must round-trip the exact window, got ${JSON.stringify(state?.manifest?.inputs?.searchWindow)}`);
+        const firstGatheredAt = now.getTime() + 2;
+        const resumedAt = now.getTime() + 60_000;
+        await setStage(canvasPath, 'gathered', firstGatheredAt, {
+          expectedRunId: 'date-window-run',
+          nodeId: 'date-window-hub',
+          collectionCompletedAt: firstGatheredAt,
+        });
+        await setStage(canvasPath, 'gathered', resumedAt, {
+          expectedRunId: 'date-window-run',
+          nodeId: 'date-window-hub',
+          collectionCompletedAt: resumedAt,
+        });
+        const resumedState = await readRunState(canvasPath, resumedAt + 1, { nodeId: 'date-window-hub' });
+        assert(resumedState?.manifest?.collectionCompletedAt === firstGatheredAt
+          && resumedState?.manifest?.lastUpdated === resumedAt
+          && collectionCompletedAtForManifest(resumedState.manifest) === firstGatheredAt,
+        `a gathered resume must refresh liveness without moving the first collection boundary, got ${JSON.stringify(resumedState?.manifest)}`);
+
+        // Simulate a gathered manifest written before collectionCompletedAt
+        // existed. Its prior lastUpdated is the conservative one-time upgrade,
+        // never the later resume timestamp.
+        const scope = jobRunPathScopeForCanvas(canvasPath, 'date-window-hub');
+        const manifestPath = path.join(scope.dir, `${scope.base}.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
+        const legacyManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        delete legacyManifest.collectionCompletedAt;
+        legacyManifest.lastUpdated = firstGatheredAt;
+        await fs.promises.writeFile(manifestPath, JSON.stringify(legacyManifest), 'utf8');
+        await setStage(canvasPath, 'gathered', resumedAt, {
+          expectedRunId: 'date-window-run',
+          nodeId: 'date-window-hub',
+        });
+        const upgradedLegacyState = await readRunState(canvasPath, resumedAt + 1, { nodeId: 'date-window-hub' });
+        assert(upgradedLegacyState?.manifest?.collectionCompletedAt === firstGatheredAt
+          && upgradedLegacyState?.manifest?.lastUpdated === resumedAt,
+        `a legacy gathered manifest must upgrade from its old lastUpdated before resume refreshes it, got ${JSON.stringify(upgradedLegacyState?.manifest)}`);
+        return { freshBoundary: true, cappedBoundary: true, legacyCompatible: true, delayedResumeBroadens: true, windowBeforeDedup: true, resumeRoundTrip: true, gatheredAnchorImmutable: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job search gathered-only resume returns the original collection boundary while refreshing manifest liveness',
+    run: async () => {
+      registerJobsHandlers();
+      const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+      const fingerprint = 'c'.repeat(64);
+      const cases = [
+        { label: 'modern', removeDedicatedBoundary: false },
+        { label: 'legacy', removeDedicatedBoundary: true },
+      ];
+      const outcomes = [];
+
+      for (let index = 0; index < cases.length; index += 1) {
+        const testCase = cases[index];
+        const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `ic-gathered-resume-${testCase.label}-`));
+        const canvasPath = path.join(root, 'workspace.json');
+        const nodeId = `gathered-resume-${testCase.label}`;
+        const runId = `gathered-run-${testCase.label}`;
+        const startedAt = Date.now() - 120_000;
+        const firstGatheredAt = startedAt + 30_000;
+        const searchWindow = freshJobSearchWindow(null, new Date(startedAt));
+        try {
+          await startRun(canvasPath, {
+            runId,
+            startedAt,
+            queries: ['platform engineer'],
+            profileFingerprint: fingerprint,
+            canonicalLocation: '',
+            nodeId,
+            sourceIds: ['indeed'],
+            searchWindow,
+            maxAgeDays: searchWindow.providerLookbackDays,
+          });
+          await recordSourcePage(canvasPath, {
+            nodeId,
+            expectedRunId: runId,
+            sourceId: 'indeed',
+            query: 'platform engineer',
+            page: 1,
+            now: firstGatheredAt - 1,
+            jobs: [{
+              title: 'Platform Engineer',
+              company: `Resume Boundary ${testCase.label}`,
+              location: 'Remote',
+              url: `https://example.com/jobs/${testCase.label}`,
+              posted: 'recently listed',
+              description: `Platform engineering role ${'x'.repeat(500)}`,
+            }],
+          });
+          await markSourceStatus(canvasPath, 'indeed', 'done', firstGatheredAt - 1, {
+            expectedRunId: runId,
+            nodeId,
+          });
+          await setStage(canvasPath, 'gathered', firstGatheredAt, {
+            expectedRunId: runId,
+            nodeId,
+            collectionCompletedAt: firstGatheredAt,
+          });
+
+          if (testCase.removeDedicatedBoundary) {
+            const scope = jobRunPathScopeForCanvas(canvasPath, nodeId);
+            const manifestPath = path.join(scope.dir, `${scope.base}.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
+            const legacyManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+            delete legacyManifest.collectionCompletedAt;
+            legacyManifest.lastUpdated = firstGatheredAt;
+            await fs.promises.writeFile(manifestPath, JSON.stringify(legacyManifest), 'utf8');
+          }
+
+          const sender = {
+            id: 67_000 + index,
+            isDestroyed: () => false,
+            once: () => {},
+            on: () => {},
+            removeListener: () => {},
+            send: () => {},
+          };
+          const result = await searchJobs({ sender }, {
+            nodeId,
+            canvasFilePath: canvasPath,
+            queries: ['platform engineer'],
+            canonicalLocation: '',
+            resume: true,
+            resumeRunId: runId,
+            profileFingerprint: fingerprint,
+          });
+          const after = await readRunState(canvasPath, Date.now(), { nodeId });
+          assert(result?.success === true
+            && result.collectionStartedAt === startedAt
+            && result.collectionCompletedAt === firstGatheredAt
+            && after?.manifest?.collectionCompletedAt === firstGatheredAt
+            && after?.manifest?.lastUpdated > firstGatheredAt,
+          `${testCase.label} gathered-only recovery must retain its original start/collection boundaries while refreshing lastUpdated, got ${JSON.stringify({ result, manifest: after?.manifest })}`);
+          outcomes.push(testCase.label);
+        } finally {
+          await fs.promises.rm(root, { recursive: true, force: true });
+        }
+      }
+      return { preserved: outcomes };
+    },
+  },
   {
     name: 'job run queue: separate hubs serialize on the shared job-search lane and queued cancellation is isolated',
     run: async () => {
@@ -476,6 +728,88 @@ export default [
       assert(JSON.stringify(auditLocations) === JSON.stringify(['New York, NY', 'San Francisco, CA']),
         `each audit must retain its listing identity so distinct same-title/company requisitions survive append merging, got ${JSON.stringify(sameTitleDifferentCities.preferenceEvaluation.audits)}`);
       return { directionRejected: rejected, listingUrl: safe.sourceUrls[0], strictFailClosed: true, hallucinatedListingClaimDowngraded: true, groundedResearchValidated: true, apiValidationSurfaced, auditLocations };
+    },
+  },
+  {
+    name: 'job preferences: long exact direction mirrors use the criterion bound and survive recovery without truncation',
+    run: () => {
+      // Regression for bug-report-2026-09-25T05-58-54-543Z: these are the
+      // two exact direction strings that repeatedly failed the manual handoff.
+      // Their matching preference criteria were valid at <=360 characters,
+      // while direction had an undocumented 180-character cap.
+      const longRole = "Target mid-level full-stack product engineering roles, strongest on the frontend, building customer-facing features for products that are the company's core offering and appropriate for about 3.5 years of experience.";
+      const longAvoid = 'Exclude internal systems that support the business, including internal IT, internal tools, IT support, teams named Internal Tools, Business Systems, Enterprise Applications, Corporate Engineering, IT, or Back Office, and roles focused on internal stakeholders, supporting operations, vendor platform administration, or maintaining legacy systems.';
+      assert(longRole.length === 216 && longAvoid.length === 346,
+        `the regression strings must retain the reported lengths, got ${longRole.length}/${longAvoid.length}`);
+
+      const reportedShape = {
+        ...blankJobPreferencePlan(),
+        direction: {
+          summary: 'Customer-facing product engineering.',
+          roleDirections: [longRole],
+          avoidDirections: [longAvoid],
+          explorationEnabled: false,
+        },
+        softPreferences: [{ id: 'soft-1', criterion: longRole, category: 'role' }],
+        strictRequirements: [{ id: 'strict-1', criterion: longAvoid, category: 'role' }],
+      };
+      const validated = validateJobPreferencePlanSubmission(reportedShape);
+      const recovered = sanitizeJobPreferencePlan(validated);
+      const revalidated = validateJobPreferencePlanSubmission(recovered);
+      assert(revalidated.direction.roleDirections[0] === longRole
+        && revalidated.direction.avoidDirections[0] === longAvoid,
+      'accepted long directions must remain exact after normalization and crash-recovery sanitization');
+
+      const roleItemSchema = JOB_PREFERENCE_PLAN_SCHEMA.properties.direction.properties.roleDirections.items;
+      const avoidItemSchema = JOB_PREFERENCE_PLAN_SCHEMA.properties.direction.properties.avoidDirections.items;
+      const criterionSchema = JOB_PREFERENCE_PLAN_SCHEMA.properties.softPreferences.items.properties.criterion;
+      assert(roleItemSchema.maxLength === JOB_PREFERENCE_CRITERION_MAX_LENGTH
+        && avoidItemSchema.maxLength === JOB_PREFERENCE_CRITERION_MAX_LENGTH
+        && criterionSchema.maxLength === JOB_PREFERENCE_CRITERION_MAX_LENGTH,
+      'the handoff schema must advertise one shared direction/criterion length contract');
+
+      const tooLong = 'x'.repeat(JOB_PREFERENCE_CRITERION_MAX_LENGTH + 1);
+      const overlong = {
+        ...reportedShape,
+        direction: { ...reportedShape.direction, roleDirections: [tooLong] },
+        softPreferences: [{ id: 'soft-1', criterion: tooLong, category: 'role' }],
+      };
+      const schemaErrorPaths = validateResponseSchema(overlong, JOB_PREFERENCE_PLAN_SCHEMA).map(error => error.path);
+      let domainRejected = false;
+      try { validateJobPreferencePlanSubmission(overlong); } catch { domainRejected = true; }
+      assert(domainRejected
+        && schemaErrorPaths.includes('$.direction.roleDirections[0]')
+        && schemaErrorPaths.includes('$.softPreferences[0].criterion'),
+      `overlong exact mirrors must be rejected by the visible schema and domain backstop, got ${JSON.stringify(schemaErrorPaths)}`);
+
+      // The incident exposed a general contract hazard: any length enforced
+      // only after schema validation produces the same opaque correction
+      // loop. Pin every other text bound in these two preference handoffs to
+      // the domain validator's existing limits as well.
+      const visiblePlanBoundErrors = validateResponseSchema({
+        ...reportedShape,
+        summary: 's'.repeat(501),
+        direction: { ...reportedShape.direction, summary: 'd'.repeat(401) },
+        softPreferences: [{ id: 'i'.repeat(61), criterion: longRole, category: 'role' }],
+        warnings: ['w'.repeat(301)],
+        titles: ['t'.repeat(JOB_PREFERENCE_TITLE_MAX_LENGTH + 1)],
+      }, JOB_PREFERENCE_PLAN_SCHEMA).map(error => error.path);
+      const visibleAuditBoundErrors = validateResponseSchema({
+        titles: [],
+        added: ['a'.repeat(JOB_PREFERENCE_TITLE_MAX_LENGTH + 1)],
+        addedReason: 'a'.repeat(501),
+        removed: [],
+        removedReason: '',
+        rationale: 'r'.repeat(801),
+      }, JOB_ROLE_AUDIT_SCHEMA).map(error => error.path);
+      assert([
+        '$.summary', '$.direction.summary', '$.softPreferences[0].id', '$.warnings[0]', '$.titles[0]',
+      ].every(path => visiblePlanBoundErrors.includes(path))
+        && ['$.titles', '$.added[0]', '$.addedReason', '$.rationale']
+          .every(path => visibleAuditBoundErrors.includes(path)),
+      `all runtime text bounds must be visible in their handoff schemas, got ${JSON.stringify({ visiblePlanBoundErrors, visibleAuditBoundErrors })}`);
+
+      return { acceptedLengths: [longRole.length, longAvoid.length], schemaLimit: JOB_PREFERENCE_CRITERION_MAX_LENGTH };
     },
   },
   {
@@ -1772,7 +2106,8 @@ export default [
       'a Search-Brief-resolved title list must be tried before the exploratory query-generation fallback');
       assert(done.includes("resultDisposition === 'preference-filtered'")
         && done.includes("${jobsLabel(count, 'job')} matched your preferences")
-        && done.includes('filtered by your preferences'),
+        && done.includes('Match details')
+        && done.includes("jobsLabel(filteredPreferenceCount, 'job')} filtered"),
       'an all-filtered terminal state must explain that Job Preferences filtered the results, not imply a zero-result scrape');
       const resumeStart = search.indexOf('const handleResumeRun = useCallback');
       const resumeEnd = search.indexOf('const handleDiscardResume', resumeStart);
@@ -2029,13 +2364,13 @@ export default [
         && resetBody.includes('? {}')
         && resetBody.includes(': { searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null };'),
         'a career-data-wiping Reset must clear the same lock triple as Clear career files; a profile-retaining Reset must leave it as an empty patch');
-      assert(search.includes('...retainedCareerData,\n      ...roleLockClearPatch,'),
+      assert(search.includes('...retainedCareerData,\n      ...resetSearchHistoryPatch,\n      ...roleLockClearPatch,'),
         'roleLockClearPatch must actually be spread into the reset’s updateGlobal patch, not merely computed and discarded');
       return { clearCareerUnlocks: true, profileRetainingResetPreservesLock: true };
     },
   },
   {
-    name: 'SETTINGS LOCKING FREEZE: every user-configurable setting (brief, location, remote residences, look-back, depth, platforms) is read-only/disabled once resolvedRoles is populated, in both JobSearchNode.jsx (empty state) and JobSearchDoneState.jsx (done state)',
+    name: 'SETTINGS LOCKING FREEZE: every user-configurable setting (brief, location, remote residences, depth, platforms) is read-only/disabled once resolvedRoles is populated, in both JobSearchNode.jsx (empty state) and JobSearchDoneState.jsx (done state)',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -2052,13 +2387,12 @@ export default [
         && search.includes('disabled={controlsLocked || settingsFrozen}'),
       'JobSearchNode.jsx must derive settingsFrozen from hasResolvedRoleLock(data) and disable the Search Brief textarea once it is populated');
       // Every other empty-state setting must also freeze, not just the brief:
-      // location/remote-residence fields, look-back days, jobs/pages depth,
-      // and platform selection all take the same disabled prop.
+      // location/remote-residence fields, jobs/pages depth, and platform
+      // selection all take the same disabled prop.
       assert(search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
-        && search.includes('disabled={controlsLocked || settingsFrozen}\n                    className="w-10')
         && search.includes('setCollectionLimits={setCollectionLimits}\n                    disabled={settingsFrozen}')
         && search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}'),
-      'JobSearchNode.jsx must disable location, look-back, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
+      'JobSearchNode.jsx must disable location, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
       // Done state: resolvedRoles AND resolvedRolesMeta arrive as PROPS (this
       // component does not read node data directly) and gate every setting in
       // this render too. FIX2 (mirrored from JobSearchNode.jsx's own
@@ -2073,10 +2407,9 @@ export default [
       // The done state is the one most likely to tempt a pre-re-run tweak, so
       // every non-brief setting must carry the same freeze there too.
       assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}')
-        && done.includes('aria-label="Maximum posting age in days"\n              disabled={settingsFrozen}')
         && done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}')
         && done.includes('searchLocation={searchLocation}\n            disabled={settingsFrozen}'),
-      'JobSearchDoneState.jsx must disable location, look-back, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
+      'JobSearchDoneState.jsx must disable location, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
       // The empty-state component must actually be the one supplying both
       // props — otherwise the done-state freeze could silently read undefined
       // forever regardless of what got locked. resolvedRolesMeta is the real
@@ -2098,16 +2431,16 @@ export default [
         fs.promises.readFile(path.resolve('src/components/HubErrorBanner.jsx'), 'utf8'),
       ]);
       assert(search.includes('Search Brief <span className="text-white/25">(optional)</span>')
-        && search.includes('AI determines which roles to search from what you write here')
+        && search.includes('AI turns this brief into roles and fit criteria.')
         && search.includes('aria-describedby={jobPreferencesHelpId}')
+        && search.includes('maxLength={4000}')
         && search.includes('const cleanupRetirementPending = hasPendingManualAiRetirement(data);')
         && search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
         && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;')
         && search.includes('disabled={controlsLocked}')
-        // Look-back and location controls carry the PERMANENT settingsFrozen
-        // freeze in addition to the transient controlsLocked busy-state (see
+        // Location controls carry the PERMANENT settingsFrozen freeze in
+        // addition to the transient controlsLocked busy-state (see
         // the SETTINGS LOCKING FREEZE test above for the full inventory).
-        && search.includes('disabled={controlsLocked || settingsFrozen}\n                    className="w-10')
         && search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
         && search.includes('locked={errorControlsLocked}'),
       'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, or finishing cancellation cleanup without hiding the cleanup retry action');
@@ -2118,13 +2451,44 @@ export default [
         && done.includes("jobsLabel(count, 'job')")
         && done.includes("jobsLabel(count, 'new job', 'new jobs')")
         && done.includes('ready to score')
-        && done.includes('aria-describedby={preferencesHelpId}'),
-      'completed result labels must pluralize every job count and retain labeled Search Brief guidance before a re-run');
+        && done.includes('aria-describedby={preferencesHelpId}')
+        && done.includes('maxLength={4000}')
+        && done.includes('const [setupOpen, setSetupOpen] = useState(() => !settingsFrozen);')
+        && done.includes("Search setup{settingsFrozen ? ' · locked' : ''}")
+        && done.includes('open={setupOpen}')
+        && done.includes('Describe roles, priorities, and deal-breakers.'),
+      'completed result labels must pluralize every job count and retain a labeled, 4,000-character Search Brief inside an initially closed locked setup disclosure with concise locked/unlocked guidance');
+
+      // A zero-title role resolution is still a real frozen plan. Both draft
+      // and completed views must therefore use an explicit fallback rather
+      // than printing the dangling label `Locked roles:` with no value.
+      assert(search.includes("resolvedRoles.length > 0\n                        ? `Locked roles: ${resolvedRoles.join(', ')}`\n                        : 'No specific roles were saved, so searches are not narrowed to a role list.'")
+        && done.includes("resolvedRoles.length > 0\n                  ? `Locked roles: ${resolvedRoles.join(', ')}`\n                  : 'No specific roles were saved, so searches are not narrowed to a role list.'")
+        && !search.includes('Locked roles: {resolvedRoles.join')
+        && !done.includes('Locked roles: {resolvedRoles.join'),
+      'a locked zero-role plan must show its explicit fallback in draft and completed Search setup, never a dangling Locked roles label');
+
+      const normalProcessingStart = processing.indexOf('<div className="group flex flex-col items-center justify-center');
+      const normalProcessing = processing.slice(normalProcessingStart);
+      const normalAtomicLiveRegions = normalProcessing.match(/role="status" aria-live="polite" aria-atomic="true"/g) || [];
+      const primaryLiveStart = normalProcessing.indexOf('<p className="text-white/60 text-xs font-medium" role="status" aria-live="polite" aria-atomic="true">');
+      const primaryLiveEnd = normalProcessing.indexOf('</p>', primaryLiveStart);
       assert(processing.includes('aria-label="Copy the Chrome launch command"')
-        && processing.includes('role="status" aria-live="polite"')
+        // Chrome setup and ordinary processing are mutually exclusive render
+        // branches. In ordinary processing, only the compact phase/source
+        // label is live; high-frequency detail/count/scoring/resume copy is
+        // visibly present but deliberately outside that atomic announcement.
+        && normalAtomicLiveRegions.length === 1
+        && primaryLiveStart >= 0 && primaryLiveEnd > primaryLiveStart
+        && normalProcessing.slice(primaryLiveStart, primaryLiveEnd).includes('{primaryStatus}')
+        && normalProcessing.slice(primaryLiveEnd).includes('{hubState === \'searching\' && activeSourceDetail && (')
+        && normalProcessing.slice(primaryLiveEnd).includes('{collectedStatus && <p')
+        && normalProcessing.slice(primaryLiveEnd).includes('{scoringStatus && <p')
+        && normalProcessing.slice(primaryLiveEnd).includes('{resumeSummary && (')
+        && !normalProcessing.slice(primaryLiveEnd).includes('role="status"')
         && processing.includes('aria-label="Cancel and reset job search"')
         && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
-      'processing controls must be keyboard-operable and communicate changing work to assistive technology');
+      'processing controls must be keyboard-operable and communicate the compact phase/source through one atomic live region without making detail, counts, scoring, or résumé text live');
       // NAMING LOCK (inverted for Phase B): the merged box's visible name is
       // now Search Brief, not Job Preferences — assert the actual label
       // markup in BOTH input components reads "Search Brief" and that
@@ -2151,15 +2515,15 @@ export default [
     // assertion still passes if the STRING for one control silently drops
     // out as long as the others remain — the boolean result of `a && b && c`
     // only tells you SOMETHING failed, not which `disabled` prop went
-    // missing. This test asserts each of the 7 inventoried settings with its
+    // missing. This test asserts each of the 6 inventoried settings with its
     // OWN assert() call (one control missing its freeze fails exactly one
     // assertion, identifying itself by message) across both render states.
-    // Settings 2/3 (location + remote residences) and 5/6 (jobs/platform +
+    // Settings 2/3 (location + remote residences) and 4/5 (jobs/platform +
     // pages/search) share ONE component instance each — that component
     // takes a single `disabled` prop, so one assertion legitimately covers
     // two inventory settings; this is the component's own shape, not a test
     // shortcut, and the comment on each assertion says so explicitly.
-    name: 'SETTINGS FREEZE per-control: each of the 7 inventoried settings is individually asserted disabled under settingsFrozen, in both JobSearchNode.jsx and JobSearchDoneState.jsx',
+    name: 'SETTINGS FREEZE per-control: each of the 6 inventoried settings is individually asserted disabled under settingsFrozen, in both JobSearchNode.jsx and JobSearchDoneState.jsx',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -2174,32 +2538,32 @@ export default [
       // ever needs settingsFrozen).
       assert(search.includes('placeholder="E.g. Senior Product Manager roles — or: help me pivot away from web development; large established companies only."\n                    aria-describedby={jobPreferencesHelpId}'
         + '\n                    // settingsFrozen is PERMANENT (roles locked on the first run,\n                    // taking every setting below with them) — distinct from\n                    // controlsLocked\'s transient "busy right now". Reusing the\n                    // same disabled styling here is deliberate: it reads as\n                    // intentionally locked, not merely temporarily busy.\n                    disabled={controlsLocked || settingsFrozen}'),
-      '[setting 1/7 — Search Brief] JobSearchNode.jsx textarea must disable on controlsLocked || settingsFrozen');
+      '[setting 1/6 — Search Brief] JobSearchNode.jsx textarea must disable on controlsLocked || settingsFrozen');
       assert(search.includes('remoteResidences={remoteResidences}\n                  setRemoteResidence={setRemoteResidence}\n                  disabled={controlsLocked || settingsFrozen}'),
-      '[settings 2+3/7 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchNode.jsx must disable it on controlsLocked || settingsFrozen');
-      assert(search.includes('aria-label="Maximum posting age in days"\n                    disabled={controlsLocked || settingsFrozen}'),
-      '[setting 4/7 — Look back days] JobSearchNode.jsx number input must disable on controlsLocked || settingsFrozen');
+      '[settings 2+3/6 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchNode.jsx must disable it on controlsLocked || settingsFrozen');
       assert(search.includes('setCollectionLimits={setCollectionLimits}\n                    disabled={settingsFrozen}'),
-      '[settings 5+6/7 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchNode.jsx must disable it on settingsFrozen');
+      '[settings 4+5/6 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchNode.jsx must disable it on settingsFrozen');
       assert(search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}\n                  />\n                )}'),
-      '[setting 7/7 — Job platforms] JobSearchNode.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
+      '[setting 6/6 — Job platforms] JobSearchNode.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
 
       // JobSearchDoneState.jsx (the re-run screen) — locked/busy is handled
       // by hiding this whole settings block (`{!locked && (...)}`); within
       // it, settingsFrozen alone gates every control, since a queued/busy
       // hub never reaches this render at all.
       assert(done.includes('// a locked brief reads as intentional rather than a stray bug.\n              disabled={settingsFrozen}'),
-      '[setting 1/7 — Search Brief] JobSearchDoneState.jsx textarea must disable on settingsFrozen');
+      '[setting 1/6 — Search Brief] JobSearchDoneState.jsx textarea must disable on settingsFrozen');
       assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}'),
-      '[settings 2+3/7 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
-      assert(done.includes('aria-label="Maximum posting age in days"\n              disabled={settingsFrozen}'),
-      '[setting 4/7 — Look back days] JobSearchDoneState.jsx number input must disable on settingsFrozen');
+      '[settings 2+3/6 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
       assert(done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}'),
-      '[settings 5+6/7 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
-      assert(done.includes('searchLocation={searchLocation}\n            disabled={settingsFrozen}\n          />\n        </div>\n      )}'),
-      '[setting 7/7 — Job platforms] JobSearchDoneState.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
+      '[settings 4+5/6 — Jobs/platform + Browser pages/search, one <JobCollectionLimitsControl> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
+      const donePlatformControlStart = done.indexOf('<JobPlatformSelectionControl');
+      const donePlatformControlEnd = done.indexOf('/>', donePlatformControlStart);
+      assert(donePlatformControlStart >= 0
+        && donePlatformControlEnd > donePlatformControlStart
+        && done.slice(donePlatformControlStart, donePlatformControlEnd).includes('disabled={settingsFrozen}'),
+      '[setting 6/6 — Job platforms] JobSearchDoneState.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
 
-      return { perControlAsserted: 10 };
+      return { perControlAsserted: 8 };
     },
   },
   {
@@ -2243,15 +2607,16 @@ export default [
   {
     // The three actions that stay reachable through a permanently-frozen hub
     // (re-run with the same locked settings, re-evaluate saved jobs against
-    // the same locked brief, or blow the whole thing away via Clear career
-    // files) must never themselves be disabled by settingsFrozen — only the
-    // SETTINGS should freeze, not the ability to act on them or escape the
-    // freeze. Each assertion below is scoped to that one button's own JSX so
+    // the same locked brief, or clear career data) must never themselves be
+    // disabled by
+    // settingsFrozen — only the SETTINGS should freeze, not the ability to
+    // act on them or escape the freeze. Each assertion below is scoped to that
+    // one button's own JSX so
     // a stray `disabled={settingsFrozen}` landing on the wrong button is
     // still caught even though the surrounding file also legitimately
     // contains that exact substring elsewhere (on the settings it SHOULD
     // gate).
-    name: 'SETTINGS FREEZE ACTIONS STAY LIVE: Re-run / Re-evaluate / Clear career files are never disabled by settingsFrozen, in either render state',
+    name: 'SETTINGS FREEZE ACTIONS STAY LIVE: Re-run / Re-evaluate / Clear career data are never disabled by settingsFrozen, in either render state',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -2280,7 +2645,7 @@ export default [
       'JobSearchDoneState.jsx Re-run Search button must disable only on platformsVerifying, never on settingsFrozen');
       const doneClearButton = button(done, 'onClick={onClearCareerFiles}');
       assert(!doneClearButton.includes('disabled'),
-      'JobSearchDoneState.jsx Clear career files button must carry no disabled prop at all (settingsFrozen or otherwise)');
+      'JobSearchDoneState.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise)');
 
       // JobSearchNode.jsx (career files retained, pre-first-run empty state)
       // — these two actions are gated on VISIBILITY (`!controlsLocked &&`
@@ -2295,9 +2660,9 @@ export default [
       'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
       const searchClearButton = button(search, 'handleClearCareerFiles(e)');
       assert(!searchClearButton.includes('disabled'),
-      'JobSearchNode.jsx Clear career files button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
+      'JobSearchNode.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
       assert(search.includes('{!controlsLocked && !activeBoardRecoveryOwnerKey && (\n                    <button'),
-      'JobSearchNode.jsx Clear career files button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
+      'JobSearchNode.jsx Clear career data button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
 
       return { actionsStayLive: true };
     },
@@ -3847,15 +4212,15 @@ export default [
   {
     name: 'search-jobs: the bulk AI role screen merges unstamped rows positionally without cross-source id collisions',
     run: () => {
-      // On a RESUME, `ageFiltered` is seeded from the crashed run's staged
+      // On a RESUME, `deduped` is seeded from the crashed run's staged
       // rows, which already carry a `roleScreen` stamp from the interrupted
-      // attempt. Before this fix, the handler re-sent the WHOLE ageFiltered
+      // attempt. Before this fix, the handler re-sent the WHOLE deduped
       // pool to screenJobRolesByTitle on every resume, spending an extra
       // handoff, and -- because this is a non-deterministic semantic call --
       // could flip an already-accepted row into a drop for a reason the
       // report never surfaces. The fix filters to `roleUnscreened` (rows
       // lacking a stamp) before the call, and rebuilds the kept pool from the
-      // FULL `ageFiltered` list afterward so previously-screened rows pass
+      // FULL `deduped` list afterward so previously-screened rows pass
       // through untouched instead of being replaced by (or re-judged into)
       // the fresh screen's output.
       const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
@@ -3864,23 +4229,23 @@ export default [
       const stage = source.slice(stageStart, stageEnd);
       assert(stageStart >= 0 && stageEnd > stageStart, 'could not locate the search-jobs bulk role-screen stage -- has it been renamed or restructured?');
 
-      const unscreenedAt = stage.indexOf('const roleUnscreened = ageFiltered.filter(job => !job?.roleScreen);');
+      const unscreenedAt = stage.indexOf('const roleUnscreened = deduped.filter(job => !job?.roleScreen);');
       const guardAt = stage.indexOf('if (roleScreenTitles.length > 0 && roleUnscreened.length > 0) {', unscreenedAt);
       const callAt = stage.indexOf('const roleScreen = await screenJobRolesByTitle({', guardAt);
       const jobsArgAt = stage.indexOf('jobs: roleUnscreened,', callAt);
       const rebuildAt = stage.indexOf('roleScreened = mergeRoleScreenedJobs(', jobsArgAt);
       assert(unscreenedAt >= 0 && guardAt > unscreenedAt && callAt > guardAt && jobsArgAt > callAt && rebuildAt > jobsArgAt,
-        'the screen must be gated on rows lacking a roleScreen stamp (roleUnscreened), and that filtered set -- not the full ageFiltered pool -- must be what is sent to screenJobRolesByTitle');
+        'the screen must be gated on rows lacking a roleScreen stamp (roleUnscreened), and that filtered set -- not the full deduped pool -- must be what is sent to screenJobRolesByTitle');
       // The old bug sent the full pool directly; assert that shape is gone
       // from the call args (this must fail against the pre-fix source, where
-      // there was no roleUnscreened variable and `jobs: ageFiltered,` was
+      // there was no roleUnscreened variable and the full pool was
       // passed straight through).
-      assert(!stage.includes('jobs: ageFiltered,'),
-        'the full (unfiltered) ageFiltered pool must never be passed directly as the screen\'s `jobs` argument');
+      assert(!stage.includes('jobs: deduped,'),
+        'the full (unfiltered) deduped pool must never be passed directly as the screen\'s `jobs` argument');
 
       const rebuildBlockEnd = stage.indexOf('roleDropped = Number(roleScreen?.counts?.dropped)', rebuildAt);
       const rebuild = stage.slice(rebuildAt, rebuildBlockEnd);
-      assert(rebuild.includes('mergeRoleScreenedJobs(ageFiltered, roleScreen)')
+      assert(rebuild.includes('mergeRoleScreenedJobs(deduped, roleScreen)')
         && !rebuild.includes('sourceJobKey('),
       'the rebuild must consume the screen\'s positional verdicts instead of joining through non-global provider ids');
 
@@ -3959,6 +4324,120 @@ export default [
     },
   },
   {
+    name: 'job run staging: renderer advances the completion anchor only after the matching successful terminal receipt',
+    run: async () => {
+      const source = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const backend = await fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8');
+
+      const completionStart = source.indexOf('const completeJobRun = useCallback');
+      const stagingStart = source.indexOf('const recordCollectionCompletion = useCallback', completionStart);
+      const stagingEnd = source.indexOf('const retryTerminalFinalization = useCallback', stagingStart);
+      assert(completionStart >= 0 && stagingStart > completionStart && stagingEnd > stagingStart,
+        'the renderer must keep terminal finalization and collection-completion staging as explicit neighboring transactions');
+      const completion = source.slice(completionStart, stagingStart);
+      const staging = source.slice(stagingStart, stagingEnd);
+
+      // A successful provider response records only a run-scoped pending
+      // candidate. It must not bless that timestamp as the durable anchor
+      // while scoring and the backend completion receipt can still fail.
+      assert(staging.includes('pendingCollectionCompletion: {')
+        && staging.includes('runId: searchResult?.runId || null,')
+        && staging.includes('collectionStartedAt,')
+        && staging.includes('collectionCompletedAt,')
+        && !staging.includes('lastCompletedRunAt'),
+      'collection settlement must stage the exact run/timestamp without advancing lastCompletedRunAt');
+      const freshPipelineStart = source.indexOf('const runPipeline = useCallback');
+      const searchResultAt = source.indexOf('const searchResult = await window.electronAPI.searchJobs({', freshPipelineStart);
+      const stageCallAt = source.indexOf('recordCollectionCompletion(searchResult, cancelled);', searchResultAt);
+      const lastFailureGuardAt = source.lastIndexOf('if (!searchResult.success) {', stageCallAt);
+      const failureThrowAt = source.indexOf("throw new Error(searchResult.error || 'Job search failed');", lastFailureGuardAt);
+      assert(freshPipelineStart >= 0 && searchResultAt > freshPipelineStart
+        && lastFailureGuardAt > searchResultAt && failureThrowAt > lastFailureGuardAt
+        && stageCallAt > failureThrowAt,
+      'only a successful search response may stage pendingCollectionCompletion');
+      const freshSearchPayload = source.slice(searchResultAt, stageCallAt);
+      const searchHandlerStart = backend.indexOf("handleSafe('search-jobs'");
+      assert(freshSearchPayload.includes('initialLookbackDays: initialJobSearchLookbackDays(laneTurnData)')
+        && freshSearchPayload.includes('searchWindow: runSearchWindow')
+        && searchHandlerStart >= 0
+        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('initialLookbackDays = null')
+        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('searchWindow: requestedSearchWindow = null')
+        && backend.slice(searchHandlerStart, searchHandlerStart + 7_000).includes('authoritativeFreshJobSearchWindow(')
+        && backend.includes("const appliedInitialLookbackDays = !resume"),
+      'the renderer must send its persisted first-scan range and frozen window, and the fresh IPC handler must validate and apply both');
+
+      // A missing/failed receipt returns before reading the pending candidate.
+      // Even a good receipt can commit only a completed terminal status for
+      // the same backend run token and a valid completion timestamp.
+      const failedGuardAt = completion.indexOf('if (failed) {');
+      const pendingReadAt = completion.indexOf('const pendingCompletion = node?.data?.pendingCollectionCompletion;');
+      const failedBranch = completion.slice(failedGuardAt, pendingReadAt);
+      const completedGuardAt = completion.indexOf("terminalStatus === 'completed'", pendingReadAt);
+      const matchingRunGuardAt = completion.indexOf('pendingCompletion?.runId === runId', completedGuardAt);
+      const validTimestampGuardAt = completion.indexOf('normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt) != null', matchingRunGuardAt);
+      const guardedCommitAt = completion.indexOf('if (commitsSuccessfulCollection) {', validTimestampGuardAt);
+      const anchorWriteAt = completion.indexOf('patch.lastCompletedRunAt = normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt);', guardedCommitAt);
+      const coverageWriteAt = completion.indexOf('patch.lastSearchCoverageStartedAt = normalizeCompletionTimestamp(', anchorWriteAt);
+      const pendingClearAt = completion.indexOf('patch.pendingCollectionCompletion = null;', coverageWriteAt);
+      assert(failedGuardAt >= 0 && pendingReadAt > failedGuardAt
+        && failedBranch.includes('return')
+        && completedGuardAt > pendingReadAt
+        && matchingRunGuardAt > completedGuardAt
+        && validTimestampGuardAt > matchingRunGuardAt
+        && guardedCommitAt > validTimestampGuardAt
+        && anchorWriteAt > guardedCommitAt
+        && coverageWriteAt > anchorWriteAt
+        && pendingClearAt > coverageWriteAt
+        && !completion.includes('nextSearchWindowMode'),
+      'failed, non-completed, mismatched, or malformed completion candidates must not advance either durable anchor; successful completion preserves the automatic historical baseline');
+      assert((completion.match(/patch\.lastCompletedRunAt\s*=/g) || []).length === 1
+        && (completion.match(/patch\.lastSearchCoverageStartedAt\s*=/g) || []).length === 1
+        && (completion.match(/patch\.pendingCollectionCompletion\s*=\s*null/g) || []).length === 1,
+      'the matching completed-run guard must be the sole completion and coverage-anchor commit site');
+
+      const receiptCheckAt = completion.indexOf("if (completionCanvasFilePath && (result?.ok !== true || result?.cleared !== true)) {");
+      const failedReceiptAt = completion.indexOf('recordFinalizationState(true);', receiptCheckAt);
+      const successfulReceiptAt = completion.indexOf('} else recordFinalizationState(false);', failedReceiptAt);
+      assert(receiptCheckAt >= 0 && failedReceiptAt > receiptCheckAt && successfulReceiptAt > failedReceiptAt
+        && (completion.match(/recordFinalizationState\(false\)/g) || []).length === 1,
+      'a saved canvas may enter the completion-anchor commit branch only after an ok receipt with confirmed sidecar cleanup');
+
+      // Both ways of abandoning an old generation must drop its staged
+      // candidate while leaving lastCompletedRunAt untouched: admission of a
+      // new run and the user-facing Reset action.
+      const freshSetupStart = source.indexOf('// Destructive fresh-run setup belongs after queue admission.', freshPipelineStart);
+      const freshSetupEnd = source.indexOf('// Step 3: Search', freshSetupStart);
+      const freshSetup = source.slice(freshSetupStart, freshSetupEnd);
+      const resetStart = source.indexOf('const resetHandler = useCallback');
+      const resetEnd = source.indexOf('const handleRerun = useCallback', resetStart);
+      const reset = source.slice(resetStart, resetEnd);
+      const clearCareerStart = source.indexOf('const handleClearCareerFiles = useCallback');
+      const clearCareerEnd = source.indexOf('const isProcessing = PROCESSING_STATES.includes(hubState);', clearCareerStart);
+      const clearCareer = source.slice(clearCareerStart, clearCareerEnd);
+      assert(freshSetupStart >= 0 && freshSetupEnd > freshSetupStart
+        && freshSetup.includes('pendingCollectionCompletion: null,'),
+      'a newly admitted fresh scan must discard a failed predecessor\'s staged completion candidate');
+      assert(resetStart >= 0 && resetEnd > resetStart
+        && reset.includes('pendingCollectionCompletion: null,'),
+      'Reset must clear pendingCollectionCompletion when it discards results');
+      assert(clearCareerStart >= 0 && clearCareerEnd > clearCareerStart
+        && clearCareer.includes('pendingCollectionCompletion: null,')
+        && clearCareer.includes('searchWindow: null,')
+        && !clearCareer.includes('nextSearchWindowMode')
+        && !clearCareer.includes('lastCompletedRunAt: null,')
+        && !clearCareer.includes('lastSearchCoverageStartedAt: null,'),
+      'Clear career data must discard the staged candidate and run-window metadata while preserving durable history for the automatic next scan');
+
+      return {
+        stagesAfterSuccess: true,
+        receiptGated: true,
+        runMatched: true,
+        resetClearsPending: true,
+        careerClearClearsPending: true,
+      };
+    },
+  },
+  {
     name: 'jobs history: persisted sidecar is private and failed atomic replacement leaves no temporary files',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-private-'));
@@ -4032,10 +4511,10 @@ export default [
   },
   {
     name: 'settingConflicts: normalizes valid entries, caps at 6, and a malformed entry is DROPPED rather than throwing',
-    run: () => {
+    run: async () => {
       // A settingConflicts entry needs all three fields (wrote/setting/
-      // resolution) and `setting` must be one of the five literal data.*
-      // field names the UI can map straight to a control. A plan missing the
+      // resolution) and `setting` must be one of the five behavior keys the UI
+      // can map straight to a control or automatic policy. A plan missing the
       // key entirely (an older manifest, predating this field) must still
       // normalize cleanly to an empty array — see blankJobPreferencePlan.
       const blank = blankJobPreferencePlan();
@@ -4070,8 +4549,8 @@ export default [
       // confirming (a) no exception is thrown and (b) only the good entries
       // survive.
       const mixedBatch = [
-        { wrote: 'good one', setting: 'maxAgeDays', resolution: 'Use the Look back control instead.' },
-        { wrote: 'bad setting enum', setting: 'notARealSetting', resolution: 'This should be dropped.' },
+        { wrote: 'good one', setting: 'searchWindow', resolution: 'Use Look back before the first scan; later windows are automatic.' },
+        { wrote: 'only jobs from this week', setting: 'maxAgeDays', resolution: 'This retired setting must be dropped.' },
         { wrote: '', setting: 'searchLocation', resolution: 'Missing wrote text, should be dropped.' },
         { wrote: 'missing resolution', setting: 'enabledSourceIds', resolution: '' },
         { setting: 'collectionLimits', resolution: 'Entirely missing wrote key, should be dropped.' },
@@ -4087,6 +4566,30 @@ export default [
         && mixedResult.settingConflicts.every(c => c.wrote === 'good one' || c.wrote === 'good two'),
       `only the well-formed entries must survive, the malformed ones silently dropped, got ${JSON.stringify(mixedResult.settingConflicts)}`);
 
+      let capturedPrompt = '';
+      const recencyOnly = await interpretJobPreferences({
+        jobPreferences: 'Only include jobs posted this week.',
+        profile: {},
+        careerData: '',
+        callText: async (prompt) => {
+          capturedPrompt = prompt;
+          return {
+            ...blank,
+            settingConflicts: [{
+              wrote: 'posted this week',
+              setting: 'searchWindow',
+              resolution: 'Use Look back before the first scan; later windows are automatic.',
+            }],
+          };
+        },
+      });
+      assert(capturedPrompt.includes('Recency/date-window prose MUST go ONLY to settingConflicts with setting="searchWindow"')
+        && capturedPrompt.includes('NEVER also put it in direction, softPreferences, or strictRequirements')
+        && recencyOnly.preferencePlan.settingConflicts[0]?.setting === 'searchWindow'
+        && recencyOnly.preferencePlan.softPreferences.length === 0
+        && recencyOnly.preferencePlan.strictRequirements.length === 0,
+      'posting-date prose must be routed only to the dedicated searchWindow advisory, never into evidence-based preference filtering');
+
       // Entirely absent settingConflicts key (a plan built before this field
       // existed) must normalize to [] rather than reject the whole plan.
       const legacyPlan = { ...blank };
@@ -4095,7 +4598,7 @@ export default [
       assert(Array.isArray(legacyNormalized.settingConflicts) && legacyNormalized.settingConflicts.length === 0,
         'a plan predating settingConflicts must normalize the missing key to an empty array');
 
-      return { validKept: 1, cappedAt6: cappedAt6.settingConflicts.length, malformedDropped: mixedBatch.length - mixedResult.settingConflicts.length };
+      return { validKept: 1, cappedAt6: cappedAt6.settingConflicts.length, malformedDropped: mixedBatch.length - mixedResult.settingConflicts.length, recencyAdvisoryOnly: true };
     },
   },
   {
