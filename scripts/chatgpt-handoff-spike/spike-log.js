@@ -23,7 +23,17 @@ export const fmtBytes = n => (n === null || n === undefined ? '—' : `${n.toLoc
 // report is built from, so nothing derived from a run can leak it.
 export function createLogger({ logPath = null, token = null, quiet = false, print = console.log } = {}) {
   const events = []
-  const redact = text => (token ? String(text).split(token).join('<token>') : String(text))
+  const secrets = new Map()
+  if (token) secrets.set(token, '<token>')
+  const redact = text => {
+    let out = String(text)
+    for (const [secret, label] of secrets) out = out.split(secret).join(label)
+    return out
+  }
+  // Session codes are not URL-secret but they are still what a chat is keyed on.
+  const addSecret = (secret, label) => {
+    if (secret && String(secret).length >= 8) secrets.set(String(secret), label || '<secret>')
+  }
 
   function record(kind, fields = {}) {
     const ts = fields.ts ?? Date.now()
@@ -37,7 +47,7 @@ export function createLogger({ logPath = null, token = null, quiet = false, prin
     if (!quiet) print(redact(line))
   }
 
-  return { events, record, say, redact }
+  return { events, record, say, redact, addSecret }
 }
 
 // ----------------------------------------------------------------- report

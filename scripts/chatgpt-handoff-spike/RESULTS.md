@@ -62,6 +62,10 @@ Two conversations had their first write attempt blocked, both within 12 minutes 
 
 One-hotkey relay: press a global hotkey when ChatGPT finishes; the app grabs the reply, matches it by handoff code, submits it, and pastes the next or correction prompt straight into ChatGPT. Keeps inference in ordinary Chat, needs no tunnel. Keep in mind if the URL/auth/warm-up constraints prove too costly.
 
+## Phase 0a (real-shaped payloads): built, not yet run against ChatGPT
+
+The verdict above covers small fake payloads. `PHASE0A.md` is the run book for the next question: do real-sized, personal-data-shaped prompts (fake name, `@example.com` email, 555-01xx phone, LinkedIn/GitHub URLs, currency amounts; 20-95 KB prompts, 3-45 KB answers) pass the safety layer, are 24-character case-sensitive codes copied exactly, and is planted listing text ignored. The server side is built and self-tested (`npm run selftest:realistic`, 36 steps including a replay of every generated reference answer); no ChatGPT trial has been run against it yet, so nothing in this file changes until one is.
+
 ## Teardown state
 
 Server and tunnel stopped; port 8787 free; the plugin was deleted in ChatGPT afterwards (its URL was already dead). `cloudflared` remains installed via Homebrew (`brew uninstall cloudflared` to remove) and was never set up as a service. `spike-log.jsonl` and `spike-report.md` are git-ignored and never contain the token (paths show `/mcp/<token>`). Still to do: re-check Settings → Usage → Analytics tomorrow for the four spike chats (see check 2).
@@ -80,4 +84,9 @@ npm run selftest                  # 21 steps, drives the full flow with the SDK 
 JOBS=2 npm start                  # prints the secret path and setup steps
 cloudflared tunnel --url http://127.0.0.1:8787
 # restart with the same URL/codes: TOKEN=<32 hex> CODES=HANDOFF-…,… JOBS=2 npm start
+
+# Phase 0a (design surface, real-shaped synthetic payloads): see PHASE0A.md
+npm run gen                       # renders fixtures/realistic (git-ignored) with the app's own prompt builder
+npm run selftest:realistic        # 36 steps
+SURFACE=design npm start          # prints one starter message per fresh chat
 ```

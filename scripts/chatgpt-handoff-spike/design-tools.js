@@ -2,7 +2,8 @@
 // registered on an McpServer. Names, titles, descriptions, parameter
 // descriptions and annotations are the design's fixed text: once a plugin is
 // created against it, changing any of them means a manual Refresh in ChatGPT
-// (and may reset its safety warm-up), so treat this file as frozen.
+// (and may reset its safety warm-up), so treat this file as frozen. The test
+// suite pins a hash of the whole advertised surface.
 import { z } from 'zod'
 import { clock, fmtBytes, fmtMs } from './spike-log.js'
 import { renderFrame } from './realistic.js'
@@ -16,9 +17,31 @@ export const CODE_PARAM = 'Copy it exactly from the most recent result. It can c
 export const RESPONSE_PARAM = 'Your complete answer exactly as the prompt specifies; for these prompts one JSON object and nothing else'
 
 const bytes = value => Buffer.byteLength(String(value ?? ''), 'utf8')
-const ageMin = (state, ts) => (state.pluginCreatedAt && Number.isFinite(Date.parse(state.pluginCreatedAt)) ? Math.round((ts - Date.parse(state.pluginCreatedAt)) / 60000) : null)
+// Floor, not round: a call at 29.6 minutes must not read as "30+ minutes".
+const ageMin = (state, ts) => (state.pluginCreatedAt && Number.isFinite(Date.parse(state.pluginCreatedAt)) ? Math.floor((ts - Date.parse(state.pluginCreatedAt)) / 60000) : null)
 
-export function registerDesignTools(mcp, { hub, logger, state, frame = 'json', onSessionDone = () => {} }) {
+// A throw inside a handler would otherwise reach ChatGPT as a raw error with
+// nothing in our log. Record it (name and message only, no stack) and answer
+// with a retryable status the model can act on.
+function guarded(tool, { logger, state }, run) {
+  return async args => {
+    const ts = Date.now()
+    try {
+      return await run(args, ts)
+    } catch (err) {
+      logger.record('tool', {
+        ts, ms: Date.now() - ts, surface: 'design', tool, accepted: false, reason: 'handler_error', flags: ['handler_error'],
+        error: `${err?.name ?? 'Error'}: ${String(err?.message ?? err).slice(0, 200)}`, pluginAgeMin: ageMin(state, ts), clientInfo: state.clientInfo,
+      })
+      logger.say(`${clock(ts)}  ! ${tool} handler error: ${err?.name ?? 'Error'}: ${String(err?.message ?? err).slice(0, 120)}`)
+      return { content: [{ type: 'text', text: JSON.stringify({ status: 'error_retryable', note: 'The server could not process that call. Retry the identical call once.' }) }] }
+    }
+  }
+}
+
+export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = () => {} }) {
+  const ctx = { logger, state }
+
   mcp.registerTool(
     'get_handoff',
     {
@@ -27,9 +50,8 @@ export function registerDesignTools(mcp, { hub, logger, state, frame = 'json', o
       inputSchema: { session: z.string().describe(SESSION_PARAM) },
       annotations: { readOnlyHint: true },
     },
-    async ({ session }) => {
-      const ts = Date.now()
-      const { body, event } = hub.get(session)
+    guarded('get_handoff', ctx, async ({ session }, ts) => {
+      const { body, event, frame } = hub.get(session)
       const text = renderFrame(body, frame)
       const ms = Date.now() - ts
       logger.record('tool', {
@@ -45,7 +67,7 @@ export function registerDesignTools(mcp, { hub, logger, state, frame = 'json', o
       })
       logger.say(`${clock(ts)}  get_handoff     ${(event.session ?? '?').padEnd(3)} ${(event.stage ?? event.reason).padEnd(13)} ${event.handoffCode ?? ''}  → ${body.status}${body.prompt ? ` ${fmtBytes(bytes(body.prompt))} prompt` : ''}  (${fmtMs(ms)})`)
       return { content: [{ type: 'text', text }] }
-    },
+    }),
   )
 
   mcp.registerTool(
@@ -60,9 +82,8 @@ export function registerDesignTools(mcp, { hub, logger, state, frame = 'json', o
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ session, handoffCode, response }) => {
-      const ts = Date.now()
-      const { body, event } = hub.submit(session, handoffCode, response)
+    guarded('submit_handoff', ctx, async ({ session, handoffCode, response }, ts) => {
+      const { body, event, frame } = hub.submit(session, handoffCode, response)
       const text = renderFrame(body, frame)
       const ms = Date.now() - ts
       logger.record('tool', {
@@ -83,6 +104,6 @@ export function registerDesignTools(mcp, { hub, logger, state, frame = 'json', o
       logger.say(`${clock(ts)}  submit_handoff  ${(event.session ?? '?').padEnd(3)} ${(event.stage ?? '?').padEnd(13)} ${(event.codeArg?.raw ?? '').slice(0, 24)}  response ${fmtBytes(bytes(response))} [${event.shape ?? '-'}]  → ${verdict}${flags.length ? `  {${flags.join(',')}}` : ''}  (${fmtMs(ms)})`)
       if (event.sessionDone) onSessionDone(event.session)
       return { content: [{ type: 'text', text }] }
-    },
+    }),
   )
 }

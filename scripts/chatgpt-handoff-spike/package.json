@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node server.js",
+    "gen": "node gen/gen-fixtures.js",
     "selftest": "node selftest.js",
     "selftest:realistic": "node selftest-realistic.js"
   },
