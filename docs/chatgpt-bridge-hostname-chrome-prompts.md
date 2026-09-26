@@ -128,3 +128,22 @@ curl -i https://bridge-lab.lullascape.com/
 - Re-check immediately before Stage 2: `dig +norec DS lullascape.com @a.gtld-servers.net` must show `ANSWER: 0`.
 
 **Follow-up done, verified (2026-09-26, 01:42 EDT).** Porkbun's DNSSEC toggle for `lullascape.com` is OFF (persisted after reload, no warning), "Registry DNSSEC" 0 records. Re-verified at the `.com` registry: no DS, delegation still Porkbun x4, 1.1.1.1 / 8.8.8.8 / 9.9.9.9 return no DS. Stage 2 may run any time now with a low residual risk (the strict worst case for a stale cached DS at some validating resolver is 24 hours, until about 01:30 EDT on 2026-09-27); ChatGPT's resolvers are unlikely to hold one because nothing on their side ever resolved this domain.
+
+**Stage 2 result (2026-09-26, about 01:55 EDT): DONE, by a different route than the prompt's steps D and E.**
+- Steps A to C ran in Chrome and were verified independently: the `.com` registry delegates `lullascape.com` to `liv.ns.cloudflare.com` and `ram.ns.cloudflare.com`, no DS record, Cloudflare serves `v=spf1 -all`, the parking records are gone, Cloudflare DNSSEC is OFF, and all bot/AI-crawler blocks are already off (Bot Fight Mode OFF, AI Labyrinth OFF, AI bot policies all "Allow", every Block Crawler toggle OFF).
+- Chrome stopped at step D1: Cloudflare's Zero Trust dashboard onboarding asks for a payment method (PayPal or card, $0 due, authorization to charge overages) even on the free plan. Jack chose **not** to add one, so the tunnel was created from the command line instead (a *locally-managed* tunnel, which needs no Zero Trust activation and no payment method):
+  1. `cloudflared tunnel login` (Jack clicked Authorize once for `lullascape.com`; this wrote `~/.cloudflared/cert.pem`).
+  2. `cloudflared tunnel create lullascape-bridge-lab` (credential file `~/.cloudflared/<tunnel-id>.json`, mode 0400, never opened or printed).
+  3. `cloudflared tunnel route dns lullascape-bridge-lab bridge-lab.lullascape.com` (a proxied CNAME to the tunnel).
+  4. `~/.cloudflared/config.yml` (mode 0600): ingress `bridge-lab.lullascape.com` to `http://127.0.0.1:8787`, catch-all `http_status:404`.
+  5. **Deleted `cert.pem`** afterwards: it grants broad zone rights and is not needed to run the tunnel. To add another hostname later (for example `bridge.`), run `cloudflared tunnel login` again, then `route dns`, then delete `cert.pem` again.
+- Verified end to end with the spike server: `https://bridge-lab.lullascape.com/probe` returns the spike's `404 {"error":"not_found"}`, and an MCP `tools/list` through the hostname returns `get_handoff, submit_handoff`. Processes were stopped afterwards; nothing is running.
+
+**Starting it again (per session; the tunnel and the server are separate processes):**
+
+```bash
+cloudflared tunnel run lullascape-bridge-lab              # reads ~/.cloudflared/config.yml; no secret to paste
+cd scripts/chatgpt-handoff-spike && JOBS=2 npm start      # prints a fresh secret path; fake data only
+```
+
+**Secrets:** the tunnel credential file `~/.cloudflared/<tunnel-id>.json` lets anyone run a connector for the tunnel; never commit, paste or screenshot it. To revoke it, delete the tunnel (`cloudflared tunnel delete lullascape-bridge-lab`, needs a fresh login). The zero-trust dashboard's payment page is not needed; steps D and E of the Stage 2 prompt are superseded by the commands above.
