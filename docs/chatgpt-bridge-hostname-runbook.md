@@ -22,6 +22,10 @@ What moving its DNS to Cloudflare changes, and the ordering it needs:
 5. **Optional later:** enable DNSSEC in Cloudflare and add its DS record at Porkbun.
 6. **Hostnames:** `bridge.lullascape.com` (production) and `bridge-lab.lullascape.com` (lab). Keep every tunnel hostname on a subdomain so a future public site on the apex stays separate.
 
+Jack confirmed there is **no email forwarding** on this domain, so the imported MX and parking records are simply deleted and the SPF record becomes `v=spf1 -all`. Only **`bridge-lab.lullascape.com`** is published first (pointing at the Phase 0 spike on `127.0.0.1:8787`); `bridge.lullascape.com` is created later, for Phase 1.
+
+The literal, step-by-step prompts for Claude in Chrome are in `docs/chatgpt-bridge-hostname-chrome-prompts.md` (Stage 1 now; Stage 2 after about 24 hours).
+
 Sections 2 to 6 below apply unchanged, except that in section 1 the registration steps are already done: do not buy a new domain.
 
 ## 1. Pick and register the domain (Porkbun, about 5 minutes)
