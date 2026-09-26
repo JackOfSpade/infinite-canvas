@@ -62,6 +62,9 @@ export const SURFACES = Object.freeze({
 })
 
 const bytes = value => Buffer.byteLength(String(value ?? ''), 'utf8')
+// What the OAuth check saw for this request (server.js puts it on req.auth, the SDK hands it to the
+// handler as extra.authInfo): a short fingerprint of the client and how long the token had left.
+const authTag = extra => (extra?.authInfo ? { authClient: extra.authInfo.clientFingerprint ?? null, authRemainingSec: extra.authInfo.remainingSec ?? null } : {})
 // Floor, not round: a call at 29.6 minutes must not read as "30+ minutes". createdAt is an
 // ISO string or an epoch in ms (a plugin's first request from ChatGPT), or null when unknown.
 const ageMin = (createdAt, ts) => {
@@ -73,10 +76,10 @@ const ageMin = (createdAt, ts) => {
 // nothing in our log. Record it (name and message only, no stack) and answer
 // with a retryable status the model can act on.
 function guarded(tool, { logger, state, tag, createdAt }, run) {
-  return async args => {
+  return async (args, extra) => {
     const ts = Date.now()
     try {
-      return await run(args, ts)
+      return await run(args, ts, extra)
     } catch (err) {
       logger.record('tool', {
         ts, ms: Date.now() - ts, surface: 'design', ...tag, tool, accepted: false, reason: 'handler_error', flags: ['handler_error'],
@@ -105,7 +108,7 @@ export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = (
       annotations: { readOnlyHint: true },
       ...meta,
     },
-    guarded('get_handoff', ctx, async ({ session }, ts) => {
+    guarded('get_handoff', ctx, async ({ session }, ts, extra) => {
       const { body, event, frame } = hub.get(session)
       const rendered = renderFrame(body, frame)
       const ms = Date.now() - ts
@@ -113,6 +116,7 @@ export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = (
         ts, ms,
         surface: 'design',
         ...tag,
+        ...authTag(extra),
         pluginAgeMin: ageMin(createdAt(), ts),
         tool: 'get_handoff',
         argBytes: { session: bytes(session) },
@@ -139,7 +143,7 @@ export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = (
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       ...meta,
     },
-    guarded('submit_handoff', ctx, async ({ session, handoffCode, response }, ts) => {
+    guarded('submit_handoff', ctx, async ({ session, handoffCode, response }, ts, extra) => {
       const { body, event, frame } = hub.submit(session, handoffCode, response)
       const rendered = renderFrame(body, frame)
       const ms = Date.now() - ts
@@ -147,6 +151,7 @@ export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = (
         ts, ms,
         surface: 'design',
         ...tag,
+        ...authTag(extra),
         pluginAgeMin: ageMin(createdAt(), ts),
         tool: 'submit_handoff',
         argBytes: { session: bytes(session), handoffCode: bytes(handoffCode), response: bytes(response) },

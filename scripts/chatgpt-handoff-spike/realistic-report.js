@@ -210,6 +210,56 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
     out.push(table(['Session', 'Jobs', 'C1 (marker in answer)', 'C1 context', 'C2 (URL requested)'], canaryRows))
   }
 
+  // --------------------------------------------------------------- oauth
+  const oauthEv = events.filter(e => e.kind === 'oauth').sort((a, b) => a.ts - b.ts)
+  const dHttp = https.filter(e => e.plugin === 'D')
+  if (oauthEv.length || dHttp.length || config.oauth) {
+    out.push('## OAuth (plugin D)')
+    out.push('')
+    const life = config.oauth?.config
+    out.push(life
+      ? `Lifetimes measured in this run: access token ${life.accessTtlSec} s, refresh token ${life.refreshTtlSec} s absolute, refresh grace ${life.refreshGraceSec} s. The consent page needs a pairing code from this Mac; a link attempt with no armed code is refused and counted as authorize_unarmed.`
+      : '_No OAuth server was configured in this run._')
+    out.push('')
+    out.push(table(['OAuth event', 'Count'], count(oauthEv, e => e.oauthEvent).sort((a, b) => b[1] - a[1]).map(([k, n]) => [k, n])))
+    const authCounts = count(dHttp.filter(e => e.route === 'mcp'), e => `${e.method} /mcp → ${e.status} (auth ${e.auth ?? 'n/a'})`)
+    out.push('Requests to the protected /mcp path, by outcome (auth none = no bearer token, invalid = a token that was unknown, expired or revoked):')
+    out.push('')
+    out.push(table(['Request', 'Count'], authCounts.sort((a, b) => b[1] - a[1]).map(([k, n]) => [k, n])))
+    const remaining = tools.filter(e => e.plugin === 'D' && e.authRemainingSec != null).map(e => e.authRemainingSec).sort((a, b) => a - b)
+    out.push(remaining.length
+      ? `Token lifetime left at each tool call: min ${remaining[0]} s, median ${remaining[Math.floor(remaining.length / 2)]} s, max ${remaining[remaining.length - 1]} s over ${remaining.length} calls; ${remaining.filter(r => r < 30).length} call(s) arrived with under 30 s left.`
+      : 'No tool call has come through plugin D yet.')
+    out.push('')
+    // Gap between one token-producing event and the next for the same client: shorter than the access
+    // lifetime means ChatGPT refreshed BEFORE expiry, longer means it waited (or was idle).
+    const producing = oauthEv.filter(e => ['token_issued', 'refresh_rotated', 'refresh_replay_within_grace'].includes(e.oauthEvent))
+    const lastFor = new Map()
+    const gaps = []
+    for (const e of producing) {
+      const prev = lastFor.get(e.client)
+      if (prev && e.oauthEvent !== 'refresh_replay_within_grace') {
+        const gapSec = Math.round((e.ts - prev.ts) / 1000)
+        const between401 = dHttp.filter(h => h.status === 401 && h.ts > prev.ts && h.ts < e.ts).length
+        gaps.push([clock(e.ts), gapSec, life ? (gapSec < life.accessTtlSec ? 'before expiry' : 'after expiry') : '—', between401])
+      }
+      if (e.oauthEvent !== 'refresh_replay_within_grace') lastFor.set(e.client, e)
+    }
+    out.push('Refresh timing (seconds since the previous token was issued to that client):')
+    out.push('')
+    out.push(table(['Refresh at', 'Seconds since previous token', 'Relative to expiry', '401s seen on /mcp in between'], gaps))
+    const key = new Set(['client_registered', 'authorize_unarmed', 'authorize_started', 'authorize_rejected', 'consent_wrong_code', 'consent_lockout', 'consent_denied', 'code_issued', 'code_reuse_revoked', 'code_reuse_rejected', 'token_issued', 'refresh_rotated', 'refresh_replay_within_grace', 'refresh_reuse_revoked', 'refresh_expired', 'token_revoked', 'cimd_failed', 'oauth_error', 'server_started'])
+    const rows = [
+      ...oauthEv.filter(e => key.has(e.oauthEvent)).map(e => ({ ts: e.ts, what: e.oauthEvent, detail: [e.method, e.grant, e.type, e.reason, e.error, e.ageSec != null ? `age ${e.ageSec}s` : null, e.staleSec != null ? `stale ${e.staleSec}s` : null].filter(Boolean).join(' '), client: e.client ? String(e.client).slice(0, 48) : '' })),
+      ...dHttp.filter(h => h.route === 'mcp' && h.status === 401).map(h => ({ ts: h.ts, what: 'mcp 401', detail: `${h.method} auth ${h.auth}`, client: '' })),
+    ].sort((a, b) => a.ts - b.ts)
+    out.push('Timeline (first 80 rows):')
+    out.push('')
+    out.push(table(['Time', 'Event', 'Detail', 'Client'], rows.slice(0, 80).map(r => [clock(r.ts), r.what, r.detail, r.client])))
+    if (rows.length > 80) out.push(`… and ${rows.length - 80} more rows in spike-log.jsonl.`)
+    out.push('')
+  }
+
   // ----------------------------------------------------- http oddities
   out.push('## Unknown paths and 4xx/5xx requests')
   out.push('')

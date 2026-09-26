@@ -11,7 +11,10 @@
     "start": "node server.js",
     "gen": "node gen/gen-fixtures.js",
     "selftest": "node selftest.js",
-    "selftest:realistic": "node selftest-realistic.js"
+    "selftest:realistic": "node selftest-realistic.js",
+    "selftest:oauth": "node selftest-oauth.js",
+    "selftest:lab-oauth": "node selftest-lab-oauth.js",
+    "selftest:all": "node selftest.js && node selftest-realistic.js && node selftest-oauth.js && node selftest-lab-oauth.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

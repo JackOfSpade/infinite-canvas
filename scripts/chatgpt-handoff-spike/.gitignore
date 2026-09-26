@@ -3,3 +3,5 @@ spike-log.jsonl
 spike-report.md
 fixtures/
 starter-messages.txt
+oauth-state.json
+oauth-state.json.*

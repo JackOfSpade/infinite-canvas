@@ -26,6 +26,7 @@ import { buildReport, clock, createLogger, fmtBytes, fmtMs } from './spike-log.j
 import { buildRealisticReport } from './realistic-report.js'
 import { registerDesignTools, SURFACES } from './design-tools.js'
 import { createHub, loadFixtures, parsePlan } from './realistic.js'
+import { createOAuthServer } from './oauth.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -208,7 +209,10 @@ function buildDesignServer({ hub, logger, state, onSessionDone, plugin }) {
   const mcp = new McpServer({ name: 'infinite-canvas-lab', version: '0.0.0' })
   // Plugin A's age counts from PLUGIN_CREATED_AT; every other plugin's from the first request ChatGPT
   // itself made to its path (it probes the URL the moment the plugin is created).
-  registerDesignTools(mcp, { hub, logger, state, onSessionDone, surface: plugin.surface, pluginId: plugin.id, createdAt: () => plugin.createdAt ?? plugin.firstSeen })
+  registerDesignTools(mcp, {
+    hub, logger, state, onSessionDone, surface: plugin.surface, pluginId: plugin.id, createdAt: () => plugin.createdAt ?? plugin.firstSeen,
+    securitySchemes: plugin.auth ? [{ type: 'oauth2', scopes: ['handoff'] }] : null,
+  })
   return mcp
 }
 
@@ -242,6 +246,7 @@ export async function startServer(options = {}) {
     forceReject = false,
     text = 'directive',
     extraPlugins = [],
+    oauth = null,
     pluginCreatedAt = null,
     pluginName = 'Infinite Canvas Lab',
   } = options
@@ -258,16 +263,44 @@ export async function startServer(options = {}) {
     const extraToken = extra.token ?? crypto.randomBytes(16).toString('hex')
     plugins.push({ id: extra.id, surface: extra.surface, token: extraToken, mcpPath: `/mcp/${extraToken}`, name: extra.name ?? `${pluginName} ${extra.id}`, createdAt: null, firstSeen: null })
   }
+  // Plugin D is the OAuth variant: the fixed path /mcp, every request needs a bearer token from the
+  // authorization server in oauth.js. Its tool text is oauth.surface (default v2).
+  if (design && oauth) {
+    if (!SURFACES[oauth.surface ?? 'v2']) throw new Error(`Unknown tool surface "${oauth.surface}" for plugin D (known: ${Object.keys(SURFACES).join(', ')})`)
+    plugins.push({ id: 'D', surface: oauth.surface ?? 'v2', token: null, mcpPath: '/mcp', name: `${pluginName} D`, auth: true, createdAt: null, firstSeen: null })
+  }
   const pluginByPath = new Map(plugins.map(p => [p.mcpPath, p]))
   const startedAt = Date.now()
   const logger = createLogger({ logPath, token, quiet })
   for (const p of plugins.slice(1)) logger.addSecret(p.token, `<token-${p.id}>`)
+  const oauthServer = design && oauth
+    ? createOAuthServer({
+      issuer: String(oauth.issuer ?? publicBase).replace(/\/+$/, ''),
+      resourcePath: '/mcp',
+      scope: 'handoff',
+      accessTtlSec: oauth.accessTtlSec,
+      refreshTtlSec: oauth.refreshTtlSec,
+      refreshGraceSec: oauth.refreshGraceSec,
+      persistPath: oauth.persistPath ?? null,
+      now: oauth.now,
+      clientMetadataFetch: oauth.clientMetadataFetch,
+      staticClient: oauth.staticClient ?? null,
+      // The module never passes a token, code, secret or pairing code to log().
+      log: (kind, fields = {}) => {
+        const { kind: _kind, t: _t, ts: _ts, ...rest } = fields
+        logger.record('oauth', { oauthEvent: kind, ...rest })
+        if (kind !== 'rate_limited') logger.say(`${clock(Date.now())}  oauth ${kind}${rest.clientKind ? ` (${rest.clientKind})` : ''}`)
+      },
+      onConsentRequested: info => logger.say(`${clock(Date.now())}  ! OAuth consent page shown to ${info.clientName ?? info.clientId} (${info.clientKind}); the pairing code is on this Mac only`),
+    })
+    : null
+  const oauthNow = oauth?.now ?? Date.now
   const queue = design ? null : createQueue({ jobs, codes })
   const hub = design
     ? createHub({ fixtures: loadFixtures(fixturesDir), plan: parsePlan(plan), sessionCodes, publicBase, defaults: { frame, instructions, forceReject, text } })
     : null
   if (hub) for (const [i, secret] of hub.secrets().entries()) logger.addSecret(secret, `<session-${i + 1}>`)
-  const state = { clientInfo: null, pluginCreatedAt, dropped: 0, oddLogged: 0 }
+  const state = { clientInfo: null, pluginCreatedAt, dropped: 0, oddLogged: 0, oauthLogged: 0 }
   const starterMessages = design
     ? hub.sessions.map(s => {
       const plugin = plugins.find(p => p.id === s.plugin)
@@ -291,7 +324,7 @@ export async function startServer(options = {}) {
         startedAt,
         endedAt: Date.now(),
         trigger,
-        config: { pluginCreatedAt, unauthenticatedDropped: state.dropped, plugins: plugins.map(p => ({ id: p.id, surface: p.surface, name: p.name, from: p.createdAt ?? p.firstSeen })) },
+        config: { pluginCreatedAt, unauthenticatedDropped: state.dropped, oauth: oauthServer ? oauthServer.stats() : null, plugins: plugins.map(p => ({ id: p.id, surface: p.surface, name: p.name, from: p.createdAt ?? p.firstSeen })) },
       })
       : buildReport({
         events: logger.events,
@@ -347,7 +380,7 @@ export async function startServer(options = {}) {
     const meta = {
       method: clean(req.method, 12),
       path: clean(pathname, 120),
-      route: pluginByPath.has(pathname) ? 'mcp' : pathname === '/healthz' ? 'healthz' : canaryEvent ? 'canary' : 'other',
+      route: pluginByPath.has(pathname) ? 'mcp' : pathname === '/healthz' ? 'healthz' : canaryEvent ? 'canary' : oauthServer && (pathname.startsWith('/.well-known/') || pathname.startsWith('/oauth/')) ? 'oauth' : 'other',
       plugin: pluginByPath.get(pathname)?.id ?? null,
       ip: clean(req.headers['cf-connecting-ip'] ?? req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '', 64) || null,
       ua: clean(req.headers['user-agent'] ?? '', 200) || null,
@@ -361,7 +394,15 @@ export async function startServer(options = {}) {
       const status = res.statusCode
       // Authenticated MCP traffic and canary hits are always recorded; anything else
       // reachable without the secret path is recorded up to a budget, then only counted.
-      if (meta.route !== 'mcp' && meta.route !== 'canary') {
+      if (meta.route === 'oauth') {
+        // The OAuth handshake is the thing Phase 0b measures, so it is recorded like MCP traffic,
+        // with its own (large) budget so an anonymous flood cannot fill the log.
+        if (state.oauthLogged >= 3000) {
+          state.dropped++
+          return
+        }
+        state.oauthLogged++
+      } else if (meta.route !== 'mcp' && meta.route !== 'canary') {
         if (state.oddLogged >= 400) {
           state.dropped++
           return
@@ -387,9 +428,36 @@ export async function startServer(options = {}) {
       sendJson(res, 200, { ok: true })
       return
     }
+    if (meta.route === 'oauth') {
+      await oauthServer.handle(req, res, pathname)
+      return
+    }
     if (meta.route !== 'mcp') {
       sendJson(res, 404, { error: 'not_found' })
       return
+    }
+    // The OAuth plugin answers 401 with a WWW-Authenticate challenge to anything without a valid bearer
+    // token (a GET probe included), before the method or the body is looked at: that response is how
+    // ChatGPT discovers where to link.
+    if (pluginByPath.get(pathname).auth) {
+      try {
+        const info = oauthServer.authenticate(req)
+        meta.auth = 'ok'
+        meta.tokenRemainingSec = Math.round((info.expiresAt - oauthNow()) / 1000)
+        req.auth = {
+          token: 'redacted',
+          clientId: info.clientId,
+          clientFingerprint: crypto.createHash('sha256').update(info.clientId).digest('hex').slice(0, 8),
+          scopes: info.scope.split(' '),
+          expiresAt: Math.floor(info.expiresAt / 1000),
+          remainingSec: meta.tokenRemainingSec,
+        }
+      } catch (err) {
+        meta.auth = err.presented ? 'invalid' : 'none'
+        res.setHeader('WWW-Authenticate', oauthServer.challengeHeader(err))
+        sendJson(res, 401, { error: 'invalid_token', error_description: 'A valid access token is required.' })
+        return
+      }
     }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
@@ -438,7 +506,7 @@ export async function startServer(options = {}) {
     server.listen(port, host, resolve)
   })
   logger.record('note', design
-    ? { message: 'server_start', surface, port: server.address().port, plan: hub.sessions.map(s => `${s.label}:${s.variantId}x${s.jobs.length}:${s.plugin}`), plugins: plugins.map(p => `${p.id}:${p.surface}`), frame, instructions, forceReject, text, pluginCreatedAt }
+    ? { message: 'server_start', surface, port: server.address().port, plan: hub.sessions.map(s => `${s.label}:${s.variantId}x${s.jobs.length}:${s.plugin}`), plugins: plugins.map(p => `${p.id}:${p.surface}${p.auth ? ':oauth' : ''}`), oauth: oauthServer ? oauthServer.stats().config : null, frame, instructions, forceReject, text, pluginCreatedAt }
     : { message: 'server_start', port: server.address().port, jobs: queue.handoffs[queue.handoffs.length - 1].job.total, sse, handoffs: queue.handoffs.length })
 
   return {
@@ -456,9 +524,14 @@ export async function startServer(options = {}) {
     logPath,
     reportPath,
     writeReport,
+    oauth: oauthServer,
+    oauthIssuer: oauthServer ? String(oauth.issuer ?? publicBase).replace(/\/+$/, '') : null,
     stop: () => new Promise(resolve => {
       server.closeAllConnections?.()
-      server.close(() => resolve())
+      server.close(() => {
+        oauthServer?.close()
+        resolve()
+      })
     }),
   }
 }
@@ -473,9 +546,13 @@ Listening on ${spike.host}:${spike.port}   ${spike.hub.sessions.length} sessions
   Plugin ${spike.plugins[0].id} "${spike.plugins[0].name}" (frozen v1 tool text)
     MCP path (secret; pass TOKEN=<32 hex> to keep it across restarts):  ${spike.mcpPath}
     Local URL:                                                          ${local}
-${spike.plugins.slice(1).map(p => `  Plugin ${p.id} "${p.name}" (tool text ${p.surface}), keep with TOKEN_${p.id}=<32 hex>
+${spike.plugins.slice(1).map(p => (p.auth
+    ? `  Plugin ${p.id} "${p.name}" (tool text ${p.surface}, OAuth): MCP path ${p.mcpPath} on ${spike.oauthIssuer}
+    Arm linking:  kill -USR2 ${process.pid}   (prints a one-time pairing code, valid 10 minutes, to type on the consent page)
+`
+    : `  Plugin ${p.id} "${p.name}" (tool text ${p.surface}), keep with TOKEN_${p.id}=<32 hex>
     MCP path: ${p.mcpPath}
-`).join('')}
+`)).join('')}
 One ChatGPT chat per session. In a NEW chat, type @ and pick that session's plugin, then paste its message
 (also saved to starter-messages.txt, which is git-ignored). Restarting resets job progress: a chat resumed
 after a restart is served stage 1 again.
@@ -551,6 +628,20 @@ async function main() {
     }
     extraPlugins.push({ id, surface: surfaceId, token: extraToken })
   }
+  // OAUTH=1 adds plugin D (fixed path /mcp behind OAuth). ACCESS_TTL_SEC / REFRESH_TTL_SEC /
+  // REFRESH_GRACE_SEC set the lifetimes to measure; OAUTH_STATE keeps the link across restarts.
+  let oauthOptions = null
+  if (process.env.OAUTH === '1') {
+    const num = name => (process.env[name] ? Number(process.env[name]) : undefined)
+    oauthOptions = {
+      surface: process.env.OAUTH_SURFACE || 'v2',
+      issuer: process.env.OAUTH_ISSUER || undefined,
+      accessTtlSec: num('ACCESS_TTL_SEC'),
+      refreshTtlSec: num('REFRESH_TTL_SEC'),
+      refreshGraceSec: num('REFRESH_GRACE_SEC'),
+      persistPath: process.env.OAUTH_STATE === '0' ? null : (process.env.OAUTH_STATE || path.join(HERE, 'oauth-state.json')),
+    }
+  }
   let spike
   try {
     spike = await startServer({
@@ -560,6 +651,7 @@ async function main() {
       forceReject: process.env.FORCE_REJECT === '1',
       text: process.env.TEXT === 'facts' ? 'facts' : 'directive',
       extraPlugins,
+      oauth: oauthOptions,
       publicBase: process.env.PUBLIC_BASE || undefined,
       pluginCreatedAt,
       pluginName: process.env.PLUGIN_NAME || undefined,
@@ -573,6 +665,17 @@ async function main() {
     printDesignBanner(spike)
   } else {
     printBanner(spike, sse)
+  }
+
+  // Arming: /oauth/authorize refuses to start a link unless the operator has opened a pairing
+  // session on this Mac. The code goes to the terminal only (never to the log or the report).
+  if (spike.oauth) {
+    const arm = () => {
+      const code = spike.oauth.openPairing()
+      console.log(`\n${clock(Date.now())}  *** PAIRING CODE ${code}  (one use, valid 10 minutes) ***\n`)
+    }
+    process.on('SIGUSR2', arm)
+    if (process.env.PAIR_ON_START === '1') arm()
   }
 
   let stopping = false
