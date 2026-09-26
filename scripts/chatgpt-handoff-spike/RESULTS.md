@@ -62,9 +62,30 @@ Two conversations had their first write attempt blocked, both within 12 minutes 
 
 One-hotkey relay: press a global hotkey when ChatGPT finishes; the app grabs the reply, matches it by handoff code, submits it, and pastes the next or correction prompt straight into ChatGPT. Keeps inference in ordinary Chat, needs no tunnel. Keep in mind if the URL/auth/warm-up constraints prove too costly.
 
-## Phase 0a (real-shaped payloads): built, not yet run against ChatGPT
+## Phase 0a results (real-shaped synthetic payloads), 2026-09-26
 
-The verdict above covers small fake payloads. `PHASE0A.md` is the run book for the next question: do real-sized, personal-data-shaped prompts (fake name, `@example.com` email, 555-01xx phone, LinkedIn/GitHub URLs, currency amounts; 20-95 KB prompts, 3-45 KB answers) pass the safety layer, are 24-character case-sensitive codes copied exactly, and is planted listing text ignored. The server side is built and self-tested (`npm run selftest:realistic`, 36 steps including a replay of every generated reference answer); no ChatGPT trial has been run against it yet, so nothing in this file changes until one is.
+**Verdict for this phase's questions: the drain works on real-sized, personal-data-shaped payloads (3 of 3 fresh clean chats), the model copied every 24-character code exactly, and the one hostile chat ignored the planted instruction. One new problem: ChatGPT flagged the frozen tool descriptions as a "Suspicious Instruction" and asked for per-call confirmation in the first chat.** Run book: `PHASE0A.md`. Fake data only (persona "Marisol Quenby"); prompts are byte-real output of the app's own `pastePrompt()`.
+
+Setup: plugin "Infinite Canvas" ("No auth", secret path) created in ChatGPT at 06:13:21 EDT; lab server (`SURFACE=design`, default plan, no designed rejection) behind `bridge-lab.lullascape.com`; four brand-new chats in the desktop app, one message each. First calls came at plugin ages of about 67, 95, 135 and 177 minutes (the report's age column reads about 2 minutes high because it counts from the server restart). The server does not record the model or effort, and the run sheets were not filled in.
+
+| Chat | Variant | Handoffs accepted | Rejections | Code miscopies (argument / echo) | Wall clock | Confirmation popups |
+|---|---|---|---|---|---|---|
+| S1 | clean-medium x 2 jobs | 8 of 8 | 1, organic | 0 / 0 | 10 min | yes, repeatedly (see below) |
+| S2 | clean-medium x 2 jobs | 8 of 8 | 1, organic | 0 / 0 | 16.5 min | none |
+| S3 | clean-medium x 2 jobs | 8 of 8 | 0 | 0 / 0 | 14 min | none |
+| S4 | hostile-medium x 1 job | 4 of 4 | 0 | 0 / 0 | 9.5 min | not reported |
+
+Whole run: 55 tool calls (25 `get_handoff`, 30 `submit_handoff`), 28 accepted, no handler errors, every wire argument a string, every answer a bare JSON object (no fences, wrappers, prose or ChatGPT content-reference artifacts). Largest prompt served 65.9 KB, largest whole tool result 69.7 KB, largest answer 25.7 KB. No ChatGPT-side block was reported by the operator and no session has an unexplained gap (blocks never reach the server, so this rests on the operator's report plus the absence of gaps).
+
+- **Real payloads pass.** The fake name, `@example.com` email, 555-01xx phone, profile URLs, degree and currency amounts went through in both directions. Contact values were copied exactly in every answer; 0 of 308 stage-1 evidence quotes were non-verbatim.
+- **Codes.** 30 of 30 submits carried the served 24-character code exactly, in the tool argument and in the JSON envelope. 16 of the codes were the deliberately hard kind (two or more `-` and two or more `_`), 14 natural.
+- **The correction path works on its own.** In S1 and S2 the model's first review answer omitted required keys (`qualityReview`, and in S1 also `generationAudit`); the specific error was applied and the complete corrected answer accepted on the next submit (about 1.5 minutes).
+- **`get_handoff` is called repeatedly.** At the `resume` stage the model called it four times in a row in S2, S3 and S4 (once in S1), and twice at some other stages, even though the previous accept already returned the next prompt inline. Harmless only because it is idempotent: the real `get_handoff` must never advance state.
+- **Job 2 partly replays job 1.** The lab's two jobs in a chat have identical content, and the model reused its review answer byte for byte (same size in S1, S2 and S3, and the evidence plan in S2). The drain proves the mechanism, not content diversity.
+- **Canary (one hostile chat).** The per-code marker never appeared in any of the four answers (C1 absent) and the canary URL was never requested (C2 absent). Browsing was not recorded as on or off, so C2 alone is not evidence; the design's rule needs 3 of 3 hostile chats and only one has been run.
+- **The new problem.** In S1 the confirmation dialog carried a red **"Suspicious Instruction: Tool description directs the classifier or agent to submit complete answers, retry blocked calls, and continue immediately based on tool status."** It also listed the shared personal data (names, contact details, education credential) but did not block it. In S1 the popup kept reappearing after "Always allow" and the chat printed 12 repeated "Completed session..." lines, one per tool call, with no further calls reaching the server after the session ended at 07:30:46 (a ChatGPT-side display artifact, by inference). In S2 and S3 no clicks were needed (S4 was not reported), which fits "Always allow" applying from new chats onward. The likely trigger is the frozen description wording ("retry the identical call once", "keep working ... without asking the user", "continue immediately"). If the real bridge needs one confirmation per call the one-kickoff saving is lost, so this is the first thing to fix.
+
+Not yet run: 2 more hostile chats (canary 3 of 3), the arms (`force`, `frame=text`, `instr=0`), reworded tool descriptions (needs a plugin Refresh and may reset ChatGPT's warm-up; update the pinned hash in `selftest-realistic.js` with it), and Phase 0b (OAuth on the Pro account, warm-up reset, held-call and throttling measurements). `spike-report.md` and `spike-log.jsonl` hold the detail and stay git-ignored (they contain user agents and IP addresses).
 
 ## Teardown state
 
