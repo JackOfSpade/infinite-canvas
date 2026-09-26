@@ -79,6 +79,14 @@ const call = (name, args = {}) => withClient(async client => {
   return JSON.parse(result.content[0].text)
 })
 
+async function waitFor(check, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('waitFor timed out')
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+
 const getHandoff = () => call('get_handoff')
 const submit = (handoffCode, response) => call('submit_handoff', { handoffCode, response: typeof response === 'string' ? response : JSON.stringify(response) })
 
@@ -263,6 +271,8 @@ async function main() {
     })
 
     console.log('\nLog and report')
+    // The drain report is written just after the last response is sent.
+    await waitFor(() => fs.existsSync(reportPath))
     const log = fs.readFileSync(logPath, 'utf8')
     const events = log.trim().split('\n').map(line => JSON.parse(line))
     const report = fs.readFileSync(reportPath, 'utf8')
@@ -290,6 +300,10 @@ async function main() {
       }
       assert.match(report, /Stages completed: \*\*8 of 8\*\*/)
       assert.match(report, /queue fully drained/)
+      // The final submit's own HTTP event must already be in the drain report,
+      // otherwise the wire-vs-handler comparison cries "mismatch" on a clean run.
+      assert.ok(!report.includes('**mismatch**'), 'drain report raced the last request')
+      assert.match(report, /`tools\/call` requests on the wire: (\d+); tool handler invocations: \1\b/)
       const largest = /Largest accepted `response`: \*\*([\d,]+) B\*\*/.exec(report)
       assert.ok(largest, 'largest accepted line')
       assert.equal(Number(largest[1].replace(/,/g, '')), resumeBytes, 'largest accepted is the 30-bullet résumé')
@@ -297,6 +311,23 @@ async function main() {
       assert.match(report, /selftest-client/)
       const manual = spike.writeReport('manual')
       assert.ok(manual.includes('trigger: manual'))
+    })
+
+    console.log('\nRestart support')
+    await step('a restarted server can reissue the same token and handoff codes', async () => {
+      const codes = ['HANDOFF-LPSJR4', 'HANDOFF-PXPTPX', 'HANDOFF-97URVA', 'HANDOFF-SY3FGK', 'HANDOFF-CJQ5WX', 'HANDOFF-WVJ5F4', 'HANDOFF-HPTHGJ', 'HANDOFF-WQY7FH']
+      const fixedToken = crypto.randomBytes(16).toString('hex')
+      const again = await startServer({ port: 0, jobs: 2, token: fixedToken, codes, logPath: path.join(workDir, 'again-log.jsonl'), reportPath: path.join(workDir, 'again-report.md'), quiet: true })
+      try {
+        assert.equal(again.mcpPath, `/mcp/${fixedToken}`)
+        assert.deepEqual(again.queue.handoffs.map(h => h.code), codes)
+      } finally {
+        await again.stop()
+      }
+      await assert.rejects(
+        startServer({ port: 0, jobs: 2, codes: ['HANDOFF-LPSJR4'], logPath: path.join(workDir, 'bad-log.jsonl'), reportPath: path.join(workDir, 'bad-report.md'), quiet: true }),
+        /CODES entry 2 is missing or not a valid handoff code/,
+      )
     })
 
     console.log('\nSSE mode')

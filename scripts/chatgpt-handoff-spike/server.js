@@ -195,6 +195,7 @@ export async function startServer(options = {}) {
     host = '127.0.0.1',
     token = crypto.randomBytes(16).toString('hex'),
     jobs = 1,
+    codes = null,
     logPath = path.join(HERE, 'spike-log.jsonl'),
     reportPath = path.join(HERE, 'spike-report.md'),
     quiet = false,
@@ -205,7 +206,7 @@ export async function startServer(options = {}) {
   const mcpPath = `/mcp/${token}`
   const startedAt = Date.now()
   const logger = createLogger({ logPath, token, quiet })
-  const queue = createQueue({ jobs })
+  const queue = createQueue({ jobs, codes })
   const state = { clientInfo: null }
 
   function writeReport(trigger) {
@@ -221,10 +222,15 @@ export async function startServer(options = {}) {
     return markdown
   }
 
+  // Called from inside the final submit's handler, i.e. before that request's
+  // own HTTP event is logged (it is recorded when the response closes). Wait a
+  // beat so the report includes the request that drained the queue.
   function onDrain() {
     logger.record('note', { message: 'queue_drained' })
-    writeReport('queue drained')
-    logger.say(`${clock(Date.now())}  *** QUEUE DRAINED: every handoff accepted. spike-report.md written; Ctrl+C rewrites it with anything that happens later. ***`)
+    setTimeout(() => {
+      writeReport('queue drained')
+      logger.say(`${clock(Date.now())}  *** QUEUE DRAINED: every handoff accepted. spike-report.md written; Ctrl+C rewrites it with anything that happens later. ***`)
+    }, 150)
   }
 
   async function handle(req, res) {
@@ -352,9 +358,17 @@ async function main() {
   const jobs = Number(process.env.JOBS || 1)
   const port = Number(process.env.PORT || 8787)
   const sse = process.env.SSE === '1'
+  // TOKEN / CODES exist only so the server can be bounced without breaking a
+  // plugin URL or a chat that is mid-flight: reuse the previous run's values.
+  const token = process.env.TOKEN || undefined
+  if (token && !/^[0-9a-f]{32}$/.test(token)) {
+    console.error('TOKEN must be 32 lowercase hex characters.')
+    process.exit(1)
+  }
+  const codes = process.env.CODES ? process.env.CODES.split(',').map(code => code.trim()) : null
   let spike
   try {
-    spike = await startServer({ port, jobs, sse })
+    spike = await startServer({ port, jobs, sse, token, codes })
   } catch (err) {
     console.error(err.code === 'EADDRINUSE' ? `Port ${port} is already in use. Stop the other process or set PORT=<free port>.` : err)
     process.exit(1)

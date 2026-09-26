@@ -306,7 +306,9 @@ const VALIDATORS = {
 
 // ------------------------------------------------------------------ queue
 
-export function createQueue({ jobs = 1, now = Date.now } = {}) {
+// `codes` lets a restarted server reissue the codes it handed out before, so a
+// chat that is mid-flight when the server is bounced can carry on.
+export function createQueue({ jobs = 1, now = Date.now, codes = null } = {}) {
   const count = Math.max(1, Math.min(MAX_JOBS, Number.isFinite(jobs) ? Math.floor(jobs) : 1))
   const handoffs = []
   const taken = new Set()
@@ -314,7 +316,10 @@ export function createQueue({ jobs = 1, now = Date.now } = {}) {
     const template = JOB_TEMPLATES[j]
     const job = { index: j, total: count, company: template.company, role: template.role, data: {} }
     for (const stage of STAGES) {
-      const code = newHandoffCode(taken)
+      const forced = codes ? normalizeCode(codes[handoffs.length]) : null
+      if (codes && !forced) throw new Error(`CODES entry ${handoffs.length + 1} is missing or not a valid handoff code`)
+      const code = forced ?? newHandoffCode(taken)
+      if (taken.has(code)) throw new Error(`duplicate handoff code ${code}`)
       taken.add(code)
       handoffs.push({
         code, stage, job,
