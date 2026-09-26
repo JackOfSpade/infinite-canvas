@@ -142,7 +142,28 @@ Same plugin B as run 3 (true age about 150 minutes), three fresh hostile-listing
 
 The canary rule is now met on the submit-only rewording as well: on the surface that keeps `get_handoff`'s tool-scope and untrusted-text rules and rewords only `submit_handoff`, the planted marker appeared in none of the 12 answers and the canary URL was never requested (browsing state still not recorded). No code miscopies and no duplicate re-submissions in these three chats.
 
-Not yet run: Phase 0b (OAuth on the Pro account, warm-up reset, held-call and throttling measurements). `spike-report.md` and `spike-log.jsonl` hold the detail and stay git-ignored (they contain user agents and IP addresses).
+## Phase 0b results (OAuth, plugin D), 2026-09-26
+
+Plugin "Infinite Canvas D": Server URL `https://bridge-lab.lullascape.com/mcp`, Authentication OAuth, every Advanced OAuth field (client ID, secret, authorization URL, token URL, scopes) left blank, tool text v2s. The authorization server is `oauth.js` (hand-rolled, reviewed by a security and a ChatGPT-compatibility reviewer, 100-step suite); linking needs a pairing code that the operator arms on the Mac (`kill -USR2 <pid>`), the stand-in for the design's native consent.
+
+**The link (12:58, from the first request to the tools scan: 27 seconds).**
+- ChatGPT's backend probed `POST /mcp` unauthenticated (a Python `aiohttp` client) and got the 401 with the `resource_metadata` challenge, then fetched `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration`, twice in a row, all 200. Cloudflare let every discovery request through (also checked with four other user agents).
+- ChatGPT chose the **client-metadata-document** route on its own (client `https://chatgpt.com/oauth/client.json`); it never registered dynamically. The server's fetch of that document from chatgpt.com was accepted. (The reviewer's critical finding, that ChatGPT's real document would be rejected, would have killed exactly this step.)
+- The consent page opened in the operator's browser; the pairing code was accepted 17 seconds later, the redirect carried `code`, `state` and `iss`, and ChatGPT's backend (`openai-connectors-oauth/1.0`) exchanged the code two seconds after that. The tools scan (`server/discover` 400, `initialize`, `tools/list`) then ran with the token.
+- The first write, at plugin age about 3 minutes, was not blocked. The first-use dialog carried no "Suspicious Instruction" banner.
+
+**First chat, 1-hour tokens.** 4 of 4 handoffs accepted with no rejection, 7 calls, every call carrying a valid token (3,544 down to 3,163 seconds left), zero refreshes.
+
+**Second chat, 2-minute tokens with the authorization server's clock shifted forward 3,700 seconds**, so the hour-long token ChatGPT held read as expired. 4 of 4 accepted in 9.7 minutes.
+- The first two requests carried the stale token and got a 401 with `error="invalid_token"`; ChatGPT refreshed within one second and the chat went on. So an unexpected 401 in ordinary Chat on the desktop app is handled by a refresh, not by a Reconnect (the community report of the opposite did not reproduce against a server that answers with the challenge header).
+- **ChatGPT refreshed before every tool call: 9 refreshes for 9 calls**, one to two seconds ahead of the call, including when the token still had 106 to 119 seconds left. With 1-hour tokens it refreshed 0 times in 7 calls, so its refresh margin lies somewhere between about 2 and 50 minutes. A refresh also ran after a 3-minute idle gap while the model wrote an answer.
+- Nine rotations, no replay inside the grace window and no reuse alarm; the link also survived a server restart (state file with hashed tokens, reloaded).
+
+**What this means for the real bridge.** OAuth linking works with a web-created plugin used from the desktop app's ordinary Chat. Client-metadata documents are enough for ChatGPT (dynamic registration and a pre-registered client were built but not exercised). Use access tokens of 1 hour or more, or every tool call costs an extra refresh round trip; keep persisted, hashed token state so a restart does not unlink; keep `iss` on every authorization response; the pairing-code gate before the consent page held up. Discovery must be reachable without a bot challenge (it was).
+
+Not yet run: disconnect and reconnect (does ChatGPT call revoke, and does re-linking work), an expired refresh token (the "link lost" experience), and held calls.
+
+Not yet run in Phase 0b: see above. Otherwise Phase 0 is measured (OAuth on the Pro account, warm-up reset, held-call and throttling measurements). `spike-report.md` and `spike-log.jsonl` hold the detail and stay git-ignored (they contain user agents and IP addresses).
 
 ## Teardown state
 

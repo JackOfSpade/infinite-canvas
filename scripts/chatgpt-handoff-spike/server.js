@@ -267,7 +267,7 @@ export async function startServer(options = {}) {
   // authorization server in oauth.js. Its tool text is oauth.surface (default v2).
   if (design && oauth) {
     if (!SURFACES[oauth.surface ?? 'v2']) throw new Error(`Unknown tool surface "${oauth.surface}" for plugin D (known: ${Object.keys(SURFACES).join(', ')})`)
-    plugins.push({ id: 'D', surface: oauth.surface ?? 'v2', token: null, mcpPath: '/mcp', name: `${pluginName} D`, auth: true, createdAt: null, firstSeen: null })
+    plugins.push({ id: 'D', surface: oauth.surface ?? 'v2', token: null, mcpPath: '/mcp', name: `${pluginName} D`, auth: true, createdAt: oauth.createdAt ?? null, firstSeen: null })
   }
   const pluginByPath = new Map(plugins.map(p => [p.mcpPath, p]))
   const startedAt = Date.now()
@@ -643,11 +643,21 @@ async function main() {
     oauthOptions = {
       surface: process.env.OAUTH_SURFACE || 'v2',
       issuer: process.env.OAUTH_ISSUER || undefined,
+      createdAt: process.env.PLUGIN_CREATED_AT_D || null,
       accessTtlSec: num('ACCESS_TTL_SEC'),
       refreshTtlSec: num('REFRESH_TTL_SEC'),
       refreshGraceSec: num('REFRESH_GRACE_SEC'),
       persistPath: process.env.OAUTH_STATE === '0' ? null : (process.env.OAUTH_STATE || path.join(HERE, 'oauth-state.json')),
     }
+    // OAUTH_CLOCK_OFFSET_SEC shifts only the authorization server's clock, so a token ChatGPT already holds
+    // reads as expired without waiting an hour: it tests what ChatGPT does when it presents a token we
+    // refuse (a stale or revoked one). Keep the same value across restarts of one experiment.
+    const offsetSec = Number(process.env.OAUTH_CLOCK_OFFSET_SEC || 0)
+    if (!Number.isFinite(offsetSec)) {
+      console.error('OAUTH_CLOCK_OFFSET_SEC must be a number of seconds.')
+      process.exit(1)
+    }
+    if (offsetSec) oauthOptions.now = () => Date.now() + offsetSec * 1000
   }
   let spike
   try {
