@@ -117,3 +117,12 @@ cd scripts/chatgpt-handoff-spike && JOBS=2 npm start
 # 3. Prove the whole path (expect the spike's 404 JSON):
 curl -i https://bridge-lab.lullascape.com/
 ```
+
+## Progress log
+
+**Stage 1: DONE, verified (2026-09-26, about 01:30 EDT).**
+- Cloudflare (Free plan) zone for `lullascape.com` created; assigned nameservers **`liv.ns.cloudflare.com`** and **`ram.ns.cloudflare.com`**. Zone contains only `TXT @ "v=spf1 -all"` (the optional `_dmarc` record was skipped). Zone status: "Waiting for your registrar to propagate your new nameservers".
+- Porkbun DNSSEC DS record (key tag 2371, algorithm 13, digest type 2) removed. Verified independently at 01:36 EDT: the `.com` registry (`a.gtld-servers.net`) returns no DS for `lullascape.com`, and 1.1.1.1, 8.8.8.8 and 9.9.9.9 return none. Delegation still at Porkbun (`curitiba/fortaleza/maceio/salvador`), as intended.
+- Open item: Porkbun's own DNSSEC toggle for the domain still reads ON next to "Registry DNSSEC: 0 records". If Porkbun manages the DS automatically it could re-add it, so turn the toggle OFF (small follow-up prompt) and re-check the registry before Stage 2.
+- Stage 2 timing: the safe wait is 24 hours from about 01:30 EDT on 2026-09-26 (the DS TTL is up to a day). The registry and the three big public resolvers are already clean, so waiting until later today is a low residual risk; it only affects a validating resolver that cached the DS in the last 24 hours. A resolver on Jack's own network may have been primed by earlier lookups: for local tests use `dig @1.1.1.1` / `curl --resolve`, or wait.
+- Re-check immediately before Stage 2: `dig +norec DS lullascape.com @a.gtld-servers.net` must show `ANSWER: 0`.
