@@ -7,8 +7,24 @@ Only Jack can do the account, payment and DNS steps. Nothing here is automated.
 
 ## 1. Pick and register the domain (Porkbun, about 5 minutes)
 
-- Choose a boring, non-descriptive name, and a mainstream TLD such as `.com` or `.ca`. Avoid the very cheapest TLDs (`.xyz`, `.top` and similar): they have a poorer reputation, and ChatGPT has rejected connectors on some domains as "not safe" (judgement, not verified for this case).
-- Expect roughly 10-15 USD or CAD per year (unverified). Leave registrar lock on. Turn on the free WHOIS privacy. Do **not** enable email forwarding, URL forwarding or DNSSEC on it.
+**Choose it as shared infrastructure for many projects, not as this app's name.** One domain gives unlimited subdomains, and one Cloudflare tunnel can map several hostnames to different local ports, so later projects cost nothing extra.
+
+- **Neutral and boring:** a short (about 6-12 letters), pronounceable, coined or two-unrelated-word name. Not `infinitecanvas`, `resume`, `jobs`, `career` or your own name: the hostname shows up in ChatGPT's plugin settings, DNS and Cloudflare logs and must not describe or expose what runs behind it. Subdomain names are discoverable, so never rely on them being secret; auth is what protects the data.
+- **Avoid brand and security words:** `openai`, `chatgpt`, `gpt`, `cloudflare`, `login`, `auth`, `secure`, `verify`, `account`, `pay`. They resemble phishing patterns and can trip safety filters. Also avoid hyphens and digits.
+- **Mainstream TLD:** `.com` (safest) or `.ca`. Avoid the very cheapest TLDs (`.xyz`, `.top` and similar): poorer reputation, and ChatGPT has rejected connectors on some domains as "not safe" (judgement, not verified for this case). Expect roughly 10-15 USD or CAD a year (unverified).
+- **Separate from anything personal or branded:** do not use `jackwu.ca` or `shuttersheep.com`. A dedicated domain keeps a registrar or Cloudflare problem, and any reputation damage, away from your email and site.
+- **Renewal must never lapse:** turn on auto-renew, keep the card valid, consider registering 2 or more years. If a lapsed domain were re-registered by someone else, the ChatGPT plugin would point at them.
+- **Registrar settings:** leave registrar lock on, turn on the free WHOIS privacy, and do **not** enable email forwarding, URL forwarding or DNSSEC on it.
+
+**Hostname plan (one level only: Cloudflare's free certificate covers `*.domain` but not `a.b.domain`):**
+
+| Hostname | Use |
+|---|---|
+| `bridge.<domain>` | The production ChatGPT bridge |
+| `bridge-lab.<domain>` | Lab/test copy of the bridge (the design requires a separate lab hostname for tests) |
+| `<project>.<domain>` | Any later project, each with its own tunnel and token so one leak never covers the others |
+
+OAuth tokens are bound to the hostname they were issued for, so projects on different subdomains cannot use each other's tokens.
 
 ## 2. Dedicated Cloudflare account (about 10 minutes)
 
