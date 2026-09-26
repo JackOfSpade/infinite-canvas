@@ -22,7 +22,7 @@ function fidelityRow(label, list, which) {
   return [
     label, withField.length, strict.length,
     withField.filter(e => e[which].tolerated).length,
-    which === 'codeArg' ? withField.filter(e => e[which].miscopy === 'other_handoff_code').length : '—',
+    withField.filter(e => e[which].miscopy === 'other_handoff_code').length,
     classes.length ? classes.map(([c, n]) => `${c} ×${n}`).join(', ') : '—',
   ]
 }

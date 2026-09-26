@@ -261,7 +261,7 @@ export async function startServer(options = {}) {
     if (plugins.some(p => p.id === extra.id)) throw new Error(`Duplicate plugin id "${extra.id}"`)
     if (!SURFACES[extra.surface]) throw new Error(`Unknown tool surface "${extra.surface}" for plugin ${extra.id} (known: ${Object.keys(SURFACES).join(', ')})`)
     const extraToken = extra.token ?? crypto.randomBytes(16).toString('hex')
-    plugins.push({ id: extra.id, surface: extra.surface, token: extraToken, mcpPath: `/mcp/${extraToken}`, name: extra.name ?? `${pluginName} ${extra.id}`, createdAt: null, firstSeen: null })
+    plugins.push({ id: extra.id, surface: extra.surface, token: extraToken, mcpPath: `/mcp/${extraToken}`, name: extra.name ?? `${pluginName} ${extra.id}`, createdAt: extra.createdAt ?? null, firstSeen: null })
   }
   // Plugin D is the OAuth variant: the fixed path /mcp, every request needs a bearer token from the
   // authorization server in oauth.js. Its tool text is oauth.surface (default v2).
@@ -626,7 +626,14 @@ async function main() {
       console.error(`TOKEN_${id} must be 32 lowercase hex characters.`)
       process.exit(1)
     }
-    extraPlugins.push({ id, surface: surfaceId, token: extraToken })
+    // PLUGIN_CREATED_AT_B=<iso>: when the plugin was created, so its age survives a server restart
+    // (without it the age counts from ChatGPT's first request after the restart).
+    const createdAt = process.env[`PLUGIN_CREATED_AT_${id}`] || null
+    if (createdAt && (!Number.isFinite(Date.parse(createdAt)) || Date.parse(createdAt) > Date.now() + 60000)) {
+      console.error(`PLUGIN_CREATED_AT_${id} must be a past ISO time with a UTC offset.`)
+      process.exit(1)
+    }
+    extraPlugins.push({ id, surface: surfaceId, token: extraToken, createdAt })
   }
   // OAUTH=1 adds plugin D (fixed path /mcp behind OAuth). ACCESS_TTL_SEC / REFRESH_TTL_SEC /
   // REFRESH_GRACE_SEC set the lifetimes to measure; OAUTH_STATE keeps the link across restarts.

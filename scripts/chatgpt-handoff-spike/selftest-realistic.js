@@ -457,6 +457,8 @@ async function main() {
       assert.equal(again.status, 'duplicate', 'resubmitting an accepted handoff is a harmless duplicate')
       const ev = lab.logger.events.filter(e => e.tool === 'submit_handoff' && e.reason === 'duplicate').pop()
       assert.equal(ev.codeArg.miscopy, 'other_handoff_code', 'a stale but valid code is its own class, not a glyph error')
+      assert.equal(ev.codeEcho.miscopy, 'other_handoff_code', 'and so is the echo of an earlier code inside a resubmitted answer')
+      assert.ok(!(ev.flags || []).includes('code_echo_substitution'))
     })
     await step('the designed cover-letter rejection (opt-in per chat) asks for correctionAck, keeps asking, then passes', async () => {
       const v = variantOf('clean-mini')

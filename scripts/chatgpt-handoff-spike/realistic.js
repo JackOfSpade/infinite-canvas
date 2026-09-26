@@ -522,7 +522,10 @@ export function createHub({ fixtures, plan, sessionCodes = null, publicBase = 'h
       if (miscopy) flags.push(`code_arg_${miscopy.replace(/_\d+$/, '')}`)
       if (value && 'handoffCode' in value) {
         const echo = value.handoffCode
-        const em = typeof echo === 'string' ? classifyCodeMiscopy(expected, echo) : 'not_a_string'
+        // An echo of ANOTHER code this session was issued (the model resubmitting an earlier answer) is stale
+        // reuse, not a copying error: same class as for the argument.
+        const echoOwner = typeof echo === 'string' ? codeIndex.get(echo) : null
+        const em = typeof echo !== 'string' ? 'not_a_string' : echoOwner && echoOwner.session === session && echo !== expected ? 'other_handoff_code' : classifyCodeMiscopy(expected, echo)
         ev.codeEcho = { raw: typeof echo === 'string' ? trunc(echo, 64) : Array.isArray(echo) ? '[array]' : `[${typeof echo}]`, miscopy: em }
         if (em) flags.push(`code_echo_${String(em).replace(/_\d+$/, '')}`)
       }
