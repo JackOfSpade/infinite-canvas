@@ -64,7 +64,7 @@ One-hotkey relay: press a global hotkey when ChatGPT finishes; the app grabs the
 
 ## Teardown state
 
-Server and tunnel stopped; port 8787 free. The plugin **still exists in ChatGPT with a dead URL: delete it** (chatgpt.com/plugins → Personal → Infinite Canvas Spike). `spike-log.jsonl` and `spike-report.md` are git-ignored and never contain the token (paths show `/mcp/<token>`).
+Server and tunnel stopped; port 8787 free; the plugin was deleted in ChatGPT afterwards (its URL was already dead). `cloudflared` remains installed via Homebrew (`brew uninstall cloudflared` to remove) and was never set up as a service. `spike-log.jsonl` and `spike-report.md` are git-ignored and never contain the token (paths show `/mcp/<token>`). Still to do: re-check Settings → Usage → Analytics tomorrow for the four spike chats (see check 2).
 
 ## Sources for the research summary
 
