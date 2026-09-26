@@ -3,7 +3,7 @@
 Two stages, because DNSSEC must be off and expired from resolver caches (about 24 hours) before the nameservers change.
 Jack does anything involving sign-up, sign-in, email verification, 2FA, CAPTCHA or payment; the agent stops there.
 
-Expected facts (public lookups, 2026-09-26): registrar Porkbun; nameservers `curitiba/fortaleza/maceio/salvador.ns.porkbun.com`; DS record key tag 2371, algorithm 13, digest type 2, digest `6D1A4E2F2362A204566CB67271F6535211A9C2B2226AAC5679FFF128FA0D8CB3`; Porkbun-default records only (apex A to 207.207.210.23/.36/.50, wildcard CNAME to `uixie.porkbun.com`, MX `fwd1`/`fwd2.porkbun.com`, SPF TXT). No email forwarding is used.
+Expected facts (public lookups, 2026-09-26): registrar Porkbun; nameservers `curitiba/fortaleza/maceio/salvador.ns.porkbun.com`; DS record key tag 2371, algorithm 13, digest type 2, digest `6D1A4E2F2362A204566CB67271F6535211A9C2B2226AAC5679FFF128FA0D8CB3`; Porkbun-default records only: apex A to 207.207.210.23/.36/.50, wildcard `*` and `www` CNAMEs to `uixie.porkbun.com`, MX `fwd1`/`fwd2.porkbun.com`, the SPF TXT, and two `_acme-challenge` TXT tokens (stale leftovers of Porkbun's automatic Let's Encrypt wildcard certificate for the link-in-bio redirect: Certificate Transparency shows certs for `*.lullascape.com` + `lullascape.com` issued 2026-07-10 and 2026-09-12; deleting them is safe). No email forwarding is used.
 
 ## Between the stages (local checks)
 
@@ -30,8 +30,8 @@ HARD RULES
 STEP 1: Cloudflare, add the site
 1a. Open https://dash.cloudflare.com/ . If I am not signed in or no account exists, STOP.
 1b. Add the domain: open https://dash.cloudflare.com/?to=/:account/add-site (or use Add > Connect a domain). Enter lullascape.com. Accept the automatic DNS-record scan. Choose the FREE plan. If payment is requested, STOP.
-1c. On the DNS-records review screen, write down exactly what was imported (type, name, content, proxy status). I expect ONLY these Porkbun defaults: apex A records for 207.207.210.23, 207.207.210.36, 207.207.210.50 (or one flattened apex record); CNAME * -> uixie.porkbun.com; MX @ priority 10 fwd1.porkbun.com; MX @ priority 20 fwd2.porkbun.com; TXT @ "v=spf1 include:_spf.porkbun.com ~all". If there is ANY other record, STOP and list it.
-1d. Delete the apex A record(s), the * CNAME and both MX records (parking and forwarding defaults I do not use). Edit the TXT SPF record so its content is exactly: v=spf1 -all . Optional, only if easy: add TXT with name _dmarc and content: v=DMARC1; p=reject;
+1c. On the DNS-records review screen, write down exactly what was imported (type, name, content, proxy status). I expect ONLY these Porkbun defaults: apex A records for 207.207.210.23, 207.207.210.36, 207.207.210.50 (or one flattened apex record); CNAME * -> uixie.porkbun.com; CNAME www -> uixie.porkbun.com; two TXT records named _acme-challenge (43-character tokens, stale ACME challenge leftovers); MX @ priority 10 fwd1.porkbun.com; MX @ priority 20 fwd2.porkbun.com; TXT @ "v=spf1 include:_spf.porkbun.com ~all". If there is ANY other record, STOP and list it.
+1d. Delete the apex A record(s), the * CNAME, the www CNAME, both _acme-challenge TXT records and both MX records (parking, stale-certificate and forwarding defaults I do not use). Edit the TXT SPF record so its content is exactly: v=spf1 -all . Optional, only if easy: add TXT with name _dmarc and content: v=DMARC1; p=reject;
 1e. Continue to the screen that shows the two Cloudflare nameservers assigned to this zone (form: something.ns.cloudflare.com). Write both down exactly. Do NOT change anything at Porkbun for this. Leave every other option on its default; do not tick anything that enables DNSSEC.
 1f. Finish the wizard and note the zone status text (expect "Pending Nameserver Update" or similar).
 
