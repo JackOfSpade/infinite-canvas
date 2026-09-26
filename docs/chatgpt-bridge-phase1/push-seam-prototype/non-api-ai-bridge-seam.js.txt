@@ -1,0 +1,337 @@
+// Parity and safety gates for the bridge seam in electron/ipc/nonApiAi.js. An answer submitted through the seam must
+// leave exactly the state a dock paste leaves, so the core test runs each scenario twice (paste, bridge) and diffs everything observable.
+import fs, { readFileSync } from 'node:fs';
+import path from 'node:path';
+import {
+  _resetNonApiAiHandoffLifecycle, assert, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
+  registerNonApiAiHandlers, requestNonApiAi,
+} from '../test-dependencies.js';
+import { getRecentLogs } from '../../electron/logger.js';
+import {
+  BRIDGE_EXCLUSION_REASONS, listBridgeableNonApiAiHandoffs, readBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
+} from '../../electron/ipc/nonApiAi.js';
+
+const source = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
+const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+const SCHEMA = { type: 'object', required: ['answer'], additionalProperties: false, properties: { answer: { type: 'string' } } };
+const TASK = 'job-scoring';
+const ALLOW = Object.freeze({ allowTasks: new Set([TASK]) });
+const PRIVATE = 'PRIVATE_VALIDATOR_DETAIL_MUST_NOT_REACH_THE_CHAT';
+const handler = (channel) => ipcMain.__getInvokeHandler(channel);
+const answer = (request, text = 'ok') => JSON.stringify({ handoffCode: request.handoffCode, answer: text });
+const without = (object, keys) => Object.fromEntries(Object.entries(object).filter(([key]) => !keys.includes(key)));
+let senderSeq = 0;
+
+function freshHarness() {
+  ipcMain.__clearInvokeHandlers();
+  _resetNonApiAiHandoffLifecycle();
+  registerNonApiAiHandlers();
+  senderSeq += 1;
+  const sent = [];
+  const sender = { id: 51000 + senderSeq, isDestroyed: () => false, once: () => {}, removeListener: () => {}, send: (channel, payload) => sent.push({ channel, payload }) };
+  const waitFor = async (count) => {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      if (requests.length >= count) return requests;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    throw new Error('timed out waiting for handoff requests');
+  };
+  return { sent, sender, waitFor };
+}
+
+// Issue `handoffs` concurrently from one handleSafe workflow, as a hub does.
+function startWorkflow({ sender, nodeId, runId, handoffs, extra = {} }) {
+  const channel = `bridge-seam-workflow-${nodeId}`;
+  handleSafe(channel, async (_event, _args, signal) => ({
+    values: await Promise.all(handoffs.map(spec => requestNonApiAi({ task: TASK, responseSchema: SCHEMA, signal, ...extra, ...spec }))),
+  }));
+  return handler(channel)({ sender }, { nodeId, manualAiRunId: runId });
+}
+
+const cancelAll = async (sender, requests) => {
+  for (const request of requests) await handler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId }).catch(() => {});
+};
+
+async function durableSteps(runId) {
+  await handler('flush-non-api-ai-persistence')({});
+  const file = path.join(electronPkg.app.getPath('userData'), 'non-api-ai-handoffs.json');
+  const steps = JSON.parse(fs.readFileSync(file, 'utf8')).runs?.[runId]?.steps || {};
+  return Object.values(steps).map(step => without(step, ['updatedAt'])).sort((a, b) => String(a.batch).localeCompare(String(b.batch)));
+}
+
+// Everything a dock or a bug report can observe, with volatile ids masked.
+function observe({ sent, lifecycle, steps, logs, values, requestIds }) {
+  let text = JSON.stringify({
+    sent,
+    lifecycle: lifecycle.map(receipt => ({
+      ...without(receipt, ['issuedAt', 'updatedAt', 'windowId', 'acceptedAt', 'settledAt', 'failures']),
+      accepted: receipt.acceptedAt != null,
+      settled: receipt.settledAt != null,
+      failures: receipt.failures.map(failure => without(failure, ['at'])),
+    })),
+    steps, logs, values,
+  });
+  for (const [index, id] of requestIds.entries()) text = text.split(id).join(`<REQ${index}>`).split(id.slice(0, 12)).join(`<REQ${index}>`);
+  return JSON.parse(text);
+}
+
+async function runScenario({ via, scenario, nodeId, runId }) {
+  const logsBefore = new Set(getRecentLogs());
+  const { sent, sender, waitFor } = freshHarness();
+  const allow = { ...ALLOW, allowNodeIds: new Set([nodeId]) };
+  const outcomes = [];
+  const run = startWorkflow({ sender, nodeId, runId, handoffs: scenario.handoffs });
+  const requests = (await waitFor(scenario.handoffs.length)).sort((a, b) => (a.batch ?? 0) - (b.batch ?? 0));
+  const submit = async (index, response) => {
+    const { requestId, handoffCode } = requests[index];
+    const result = via === 'ipc'
+      ? await handler('submit-non-api-ai-response')({ sender }, { requestId, response })
+      : await submitNonApiAiResponseForBridge({ requestId, handoffCode, response, ...allow });
+    outcomes.push(result.accepted);
+  };
+  await scenario.script({ requests, submit });
+  const values = (await run).values ?? null;
+  const observables = observe({
+    sent,
+    lifecycle: getNonApiAiHandoffLifecycle({ windowId: sender.id }),
+    steps: await durableSteps(runId).catch(() => []),
+    logs: getRecentLogs().filter(entry => !logsBefore.has(entry)).map(entry => entry.message).filter(message => message.includes('[Non-API AI] Rejected response')),
+    values,
+    requestIds: requests.map(request => request.requestId),
+  });
+  await handler('complete-non-api-ai-run')({ sender }, { runId });
+  return { observables, outcomes };
+}
+
+const SCENARIOS = [
+  {
+    name: 'a valid answer is accepted',
+    handoffs: [{ prompt: 'PARITY VALID', batch: 1, batchTotal: 1, itemCount: 4, itemsDone: 0, itemsTotal: 4, progressScopeId: 's', progressUnitId: 'u1', progressUnits: 4, measureResponseUnits: () => 4 }],
+    script: async ({ requests, submit }) => { await submit(0, answer(requests[0])); },
+  },
+  {
+    name: 'invalid JSON, a schema miss and a domain rejection each reissue the same handoff, then a valid answer is accepted',
+    handoffs: [{ prompt: 'PARITY REJECTIONS', batch: 1, batchTotal: 1, itemCount: 1, responseValidator: (value) => { if (value.answer === 'domain') throw new Error(PRIVATE); } }],
+    script: async ({ requests, submit }) => {
+      await submit(0, `{"handoffCode":"${requests[0].handoffCode}","answer": "x" broken}`);
+      await submit(0, JSON.stringify({ handoffCode: requests[0].handoffCode, unexpected: true }));
+      await submit(0, answer(requests[0], 'domain'));
+      await submit(0, answer(requests[0], 'fixed'));
+    },
+  },
+  {
+    name: 'a wrong or missing handoff code is rejected with the base prompt reissued unchanged',
+    handoffs: [{ prompt: 'PARITY CODES', batch: 1, batchTotal: 1, itemCount: 1 }],
+    script: async ({ requests, submit }) => {
+      await submit(0, JSON.stringify({ handoffCode: 'HANDOFF-ZZZZZZ', answer: 'ok' }));
+      await submit(0, JSON.stringify({ answer: 'ok' }));
+      await submit(0, answer(requests[0]));
+    },
+  },
+  {
+    name: 'the same long answer is accepted for one step and refused (DUPLICATE_RESPONSE) for another',
+    handoffs: [
+      { prompt: 'PARITY DUPLICATE ONE', batch: 1, batchTotal: 2, itemCount: 1 },
+      { prompt: 'PARITY DUPLICATE TWO', batch: 2, batchTotal: 2, itemCount: 1 },
+    ],
+    script: async ({ requests, submit }) => {
+      await submit(0, answer(requests[0], 'x'.repeat(600)));
+      await submit(1, answer(requests[1], 'x'.repeat(600)));
+      await submit(1, answer(requests[1], 'second'));
+    },
+  },
+  {
+    name: 'a failed durable write is a rejection on both paths and a retry then succeeds',
+    handoffs: [{ prompt: 'PARITY COMMIT FAILURE', batch: 1, batchTotal: 1, itemCount: 1 }],
+    script: async ({ requests, submit }) => {
+      const original = fs.promises.writeFile;
+      let failOnce = true;
+      fs.promises.writeFile = async (...args) => {
+        if (failOnce && String(args[0]).includes('non-api-ai-handoffs.json')) {
+          failOnce = false;
+          throw Object.assign(new Error("EACCES: permission denied, open '/Users/private/secret/non-api-ai-handoffs.json'"), { code: 'EACCES' });
+        }
+        return original(...args);
+      };
+      try {
+        await submit(0, answer(requests[0]));
+        await submit(0, answer(requests[0]));
+      } finally {
+        fs.promises.writeFile = original;
+      }
+    },
+  },
+];
+
+const differing = (a, b) => Object.keys({ ...a, ...b }).filter(key => JSON.stringify(a[key]) !== JSON.stringify(b[key]));
+
+export default [
+  {
+    name: 'non-API AI bridge seam: every scenario leaves identical dock events, durable steps, lifecycle receipts, logs and resolved values on the paste path and the bridge path',
+    run: async () => {
+      let index = 0;
+      for (const scenario of SCENARIOS) {
+        index += 1;
+        const nodeId = `bridge-seam-parity-node-${index}`;
+        const runId = `bridge-seam-parity-run-${index}-${process.pid}-${Date.now()}`;
+        const paste = await runScenario({ via: 'ipc', scenario, nodeId, runId });
+        const bridge = await runScenario({ via: 'bridge', scenario, nodeId, runId });
+        assert(JSON.stringify(paste.outcomes) === JSON.stringify(bridge.outcomes), `${scenario.name}: accept/reject sequence differs (${paste.outcomes} vs ${bridge.outcomes})`);
+        const diff = differing(paste.observables, bridge.observables);
+        assert(diff.length === 0, `${scenario.name}: observables differ in ${diff.join(', ')}`);
+      }
+      return { scenarios: SCENARIOS.length };
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: the IPC handler still returns exactly { accepted } or { accepted, validationErrors }',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const run = startWorkflow({ sender, nodeId: 'bridge-seam-ipc-shape', runId: null, handoffs: [{ prompt: 'IPC SHAPE', batch: 1, batchTotal: 1, itemCount: 1 }] });
+      const [request] = await waitFor(1);
+      const submit = handler('submit-non-api-ai-response');
+      const rejected = await submit({ sender }, { requestId: request.requestId, response: '{}' });
+      const accepted = await submit({ sender }, { requestId: request.requestId, response: answer(request) });
+      const gone = await submit({ sender }, { requestId: request.requestId, response: answer(request) });
+      await run;
+      const keys = (result) => Object.keys(result).sort().join();
+      assert(keys(rejected) === 'accepted,validationErrors' && keys(accepted) === 'accepted' && keys(gone) === 'accepted,validationErrors', 'the internal reason never crosses IPC');
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: a rejection carries only the outcome enum, the safe classification and the correction block, never the validator message',
+    run: async () => {
+      const { sender, waitFor, sent } = freshHarness();
+      const run = startWorkflow({
+        sender, nodeId: 'bridge-seam-privacy', runId: `bridge-seam-privacy-${process.pid}-${Date.now()}`,
+        handoffs: [{ prompt: 'PRIVACY PROMPT', batch: 1, batchTotal: 1, itemCount: 1, responseValidator: () => { throw new Error(PRIVATE); } }],
+      });
+      const [request] = await waitFor(1);
+      const ids = { requestId: request.requestId, handoffCode: request.handoffCode };
+      const rejected = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request), ...ALLOW });
+      const dock = sent.filter(item => item.channel === 'non-api-ai-request').at(-1).payload;
+      assert(rejected.outcome === 'rejected' && rejected.accepted === false && rejected.validationCode === 'VALIDATION_FAILED' && rejected.isCorrection === true
+        && !JSON.stringify(rejected).includes(PRIVATE) && dock.validationError === PRIVATE, 'the dock keeps the precise message; the bridge outcome does not');
+      assert(`${request.prompt}\n\n${rejected.correction}` === dock.prompt, 'base prompt plus the correction block is the dock retry prompt');
+      const read = readBridgeableNonApiAiHandoff({ ...ids, ...ALLOW });
+      assert(read.ok && read.prompt === dock.prompt && read.attempt === 2 && read.isCorrection, 'a re-serve carries the dock retry prompt byte for byte');
+      await cancelAll(sender, [request]);
+      await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: only text-only, structured, allowlisted, undrafted handoffs are listed, and the allowlist cannot unlock the structural exclusions',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-eligibility';
+      handleSafe('bridge-seam-eligibility-workflow', async (_event, _args, signal) => ({
+        values: await Promise.all([
+          requestNonApiAi({ prompt: 'OK', task: TASK, responseSchema: SCHEMA, batch: 1, batchTotal: 6, signal }),
+          requestNonApiAi({ prompt: 'WITH FILE', task: 'vision-product-analysis', responseSchema: SCHEMA, attachmentPaths: ['/Users/private/photo.png'], signal }),
+          requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research', grounding: true, requestKind: 'raw-text', signal }),
+          requestNonApiAi({ prompt: 'OTHER TASK', task: 'price-synthesis', responseSchema: SCHEMA, signal }),
+          requestNonApiAi({ prompt: 'DRAFTED', task: TASK, responseSchema: SCHEMA, batch: 5, batchTotal: 6, signal }),
+          requestNonApiAi({ prompt: 'SCHEMALESS', task: TASK, requestKind: 'raw-text', signal }),
+        ]),
+      }));
+      const run = handler('bridge-seam-eligibility-workflow')({ sender }, { nodeId });
+      const requests = await waitFor(6);
+      const by = (text) => requests.find(request => request.prompt.includes(text));
+      await handler('update-non-api-ai-draft')({ sender }, { requestId: by('DRAFTED').requestId, response: 'PRIVATE_DRAFT_TEXT typed by the person' });
+      const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research', 'price-synthesis']), allowNodeIds: new Set([nodeId]) };
+      const listed = listBridgeableNonApiAiHandoffs(everything);
+      assert(listed.handoffs.length === 2 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.batch === 1), 'only the plain structured handoffs remain');
+      assert(listed.excluded.attachment === 1 && listed.excluded.grounded === 1 && listed.excluded.free_text === 1 && listed.excluded.person_editing === 1, 'each exclusion counted once under its own reason');
+      assert(listBridgeableNonApiAiHandoffs().handoffs.length === 0 && listBridgeableNonApiAiHandoffs().excluded.task_not_allowed === 3, 'no allowlist offers nothing');
+      const otherHub = listBridgeableNonApiAiHandoffs({ ...ALLOW, allowNodeIds: new Set(['another-hub']) });
+      assert(otherHub.handoffs.length === 0 && otherHub.excluded.node_not_allowed === 2, 'an unselected hub offers nothing');
+      const serialized = JSON.stringify(listed);
+      assert(!serialized.includes('PRIVATE_DRAFT_TEXT') && !serialized.includes('/Users/private') && !serialized.includes('"prompt"'), 'the list carries no prompt, draft or path');
+      const drafted = readBridgeableNonApiAiHandoff({ requestId: by('DRAFTED').requestId, handoffCode: by('DRAFTED').handoffCode, ...ALLOW });
+      const attachment = readBridgeableNonApiAiHandoff({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, ...everything });
+      assert(drafted.reason === 'person_editing' && attachment.reason === 'attachment', 'reading re-applies the rules');
+      const refused = await submitNonApiAiResponseForBridge({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, response: answer(by('WITH FILE')), ...everything });
+      assert(refused.outcome === 'ineligible' && refused.exclusion === 'attachment', 'submitting to an attachment handoff is refused untouched');
+      assert(BRIDGE_EXCLUSION_REASONS.every(reason => reason in listed.excluded), 'every reason is reported');
+      await cancelAll(sender, requests);
+      await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: handoffs are listed in the dock order regardless of arrival order',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-order';
+      const run = startWorkflow({ sender, nodeId, runId: null, handoffs: [3, 1, 2].map(batch => ({ prompt: `ORDER ${batch}`, batch, batchTotal: 3, itemCount: 1 })) });
+      const requests = await waitFor(3);
+      const listed = listBridgeableNonApiAiHandoffs({ ...ALLOW, allowNodeIds: new Set([nodeId]) }).handoffs;
+      assert(listed.map(item => item.batch).join() === '1,2,3', 'batch order, not arrival order');
+      // Drift alarm: the dock's insertion rule in receiveRequest is the one bridgeDockOrder copies.
+      assert(['queued.nodeId === incoming.nodeId', 'queued.task === incoming.task', 'queued.batch > incoming.batch', 'next.splice(at, 0, incoming);'].every(part => dialogSource.includes(part)), 'the dock still orders by the copied rule');
+      await cancelAll(sender, requests);
+      await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: two simultaneous submissions commit once, whichever path they arrive on',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const runId = `bridge-seam-race-${process.pid}-${Date.now()}`;
+      const run = startWorkflow({ sender, nodeId: 'bridge-seam-race', runId, handoffs: [{ prompt: 'RACE', batch: 1, batchTotal: 1, itemCount: 3, itemsDone: 0, itemsTotal: 3, progressScopeId: 'r', progressUnitId: 'u', progressUnits: 3 }] });
+      const [request] = await waitFor(1);
+      const args = { requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request), ...ALLOW };
+      const results = await Promise.all([
+        submitNonApiAiResponseForBridge(args),
+        submitNonApiAiResponseForBridge(args),
+        handler('submit-non-api-ai-response')({ sender }, { requestId: request.requestId, response: answer(request) }),
+      ]);
+      await run;
+      assert(results.filter(result => result.accepted).length === 1 && results.filter(result => result.outcome === 'busy').length === 1, 'exactly one commit; the other bridge call is busy');
+      const receipts = getNonApiAiHandoffLifecycle({ windowId: sender.id }).filter(receipt => receipt.runId === runId);
+      assert(receipts.length === 1 && receipts[0].outcome === 'accepted' && receipts[0].itemsDone === 3, 'one accepted receipt, progress counted once');
+      await handler('complete-non-api-ai-run')({ sender }, { runId });
+      assert((await submitNonApiAiResponseForBridge(args)).outcome === 'not_pending', 'a late duplicate finds nothing pending');
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: a handoff re-issued under the same code after Back cannot be answered by a stale bridge submission',
+    run: async () => {
+      const { sender, waitFor, sent } = freshHarness();
+      const runId = `bridge-seam-back-${process.pid}-${Date.now()}`;
+      const spec = { prompt: 'BACK STEP', batch: 1, batchTotal: 1, itemCount: 1 };
+      const first = startWorkflow({ sender, nodeId: 'bridge-seam-back', runId, handoffs: [spec] });
+      const [original] = await waitFor(1);
+      await submitNonApiAiResponseForBridge({ requestId: original.requestId, handoffCode: original.handoffCode, response: answer(original), ...ALLOW });
+      await first;
+      sent.length = 0;
+      // Back: the same step (same code) is issued again with the accepted answer restored as an editable draft.
+      const second = startWorkflow({ sender, nodeId: 'bridge-seam-back-again', runId: `${runId}-again`, handoffs: [{ ...spec }], extra: { initialResponse: answer(original) } });
+      const [reissued] = await waitFor(1);
+      const stale = await submitNonApiAiResponseForBridge({ requestId: original.requestId, handoffCode: original.handoffCode, response: answer(original), ...ALLOW });
+      const drafted = await submitNonApiAiResponseForBridge({ requestId: reissued.requestId, handoffCode: reissued.handoffCode, response: answer(reissued), ...ALLOW });
+      assert(stale.outcome === 'not_pending', 'the old request id is gone');
+      assert(drafted.outcome === 'ineligible' && drafted.exclusion === 'person_editing', 'the restored draft keeps the reissued handoff out of the bridge');
+      await cancelAll(sender, [reissued]);
+      await second.catch(() => {});
+      await handler('complete-non-api-ai-run')({ sender }, { runId });
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: the accept body exists once, both entry points only call it, and the pinned log lines are untouched',
+    run: () => {
+      const between = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+      const ipcHandler = between("ipcMain.handle('submit-non-api-ai-response'", "ipcMain.handle('step-back-non-api-ai-request'");
+      const bridgeSubmit = between('export async function submitNonApiAiResponseForBridge(', '\n}\n');
+      const forbidden = ['validateNonApiAiSubmission(', 'updateDurableStep(', 'settle(', 'record.resolve(', 'claimAcceptedResponseFingerprint(', 'updateHandoffLifecycle('];
+      assert(forbidden.every(text => !ipcHandler.includes(text) && !bridgeSubmit.includes(text)), 'neither entry point re-implements validation, commit or settlement');
+      assert(ipcHandler.includes('await acceptNonApiAiResponse(record, args)') && bridgeSubmit.includes('await acceptNonApiAiResponse(record, { response })'), 'both call the one accept body');
+      assert((source.match(/updateDurableStep\(record, \{ status: 'accepted'/g) || []).length === 1, 'exactly one accepted-commit site');
+      const beforeCall = bridgeSubmit.slice(0, bridgeSubmit.indexOf('await acceptNonApiAiResponse')).split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
+      assert(!beforeCall.includes('await '), 'no await between the eligibility checks and the accept body');
+      const seam = between('// ── In-process bridge seam', 'export function registerNonApiAiHandlers()');
+      assert(!/\.message|\.stack|validationErrors|validationError\b/.test(seam.replace(/record\.validationError\b/g, '')), 'the seam never reads an error message');
+      assert(source.split('\n').filter(line => /Rejected response for task|Ignoring invalid (legacy )?saved response/.test(line)).length === 3, 'the exactly-three log-line pin holds');
+    },
+  },
+];

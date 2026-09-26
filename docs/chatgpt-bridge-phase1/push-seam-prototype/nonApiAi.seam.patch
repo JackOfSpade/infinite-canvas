@@ -1,0 +1,389 @@
+--- a/electron/ipc/nonApiAi.js
++++ b/electron/ipc/nonApiAi.js
+@@ -2197,6 +2197,8 @@
+     attemptKind: cleanAttemptKind(attemptKind),
+     rootBatchSize: cleanBatchNumber(rootBatchSize),
+     task,
++    // Recorded so the in-process bridge can prove a handoff never asked the chat for web research.
++    grounded: grounding === true,
+     responseSchema: effectiveResponseSchema,
+     responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
+     attachmentPaths: normalizedAttachmentPaths,
+@@ -2359,8 +2361,283 @@
+   // paste and later silently producing placeholder data.
+   responseValidator?.(value);
+   return value;
++}
++
++/**
++ * The one accept/reject body for a pasted or bridged response. The IPC handler
++ * below and the in-process bridge (submitNonApiAiResponseForBridge) both call
++ * it, so validation, the durable commit, progress, lifecycle receipts, the
++ * settled event and the reissue on rejection can never diverge between the two.
++ * Callers must check the record and its settling flag synchronously first, with
++ * no await before this call: the check-then-set on `settling` is the only thing
++ * that keeps two simultaneous submissions from both committing.
++ */
++async function acceptNonApiAiResponse(record, args) {
++  // Where the write stands, so the caller can tell a rejected answer from a failed save.
++  let phase = 'validate';
++  try {
++    const value = validateNonApiAiSubmission({
++      response: args.response,
++      responseSchema: record.responseSchema,
++      responseValidator: record.responseValidator,
++      task: record.task,
++      expectedHandoffCode: record.handoffCode,
++      requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
++    });
++    // A legacy step restored before handoff-code enforcement existed has no
++    // code in the paste for the check above to compare against, so this is
++    // the remaining guard against the same pasted answer being accepted
++    // into two different steps (see acceptedResponseFingerprints near the
++    // top of this file). Must run before any durable write or resolution
++    // below — a rejection here must leave this request exactly as pending
++    // as a code-mismatch rejection does.
++    claimAcceptedResponseFingerprint(record, args.response);
++    record.validationError = null;
++    record.validationCode = null;
++    record.settling = true;
++    phase = 'commit';
++    await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
++    phase = 'committed';
++    // The durable write yields. Cancellation or Back may settle this record
++    // in that interval, in which case its response must not mutate display
++    // progress or revive the already-rejected workflow promise.
++    if (!isActiveSettlingRecord(record)) {
++      return { accepted: false, validationErrors: ['This Non-API AI request was cancelled before the submission finished saving.'], reason: 'cancelled_during_save' };
++    }
++    // The durable write is the commit point. Selecting, copying, retrying,
++    // replaying, or failing validation never reaches this increment.
++    const progressScope = acceptProgressRecord(record, value);
++    const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
++    const responseHash = responseReceiptHash(args.response);
++    updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
++    publishProgressScope(progressScope, record);
++    // Teach this process's sizer what the response actually cost. This update
++    // is deliberately non-durable and must never fail an accepted answer.
++    let measuredUnits = record.matchCount ?? record.itemCount;
++    if (record.measureResponseUnits) {
++      try {
++        const actual = record.measureResponseUnits(value);
++        // `>= 0`, not `> 0`: a schema-valid response really can contain zero
++        // units, and falling back to the full intended count there would
++        // charge a near-empty response against a large denominator — the
++        // artificially-cheap sample this measurement exists to prevent.
++        // recordHandoffOutputSample drops a zero-unit sample outright.
++        if (Number.isFinite(actual) && actual >= 0) measuredUnits = actual;
++      } catch { /* a measurement must never fail an accepted answer */ }
++    }
++    void recordHandoffOutputSample({
++      task: record.task,
++      units: measuredUnits,
++      responseChars: acceptedChars,
++      planItemCount: record.planItemCount,
++    }).catch(() => {});
++    settle(record, { accepted: true });
++    record.resolve(value);
++    return { accepted: true, reason: 'accepted' };
++  } catch (error) {
++    // An abort/step-back can race a failed durable write too. Its owner has
++    // already settled the promise, so never turn that terminal state into a
++    // retry prompt or overwrite its lifecycle receipt.
++    if (record.signal?.aborted || pendingRequests.get(record.requestId) !== record) {
++      return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'], reason: 'not_pending' };
++    }
++    record.settling = false;
++    const message = error?.message || 'The pasted response could not be accepted.';
++    const validationCode = nonApiAiLogErrorCode(error);
++    const validationDiagnostic = defaultSafeValidationDiagnostic(error, validationCode);
++    const responseReceipt = safeResponseReceipt(args.response);
++    record.validationError = message;
++    record.validationCode = validationCode;
++    record.validationDiagnostic = validationDiagnostic;
++    updateHandoffLifecycle(record, {
++      rejected: true,
++      code: validationCode,
++      validationDiagnostic,
++      ...responseReceipt,
++    });
++    logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
++    sendRequest(record, 'reissue');
++    return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
++  }
++}
++
++// ── In-process bridge seam ───────────────────────────────────────────────────
++// A narrow, stateless view of `pendingRequests` for the ChatGPT MCP bridge
++// (electron/ipc/handoffBridge/sources/push.js). The bridge never sees a record:
++// it gets frozen projections and a fixed outcome enum, and every accept goes
++// through acceptNonApiAiResponse above, the same body the dock's paste uses.
++//
++// Default-deny on purpose. A handoff is offered only when it needs nothing a
++// text-only tool connection cannot supply (no attachment, no web research, a
++// structured answer), its task id is on the caller's allowlist, and nobody is
++// typing an answer for it in the dock. The three structural checks run before
++// the allowlist so a wrong allowlist can never unblock them.
++
++/** Why a pending handoff is not offered to an external session, in precedence order. */
++export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
++  'ending', 'settling', 'attachment', 'grounded', 'free_text',
++  'task_not_allowed', 'node_not_allowed', 'person_editing',
++]);
++
++function bridgeExclusionReason(record, { allowTasks, allowNodeIds } = {}) {
++  // The window is closing or the workflow was cancelled: the record is about to settle.
++  if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
++  if (record.settling) return 'settling';
++  if (record.attachmentPaths.length > 0) return 'attachment';
++  if (record.grounded === true) return 'grounded';
++  if (!record.responseSchema) return 'free_text';
++  if (!(allowTasks instanceof Set) || !allowTasks.has(record.task)) return 'task_not_allowed';
++  if (allowNodeIds != null && !(allowNodeIds instanceof Set && allowNodeIds.has(record.nodeId))) return 'node_not_allowed';
++  // `initialResponse` is the person's unsent draft, or the accepted answer a Back
++  // step restored for editing. Either way the dock is not done with this handoff.
++  if (typeof record.initialResponse === 'string' && record.initialResponse.trim() !== '') return 'person_editing';
++  return null;
++}
++
++// The dock's own order (NonApiAiDialog.jsx receiveRequest): arrival order, except
++// that a request is inserted ahead of a queued one from the same hub and task
++// with a larger batch number. Folding the pending Map's insertion order through
++// that rule reproduces the chip strip, per window, so ChatGPT works through the
++// batches in the order the person would.
++function bridgeDockOrder(records) {
++  const byWindow = new Map();
++  for (const record of records) {
++    const list = byWindow.get(record.sender) || [];
++    list.push(record);
++    byWindow.set(record.sender, list);
++  }
++  const ordered = [];
++  for (const list of byWindow.values()) {
++    const queue = [];
++    for (const incoming of list) {
++      let at = queue.length;
++      for (let i = 0; i < queue.length; i += 1) {
++        const queued = queue[i];
++        if (queued.nodeId === incoming.nodeId
++          && queued.task === incoming.task
++          && Number.isFinite(queued.batch)
++          && Number.isFinite(incoming.batch)
++          && queued.batch > incoming.batch) { at = i; break; }
++      }
++      queue.splice(at, 0, incoming);
++    }
++    ordered.push(...queue);
++  }
++  return ordered;
++}
++
++function bridgeListEntry(record) {
++  return Object.freeze({
++    requestId: record.requestId,
++    handoffCode: record.handoffCode,
++    windowId: record.sender?.id ?? null,
++    nodeId: record.nodeId || null,
++    runId: record.runId || null,
++    task: record.task || null,
++    batch: record.batch ?? null,
++    batchTotal: record.batchTotal ?? null,
++    itemCount: record.itemCount ?? null,
++    itemsDone: record.itemsDone ?? null,
++    itemsTotal: record.itemsTotal ?? null,
++    attemptKind: record.attemptKind,
++    rejections: record.lifecycle?.rejected ?? 0,
++    // Sizes and flags only. The prompt is read separately, one handoff at a time.
++    promptChars: record.materializedPrompt.length,
++    // False only for a step restored from before code enforcement: `{}` may be a
++    // valid answer there, so the bridge must not treat it as junk.
++    codeEnforced: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
++    durable: Boolean(record.stepKey),
++    issuedAt: record.lifecycle?.issuedAt ?? null,
++  });
+ }
+ 
++/**
++ * Pending handoffs an external session may serve, in dock order, plus counts of
++ * the ones it may not. Read-only and cheap (no prompt text is built), so a held
++ * `get_handoff` can poll it several times a second.
++ */
++export function listBridgeableNonApiAiHandoffs({ allowTasks, allowNodeIds = null } = {}) {
++  const excluded = Object.fromEntries(BRIDGE_EXCLUSION_REASONS.map(reason => [reason, 0]));
++  const eligible = [];
++  for (const record of pendingRequests.values()) {
++    const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
++    if (reason) excluded[reason] += 1;
++    else eligible.push(record);
++  }
++  return Object.freeze({
++    handoffs: Object.freeze(bridgeDockOrder(eligible).map(bridgeListEntry)),
++    excluded: Object.freeze(excluded),
++    pending: pendingRequests.size,
++  });
++}
++
++function bridgeOutcome(outcome, extra = {}) {
++  return Object.freeze({ outcome, accepted: outcome === 'accepted', ...extra });
++}
++
++// What a rejection or a serve tells the chat, from a record's current state. It
++// is exactly what publicRequest sends the dock (the retry prompt), split so the
++// added correction block can travel alone: the chat already holds the base prompt.
++function bridgeRetryView(record) {
++  const retry = promptForRetry(record, record.validationError);
++  return {
++    prompt: retry.prompt,
++    isCorrection: retry.isCorrection,
++    correction: retry.isCorrection ? retry.prompt.slice(record.materializedPrompt.length).replace(/^\n+/, '') : '',
++    attempt: (record.lifecycle?.rejected ?? 0) + 1,
++    validationCode: typeof record.validationCode === 'string' && SAFE_NON_API_AI_LOG_ERROR_CODES.has(record.validationCode)
++      ? record.validationCode
++      : null,
++    validationDiagnostic: cloneSafeValidationDiagnostic(record.validationDiagnostic),
++  };
++}
++
++/**
++ * The prompt for one handoff, byte-identical to what the dock shows and copies
++ * (publicRequest(record).prompt), or the reason it may not be served.
++ */
++export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTasks, allowNodeIds = null } = {}) {
++  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
++  if (!record || record.handoffCode !== handoffCode) return Object.freeze({ ok: false, reason: 'not_pending' });
++  const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
++  if (reason) return Object.freeze({ ok: false, reason });
++  return Object.freeze({ ok: true, requestId: record.requestId, handoffCode: record.handoffCode, task: record.task || null, ...bridgeRetryView(record) });
++}
++
++/**
++ * Submit an answer on behalf of an external session. Same validation, commit,
++ * lifecycle, settled event and reissue as the dock (acceptNonApiAiResponse). The
++ * result never carries the validator's free-form message, an error message or a
++ * path: only the outcome enum, the safe classification the dock's own receipts
++ * use, and the correction block the dock would have you copy.
++ */
++export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, response, allowTasks, allowNodeIds = null } = {}) {
++  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
++  if (!record || record.handoffCode !== handoffCode) return bridgeOutcome('not_pending');
++  if (typeof response !== 'string') return bridgeOutcome('invalid_argument');
++  const excluded = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
++  if (excluded === 'settling') return bridgeOutcome('busy');
++  if (excluded) return bridgeOutcome('ineligible', { exclusion: excluded });
++  // No await between the checks above and this call: acceptNonApiAiResponse sets
++  // `settling` synchronously, which is what makes a second submit see `busy`.
++  const result = await acceptNonApiAiResponse(record, { response });
++  switch (result.reason) {
++    case 'accepted': return bridgeOutcome('accepted');
++    case 'validation': {
++      const view = bridgeRetryView(record);
++      return bridgeOutcome('rejected', {
++        validationCode: view.validationCode,
++        validationDiagnostic: view.validationDiagnostic,
++        isCorrection: view.isCorrection,
++        correction: view.correction,
++        attempt: view.attempt,
++      });
++    }
++    case 'commit_failed': return bridgeOutcome('commit_failed');
++    default: return bridgeOutcome('not_pending');
++  }
++}
++
+ export function registerNonApiAiHandlers() {
+   // Electron rejects a second `handle` registration for the same channel.
+   // Main currently calls this once, but removing the old handlers makes a
+@@ -2389,89 +2666,10 @@
+     if (!record) return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
+     if (event.sender !== record.sender) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
+     if (record.settling) return { accepted: false, validationErrors: ['This response is already being submitted.'] };
+-
+-    try {
+-      const value = validateNonApiAiSubmission({
+-        response: args.response,
+-        responseSchema: record.responseSchema,
+-        responseValidator: record.responseValidator,
+-        task: record.task,
+-        expectedHandoffCode: record.handoffCode,
+-        requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+-      });
+-      // A legacy step restored before handoff-code enforcement existed has no
+-      // code in the paste for the check above to compare against, so this is
+-      // the remaining guard against the same pasted answer being accepted
+-      // into two different steps (see acceptedResponseFingerprints near the
+-      // top of this file). Must run before any durable write or resolution
+-      // below — a rejection here must leave this request exactly as pending
+-      // as a code-mismatch rejection does.
+-      claimAcceptedResponseFingerprint(record, args.response);
+-      record.validationError = null;
+-      record.validationCode = null;
+-      record.settling = true;
+-      await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
+-      // The durable write yields. Cancellation or Back may settle this record
+-      // in that interval, in which case its response must not mutate display
+-      // progress or revive the already-rejected workflow promise.
+-      if (!isActiveSettlingRecord(record)) {
+-        return { accepted: false, validationErrors: ['This Non-API AI request was cancelled before the submission finished saving.'] };
+-      }
+-      // The durable write is the commit point. Selecting, copying, retrying,
+-      // replaying, or failing validation never reaches this increment.
+-      const progressScope = acceptProgressRecord(record, value);
+-      const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
+-      const responseHash = responseReceiptHash(args.response);
+-      updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
+-      publishProgressScope(progressScope, record);
+-      // Teach this process's sizer what the response actually cost. This update
+-      // is deliberately non-durable and must never fail an accepted answer.
+-      let measuredUnits = record.matchCount ?? record.itemCount;
+-      if (record.measureResponseUnits) {
+-        try {
+-          const actual = record.measureResponseUnits(value);
+-          // `>= 0`, not `> 0`: a schema-valid response really can contain zero
+-          // units, and falling back to the full intended count there would
+-          // charge a near-empty response against a large denominator — the
+-          // artificially-cheap sample this measurement exists to prevent.
+-          // recordHandoffOutputSample drops a zero-unit sample outright.
+-          if (Number.isFinite(actual) && actual >= 0) measuredUnits = actual;
+-        } catch { /* a measurement must never fail an accepted answer */ }
+-      }
+-      void recordHandoffOutputSample({
+-        task: record.task,
+-        units: measuredUnits,
+-        responseChars: acceptedChars,
+-        planItemCount: record.planItemCount,
+-      }).catch(() => {});
+-      settle(record, { accepted: true });
+-      record.resolve(value);
+-      return { accepted: true };
+-    } catch (error) {
+-      // An abort/step-back can race a failed durable write too. Its owner has
+-      // already settled the promise, so never turn that terminal state into a
+-      // retry prompt or overwrite its lifecycle receipt.
+-      if (record.signal?.aborted || pendingRequests.get(record.requestId) !== record) {
+-        return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
+-      }
+-      record.settling = false;
+-      const message = error?.message || 'The pasted response could not be accepted.';
+-      const validationCode = nonApiAiLogErrorCode(error);
+-      const validationDiagnostic = defaultSafeValidationDiagnostic(error, validationCode);
+-      const responseReceipt = safeResponseReceipt(args.response);
+-      record.validationError = message;
+-      record.validationCode = validationCode;
+-      record.validationDiagnostic = validationDiagnostic;
+-      updateHandoffLifecycle(record, {
+-        rejected: true,
+-        code: validationCode,
+-        validationDiagnostic,
+-        ...responseReceipt,
+-      });
+-      logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+-      sendRequest(record, 'reissue');
+-      return { accepted: false, validationErrors: [message] };
+-    }
++    // `reason` is internal (the in-process bridge reads it); the renderer contract stays
++    // exactly { accepted } or { accepted: false, validationErrors }.
++    const { reason: _reason, ...result } = await acceptNonApiAiResponse(record, args);
++    return result;
+   });
+ 
+   ipcMain.handle('step-back-non-api-ai-request', async (event, args = {}) => {
