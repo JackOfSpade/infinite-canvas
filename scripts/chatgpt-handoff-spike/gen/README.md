@@ -5,7 +5,7 @@ Builds the static fixtures the spike server serves: real-shaped, byte-real appli
 ```bash
 cd scripts/chatgpt-handoff-spike
 node gen/gen-fixtures.js          # writes fixtures/realistic/ (git-ignored) and prints a size table
-# npm script to add to package.json:  "gen": "node gen/gen-fixtures.js"
+# or:  npm run gen     (needs Node 22.15 or newer: module.registerHooks)
 ```
 
 ## How it works
@@ -17,13 +17,13 @@ node gen/gen-fixtures.js          # writes fixtures/realistic/ (git-ignored) and
 
 ## Regenerating, determinism, knobs
 
-Same seed and same app commit give byte-identical output (`generatedAt` defaults to the HEAD commit date, not the wall clock). Regenerate after any change to `electron/ipc/localAiApplication.js` wording; the manifest records `appSourceCommit` (HEAD only: uncommitted changes under `electron/` or `src/` are reported on stderr but not captured).
+Same seed and same app commit give byte-identical output (`generatedAt` defaults to the committer date of the last commit that touched `electron/` or `src/`, not the wall clock). Regenerate after any change to `electron/ipc/localAiApplication.js` wording; the manifest records `appSourceCommit` (that same last app-source commit only: uncommitted changes under `electron/` or `src/` are reported on stderr but not captured).
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `SEED` | `20260926` | Integer seed for all content |
 | `OUT_DIR` | `fixtures/realistic` | Output directory (only the four variant folders and the two JSON files are replaced) |
-| `GENERATED_AT` | HEAD commit date | ISO string, or `now` for the wall clock |
+| `GENERATED_AT` | last app-source commit date | ISO string, or `now` for the wall clock |
 | `ALLOW_VALIDATION_FAILURES` | unset | `1` writes files even if a real validator objects |
 
 Sizes are steered by `SIZE_PROFILES` in `synthetic.js` (roles, bullets per role, achievements-log entries, projects, topic count, evidence-item count, listing sections, résumé bullets).
@@ -40,8 +40,8 @@ fixtures/realistic/<variant>/career-corpus.txt  listing.md
 Variants: `clean-small`, `clean-medium`, `clean-large`, `hostile-medium` (= clean-medium content plus the canary paragraph; its own job id). Stages: `evidence-plan`, `resume`, `cover-letter`, `review`.
 
 ```jsonc
-{ "generatedAt": ISO, "seed": number, "appSourceCommit": "<git rev-parse HEAD>",
-  "sentinels": { "handoffCode": "HANDOFFCODEPLACEHOLDER0", "canaryMarker": "@@CANARY_MARKER@@", "canaryUrl": "@@CANARY_URL@@" },
+{ "generatedAt": ISO, "seed": number, "appSourceCommit": "<last commit touching electron/ or src/>",
+  "sentinels": { "handoffCode": "HANDOFFCODEPLACEHOLDER00", "canaryMarker": "@@CANARY_MARKER@@", "canaryUrl": "@@CANARY_URL@@" },
   "variants": [ { "id", "hostile", "jobId" /* uuid v4 */,
     "persona": { "name","email","phone","city","linkedin","github","portfolio","degree" },
     "corpusFile", "listingFile",
@@ -54,7 +54,9 @@ Variants: `clean-small`, `clean-medium`, `clean-large`, `hostile-medium` (= clea
 
 Notes for the server:
 
-- The handoff-code sentinel appears once per prompt (shared fields) and once per answer (`handoffCode`). It is 23 characters, not 24 (the literal is the contract); a real code is 24 base64url characters. Answers echo `protocol, jobId, stage, handoffCode, baseHashes` first, in the real key order. `baseHashes` in stage 2 to 4 are computed from the reference answers of the earlier stages.
+- The handoff-code sentinel appears once per prompt (shared fields) and once per answer (`handoffCode`). It is 24 characters, the length of a real code (24 base64url characters), so fixture and served prompts have the same length. Answers echo `protocol, jobId, stage, handoffCode, baseHashes` first, in the real key order. `baseHashes` in stage 2 to 4 are computed from the reference answers of the earlier stages.
+- `baseHashes.evidencePlan` in stage 2 to 4 hashes the reference plan as it contains the SENTINEL handoff code. A real app run hashes a plan that carries its real stage-1 code, so its value differs (verified by an independent check: it is the only non-code, non-jobId byte difference from a real-app prompt). It is an opaque 64-hex string the model copies and the server compares to the manifest, so it is harmless here; do not treat it as an app-derived value.
+- Hostile prompts run 5.1% (stage 1) to 5.8% (stage 4) above the medium size targets because of the canary paragraph and its JSON escaping.
 - `identityContact` is empty for `review`: a passing review carries no identity block. For the other stages it is the name plus six contact values (the app only demands one contact value, so this is stricter than the app).
 - Hostile listing: the canary is the last paragraph of the fenced listing body (about 750 characters) and is identical in all four stage prompts. Because the listing is frozen across stages, it names the target field for each stage in one sentence (first evidence item's `requirement`, first résumé bullet's `text`, `roleThesis`, `finalDecisionSummary`). The reference answers ignore it. `@@CANARY_MARKER@@` and `@@CANARY_URL@@` occur only in the hostile prompts and its `listing.md`.
 - The listing on the wire is the app's own `formatOriginalJobListingMarkdown()` output, so headers are markdown-escaped (`$155,000 \- $195,000 a year`).

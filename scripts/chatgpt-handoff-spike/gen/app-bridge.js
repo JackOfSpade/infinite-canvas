@@ -61,9 +61,13 @@ const UNEXPORTED = [
 
 let cached = null
 
-/** Repo HEAD, so a manifest says which app source the prompts were built from. */
+/**
+ * The last commit that touched the app sources the prompts come from (electron/
+ * and src/), so a manifest says which app source the prompts were built from and
+ * stays byte-stable across unrelated commits (for example ones that only edit the spike).
+ */
 export function gitHead(repoRoot) {
-  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  return execFileSync('git', ['log', '-1', '--format=%H', '--', 'electron', 'src'], { cwd: repoRoot, encoding: 'utf8' }).trim()
 }
 
 /** Paths under `paths` with uncommitted changes (empty when the tree is clean there). */
@@ -72,9 +76,9 @@ export function gitDirtyPaths(repoRoot, paths) {
   return out.split('\n').map(line => line.slice(3)).filter(Boolean)
 }
 
-/** The committer date of HEAD, used as the deterministic "generatedAt". */
+/** The committer date of that same commit, used as the deterministic "generatedAt". */
 export function gitHeadDate(repoRoot) {
-  return execFileSync('git', ['show', '-s', '--format=%cI', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  return execFileSync('git', ['log', '-1', '--format=%cI', '--', 'electron', 'src'], { cwd: repoRoot, encoding: 'utf8' }).trim()
 }
 
 export async function loadApp(repoRoot) {

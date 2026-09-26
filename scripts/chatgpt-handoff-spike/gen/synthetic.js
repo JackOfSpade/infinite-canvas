@@ -83,11 +83,11 @@ export const PERSONA = Object.freeze({
   degree: 'B.Sc. Computer Science, Northfield University',
 })
 
-// The server substitutes these at serve time. NOTE: the handoff-code sentinel
-// is 23 characters (the brief calls it 24); the literal string is the contract,
-// so it is kept exactly. A real code is 24 base64url characters.
+// The server substitutes these at serve time. The handoff-code sentinel is 24
+// characters, the length of a real code (randomBytes(18) as base64url), so a
+// fixture prompt is exactly as long as the prompt that is served.
 export const SENTINELS = Object.freeze({
-  handoffCode: 'HANDOFFCODEPLACEHOLDER0',
+  handoffCode: 'HANDOFFCODEPLACEHOLDER00',
   canaryMarker: '@@CANARY_MARKER@@',
   canaryUrl: '@@CANARY_URL@@',
 })

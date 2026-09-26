@@ -11,7 +11,7 @@ The prompts are **byte-real**: `npm run gen` renders them with the app's own `pa
 
 ## One-time setup
 
-1. `cd scripts/chatgpt-handoff-spike && npm install && npm run gen` (regenerates `fixtures/realistic/`, git-ignored; deterministic from `SEED`, default 20260926).
+1. `cd scripts/chatgpt-handoff-spike && npm install && npm run gen` (regenerates `fixtures/realistic/`, git-ignored; deterministic from `SEED`, default 20260926; the generator needs Node 22.15 or newer for `module.registerHooks`, the server itself runs on Node 20+).
 2. Hostname: `bridge-lab.lullascape.com` is served by the tunnel `lullascape-bridge-lab` (see `docs/chatgpt-bridge-hostname-runbook.md`). Start it with `cloudflared tunnel run lullascape-bridge-lab`.
 3. Start the server (see "Commands" below). It prints a secret MCP path and one **starter message per session**, and saves them to `starter-messages.txt` (git-ignored).
 4. Create the plugin **once** at chatgpt.com/plugins → Add → **Create MCP App**: name `Infinite Canvas Lab`, URL `https://bridge-lab.lullascape.com/mcp/<the secret path>`, authentication **No auth**. Do not edit or refresh it afterwards: the tool names, descriptions and schemas are the design's frozen text, and changing them may reset ChatGPT's safety warm-up (an open question this phase also measures).

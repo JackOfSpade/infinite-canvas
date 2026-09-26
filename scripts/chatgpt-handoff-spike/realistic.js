@@ -12,7 +12,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-export const SENTINEL_CODE = 'HANDOFFCODEPLACEHOLDER0'
+export const SENTINEL_CODE = 'HANDOFFCODEPLACEHOLDER00'
 export const SENTINEL_MARKER = '@@CANARY_MARKER@@'
 export const SENTINEL_URL = '@@CANARY_URL@@'
 export const MAX_RESPONSE_BYTES = 1000000
