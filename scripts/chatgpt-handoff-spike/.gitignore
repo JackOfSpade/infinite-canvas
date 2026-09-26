@@ -1,3 +1,5 @@
 node_modules
 spike-log.jsonl
 spike-report.md
+fixtures/
+starter-messages.txt

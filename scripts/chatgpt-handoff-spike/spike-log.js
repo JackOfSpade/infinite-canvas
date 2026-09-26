@@ -44,7 +44,7 @@ export function createLogger({ logPath = null, token = null, quiet = false, prin
 
 const cell = value => String(value ?? '').replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ')
 
-function table(headers, rows) {
+export function table(headers, rows) {
   if (!rows.length) return '_none_\n'
   const lines = [
     `| ${headers.join(' | ')} |`,
@@ -54,7 +54,7 @@ function table(headers, rows) {
   return `${lines.join('\n')}\n`
 }
 
-const count = (items, pick) => {
+export const count = (items, pick) => {
   const tally = new Map()
   for (const item of items) {
     const key = pick(item)
