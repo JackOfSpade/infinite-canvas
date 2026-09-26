@@ -31,7 +31,11 @@
 | Real OAuth (not "No auth" + secret path) for real handoffs | **Decided: yes** (Jack, 2026-09-26) |
 | Which domain / tunnel provider | **Decided (2026-09-26, revised): Jack's existing `lullascape.com` (Porkbun registrar, DNS moved to a dedicated Cloudflare account, free named tunnel), hostnames `bridge.` and `bridge-lab.`.** Supersedes the earlier "new cheap domain" choice. It looks unused apart from Porkbun defaults (link-in-bio redirect, parking wildcard, forwarding MX, DNSSEC on), so the move needs an ordered DNSSEC-off step and a check that no email aliases or page depend on it (see `docs/chatgpt-bridge-hostname-runbook.md` section 0). `jackwu.ca` and `shuttersheep.com` stay untouched: both have DNSSEC and forwarding, and `shuttersheep.com` serves a live site. A free Cloudflare named tunnel needs the whole domain's DNS on Cloudflare (CNAME-only needs the paid Business plan). Alternatives not chosen: Tailscale Funnel, ngrok on a CNAME, a VPS relay. **Status: built and verified 2026-09-26:** `lullascape.com` is on Cloudflare (Free plan) and `bridge-lab.lullascape.com` is served by a locally-managed tunnel `lullascape-bridge-lab` created from the command line (no Zero Trust activation, no payment method; `cert.pem` deleted afterwards). Details in `docs/chatgpt-bridge-hostname-chrome-prompts.md`. |
 | Run Phase 0 before any app code (D9) | Recommended; awaiting Jack |
-| D3-D8, D10 below | Open |
+| Start Phase 1 (the real bridge inside the app) after the Phase 0 GO | **Decided: yes** (Jack, 2026-09-26) |
+| D4 First-release scope | **Decided: applications PLUS scoring/push from the start** (Jack, 2026-09-26; the design recommended applications only, so the Phase 3 seam in nonApiAi.js is now in scope and its differential-parity gates apply to the first release) |
+| D5 Session limits | **Decided: longer / always armed while the app is open** (Jack, 2026-09-26; the design recommended 30 min idle, 2 h cap and advised against always-armed; the revised design must replace the armed-session timers with other controls) |
+| D6 Who runs the tunnel | **Decided: the app spawns and supervises cloudflared** (Jack, 2026-09-26; the design recommended a user-run launchd agent; the revised design must contain the orphan, PATH, binary-trust and generated-config risks it listed) |
+| D3, D7, D8, D10 | Open (D3 is moot: OAuth works, see RESULTS.md) |
 
 ## 2. Recommended design
 
