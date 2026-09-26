@@ -5,6 +5,25 @@
 
 Only Jack can do the account, payment and DNS steps. Nothing here is automated.
 
+## 0. Chosen domain: `lullascape.com` (2026-09-26)
+
+Jack chose an existing domain instead of buying a new one. Findings from public lookups on 2026-09-26:
+
+- Registered at Porkbun on 2026-04-29, expires 2027-04-29, registrar lock on, DNS at Porkbun. A mainstream `.com` with a neutral coined name: it fits the naming guide in section 1.
+- Still on Porkbun's defaults, no site of Jack's own: the apex redirects (302) to a Porkbun link-in-bio page `https://lullascape-com.l.ink/`; **any subdomain** is a wildcard CNAME to Porkbun's parking host `uixie.porkbun.com`; MX points at Porkbun email forwarding (`fwd1/fwd2.porkbun.com`) and there is Porkbun's SPF TXT.
+- **DNSSEC is on** (a DS record exists at the `.com` registry), as on Jack's other two Porkbun domains.
+
+What moving its DNS to Cloudflare changes, and the ordering it needs:
+
+1. **Decide what to keep.** Moving the nameservers stops the `l.ink` redirect and the parking records unless you recreate them, and stops email forwarding unless you recreate the MX and SPF records. If Jack has no aliases and no use for the `l.ink` page, nothing is lost. **Ask before moving:** does `lullascape.com` have email forwarding aliases or a page you rely on?
+2. **Add the domain to Cloudflare first** (Free plan). Cloudflare imports the existing records. Delete the imported apex `A` and wildcard `*` CNAME (the parking records) so they cannot shadow the tunnel. Keep the two MX records and the SPF TXT record only if forwarding is in use.
+3. **Turn DNSSEC off at Porkbun** for this domain (remove the DS record) **before** changing nameservers. If the DS record is left in place, validating resolvers get SERVFAIL for the whole domain once Cloudflare's nameservers answer. Then wait about a day for the old DS to expire from resolver caches. Because nothing important depends on this domain, waiting less is a low-risk shortcut if forwarding is not in use, but the tunnel hostname itself would fail to resolve for validating resolvers during any gap, including ChatGPT's if it validates.
+4. **Switch the nameservers** at Porkbun to Cloudflare's two and wait for **Active**.
+5. **Optional later:** enable DNSSEC in Cloudflare and add its DS record at Porkbun.
+6. **Hostnames:** `bridge.lullascape.com` (production) and `bridge-lab.lullascape.com` (lab). Keep every tunnel hostname on a subdomain so a future public site on the apex stays separate.
+
+Sections 2 to 6 below apply unchanged, except that in section 1 the registration steps are already done: do not buy a new domain.
+
 ## 1. Pick and register the domain (Porkbun, about 5 minutes)
 
 **Choose it as shared infrastructure for many projects, not as this app's name.** One domain gives unlimited subdomains, and one Cloudflare tunnel can map several hostnames to different local ports, so later projects cost nothing extra.
