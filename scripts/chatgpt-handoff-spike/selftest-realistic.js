@@ -212,6 +212,7 @@ async function main() {
       { variantId: 'hostile-medium', jobs: 1, flags: {} },
     ])
     assert.deepEqual(parsePlan('clean-medium:1:text=facts+plugin=b')[0].flags, { text: 'facts', plugin: 'B' })
+    assert.deepEqual(parsePlan('clean-medium:1:hold=10-30-999')[0].flags, { holds: [10, 30, 300] })
     assert.throws(() => parsePlan('clean-medium:1:bogus'), /Unknown PLAN flag/)
     assert.equal(parsePlan('').length, 4, 'the default plan is 3 clean chats and 1 hostile chat')
   })
@@ -706,6 +707,31 @@ async function main() {
       const ev = lab.logger.events.filter(e => e.surface === 'design' && e.plugin === 'A' && e.pluginAgeMin != null)
       assert.ok(ev.length > 20)
       assert.ok(ev.every(e => e.pluginAgeMin === 30), 'a call 30 min 1 s+ after creation is age 30, never rounded up to 31')
+    })
+
+    await step('the held-call arm delays get_handoff by the planned seconds, cycling, logs it, and the report lists held calls', async () => {
+      const held = await startServer({ port: 0, surface: 'design', fixturesDir, plan: 'clean-mini:1:hold=1-2', logPath: path.join(workDir, 'h-log.jsonl'), reportPath: path.join(workDir, 'h-report.md'), quiet: true })
+      try {
+        const h = rig(`http://127.0.0.1:${held.port}${held.mcpPath}`)
+        const code = held.hub.sessions[0].code
+        const t0 = Date.now()
+        await h.get(code)
+        const first = Date.now() - t0
+        const t1 = Date.now()
+        await h.get(code)
+        const second = Date.now() - t1
+        assert.ok(first >= 950 && first < 1900, `first call held about 1 s, took ${first} ms`)
+        assert.ok(second >= 1950 && second < 3000, `second call held about 2 s, took ${second} ms`)
+        const t2 = Date.now()
+        await h.get(code)
+        assert.ok(Date.now() - t2 >= 950, 'the list cycles back to 1 s')
+        const evs = held.logger.events.filter(e => e.kind === 'tool' && e.tool === 'get_handoff')
+        assert.deepEqual(evs.map(e => e.holdSec), [1, 2, 1])
+        assert.ok(evs.every(e => e.ms >= e.holdSec * 950))
+        assert.match(held.writeReport('manual'), /## Held calls[\s\S]*\| Held \(s\) \|/)
+      } finally {
+        await held.stop()
+      }
     })
 
     console.log('\nLog and report')

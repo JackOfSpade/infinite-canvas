@@ -109,7 +109,10 @@ export function registerDesignTools(mcp, { hub, logger, state, onSessionDone = (
       ...meta,
     },
     guarded('get_handoff', ctx, async ({ session }, ts, extra) => {
-      const { body, event, frame } = hub.get(session)
+      const { body, event, frame, holdSec } = hub.get(session)
+      // Held-call arm: answer only after holdSec seconds, to measure how long ChatGPT (and the tunnel in
+      // front of this server) will wait for a tool call.
+      if (holdSec) await new Promise(resolve => setTimeout(resolve, holdSec * 1000))
       const rendered = renderFrame(body, frame)
       const ms = Date.now() - ts
       logger.record('tool', {

@@ -287,7 +287,8 @@ export function loadFixtures(dir) {
 // PLAN is "variant:jobs[:flags],...", one entry per fresh ChatGPT chat. Flags are
 // joined with "+": force (the designed cover-letter rejection), frame=text|json,
 // instr=0|1, text=facts|directive (wording of results), plugin=<letter> (which plugin
-// the starter message names). A flag applies to that chat only, so A/B arms can run side by side.
+// the starter message names), hold=10-30-60 (seconds the n-th get_handoff call of the chat is held
+// before it answers, cycling: how long a held call survives is what this measures). A flag applies to that chat only, so A/B arms can run side by side.
 export function parsePlan(text) {
   return String(text || 'clean-medium:2,clean-medium:2,clean-medium:2,hostile-medium:1')
     .split(',')
@@ -303,7 +304,8 @@ export function parsePlan(text) {
         else if (f === 'instr=0' || f === 'instr=1') flags.instructions = f === 'instr=1'
         else if (f === 'text=facts' || f === 'text=directive') flags.text = f.slice(5)
         else if (/^plugin=[A-Za-z]$/.test(f)) flags.plugin = f.slice(7).toUpperCase()
-        else throw new Error(`Unknown PLAN flag "${f}" in "${item}" (use force, noforce, frame=text|json, instr=0|1, text=facts|directive, plugin=<letter>)`)
+        else if (/^hold=\d{1,3}(-\d{1,3})*$/.test(f)) flags.holds = f.slice(5).split('-').map(n => Math.min(300, Number(n)))
+        else throw new Error(`Unknown PLAN flag "${f}" in "${item}" (use force, noforce, frame=text|json, instr=0|1, text=facts|directive, plugin=<letter>, hold=<sec>-<sec>-...)`)
       }
       return { variantId: variantId.trim(), jobs: Math.max(1, Math.min(4, Number(jobs) || 1)), flags }
     })
@@ -346,6 +348,8 @@ export function createHub({ fixtures, plan, sessionCodes = null, publicBase = 'h
       forceReject: flags.forceReject ?? def.forceReject,
       text: flags.text ?? def.text,
       plugin: flags.plugin ?? 'A',
+      holds: flags.holds ?? [],
+      getCalls: 0,
       jobs: [],
       startedAt: null,
       servedTotal: 0,
@@ -476,10 +480,13 @@ export function createHub({ fixtures, plan, sessionCodes = null, publicBase = 'h
     stage.firstServedAt ??= now()
     session.servedTotal++
     const body = servedBody(session, job, stageIndex)
+    const holdSec = session.holds.length ? session.holds[session.getCalls % session.holds.length] : 0
+    session.getCalls++
     return {
       body,
       frame: session.frame,
-      event: { ...baseEvent(session, job, stageIndex), reason: 'served', handoffCode: stage.code, attempt: body.attempt, serveNo: stage.serves, promptBytes: Buffer.byteLength(body.prompt), flags: [] },
+      holdSec,
+      event: { ...baseEvent(session, job, stageIndex), reason: 'served', holdSec, handoffCode: stage.code, attempt: body.attempt, serveNo: stage.serves, promptBytes: Buffer.byteLength(body.prompt), flags: [] },
     }
   }
 

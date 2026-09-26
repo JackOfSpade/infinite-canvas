@@ -260,6 +260,24 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
     out.push('')
   }
 
+  // ----------------------------------------------------------- held calls
+  const held = tools.filter(e => e.tool === 'get_handoff' && e.holdSec)
+  if (held.length) {
+    out.push('## Held calls')
+    out.push('')
+    out.push('A held get_handoff waits this many seconds before it answers. "Client gone" means the connection was closed before the server finished (ChatGPT gave up, or the tunnel in front cut the request off: Cloudflare ends a proxied request at 100 s), so the model never received the result.')
+    out.push('')
+    const heldHttp = https.filter(e => e.route === 'mcp' && (e.rpc || []).some(r => r.tool === 'get_handoff') && e.ms >= 4000)
+    out.push(table(
+      ['Time', 'Session', 'Held (s)', 'Server took (s)', 'HTTP status', 'Client gone', 'Next call from this chat'],
+      held.map(e => {
+        const h = heldHttp.find(x => Math.abs(x.ts - e.ts) < 1500)
+        const next = bySession(e.session).find(x => x.ts > e.ts + 200)
+        return [clock(e.ts), e.session ?? '—', e.holdSec, ((e.ms || 0) / 1000).toFixed(1), h ? h.status : '—', h ? (h.aborted ? 'YES' : 'no') : '—', next ? `${next.tool} ${next.stage ?? ''} after ${((next.ts - e.ts) / 1000).toFixed(0)} s` : 'none'].map(String)
+      }),
+    ))
+  }
+
   // ----------------------------------------------------- http oddities
   out.push('## Unknown paths and 4xx/5xx requests')
   out.push('')
