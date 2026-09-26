@@ -34,7 +34,12 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
   const gets = tools.filter(e => e.tool === 'get_handoff')
   const submits = tools.filter(e => e.tool === 'submit_handoff')
   const bySession = label => tools.filter(e => e.session === label)
-  const armOf = s => `${s.frame}${s.instructions ? '' : '/no-instr'}${s.forceReject ? '/force' : ''}`
+  const armOf = s => `${s.frame}${s.instructions ? '' : '/no-instr'}${s.text === 'facts' ? '/facts' : ''}${s.forceReject ? '/force' : ''}`
+  // The plugin (URL path, so tool text) a session's calls actually came through, from its first call.
+  const pluginOf = s => {
+    const ids = [...new Set(bySession(s.label).map(e => `${e.plugin ?? '?'}/${e.surfaceId ?? '?'}`))]
+    return ids.length ? ids.join(' + ') : `${s.plugin} (planned)`
+  }
 
   const out = []
   out.push('# Phase 0a report (design surface, real-shaped synthetic payloads)')
@@ -45,6 +50,7 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
   // ------------------------------------------------------------ summary
   out.push('## Summary')
   out.push('')
+  if ((config.plugins || []).length) out.push(`- Plugins: ${config.plugins.map(p => `${p.id} "${p.name}" (tool text ${p.surface}, ${p.from ? `${p.id === 'A' && typeof p.from === 'string' ? 'created' : 'first request from ChatGPT'} ${new Date(p.from).toISOString()}` : 'no request from ChatGPT yet'})`).join('; ')}`)
   out.push(`- Sessions planned: ${hub.sessions.length} (${hub.sessions.map(s => `${s.label}=${s.variantId}×${s.jobs.length} [${armOf(s)}]`).join(', ')})`)
   out.push(`- Tool calls: ${gets.length} get_handoff, ${submits.length} submit_handoff (accepted ${submits.filter(e => e.accepted).length}); calls with an unrecognised session: ${tools.filter(e => e.reason === 'unauthorized').length}; handler errors: ${tools.filter(e => e.reason === 'handler_error').length}`)
   const done = hub.sessions.filter(s => hub.isSessionDone(s)).length
@@ -63,7 +69,7 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
   out.push('## Sessions')
   out.push('')
   out.push(table(
-    ['Session', 'Variant', 'Arm', 'Plugin age at first call (min)', 'Jobs done', 'Stages accepted', 'Serves', 'Submits', 'Accepted', 'Rejected (designed / other)', 'Junk / unknown / superseded / duplicate / misrouted / too large / other', 'Code-arg strict miscopies', 'Code-echo strict miscopies', 'Canary C1 / C2', 'First serve → last accept'],
+    ['Session', 'Variant', 'Plugin / tool text', 'Arm', 'Plugin age at first call (min)', 'Jobs done', 'Stages accepted', 'Serves', 'Submits', 'Accepted', 'Rejected (designed / other)', 'Junk / unknown / superseded / duplicate / misrouted / too large / other', 'Code-arg strict miscopies', 'Code-echo strict miscopies', 'Canary C1 / C2', 'First serve → last accept'],
     hub.sessions.map(s => {
       const ev = bySession(s.label)
       const sub = ev.filter(e => e.tool === 'submit_handoff')
@@ -79,7 +85,7 @@ export function buildRealisticReport({ events, hub, startedAt, endedAt, trigger,
       const c1 = ev.filter(e => e.canaryC1).length
       const c2 = canary.filter(e => e.session === s.label).length
       return [
-        s.label, s.variantId, armOf(s), ev.length && ev[0].pluginAgeMin != null ? ev[0].pluginAgeMin : '—', `${s.jobs.filter(j => j.done).length}/${s.jobs.length}`, `${stagesAccepted}/${stagesTotal}`,
+        s.label, s.variantId, pluginOf(s), armOf(s), ev.length && ev[0].pluginAgeMin != null ? ev[0].pluginAgeMin : '—', `${s.jobs.filter(j => j.done).length}/${s.jobs.length}`, `${stagesAccepted}/${stagesTotal}`,
         ev.filter(e => e.tool === 'get_handoff' && e.reason === 'served').length + sub.filter(e => e.nextStage).length,
         sub.length, accepted, `${designed} / ${rejected.length - designed}`, `${listed.join(' / ')} / ${other}`,
         sub.filter(e => strictMiscopy(e.codeArg)).length, sub.filter(e => strictMiscopy(e.codeEcho)).length,
