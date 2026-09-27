@@ -186,3 +186,22 @@ Adversarial review closed pairing sheets that were acknowledged without appearin
 | G10 | Green after two independent reviews of the controller, pairing/probes, IPC/dialogs, Tray/power, composition and Electron lifecycle hunks. No open B6 security finding remains. |
 
 The temporary clean clone used by `act` was removed. Nothing was pushed.
+
+## B7 — renderer controls and Electron smokes (2026-09-27)
+
+Implemented directly on local `main` in commit `7b3f24e` (`feat: add ChatGPT bridge renderer controls`) and completed by `33e199a` (`test: add ChatGPT bridge Electron smokes`). The renderer work adds the status/store boundary, health model, sidebar trigger, popover, Settings controls, setup flow, crash-isolated mounting, publisher and render harness. The inert and enabled-path Electron smokes cover SM1–SM8, the exact preload surface, disabled-mode inactivity, TEST MODE setup, pairing, application drain, controlled shutdown, watchdog escalation and orphan reaping.
+
+Adversarial review closed an enable attempt that could proceed despite an unavailable platform (`be63b1a`) and a composition omission that prevented the publisher's coalesced job hint from reaching the engine (`6a9565b`, alongside B8.4's report-redaction work). The native pairing sheet owns formatting while the test hook retains the raw compact code, and the orphan test allows the documented delayed-reaper plus TERM/TERM/KILL bound without weakening the six-second watchdog assertion.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The renderer commit contains exactly the B7.1–B7.4 production and owned test paths; the smoke commit contains exactly `scripts/electron-smoke.js` and `scripts/electron-bridge-smoke.js`. The two corrective changes are isolated in the commits named above. No new ignored path or whitespace error. |
+| G1 | Green. `npm run test:unit` passed with 0 failed and the exact filtered comparison with `~/ic-baseline-units.txt` printed nothing. Focused UI (8) and render (12) groups passed. |
+| G2 | Green. `npm test` passed. |
+| G3 | Green. `npm run lint` and targeted ESLint passed, including the React Compiler rules. |
+| G4 | Green. `npm run build:compile` passed with only the existing chunk-size warnings. |
+| G5 | Green. `npm run test:e2e` ended with `Electron smoke test passed`; the bridge stayed off, created no bridge directory or socket, spawned no cloudflared descendant and reported no renderer error. |
+| G6 | Green twice. `npm run test:e2e:bridge` completed the enabled TEST MODE flow, including pairing, real Unix-socket/SDK handoff drain, Disable cleanup, watchdog escalation and launch-entry orphan reaping. |
+| G9 | Green. All frozen files, `package-lock.json` and the B0-only `package.json` remained byte-untouched. |
+
+Nothing was pushed.
