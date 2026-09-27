@@ -315,6 +315,86 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code !== 'ESRCH'; }
 }
 
+// Playwright's ElectronApplication state is not an OS reaper. Chromium
+// helpers can survive after its root process has been reparented, so scope all
+// cleanup to the random user-data root allocated by this smoke. Never use a
+// broad executable-name match or pkill.
+function userDataMarkers(directory) {
+  const resolved = path.resolve(directory);
+  const markers = new Set([resolved]);
+  if (process.platform === 'darwin') {
+    if (resolved.startsWith('/var/')) markers.add(`/private${resolved}`);
+    if (resolved.startsWith('/private/var/')) markers.add(resolved.slice('/private'.length));
+  }
+  return markers;
+}
+
+function smokeProcessRows() {
+  const stdout = execFileSync('/bin/ps', ['-axww', '-o', 'pid=,pgid=,command='], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000, maxBuffer: 2 * 1024 * 1024,
+  });
+  return String(stdout).split('\n').flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+([\s\S]+)$/);
+    return match ? [{ pid: Number(match[1]), pgid: Number(match[2]), command: match[3] }] : [];
+  });
+}
+
+function hasSmokeUserDataMarker(command, markers) {
+  return [...markers].some((marker) => {
+    const needle = `--user-data-dir=${marker}`;
+    let offset = command.indexOf(needle);
+    while (offset !== -1) {
+      const next = command[offset + needle.length];
+      // The random root must terminate the argv value; a sibling such as
+      // <random-root>-other is not smoke-owned.
+      if (next === undefined || /\s/.test(next)) return true;
+      offset = command.indexOf(needle, offset + needle.length);
+    }
+    return false;
+  });
+}
+
+function smokeElectronProcesses(directory) {
+  const markers = userDataMarkers(directory);
+  return smokeProcessRows().filter(row => hasSmokeUserDataMarker(row.command, markers));
+}
+
+async function waitForSmokeElectronExit(directory, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (smokeElectronProcesses(directory).length === 0) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
+async function killSmokeElectronProcesses(directory) {
+  const markers = userDataMarkers(directory);
+  const rows = smokeProcessRows();
+  const owned = rows.filter(row => hasSmokeUserDataMarker(row.command, markers));
+  const killedGroups = new Set();
+  for (const row of owned) {
+    // Refresh both the PID and its current process group immediately before
+    // any signal. This excludes a reused PID and a group that gained a
+    // non-smoke member after the first ps snapshot.
+    const currentRows = smokeProcessRows();
+    const current = currentRows.find(candidate => candidate.pid === row.pid
+      && hasSmokeUserDataMarker(candidate.command, markers));
+    if (!current || killedGroups.has(current.pgid)) continue;
+    const group = currentRows.filter(candidate => candidate.pgid === current.pgid);
+    // Only signal a whole process group after each member has independently
+    // been tied to this unique smoke root. Otherwise target the exact process
+    // after a second lookup so a reused PID cannot be killed from stale data.
+    if (process.platform !== 'win32' && current.pgid > 1 && group.length > 0
+      && group.every(candidate => hasSmokeUserDataMarker(candidate.command, markers))) {
+      try { process.kill(-current.pgid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+      killedGroups.add(current.pgid);
+      continue;
+    }
+    try { process.kill(current.pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
+}
+
 function processCommand(pid) {
   try {
     return String(execFileSync('/bin/ps', ['-p', String(pid), '-ww', '-o', 'command='], {
@@ -467,23 +547,29 @@ async function assertBackgroundWindow(application) {
 }
 
 async function closeElectron(application, { restoreHttps = false } = {}) {
-  if (!application) return;
-  if (restoreHttps) {
+  if (application && restoreHttps) {
     try { await application.evaluate(() => globalThis.__icBridgeSmokeRestoreHttps?.()); } catch { /* a crash may already have ended main */ }
   }
-  const processHandle = application.process();
-  if (processHandle.exitCode === null) {
+  if (application) {
     let timeout;
     try {
+      // This remains the primary, lifecycle-aware shutdown path.
       await Promise.race([
         application.close(),
         new Promise(resolve => { timeout = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000); }),
       ]);
-    } catch { /* retain the SIGKILL-only fallback below */ }
+    } catch { /* retain the OS-verified SIGKILL-only fallback below */ }
     finally { if (timeout) clearTimeout(timeout); }
   }
-  // Do not send SIGTERM from a smoke: it bypasses Electron lifecycle cleanup.
-  if (processHandle.exitCode === null) processHandle.kill('SIGKILL');
+  // Do not trust Playwright's process handle: after a successful close it can
+  // say "exited" while reparented Chromium helpers are still alive. Give
+  // Electron a bounded grace, then SIGKILL only the process(es)/groups proved
+  // to use this smoke's random user-data root, and wait for OS disappearance.
+  if (!await waitForSmokeElectronExit(userDataDir, 3_000)) {
+    await killSmokeElectronProcesses(userDataDir);
+    assert.equal(await waitForSmokeElectronExit(userDataDir, 3_000), true,
+      'Electron SIGKILL fallback must leave no smoke-owned process alive');
+  }
 }
 
 async function killElectronForCrash(application) {
@@ -555,6 +641,9 @@ async function emergencyStopTunnel() {
   } catch { /* no fake has been spawned */ }
 }
 
+let smokePassed = false;
+let primarySmokeFailure = null;
+const cleanupFailures = [];
 try {
   app = await electron.launch({ args: ['.', `--user-data-dir=${userDataDir}`], env });
   const page = await app.firstWindow();
@@ -813,12 +902,35 @@ try {
   await closeElectron(app);
   app = null;
   assert.deepEqual(rendererErrors, [], 'bridge smoke renderer must remain error-free');
-  console.log('Electron bridge smoke test passed');
+  smokePassed = true;
+} catch (error) {
+  primarySmokeFailure = error;
 } finally {
-  await closeElectron(app, { restoreHttps: true });
-  await emergencyStopTunnel();
-  await Promise.allSettled([
+  // Run every cleanup phase even when a preceding phase fails, then make the
+  // complete teardown failure visible rather than printing a false PASS.
+  try {
+    await closeElectron(app, { restoreHttps: true });
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  try {
+    await emergencyStopTunnel();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  // The fake connector and Electron verification may each fail, but both
+  // unique fixture roots are always attempted and rejected removals are fatal.
+  const removals = await Promise.allSettled([
     fs.rm(userDataDir, { recursive: true, force: true }),
     fs.rm(fakeSourceRoot, { recursive: true, force: true }),
   ]);
+  for (const result of removals) {
+    if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
 }
+if (primarySmokeFailure) {
+  if (cleanupFailures.length === 0) throw primarySmokeFailure;
+  throw new globalThis.AggregateError([primarySmokeFailure, ...cleanupFailures], 'Electron bridge smoke and cleanup failed');
+}
+if (cleanupFailures.length > 0) throw new globalThis.AggregateError(cleanupFailures, 'Electron bridge smoke cleanup failed');
+if (smokePassed) console.log('Electron bridge smoke test passed');

@@ -109,6 +109,115 @@ async function assertNoTunnelDescendant(application, label) {
   );
 }
 
+// Playwright reports the child-process state it observed, but Chromium helpers
+// can outlive that handle after Electron main has been reparented.  Scope every
+// fallback operation to this run's random user-data directory; never use pkill
+// or a name-only process match.
+function userDataMarkers(directory) {
+  const resolved = path.resolve(directory);
+  const markers = new Set([resolved]);
+  if (process.platform === 'darwin') {
+    if (resolved.startsWith('/var/')) markers.add(`/private${resolved}`);
+    if (resolved.startsWith('/private/var/')) markers.add(resolved.slice('/private'.length));
+  }
+  return markers;
+}
+
+async function smokeProcessRows() {
+  const { stdout } = await execFileAsync('/bin/ps', ['-axww', '-o', 'pid=,pgid=,command='], { maxBuffer: 2 * 1024 * 1024 });
+  return String(stdout).split('\n').flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+([\s\S]+)$/);
+    return match ? [{ pid: Number(match[1]), pgid: Number(match[2]), command: match[3] }] : [];
+  });
+}
+
+function hasSmokeUserDataMarker(command, markers) {
+  return [...markers].some((marker) => {
+    const needle = `--user-data-dir=${marker}`;
+    let offset = command.indexOf(needle);
+    while (offset !== -1) {
+      const next = command[offset + needle.length];
+      // The smoke root is one complete argv value, never merely a prefix of a
+      // different path such as <random-root>-other.
+      if (next === undefined || /\s/.test(next)) return true;
+      offset = command.indexOf(needle, offset + needle.length);
+    }
+    return false;
+  });
+}
+
+async function smokeElectronProcesses(directory) {
+  const markers = userDataMarkers(directory);
+  return (await smokeProcessRows()).filter(row => hasSmokeUserDataMarker(row.command, markers));
+}
+
+async function waitForSmokeElectronExit(directory, label, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await smokeElectronProcesses(directory)).length === 0) return;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const remaining = await smokeElectronProcesses(directory);
+  assert.equal(remaining.length, 0, `${label}: smoke-owned Electron processes remain (${remaining.map(row => row.pid).join(', ')})`);
+}
+
+async function killSmokeElectronProcesses(directory) {
+  const markers = userDataMarkers(directory);
+  const rows = await smokeProcessRows();
+  const owned = rows.filter(row => hasSmokeUserDataMarker(row.command, markers));
+  const killedGroups = new Set();
+  for (const row of owned) {
+    // Re-read immediately before signalling so a reused PID can never be
+    // targeted based on a stale ps snapshot. The group is also read afresh:
+    // it may have acquired a non-smoke member after the first snapshot.
+    const currentRows = await smokeProcessRows();
+    const current = currentRows.find(candidate => candidate.pid === row.pid
+      && hasSmokeUserDataMarker(candidate.command, markers));
+    if (!current || killedGroups.has(current.pgid)) continue;
+    const group = currentRows.filter(candidate => candidate.pgid === current.pgid);
+    // A negative PID kills an entire POSIX process group.  It is safe only
+    // when every member is independently proven to carry this smoke's random
+    // user-data marker; otherwise kill the exact verified members below.
+    if (process.platform !== 'win32' && current.pgid > 1 && group.length > 0
+      && group.every(candidate => hasSmokeUserDataMarker(candidate.command, markers))) {
+      try { process.kill(-current.pgid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+      killedGroups.add(current.pgid);
+      continue;
+    }
+    try { process.kill(current.pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
+}
+
+async function closeElectron(application) {
+  if (application) {
+    let timeoutId;
+    try {
+      // This is the normal path: Electron's app.quit lifecycle performs its
+      // own background cleanup before process termination.
+      await Promise.race([
+        application.close(),
+        new Promise(resolve => {
+          timeoutId = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000);
+        }),
+      ]);
+    } catch (error) {
+      console.warn(`Electron smoke shutdown failed: ${error?.message || error}`);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+  // Do not trust ElectronApplication/ChildProcess exitCode alone.  Give the
+  // operating system a short bounded grace, then force only this smoke's
+  // verified process group(s) and prove they are actually gone.
+  try {
+    await waitForSmokeElectronExit(userDataDir, 'Electron lifecycle shutdown', 3_000);
+  } catch {
+    await killSmokeElectronProcesses(userDataDir);
+    await waitForSmokeElectronExit(userDataDir, 'Electron SIGKILL fallback', 3_000);
+  }
+}
+
 function objectKeys(value, keys = []) {
   if (!value || typeof value !== 'object') return keys;
   for (const [key, child] of Object.entries(value)) {
@@ -300,6 +409,9 @@ async function reloadFixture(page) {
   await page.waitForLoadState('domcontentloaded');
 }
 
+let smokePassed = false;
+let primarySmokeFailure = null;
+const cleanupFailures = [];
 try {
   app = await electron.launch({
     args: ['.', `--user-data-dir=${userDataDir}`],
@@ -1444,45 +1556,38 @@ try {
   );
   assert.deepEqual(rendererErrors, [], 'generated pagination workspace should not emit runtime errors');
   await assertNoTunnelDescendant(app, 'final bridge-off check');
-  console.log('Electron smoke test passed');
+  smokePassed = true;
+} catch (error) {
+  primarySmokeFailure = error;
 } finally {
-  // Playwright's ElectronApplication.close() explicitly calls app.quit(), which
-  // reaches main's background before-quit cleanup. A POSIX SIGTERM is only a
-  // process signal and is not an Electron lifecycle contract, so it must remain
-  // a last-resort kill rather than the primary shutdown path.
-  if (app) {
-    const electronProcess = app.process();
-    if (electronProcess.exitCode === null) {
-      let timeoutId;
-      try {
-        await Promise.race([
-          app.close(),
-          new Promise(resolve => {
-            // Main gives background cleanup a bounded window to release a
-            // headless Chromium profile and loopback server before app.exit().
-            // Keep a margin before the hard-kill fallback for event-loop lag.
-            timeoutId = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000);
-          }),
-        ]);
-      } catch (error) {
-        // A rejected app.close() must not skip the SIGKILL fallback or either
-        // disposable-root cleanup below.
-        console.warn(`Electron smoke shutdown failed: ${error?.message || error}`);
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-      }
-    }
-    if (electronProcess.exitCode === null) {
-      electronProcess.kill('SIGKILL');
-    }
+  // Do not let one teardown failure skip any later teardown. Each failure is
+  // retained so a passing test can never conceal an undisposed fixture root.
+  try {
+    await closeElectron(app);
+  } catch (error) {
+    cleanupFailures.push(error);
   }
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  if (bridgeUserDataDir) {
-    assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
-      'ordinary E2E shutdown must leave no bridge state directory');
+  try {
+    if (bridgeUserDataDir) {
+      assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
+        'ordinary E2E shutdown must leave no bridge state directory');
+    }
+  } catch (error) {
+    cleanupFailures.push(error);
   }
-  await Promise.allSettled([
+  // The roots are attempted even after close/verification errors; unlike a
+  // discarded allSettled result, every rejected removal is surfaced below.
+  const removals = await Promise.allSettled([
     fs.rm(userDataDir, { recursive: true, force: true }),
     fs.rm(previewFixtureRoot, { recursive: true, force: true }),
   ]);
+  for (const result of removals) {
+    if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
 }
+if (primarySmokeFailure) {
+  if (cleanupFailures.length === 0) throw primarySmokeFailure;
+  throw new globalThis.AggregateError([primarySmokeFailure, ...cleanupFailures], 'Electron smoke and cleanup failed');
+}
+if (cleanupFailures.length > 0) throw new globalThis.AggregateError(cleanupFailures, 'Electron smoke cleanup failed');
+if (smokePassed) console.log('Electron smoke test passed');
