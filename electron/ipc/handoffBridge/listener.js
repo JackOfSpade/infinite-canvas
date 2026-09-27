@@ -9,6 +9,8 @@ const SOCKET_MODE = CONSTANTS.SOCKET_MODE_OCTAL;
 const DIRECTORY_MODE = CONSTANTS.BRIDGE_DIRECTORY_MODE_OCTAL;
 const RESTART_DELAYS = [1_000, 5_000, 30_000];
 const DEFAULT_DRAIN_MS = 10_000;
+const SELF_PROBE_TIMEOUT_MS = 2_000;
+const SELF_PROBE_MAX_BYTES = 16 * 1024;
 const fixedUnavailable = '{"error":"temporarily_unavailable","error_description":"The handoff bridge is unavailable."}';
 const fixedServerError = '{"error":"server_error","error_description":"The handoff bridge could not complete that request."}';
 
@@ -16,7 +18,7 @@ function unavailable(detail) { const error = new Error('The bridge socket is una
 const mode = stat => stat.mode & 0o777;
 const hasBody = req => Number(req?.headers?.['content-length'] || 0) > 0 || Boolean(req?.headers?.['transfer-encoding']);
 
-export function createListener({ socketPath, handler, httpModule = http, fsModule = fs, netModule = net, uid = process.getuid?.(), timers = globalThis, onRestart = () => undefined } = {}) {
+export function createListener({ socketPath, handler, httpModule = http, fsModule = fs, netModule = net, uid = process.getuid?.(), timers = globalThis, onRestart = () => undefined, beforeRebind = async () => undefined } = {}) {
   if (typeof socketPath !== 'string' || !socketPath || Buffer.byteLength(socketPath) > SOCKET_PATH_MAX_BYTES) throw unavailable('path_too_long');
   if (!path.isAbsolute(socketPath) || !/^[A-Za-z0-9_./ -]+$/.test(socketPath) || socketPath.includes('//') || socketPath.split('/').some(part => part === '.' || part === '..')) throw unavailable('bad_path');
   if (typeof handler !== 'function') throw new TypeError('listener handler is required');
@@ -140,7 +142,7 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
     const restart = () => {
       fired = true;
       restartTimer = null;
-      bind(generation).then(result => {
+      Promise.resolve(beforeRebind()).catch(() => undefined).then(() => bind(generation)).then(result => {
         if (!result) return;
         terminalNotified = false; notifyRestart({ ok: true });
       }, bindError => { lastRestartError = bindError; notifyRestart({ ok: false, code: bindError?.code }); scheduleRestart(bindError); });
@@ -258,6 +260,75 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
     })();
     return binding.finally(() => { binding = null; });
   };
+  const quiesce = () => {
+    accepting = false;
+    return true;
+  };
+  const drain = async ({ drainMs = DEFAULT_DRAIN_MS } = {}) => {
+    if (inFlight === 0) return true;
+    let resolveDrain;
+    const drained = new Promise(resolve => { resolveDrain = resolve; drainWaiters.add(resolve); });
+    let timeoutTimer;
+    const timeout = new Promise(resolve => {
+      try { timeoutTimer = timers.setTimeout?.(resolve, drainMs); timeoutTimer?.unref?.(); } catch { resolve(); }
+    });
+    await Promise.race([drained, timeout]);
+    if (timeoutTimer !== undefined) try { timers.clearTimeout?.(timeoutTimer); } catch { /* already settled */ }
+    drainWaiters.delete(resolveDrain);
+    return inFlight === 0;
+  };
+  const selfProbe = async ({ hostname } = {}) => {
+    if (!server || !accepting || typeof hostname !== 'string' || !hostname) return { ok: false, code: 'socket_unavailable' };
+    return new Promise(resolve => {
+      let settled = false; let timer; let request; let response;
+      const done = value => {
+        if (settled) return;
+        settled = true;
+        try { if (timer !== undefined) timers.clearTimeout?.(timer); } catch { /* no work remains */ }
+        resolve(value);
+      };
+      const abort = () => {
+        try { response?.destroy?.(); } catch { /* request teardown is best effort */ }
+        try { request?.destroy?.(); } catch { try { request?.abort?.(); } catch { /* no teardown port remains */ } }
+      };
+      const fail = () => { if (!settled) { abort(); done({ ok: false, code: 'socket_unavailable' }); } };
+      const expectedResource = `https://${hostname}/mcp`;
+      try {
+        request = httpModule.request?.({ socketPath, path: '/.well-known/oauth-protected-resource/mcp', method: 'GET', headers: { host: hostname, accept: 'application/json' } }, incoming => {
+          response = incoming;
+          if (response?.statusCode !== 200 || typeof response?.on !== 'function') return fail();
+          const declaredLength = response.headers?.['content-length'];
+          if (declaredLength !== undefined && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > SELF_PROBE_MAX_BYTES)) return fail();
+          const chunks = []; let bytes = 0;
+          response.on('data', chunk => {
+            try {
+              const size = Buffer.isBuffer(chunk) ? chunk.length : typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk instanceof Uint8Array ? chunk.byteLength : NaN;
+              if (!Number.isSafeInteger(size) || bytes + size > SELF_PROBE_MAX_BYTES) return fail();
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+              bytes += size;
+            } catch { fail(); }
+          });
+          response.on('error', fail);
+          response.on('aborted', fail);
+          response.on('end', () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
+              if (!body || typeof body !== 'object' || Array.isArray(body) || body.resource !== expectedResource) return fail();
+              done({ ok: true });
+            } catch { fail(); }
+          });
+        });
+        if (settled) { abort(); return; }
+        if (!request || typeof request.on !== 'function' || typeof request.end !== 'function') return fail();
+        request.on('error', fail);
+        request.setTimeout?.(SELF_PROBE_TIMEOUT_MS, fail);
+        timer = timers.setTimeout?.(fail, SELF_PROBE_TIMEOUT_MS);
+        if (timer === undefined) return fail();
+        timer?.unref?.();
+        request.end();
+      } catch { fail(); }
+    });
+  };
   return Object.freeze({
     start: async () => {
       if (binding) return binding;
@@ -274,9 +345,12 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
     },
     get accepting() { return accepting; },
     get inFlight() { return inFlight; },
+    quiesce,
+    drain,
+    selfProbe,
     async stop({ drainMs = DEFAULT_DRAIN_MS } = {}) {
       stopping = true;
-      accepting = false;
+      quiesce();
       generation++;
       if (restartTimer !== null) {
         try { timers.clearTimeout?.(restartTimer); } catch { /* stop must continue */ }
@@ -284,16 +358,7 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
       }
       const instance = server;
       try { if (instance) {
-        let drainResolve = null;
-        const drained = inFlight === 0 ? Promise.resolve() : new Promise(resolve => { drainResolve = resolve; drainWaiters.add(resolve); });
-        let timeoutTimer;
-        const timeout = new Promise(resolve => {
-          try { timeoutTimer = timers.setTimeout?.(resolve, drainMs); timeoutTimer?.unref?.(); }
-          catch { resolve(); }
-        });
-        await Promise.race([drained, timeout]);
-        if (timeoutTimer !== undefined) timers.clearTimeout?.(timeoutTimer);
-        if (drainResolve) drainWaiters.delete(drainResolve);
+        await drain({ drainMs });
         const closed = new Promise(resolve => { try { instance.close?.(resolve); } catch { resolve(); } });
         instance.closeIdleConnections?.();
         instance.closeAllConnections?.();

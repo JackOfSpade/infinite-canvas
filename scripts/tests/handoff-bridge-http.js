@@ -232,6 +232,50 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: http: self-probe accepts only a bounded exact resource document',
+    async run() {
+      const runProbe = async ({ statusCode = 200, body = '{"resource":"https://bridge.example.com/mcp"}', headers = {}, timeout = false } = {}) => {
+        const fixture = createSocketFsNet(); const clock = createFakeClock(0); let request; let options;
+        const server = { on() {}, once() {}, off() {}, listen: (_opts, ready) => { fixture.entries.set(fixture.socketPath, { type: 'socket', uid: process.getuid?.() ?? 0, mode: 0o600 }); ready(); }, close: done => done(), closeIdleConnections() {}, closeAllConnections() {} };
+        const httpModule = {
+          createServer: () => server,
+          request(nextOptions, callback) {
+            options = nextOptions;
+            request = new EventEmitter();
+            request.destroy = () => { request.destroyed = true; };
+            request.setTimeout = (_ms, onTimeout) => { request.onTimeout = onTimeout; };
+            request.end = () => {
+              if (timeout) return;
+              queueMicrotask(() => {
+                const response = new EventEmitter(); Object.assign(response, { statusCode, headers });
+                callback(response);
+                queueMicrotask(() => { response.emit('data', body); response.emit('end'); });
+              });
+            };
+            return request;
+          },
+        };
+        const listener = createListener({ socketPath: fixture.socketPath, handler() {}, fsModule: fixture.fs, netModule: fixture.net, httpModule, timers: clock });
+        await listener.start();
+        const probing = listener.selfProbe({ hostname: 'bridge.example.com' });
+        if (timeout) clock.advance(2_000);
+        const result = await probing;
+        await listener.stop();
+        return { result, request, options };
+      };
+      const good = await runProbe();
+      assert(good.result.ok && good.options.path === '/.well-known/oauth-protected-resource/mcp', 'only an exact 200 metadata resource document may prove the local listener');
+      for (const rejected of [
+        await runProbe({ statusCode: 204 }),
+        await runProbe({ body: '{"resource":"https://bridge.example.com/mcp/other"}' }),
+        await runProbe({ body: 'not json' }),
+        await runProbe({ body: `{"resource":"https://bridge.example.com/mcp","padding":"${'x'.repeat(16 * 1024)}"}` }),
+      ]) assert(!rejected.result.ok && rejected.result.code === 'socket_unavailable' && rejected.request.destroyed, 'wrong status, resource, JSON, or an oversized response must fail with the fixed local code');
+      const timedOut = await runProbe({ timeout: true });
+      assert(!timedOut.result.ok && timedOut.request.destroyed, 'a stalled self-probe must abort through its bounded deadline');
+    },
+  },
+  {
     name: 'handoff bridge: http: host route and bearer checks reject before body consumption',
     async run() {
       const mcp = async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } });
