@@ -100,7 +100,7 @@ export async function prepareBinary({ userData, sourcePath, pin = null, tunnelId
       const signature = deps.codesign?.(tmp);
       if (!(signature === true || signature?.verified === true)) throw Object.assign(new Error('signature'), { code: 'binary-signature-invalid' });
     }
-    const version = deps.version ? deps.version(tmp) : testMode ? 'cloudflared version 2026.9.3' : null;
+    const version = testMode ? 'cloudflared version 2026.9.3' : deps.version ? deps.version(tmp) : null;
     if (!VERSION_RE.test(version)) throw Object.assign(new Error('version'), { code: 'binary-unrecognized' });
     const copyHash = sha256File(tmp, { fsImpl, cryptoImpl });
     if (copyHash !== digest) throw Object.assign(new Error('copy hash'), { code: 'binary-copy-failed' });

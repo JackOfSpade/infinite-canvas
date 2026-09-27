@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
 import { writeFakeCloudflaredLauncher } from './fixtures/handoff-bridge/bridgeFixtures.js';
@@ -23,6 +24,7 @@ import { createRotatingLog } from '../../electron/ipc/handoffBridge/tunnel/logRi
 import { findApprovedCopy, findBinary, prepareBinary, verifyPinnedCopy } from '../../electron/ipc/handoffBridge/tunnel/binary.js';
 import { ensureTunnelDirectory, readTunnelState, tunnelPaths, writeTunnelState } from '../../electron/ipc/handoffBridge/tunnel/files.js';
 import { inspectCredentials, recordTunnelIntent } from '../../electron/ipc/handoffBridge/tunnel/credentials.js';
+import { ensureDirectoryWithinRoot } from '../../electron/utils/pathSafety.js';
 
 const fakeUrl = new URL('./fixtures/handoff-bridge/fake-cloudflared.js', import.meta.url);
 const TUNNEL_ID = '123e4567-e89b-42d3-a456-426614174000';
@@ -359,23 +361,26 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     name: 'handoff bridge: tunnel: binary test mode copies, pins, and skips host trust ports while production fails closed',
     async run() {
       const bytes = Buffer.alloc(5 * 1024 * 1024, 7); const mem = createMemoryBinaryFs(); const source = '/synthetic/cloudflared'; mem.add(source, bytes);
-      for (const directory of ['/', '/users', '/users/test', '/users/prod']) mem.mkdirSync(directory);
+      for (const directory of ['/', '/users', '/users/test', '/users/prod', '/users/prod-verified']) mem.mkdirSync(directory);
       const crypto = awaitableCrypto(); const pin = crypto.hash(bytes);
       assert(findBinary('/missing/chosen', { existsSync: () => true }) === '/missing/chosen' && findBinary('/missing/chosen', { existsSync: () => false }) === null, 'an explicitly chosen unavailable binary must not silently fall back to PATH-like locations');
-      let codesign = 0; let xattr = 0;
+      let codesign = 0; let xattr = 0; let versionCalls = 0;
       const ensureDirectory = async (_root, target) => { mem.mkdirSync(target); return target; };
       let ancestorStats = 0; const originalStat = mem.statSync; mem.statSync = name => { if (name === '/users' || name === '/') ancestorStats++; return originalStat(name); };
-      const testCopy = await prepareBinary({ userData: '/users/test', sourcePath: source, pin, testMode: true }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('12345678'), codesign: () => { codesign++; return { verified: true }; }, xattr: () => { xattr++; return { present: true }; } });
-      assert(testCopy.ok && codesign === 0 && xattr === 0 && ancestorStats === 0, 'test mode must only copy and pin a pre-seeded fake without host trust probes');
-      assert((mem.entries.get(testCopy.copyPath).mode & 0o777) === 0o500 && verifyPinnedCopy(testCopy.copyPath, pin, { fsImpl: mem, cryptoImpl: crypto }).ok, 'the executed copy must be 0500 and pinned');
+      const testCopy = await prepareBinary({ userData: '/users/test', sourcePath: source, pin, testMode: true }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('12345678'), codesign: () => { codesign++; return { verified: true }; }, xattr: () => { xattr++; return { present: true }; }, version: () => { versionCalls++; throw new Error('test mode must not execute the version probe'); } });
+      assert(testCopy.ok && codesign === 0 && xattr === 0 && versionCalls === 0 && ancestorStats === 0, 'test mode must only copy and pin a pre-seeded fake without host trust probes');
+      assert((mem.entries.get(testCopy.copyPath).mode & 0o777) === 0o500 && verifyPinnedCopy(testCopy.copyPath, pin, { fsImpl: mem, cryptoImpl: crypto, uid: 501 }).ok, 'the executed copy must be 0500 and pinned');
       const reused = await prepareBinary({ userData: '/users/test', sourcePath: source, pin, testMode: true }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('abcdefgh') });
       assert(reused.ok && reused.copyPath === testCopy.copyPath, 'an identical immutable copied binary is safely reusable');
       const production = await prepareBinary({ userData: '/users/prod', sourcePath: source, pin, testMode: false }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('abcdefgh'), codesign: () => ({ verified: false }), xattr: () => ({ present: false }), version: () => 'cloudflared version 2026.9.3' });
       assert(!production.ok, `an unsigned fake must be refused outside test mode (${JSON.stringify(production)})`);
+      let productionVersionCalls = 0;
+      const productionVerified = await prepareBinary({ userData: '/users/prod-verified', sourcePath: source, pin, testMode: false }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('87654321'), codesign: () => ({ verified: true }), xattr: () => ({ present: false }), version: () => { productionVersionCalls++; return 'cloudflared version 2026.9.3'; } });
+      assert(productionVerified.ok && productionVersionCalls === 1, 'production must retain the injected version probe after trust checks');
       const mismatch = await prepareBinary({ userData: '/users/test-mismatch', sourcePath: source, pin: '0'.repeat(64), testMode: true }, { fsImpl: mem, cryptoImpl: crypto, uid: 501, ensureDirectory, random: () => Buffer.from('87654321') });
       assert(!mismatch.ok && mismatch.code === 'binary-changed', 'test mode must not weaken a mismatched pre-seeded pin');
       mem.entries.get(testCopy.copyPath).bytes[0] ^= 1;
-      assert(!verifyPinnedCopy(testCopy.copyPath, pin, { fsImpl: mem, cryptoImpl: crypto }).ok, 'a changed copy must refuse every spawn');
+      assert(!verifyPinnedCopy(testCopy.copyPath, pin, { fsImpl: mem, cryptoImpl: crypto, uid: 501 }).ok, 'a changed copy must refuse every spawn');
     },
   },
   {
@@ -852,6 +857,62 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
       const result = await timerFault.supervisor.start(); await flush();
       assert(!result.ok && result.code === 'spawn-failed' && timerFault.supervisor.status().state === 'failed' && timerFault.supervisor.status().lastExit === 'spawn-failed', 'timer construction faults after spawn must kill the group and fail closed without rejection');
       await timerFault.supervisor.stop();
+    },
+  },
+  {
+    name: 'handoff bridge: tunnel: macOS system aliases preserve trusted roots but reject nested links',
+    run: async () => {
+      if (process.platform !== 'darwin') return { skipped: 'darwin-only' };
+      const roots = [];
+      let outsideRoot = '';
+      try {
+        const realTemporaryParent = await fs.promises.realpath(os.tmpdir());
+        assert(realTemporaryParent.startsWith('/private/var/'),
+          'the macOS temporary directory fixture must resolve through /private/var');
+        const lexicalTemporaryParent = `/var${realTemporaryParent.slice('/private/var'.length)}`;
+        for (const [temporaryParent, lexicalPrefix, canonicalPrefix] of [
+          [lexicalTemporaryParent, '/var', '/private/var'],
+          ['/tmp', '/tmp', '/private/tmp'],
+        ]) {
+          const lexicalRoot = await fs.promises.mkdtemp(path.join(temporaryParent, 'local-ai-system-alias-'));
+          roots.push(lexicalRoot);
+          const realRoot = await fs.promises.realpath(lexicalRoot);
+          assert(realRoot === `${canonicalPrefix}${lexicalRoot.slice(lexicalPrefix.length)}`,
+            `${lexicalPrefix} fixture must resolve through its macOS /private alias`);
+          const trustedDir = await ensureDirectoryWithinRoot(lexicalRoot, path.join(lexicalRoot, 'trusted'), {
+            label: 'Local AI macOS system alias',
+          });
+          assert(await fs.promises.realpath(trustedDir) === path.join(realRoot, 'trusted'),
+            `${lexicalPrefix} descendants remain usable through the trusted lexical root`);
+        }
+
+        const realEtcSsl = await fs.promises.realpath('/etc/ssl');
+        const trustedEtcSsl = await ensureDirectoryWithinRoot('/etc/ssl', '/etc/ssl', {
+          label: 'Local AI macOS system alias',
+        });
+        assert(realEtcSsl.startsWith('/private/etc/') && trustedEtcSsl === realEtcSsl,
+          '/etc descendants use the same narrowly allowed macOS alias');
+
+        outsideRoot = await fs.promises.mkdtemp('/tmp/local-ai-system-alias-outside-');
+        const linkedDir = path.join(roots[0], 'attacker-controlled');
+        await fs.promises.symlink(outsideRoot, linkedDir, 'dir');
+        let symlinkError = null;
+        try {
+          await ensureDirectoryWithinRoot(roots[0], path.join(linkedDir, 'created'), {
+            label: 'Local AI macOS system alias',
+          });
+        } catch (error) { symlinkError = error; }
+        assert(/symbolic link|resolved outside/i.test(String(symlinkError?.message || '')),
+          'a nested attacker-controlled symlink remains rejected under a system alias');
+        assert(!fs.existsSync(path.join(outsideRoot, 'created')),
+          'rejecting the nested symlink does not create a directory at its target');
+      } finally {
+        await Promise.all([
+          ...roots.map(root => fs.promises.rm(root, { recursive: true, force: true })),
+          ...(outsideRoot ? [fs.promises.rm(outsideRoot, { recursive: true, force: true })] : []),
+        ]);
+      }
+      return { aliases: 3, symlinkTraversalBlocked: true };
     },
   },
   ...B3_MATRIX,
