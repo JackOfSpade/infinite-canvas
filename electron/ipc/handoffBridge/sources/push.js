@@ -60,6 +60,16 @@ function currentPath(windows, windowId) {
   return typeof path === 'string' && path.startsWith('/') ? path : null;
 }
 
+function safeCount(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function safeExcluded(value, reasons) {
+  const out = {};
+  for (const reason of Array.isArray(reasons) ? reasons : []) out[reason] = safeCount(value?.[reason]);
+  return Object.freeze(out);
+}
+
 function hubMatches(entry, selected, windows) {
   return Boolean(entry && selected && selected.windowId === entry.windowId && selected.nodeId === entry.nodeId && selected.canvasFilePath === currentPath(windows, entry.windowId));
 }
@@ -80,16 +90,108 @@ function copySafeRead(view) {
 
 function result(status, extra = {}) { return Object.freeze({ status, ...extra }); }
 
-export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS } = {}) {
+export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS } = {}) {
   const port = { exclusions: seam.BRIDGE_EXCLUSION_REASONS || BRIDGE_EXCLUSION_REASONS, list: seam.list || listBridgeableNonApiAiHandoffs, read: seam.read || readBridgeableNonApiAiHandoff, submit: seam.submit || submitNonApiAiResponseForBridge };
   const selected = new Map();
+  // The discovery cache is the only data used by the synchronous status
+  // surface. It holds the exact triple internally but exposes just hub keys.
+  const discovered = new Map();
   const epochs = new Map();
+  function displayKey(canvasFilePath, nodeId) {
+    if (typeof hubKey !== 'function') return null;
+    try {
+      const key = hubKey(canvasFilePath, nodeId);
+      return typeof key === 'string' && /^[a-f0-9]{64}$/.test(key) ? key : null;
+    } catch { return null; }
+  }
   function state(epoch = 'default') { const key = typeof epoch === 'string' && epoch ? epoch : 'default'; if (!epochs.has(key)) epochs.set(key, { served: new Map(), byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, waits: 0, remaining: { ready: 0, working: 0, needsYou: 0 } }); return epochs.get(key); }
   function enabledTasks() { return new Set(Object.entries(PUSH_TASK_POLICY).filter(([, item]) => item.mode === 'release_one').map(([task]) => task)); }
   function selectedHubs() { return new Set([...selected.values()].map(item => item.nodeId)); }
-  function selectHub({ windowId, canvasFilePath, nodeId } = {}) { if (!Number.isInteger(windowId) || typeof nodeId !== 'string' || !nodeId || currentPath(windows, windowId) !== canvasFilePath) return false; selected.set(`${windowId}\u0000${nodeId}`, { windowId, canvasFilePath, nodeId }); return true; }
+  function selectionKey({ windowId, nodeId }) { return `${windowId}\u0000${nodeId}`; }
+  function selectHub({ windowId, canvasFilePath, nodeId } = {}) {
+    if (!Number.isInteger(windowId) || typeof nodeId !== 'string' || !nodeId || currentPath(windows, windowId) !== canvasFilePath) return false;
+    const key = displayKey(canvasFilePath, nodeId);
+    if (!key) return false;
+    selected.set(selectionKey({ windowId, nodeId }), { windowId, canvasFilePath, nodeId, key });
+    return true;
+  }
+  function selectHubKey(key) {
+    if (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key)) return false;
+    const hub = discovered.get(key);
+    if (!hub || currentPath(windows, hub.windowId) !== hub.canvasFilePath) return false;
+    return selectHub(hub);
+  }
+  function unselectHubKey(key) {
+    if (typeof key !== 'string') return false;
+    pruneHubs();
+    let removed = false;
+    for (const [selection, hub] of selected) {
+      if (hub.key === key) { selected.delete(selection); removed = true; }
+    }
+    return removed;
+  }
   function clearHubs({ windowId = null } = {}) { for (const [key, hub] of selected) if (windowId === null || hub.windowId === windowId) selected.delete(key); }
-  function pruneHubs() { for (const [key, hub] of selected) if (currentPath(windows, hub.windowId) !== hub.canvasFilePath) selected.delete(key); }
+  function pruneHubs() {
+    for (const [key, hub] of selected) if (currentPath(windows, hub.windowId) !== hub.canvasFilePath) selected.delete(key);
+    for (const [key, hub] of discovered) if (currentPath(windows, hub.windowId) !== hub.canvasFilePath) discovered.delete(key);
+  }
+  function cacheDiscovery(snapshot, { replace = false } = {}) {
+    // A selected poll is intentionally incomplete: it has rows only for the
+    // selected hubs. Rebuild each observed hub from that one snapshot, then
+    // overlay those replacements onto the cache. Starting from the old hub
+    // and incrementing would turn N pending handoffs into 2N, 3N, ... on
+    // ordinary repeated get() calls.
+    const observed = new Map();
+    const excluded = safeExcluded(snapshot?.excluded, port.exclusions);
+    for (const entry of Array.isArray(snapshot?.handoffs) ? snapshot.handoffs : []) {
+      const canvasFilePath = currentPath(windows, entry?.windowId);
+      if (!canvasFilePath || typeof entry?.nodeId !== 'string' || !entry.nodeId) continue;
+      const key = displayKey(canvasFilePath, entry.nodeId);
+      if (!key) continue;
+      const prior = observed.get(key) || {
+        key,
+        windowId: entry.windowId,
+        canvasFilePath,
+        nodeId: entry.nodeId,
+        pending: 0,
+        tasks: new Map(),
+        excluded,
+      };
+      prior.pending += 1;
+      if (typeof entry.task === 'string' && PUSH_TASK_POLICY[entry.task]?.mode === 'release_one') {
+        prior.tasks.set(entry.task, (prior.tasks.get(entry.task) || 0) + 1);
+      }
+      observed.set(key, prior);
+    }
+    const next = replace ? new Map() : new Map(discovered);
+    for (const [key, hub] of observed) next.set(key, hub);
+    if (!replace) {
+      // An empty selected result means that selected hub now has zero pending
+      // work, not that every other (unselected) discovered hub vanished.
+      for (const hub of selected.values()) {
+        if (observed.has(hub.key)) continue;
+        next.set(hub.key, {
+          key: hub.key,
+          windowId: hub.windowId,
+          canvasFilePath: hub.canvasFilePath,
+          nodeId: hub.nodeId,
+          pending: 0,
+          tasks: new Map(),
+          excluded,
+        });
+      }
+    }
+    discovered.clear();
+    for (const [key, hub] of next) discovered.set(key, hub);
+  }
+  async function refreshHubs() {
+    pruneHubs();
+    let snapshot;
+    try { snapshot = await port.list({ allowTasks: enabledTasks(), allowNodeIds: null }); }
+    catch { return false; }
+    cacheDiscovery(snapshot, { replace: true });
+    return true;
+  }
   function seamArgs(entry) { return { requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks: enabledTasks(), allowNodeIds: selectedHubs() }; }
   function removeServed(value, requestId) { const served = value.served.get(requestId); if (!served) return; value.served.delete(requestId); if (value.byCode.get(served.handoffCode) === requestId) value.byCode.delete(served.handoffCode); }
   function tombstone(value, requestId, code) { const key = canonicalCode(code); value.tombstones.delete(key); value.tombstones.set(key, { requestId, code: key }); while (value.tombstones.size > TOMBSTONE_CAP) value.tombstones.delete(value.tombstones.keys().next().value); }
@@ -111,6 +213,10 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     const value = state(epoch); pruneHubs();
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let snapshot; try { snapshot = await port.list({ allowTasks: enabledTasks(), allowNodeIds: selectedHubs() }); } catch { return result('retry'); }
+      // This list is intentionally selection-filtered, so it can update rows
+      // that are selected but cannot discover unselected hubs. The explicit
+      // refreshHubs action discovers those without making status asynchronous.
+      cacheDiscovery(snapshot);
       const candidates = Array.isArray(snapshot?.handoffs) ? snapshot.handoffs.filter(entry => !value.held.has(entry.requestId) && hubMatches(entry, selected.get(`${entry.windowId}\u0000${entry.nodeId}`), windows)) : [];
       const entry = candidates.find(item => value.served.has(item.requestId)) || candidates[0];
       if (!entry) {
@@ -194,9 +300,22 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     pruneHubs();
     const key = typeof epoch === 'string' && epoch ? epoch : 'default';
     const value = epochs.get(key);
-    return Object.freeze({ served: value?.served.size ?? 0, held: value?.held.size ?? 0, selectedHubs: selected.size, working: value?.remaining?.working ?? 0, needsYou: value?.remaining?.needsYou ?? 0 });
+    const safeHubs = [...discovered.values()].map(hub => Object.freeze({
+      key: hub.key,
+      pending: hub.pending,
+      tasks: Object.freeze([...hub.tasks].map(([task, pending]) => Object.freeze({ task, pending }))),
+      excluded: hub.excluded,
+    }));
+    return Object.freeze({
+      served: value?.served.size ?? 0,
+      held: value?.held.size ?? 0,
+      selectedHubs: Object.freeze([...selected.values()].map(hub => hub.key).sort()),
+      discovered: Object.freeze(safeHubs),
+      working: value?.remaining?.working ?? 0,
+      needsYou: value?.remaining?.needsYou ?? 0,
+    });
   }
-  return Object.freeze({ enabledTasks, selectedHubs, selectHub, clearHubs, pruneHubs, get, submit, nextAfterAccept, closeEpoch, status });
+  return Object.freeze({ enabledTasks, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, get, submit, nextAfterAccept, closeEpoch, status });
 }
 
 export { canonicalCode as normalizePushHandoffCode };
