@@ -176,6 +176,18 @@ export function HandoffBridgePanel() {
 
   const health = deriveBridgeHealth(status, now);
   const chat = describeChat(status.chat, now);
+  const canPause = status.enabled && !status.paused && status.serving === 'live';
+  const canResume = status.enabled && status.paused;
+  const canPair = status.enabled && status.setup.tunnelReachable;
+  const canStartChat = status.enabled && status.serving === 'live' && !status.paused && status.setup.tunnelReachable && status.setup.linked;
+  const canRelease = status.enabled && ['live', 'paused'].includes(status.serving);
+  const healthActionDisabled = id => (
+    (['new-chat', 'copy-starter'].includes(id) && !canStartChat)
+    || (id === 'pause' && !canPause)
+    || (id === 'resume' && !canResume)
+    || (id === 'open-pairing' && !canPair)
+    || (id === 'revoke-all' && !status.enabled)
+  );
   const newChat = useCallback(() => {
     const referenceNow = now || status.at;
     const age = status.chat.lastCallAt && referenceNow >= status.chat.lastCallAt
@@ -284,7 +296,7 @@ export function HandoffBridgePanel() {
         <aside
           ref={panelRef}
           tabIndex={-1}
-          className="fixed bottom-3 left-14 z-[900] w-[360px] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-xl border border-white/10 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur"
+          className="fixed bottom-3 left-3 z-[900] w-[360px] max-w-[calc(100vw-2rem)] min-w-0 max-h-[calc(100vh-2rem)] overflow-y-auto rounded-xl border border-white/10 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur sm:left-14"
           aria-label={BRIDGE_UI_COPY.panelLabel}
         >
           <header className="flex items-start gap-3">
@@ -300,7 +312,7 @@ export function HandoffBridgePanel() {
               type="button"
               onClick={() => openBridgeSetup(2)}
               aria-label={BRIDGE_UI_COPY.settingsLabel}
-              className="text-white/45 hover:text-white"
+              className="bridge-icon-button"
             >
               <Settings size={16} />
             </button>
@@ -308,7 +320,7 @@ export function HandoffBridgePanel() {
               type="button"
               onClick={closeBridgePopover}
               aria-label={BRIDGE_UI_COPY.closePanel}
-              className="text-white/45 hover:text-white"
+              className="bridge-icon-button"
             >
               <X size={16} />
             </button>
@@ -316,18 +328,19 @@ export function HandoffBridgePanel() {
 
           <div className="mt-3 flex flex-wrap gap-2">
             {status.paused ? (
-              <button type="button" onClick={() => void call('handoffBridgeResume')} className="bridge-button-primary">
+              <button type="button" disabled={!canResume} onClick={() => void call('handoffBridgeResume')} className="bridge-button-primary">
                 <Play size={13} /> {BRIDGE_UI_COPY.resume}
               </button>
-            ) : (
+            ) : canPause ? (
               <button type="button" onClick={() => void call('handoffBridgePause')} className="bridge-button-secondary">
                 <Pause size={13} /> {BRIDGE_UI_COPY.pause}
               </button>
-            )}
+            ) : null}
             {health.actions.map(item => (
               <button
                 type="button"
                 key={item.id}
+                disabled={healthActionDisabled(item.id)}
                 onClick={() => runHealthAction(item.id)}
                 className={item.kind === 'danger' ? 'bridge-button-danger' : 'bridge-button-secondary'}
               >
@@ -344,14 +357,14 @@ export function HandoffBridgePanel() {
               {chat.ordinal ? BRIDGE_UI_COPY.chatOrdinal(chat.ordinal) : BRIDGE_UI_COPY.noChat}
               {chat.workingOn ? ` · ${BRIDGE_UI_COPY.workingOn(chat.workingOn)}` : ''}
             </p>
-            <div className="mt-2 flex gap-2">
-              <button type="button" onClick={() => void call('handoffBridgeContinueChat')} className="bridge-button-secondary">
+            {canStartChat && <div className="mt-2 flex min-w-0 flex-wrap gap-2">
+              <button type="button" disabled={!chat.ordinal} onClick={() => void call('handoffBridgeContinueChat')} className="bridge-button-secondary">
                 {BRIDGE_UI_COPY.copyContinue}
               </button>
               <button type="button" onClick={newChat} className="bridge-button-secondary">
                 {BRIDGE_UI_COPY.startChat}
               </button>
-            </div>
+            </div>}
           </section>
 
           <section className="mt-4 border-t border-white/10 pt-3">
@@ -359,11 +372,11 @@ export function HandoffBridgePanel() {
               <h3 className="text-xs font-semibold text-white/75">{BRIDGE_UI_COPY.applications}</h3>
               <button
                 type="button"
-                disabled={!candidates.length}
+                disabled={!canRelease || !candidates.length}
                 onClick={() => void call('handoffBridgeRelease', {
                   items: candidates.map(item => ({ jobId: item.jobId })),
                 })}
-                className="text-[11px] text-sky-300 hover:text-sky-200 disabled:opacity-40"
+                className="text-[11px] text-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {BRIDGE_UI_COPY.sendAll}
               </button>
@@ -374,8 +387,9 @@ export function HandoffBridgePanel() {
                   <span className="min-w-0 truncate text-white/55">{itemLabel(item)}</span>
                   <button
                     type="button"
+                    disabled={!canRelease}
                     onClick={() => void call('handoffBridgeRelease', { items: [{ jobId: item.jobId }] })}
-                    className="text-sky-300"
+                    className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {BRIDGE_UI_COPY.release}
                   </button>
@@ -390,8 +404,9 @@ export function HandoffBridgePanel() {
                       {row.action === 'hold' && (
                         <button
                           type="button"
+                          disabled={!canRelease}
                           onClick={() => void call('handoffBridgeHoldJob', { jobId: job.jobId, held: true })}
-                          className="text-sky-300"
+                          className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {BRIDGE_UI_COPY.keepForMe}
                         </button>
@@ -399,8 +414,9 @@ export function HandoffBridgePanel() {
                       {row.action === 'resume' && (
                         <button
                           type="button"
+                          disabled={!canRelease}
                           onClick={() => void call('handoffBridgeHoldJob', { jobId: job.jobId, held: false })}
-                          className="text-sky-300"
+                          className="text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {BRIDGE_UI_COPY.resumeServing}
                         </button>
@@ -426,6 +442,7 @@ export function HandoffBridgePanel() {
                 <input
                   type="checkbox"
                   checked={status.push.selectedHubs.includes(hub.key)}
+                  disabled={!canRelease}
                   onChange={event => void call(
                     event.target.checked ? 'handoffBridgeReleasePush' : 'handoffBridgeUnreleasePush',
                     event.target.checked ? { hubs: [hub.key] } : { hub: hub.key },
@@ -458,23 +475,23 @@ export function HandoffBridgePanel() {
             </div>
           </section>
 
-          <p className="mt-4 border-t border-white/10 pt-3 text-[11px] leading-relaxed text-white/45">
-            {BRIDGE_COPY.hygiene}
-          </p>
+          <section className="mt-4 space-y-2 border-t border-white/10 pt-3 text-[11px] leading-relaxed text-white/45">
+            {BRIDGE_COPY.hygiene.map(paragraph => <p key={paragraph}>{paragraph}</p>)}
+          </section>
           <p className="mt-2 text-[11px] leading-relaxed text-white/45">{BRIDGE_COPY.dockNote}</p>
           <p className="mt-2 text-[11px] leading-relaxed text-white/45">
             {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
           </p>
 
-          <footer className="mt-4 flex items-center justify-between border-t border-white/10 pt-3">
-            <span className="flex items-center gap-1 text-[11px] text-white/35">
+          {status.enabled && <footer className="mt-4 flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-3">
+            <span className="flex min-w-0 items-center gap-1 text-[11px] text-white/35">
               <Cable size={12} /> {health.headline}
             </span>
-            <div className="flex gap-2">
+            <div className="flex min-w-0 flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => setConfirm('revoke')}
-                className="text-[11px] text-red-300 hover:text-red-200"
+                className="bridge-button-danger"
               >
                 {BRIDGE_UI_COPY.revoke}
               </button>
@@ -484,12 +501,12 @@ export function HandoffBridgePanel() {
                   if (status.chat.outstanding) setConfirm('off');
                   else void call('handoffBridgeSetEnabled', { enabled: false });
                 }}
-                className="text-[11px] text-red-300 hover:text-red-200"
+                className="bridge-button-danger"
               >
                 {BRIDGE_UI_COPY.turnOff}
               </button>
             </div>
-          </footer>
+          </footer>}
         </aside>
       )}
       {dialog}

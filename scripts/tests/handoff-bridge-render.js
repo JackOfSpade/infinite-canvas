@@ -161,7 +161,7 @@ export default [
   {
     name: 'handoff bridge: render: source wiring is guarded, accessible and uses only the frozen renderer IPC surface',
     run() {
-      const app = source('src/App.jsx'); const settings = source('src/components/SettingsPanel.jsx'); const sidebar = source('src/components/Sidebar.jsx'); const panel = source('src/components/HandoffBridgePanel.jsx'); const dialog = source('src/components/HandoffBridgeSetupDialog.jsx'); const trigger = source('src/components/HandoffBridgeTrigger.jsx');
+      const app = source('src/App.jsx'); const settings = source('src/components/SettingsPanel.jsx'); const setup = source('src/components/HandoffBridgeSetup.jsx'); const sidebar = source('src/components/Sidebar.jsx'); const panel = source('src/components/HandoffBridgePanel.jsx'); const dialog = source('src/components/HandoffBridgeSetupDialog.jsx'); const confirmDialog = source('src/components/ConfirmDialog.jsx'); const trigger = source('src/components/HandoffBridgeTrigger.jsx'); const styles = source('src/index.css');
       assert(app.includes('<HandoffBridgeGuard label="panel">') && app.indexOf('<HandoffBridgePanel') > app.indexOf('<NonApiAiDialog'), 'App must mount the guarded panel after the non-API dialog');
       assert(settings.includes('<HandoffBridgeGuard label="settings">') && settings.includes('<HandoffBridgeSetup'), 'Settings must mount its guarded bridge section');
       assert(sidebar.includes('<HandoffBridgeTrigger />'), 'Sidebar must mount the bridge trigger');
@@ -169,12 +169,82 @@ export default [
       for (const text of [panel, dialog]) assert(!text.includes('dangerouslySetInnerHTML'), 'bridge surfaces must not inject HTML');
       assert(!dialog.includes('handoffBridgeCopyServerUrl'), 'Copy server URL must use an existing IPC channel or a non-secret renderer clipboard helper');
       assert(!dialog.includes('openExternalFailureMessage') && dialog.includes('externalLinkFailure'), 'bridge-visible external-link failures must use bridge copy');
+      assert(dialog.includes('LINK_PROGRESS_KEYS') && !dialog.includes('Object.values(status.link.progress)'), 'link-progress rows must use their explicit status keys, never object enumeration order');
+      assert(dialog.includes('role="dialog"') && dialog.includes('aria-modal="true"') && dialog.includes('onKeyDown={trapFocus}'), 'setup must retain labelled modal semantics and a local focus trap');
+      assert(!dialog.includes('status.seq'), 'setup inputs must not remount and discard a draft when status refreshes');
+      assert(dialog.includes('canAccessStep') && dialog.includes('disabled={!canAdvance}'), 'setup navigation must keep prerequisite steps inaccessible');
+      assert(dialog.includes('w-[min(560px,calc(100vw-2rem))]') && dialog.includes('max-h-[85vh]'), 'setup must retain narrow-viewport width and height limits');
+      assert(confirmDialog.includes('role="dialog"') && confirmDialog.includes('aria-modal="true"') && confirmDialog.includes('onKeyDown={trapFocus}') && confirmDialog.includes('max-w-full'), 'nested bridge confirmations must retain accessible, narrow-viewport modal behavior');
+      assert(settings.includes('max-w-[calc(100vw-2rem)]') && settings.includes('min-w-0') && !settings.includes('overflow-x-hidden'), 'Settings must remain inside a narrow viewport without clipping other Settings content');
+      assert(setup.includes('flex-wrap') && setup.includes('min-w-0') && setup.includes('bridge-button-danger'), 'bridge Settings controls must wrap long labels and actions instead of overflowing');
+      assert(panel.includes('max-w-[calc(100vw-2rem)]') && panel.includes('left-3') && panel.includes('sm:left-14'), 'bridge popover must remain within a narrow viewport');
+      for (const className of ['bridge-button-primary', 'bridge-button-secondary', 'bridge-button-danger']) assert(new RegExp(`\\.${className}(?:,|\\s*\\{)`).test(styles), `${className} must have a shared CSS definition`);
+      for (const rule of ['display: inline-flex', 'max-width: 100%', 'min-height: 2.25rem', 'overflow-wrap: anywhere', ':disabled']) assert(styles.includes(rule), `bridge buttons must retain the compact responsive rule ${rule}`);
       assert(trigger.includes("health.badge > 9 ? '9+'"), 'the trigger badge must cap visibly at 9+');
       assert(!panel.includes('now || Date.now()'), 'new-chat confirmation must use state time, never a wall-clock fallback');
       assert(!dialog.includes('${BRIDGE_SETUP_COPY.stepComplete}') && !dialog.includes('${BRIDGE_SETUP_COPY.stepPending}'), 'setup progress must use icons or CSS, not visible glyph text');
       assert(dialog.includes('LINK_WOULD_BREAK') && dialog.includes('confirmBreak'), 'hostname changes that would break a link must offer an explicit confirm-and-retry flow');
       for (const count of ['getServed', 'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'stallNotices', 'tunnelRestarts']) assert(panel.includes(`status.counts.${count}`), `panel counts must include ${count}`);
       for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
+    },
+  },
+  {
+    name: 'handoff bridge: render: setup dialog retains drafts, gates steps and traps focus',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-setup-dialog-'));
+      const entry = path.join(directory, 'SetupDialogProbe.jsx');
+      const dialog = path.resolve('src/components/HandoffBridgeSetupDialog.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js'); const uiStore = path.resolve('src/utils/handoffBridgeUiStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgeSetupDialog } from ${JSON.stringify(dialog)};\nexport { applyHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport { openBridgeSetup, __resetBridgeUiForTests } from ${JSON.stringify(uiStore)};\nexport function SetupDialogProbe() { return <HandoffBridgeSetupDialog />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorRects = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, 'getClientRects');
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value: () => [{ width: 1, height: 1 }] });
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          let rootNode;
+          try {
+            window.electronAPI = { handoffBridgeGetStatus: async () => ({ status: status(1) }), onHandoffBridgeStatus: () => () => {} };
+            bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests();
+            rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+            const incomplete = status(1, { setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: true, toolsListed: false, firstCallSeen: false } });
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.SetupDialogProbe)); bundle.module.applyHandoffBridgeStatus(incomplete); bundle.module.openBridgeSetup(4); });
+            const lockedDialog = window.document.querySelector('[role="dialog"]');
+            assert(lockedDialog?.getAttribute('aria-modal') === 'true' && window.document.activeElement === lockedDialog, 'setup must focus its labelled modal when opened');
+            assert(lockedDialog.textContent.includes('Tunnel'), 'a direct request for First chat must stop at Tunnel when a previously linked bridge is unreachable');
+            const lockedSteps = [...lockedDialog.querySelectorAll('button[aria-label^="Go to"]')];
+            assert(lockedSteps.slice(2).every(button => button.disabled), 'plugin and first-chat progress controls must stay disabled before their prerequisites');
+            assert([...lockedDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'Next must be disabled while tunnel setup is incomplete');
+
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(2)); bundle.module.openBridgeSetup(2); });
+            const liveDialog = window.document.querySelector('[role="dialog"]');
+            const hostname = liveDialog.querySelector('input[aria-label="Public address"]');
+            hostname.value = 'draft.example.com';
+            hostname.dispatchEvent(new window.Event('input', { bubbles: true }));
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(3, { config: { hostname: 'saved.example.com' } })); });
+            assert(hostname.value === 'draft.example.com', 'a newer status sequence must not replace an address draft');
+
+            const focusable = [...liveDialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];
+            const first = focusable[0]; const last = focusable[focusable.length - 1];
+            last.focus();
+            const tab = new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+            await bundle.module.act(async () => { last.dispatchEvent(tab); });
+            assert(tab.defaultPrevented && window.document.activeElement === first, 'Tab from the final setup control must wrap inside the dialog');
+            await bundle.module.act(async () => rootNode.unmount());
+            rootNode = null;
+            assert(entries.length === 0, 'setup dialog interaction must emit no console warnings or errors');
+          } finally {
+            if (rootNode) await bundle.module.act(async () => rootNode.unmount());
+            if (priorRects) Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', priorRects);
+            else delete window.HTMLElement.prototype.getClientRects;
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent);
+            else delete globalThis.CustomEvent;
+          }
+        }));
+      } finally {
+        __resetHandoffBridgeStoreForTests(); __resetBridgeUiForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -277,7 +347,7 @@ export default [
           window.electronAPI = { handoffBridgeGetStatus: async () => ({ status: status(1, { power: { keepAwake } }) }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined };
           bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests(); const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
           await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.AwakeProbe)); bundle.module.applyHandoffBridgeStatus(status(2, { power: { keepAwake } })); bundle.module.openBridgePopover(); });
-          const selected = keepAwake ? 'asks macOS not to put your Mac to sleep' : 'Your Mac may sleep'; const other = keepAwake ? 'Your Mac may sleep' : 'asks macOS not to put your Mac to sleep'; const text = window.document.body.textContent;
+          const selected = keepAwake ? 'During bridge work, the app asks macOS to stay awake' : 'During bridge work, your Mac may sleep'; const other = keepAwake ? 'During bridge work, your Mac may sleep' : 'During bridge work, the app asks macOS to stay awake'; const text = window.document.body.textContent;
           assert(text.split(selected).length - 1 === 2 && !text.includes(other), 'the selected keep-awake sentence must appear once in panel and once in Settings only');
           await bundle.module.act(async () => rootNode.unmount()); assert(entries.length === 0, 'keep-awake render must have no console output');
         }));

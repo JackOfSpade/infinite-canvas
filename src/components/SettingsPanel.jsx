@@ -512,7 +512,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-h-[85vh] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel flex flex-col"
+        className="w-[420px] max-w-[calc(100vw-2rem)] max-h-[85vh] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -527,7 +527,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
         </div>
 
         {/* Scrollable Content */}
-        <div className="px-6 py-5 space-y-6 overflow-y-auto custom-scrollbar flex-1">
+        <div className="min-w-0 px-6 py-5 space-y-6 overflow-y-auto custom-scrollbar flex-1">
 
           {/* ── Job Sources ─────────────────────────────────────────── */}
           {/* Per-source credentials for job-search APIs that require keys.
@@ -628,7 +628,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
           </div>
 
           <HandoffBridgeGuard label="settings">
-            <HandoffBridgeSetup />
+            <HandoffBridgeSetup onOpenPanel={onClose} />
           </HandoffBridgeGuard>
 
           <div className="w-full h-px bg-white/[0.06]" />

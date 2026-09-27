@@ -42,8 +42,41 @@ const VARIANT_STYLES = {
 export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, onAbort, variant = 'danger' }) {
   const style = VARIANT_STYLES[variant] || VARIANT_STYLES.danger;
   const [isResolving, setIsResolving] = useState(false);
+  const dialogRef = useRef(null);
+  const cancelButtonRef = useRef(null);
+  const previousFocusRef = useRef(null);
   const resolvingRef = useRef(false);
   const resolveTimerRef = useRef(null);
+
+  const focusableElements = useCallback(() => {
+    if (!dialogRef.current) return [];
+    return [...dialogRef.current.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )];
+  }, []);
+
+  const trapFocus = useCallback((event) => {
+    if (event.key !== 'Tab') return;
+    const elements = focusableElements();
+    if (elements.length === 0) {
+      event.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+
+    const first = elements[0];
+    const last = elements[elements.length - 1];
+    if (!dialogRef.current?.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, [focusableElements]);
 
   const resolveOnce = useCallback((action) => {
     if (resolvingRef.current) return;
@@ -62,6 +95,20 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
     return () => updateModalCount(-1);
   }, []);
 
+  // A portal sits at the end of document.body, so focus would otherwise stay
+  // on an obscured canvas control. Start on the safe action and return focus
+  // to the control that opened the dialog after it closes.
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement;
+    cancelButtonRef.current?.focus();
+    return () => {
+      const previousFocus = previousFocusRef.current;
+      if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
+        previousFocus.focus();
+      }
+    };
+  }, []);
+
   // Close on Escape — Escape always means "no further action", which cancels
   // the dialog (triggers onAbort to undo if available, else falls back to onCancel).
   useEscapeToClose((e) => {
@@ -74,13 +121,19 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
   }, []);
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      <div
+        className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
       onClick={() => resolveOnce(onAbort || onCancel)}
     >
       <div
-        className="w-[360px] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel relative"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        className="w-[360px] max-w-full min-w-0 bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel relative"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={trapFocus}
       >
         {onAbort && (
           <button
@@ -106,6 +159,7 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
 
         <div className="px-6 pb-6 flex gap-3">
           <button
+            ref={cancelButtonRef}
             onClick={() => resolveOnce(onCancel)}
             disabled={isResolving}
             className="flex-1 px-4 py-2.5 rounded-lg text-xs font-medium bg-white/5 text-white/70 hover:bg-white/10 transition-colors"

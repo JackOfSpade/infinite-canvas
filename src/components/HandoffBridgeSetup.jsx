@@ -7,19 +7,242 @@ import { openBridgePopover, openBridgeSetup } from '../utils/handoffBridgeUiStor
 import { deriveBridgeHealth } from '../utils/handoffBridgeView';
 import { BRIDGE_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 
-function invoke(api, method, payload) { const fn = api?.[method]; if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' }); try { return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload)); } catch { return Promise.resolve({ success: false, code: 'INTERNAL' }); } }
-function unavailableCopy(reason) { return reason === 'e2e' ? BRIDGE_COPY.e2eUnavailable : reason === 'env-disabled' ? BRIDGE_UI_COPY.envDisabled : BRIDGE_UI_COPY.unavailable; }
+function invoke(api, method, payload) {
+  const fn = api?.[method];
+  if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+  try {
+    return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload));
+  } catch {
+    return Promise.resolve({ success: false, code: 'INTERNAL' });
+  }
+}
 
-export function HandoffBridgeSetup() {
-  const status = useHandoffBridgeStatus(); const [notice, setNotice] = useState(''); const [confirm, setConfirm] = useState(null); const mountedRef = useRef(true);
+function unavailableCopy(reason) {
+  return reason === 'e2e'
+    ? BRIDGE_COPY.e2eUnavailable
+    : reason === 'env-disabled'
+      ? BRIDGE_UI_COPY.envDisabled
+      : BRIDGE_UI_COPY.unavailable;
+}
+
+export function HandoffBridgeSetup({ onOpenPanel }) {
+  const status = useHandoffBridgeStatus();
+  const [notice, setNotice] = useState('');
+  const [confirm, setConfirm] = useState(null);
+  const mountedRef = useRef(true);
   const apiPresent = hasHandoffBridgeApi();
+
   useEffect(() => startHandoffBridgeStatusSync(), []);
-  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
-  useEffect(() => { if (!notice) return undefined; const timer = setTimeout(() => { if (mountedRef.current) setNotice(''); }, 8000); return () => clearTimeout(timer); }, [notice]);
-  const call = useCallback(async (method, payload) => { const result = await invoke(globalThis.window?.electronAPI, method, payload); if (mountedRef.current) setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.saved); return result; }, []);
-  const health = deriveBridgeHealth(status, 0); const unavailable = !status.availability.ok;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(() => {
+      if (mountedRef.current) setNotice('');
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const call = useCallback(async (method, payload) => {
+    const result = await invoke(globalThis.window?.electronAPI, method, payload);
+    if (mountedRef.current) {
+      setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.saved);
+    }
+    return result;
+  }, []);
+
+  const handleOpenPanel = useCallback(() => {
+    if (typeof onOpenPanel === 'function') onOpenPanel();
+    openBridgePopover();
+  }, [onOpenPanel]);
+
+  const health = deriveBridgeHealth(status, 0);
+  const unavailable = !status.availability.ok;
+  const canToggleServing = status.enabled && (status.paused || status.serving === 'live');
+
   if (!apiPresent) return null;
-  const patchScope = (key, value) => void call('handoffBridgeSaveConfig', { patch: { scope: { ...status.config.scope, [key]: value } } });
-  const dialog = confirm === 'revoke' ? <ConfirmDialog title={BRIDGE_UI_COPY.confirmRevokeTitle} message={BRIDGE_UI_COPY.confirmRevokeMessage} confirmLabel={BRIDGE_UI_COPY.confirmRevoke} cancelLabel={BRIDGE_UI_COPY.cancel} onConfirm={() => { setConfirm(null); void call('handoffBridgeRevokeAll'); }} onCancel={() => setConfirm(null)} /> : confirm === 'forget' ? <ConfirmDialog title={BRIDGE_UI_COPY.confirmForgetTitle} message={BRIDGE_UI_COPY.confirmForgetMessage} confirmLabel={BRIDGE_UI_COPY.confirmForget} cancelLabel={BRIDGE_UI_COPY.cancel} onConfirm={() => { setConfirm(null); void call('handoffBridgeForgetSetup'); }} onCancel={() => setConfirm(null)} /> : null;
-  return <><section className="mt-6 border-t border-white/10 pt-5" aria-labelledby="chatgpt-bridge-settings"><div className="flex items-center gap-2 mb-3"><Cable size={15} className="text-sky-400" /><h3 id="chatgpt-bridge-settings" className="text-sm font-semibold text-white/85">{BRIDGE_UI_COPY.settingsHeading}</h3></div><div role="group" aria-label={BRIDGE_UI_COPY.settingsGroup} className="space-y-3 rounded-lg border border-white/10 bg-white/[0.02] p-3"><label className="flex items-center justify-between gap-3 text-xs text-white/75"><span>{BRIDGE_UI_COPY.enabledLabel}</span><input type="checkbox" checked={status.enabled} disabled={unavailable} onChange={event => void call('handoffBridgeSetEnabled', { enabled: event.target.checked })} /></label>{unavailable && <p className="text-[11px] text-amber-300">{unavailableCopy(status.availability.reason)}</p>}<p className="text-[11px] text-white/50">{health.headline}: {health.detail}</p><p className="text-[11px] text-white/45">{status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}</p><div className="flex flex-wrap gap-2"><button type="button" disabled={unavailable} onClick={() => openBridgeSetup(status.enabled ? 2 : 1)} className="bridge-button-secondary"><Settings2 size={13} /> {status.enabled ? BRIDGE_UI_COPY.manage : BRIDGE_UI_COPY.setUp}</button><button type="button" disabled={unavailable} onClick={openBridgePopover} className="bridge-button-secondary">{BRIDGE_UI_COPY.openPanel}</button><button type="button" disabled={unavailable} onClick={() => void call(status.paused ? 'handoffBridgeResume' : 'handoffBridgePause')} className="bridge-button-secondary">{status.paused ? <Play size={13} /> : <Pause size={13} />}{status.paused ? BRIDGE_UI_COPY.resume : BRIDGE_UI_COPY.pause}</button></div><label className="flex items-center gap-2 text-[11px] text-white/65"><input type="checkbox" checked={status.config.scope.applications} disabled={unavailable} onChange={event => patchScope('applications', event.target.checked)} /> {BRIDGE_UI_COPY.applications}</label><label className="flex items-center gap-2 text-[11px] text-white/65"><input type="checkbox" checked={status.config.scope.scoring} disabled={unavailable} onChange={event => patchScope('scoring', event.target.checked)} /> {BRIDGE_UI_COPY.scoringSetting}</label><label className="flex items-center gap-2 text-[11px] text-white/65"><input type="checkbox" checked={status.autoStart} disabled={unavailable} onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoStart: event.target.checked } })} /> {BRIDGE_UI_COPY.autoStart}</label><label className="flex items-center gap-2 text-[11px] text-white/65"><input type="checkbox" checked={status.autoRelease} disabled={unavailable} onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoRelease: event.target.checked } })} /> {BRIDGE_UI_COPY.autoRelease}</label><label className="flex items-center gap-2 text-[11px] text-white/65"><input type="checkbox" checked={status.config.telemetryInBugReports} disabled={unavailable} onChange={event => void call('handoffBridgeSaveConfig', { patch: { telemetryInBugReports: event.target.checked } })} /> {BRIDGE_UI_COPY.telemetry}</label><div className="flex gap-2 pt-1 border-t border-white/10"><span className="text-[11px] text-white/35">{BRIDGE_UI_COPY.dangerZone}</span><button type="button" disabled={unavailable} onClick={() => setConfirm('revoke')} className="text-[11px] text-red-300 hover:text-red-200">{BRIDGE_UI_COPY.confirmRevoke}</button><button type="button" disabled={unavailable} onClick={() => setConfirm('forget')} className="text-[11px] text-red-300 hover:text-red-200">{BRIDGE_UI_COPY.forget}</button></div>{notice && <p role="status" className="text-[11px] text-white/60">{notice}</p>}</div></section>{dialog}</>;
+
+  const patchScope = (key, value) => {
+    void call('handoffBridgeSaveConfig', {
+      patch: { scope: { ...status.config.scope, [key]: value } },
+    });
+  };
+
+  let dialog = null;
+  if (confirm === 'revoke') {
+    dialog = (
+      <ConfirmDialog
+        title={BRIDGE_UI_COPY.confirmRevokeTitle}
+        message={BRIDGE_UI_COPY.confirmRevokeMessage}
+        confirmLabel={BRIDGE_UI_COPY.confirmRevoke}
+        cancelLabel={BRIDGE_UI_COPY.cancel}
+        onConfirm={() => {
+          setConfirm(null);
+          void call('handoffBridgeRevokeAll');
+        }}
+        onCancel={() => setConfirm(null)}
+      />
+    );
+  } else if (confirm === 'forget') {
+    dialog = (
+      <ConfirmDialog
+        title={BRIDGE_UI_COPY.confirmForgetTitle}
+        message={BRIDGE_UI_COPY.confirmForgetMessage}
+        confirmLabel={BRIDGE_UI_COPY.confirmForget}
+        cancelLabel={BRIDGE_UI_COPY.cancel}
+        onConfirm={() => {
+          setConfirm(null);
+          void call('handoffBridgeForgetSetup');
+        }}
+        onCancel={() => setConfirm(null)}
+      />
+    );
+  }
+
+  return (
+    <>
+      <section
+        className="mt-6 min-w-0 border-t border-white/10 pt-5"
+        aria-labelledby="chatgpt-bridge-settings"
+      >
+        <div className="mb-3 flex min-w-0 items-center gap-2">
+          <Cable size={15} className="shrink-0 text-sky-400" />
+          <h3 id="chatgpt-bridge-settings" className="min-w-0 text-sm font-semibold text-white/85">
+            {BRIDGE_UI_COPY.settingsHeading}
+          </h3>
+        </div>
+        <div
+          role="group"
+          aria-label={BRIDGE_UI_COPY.settingsGroup}
+          className="min-w-0 space-y-3 rounded-lg border border-white/10 bg-white/[0.02] p-3"
+        >
+          <label className="flex min-w-0 items-start justify-between gap-3 text-xs text-white/75">
+            <span className="min-w-0">{BRIDGE_UI_COPY.enabledLabel}</span>
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.enabled}
+              disabled={unavailable}
+              onChange={event => void call('handoffBridgeSetEnabled', { enabled: event.target.checked })}
+            />
+          </label>
+          {unavailable && (
+            <p className="break-words text-[11px] text-amber-300">
+              {unavailableCopy(status.availability.reason)}
+            </p>
+          )}
+          <p className="break-words text-[11px] text-white/50">{health.headline}: {health.detail}</p>
+          <p className="break-words text-[11px] text-white/45">
+            {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
+          </p>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={unavailable}
+              onClick={() => openBridgeSetup(status.enabled ? 2 : 1)}
+              className="bridge-button-secondary"
+            >
+              <Settings2 size={13} /> {status.enabled ? BRIDGE_UI_COPY.manage : BRIDGE_UI_COPY.setUp}
+            </button>
+            <button
+              type="button"
+              disabled={unavailable || !status.enabled}
+              onClick={handleOpenPanel}
+              className="bridge-button-secondary"
+            >
+              {BRIDGE_UI_COPY.openPanel}
+            </button>
+            {status.enabled && (
+              <button
+                type="button"
+                disabled={unavailable || !canToggleServing}
+                onClick={() => void call(status.paused ? 'handoffBridgeResume' : 'handoffBridgePause')}
+                className="bridge-button-secondary"
+              >
+                {status.paused ? <Play size={13} /> : <Pause size={13} />}
+                {status.paused ? BRIDGE_UI_COPY.resume : BRIDGE_UI_COPY.pause}
+              </button>
+            )}
+          </div>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.config.scope.applications}
+              disabled={unavailable}
+              onChange={event => patchScope('applications', event.target.checked)}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.applications}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.config.scope.scoring}
+              disabled={unavailable}
+              onChange={event => patchScope('scoring', event.target.checked)}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.scoringSetting}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.autoStart}
+              disabled={unavailable}
+              onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoStart: event.target.checked } })}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.autoStart}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.autoRelease}
+              disabled={unavailable}
+              onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoRelease: event.target.checked }})}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.autoRelease}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
+              checked={status.config.telemetryInBugReports}
+              disabled={unavailable}
+              onChange={event => void call('handoffBridgeSaveConfig', {
+                patch: { telemetryInBugReports: event.target.checked },
+              })}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.telemetry}</span>
+          </label>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-white/10 pt-1">
+            <span className="text-[11px] text-white/35">{BRIDGE_UI_COPY.dangerZone}</span>
+            <button
+              type="button"
+              disabled={unavailable}
+              onClick={() => setConfirm('revoke')}
+              className="bridge-button-danger"
+            >
+              {BRIDGE_UI_COPY.confirmRevoke}
+            </button>
+            <button
+              type="button"
+              disabled={unavailable}
+              onClick={() => setConfirm('forget')}
+              className="bridge-button-danger"
+            >
+              {BRIDGE_UI_COPY.forget}
+            </button>
+          </div>
+          {notice && <p role="status" className="break-words text-[11px] text-white/60">{notice}</p>}
+        </div>
+      </section>
+      {dialog}
+    </>
+  );
 }

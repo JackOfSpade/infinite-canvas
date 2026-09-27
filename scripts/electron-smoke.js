@@ -1301,6 +1301,18 @@ try {
 
   await clickToolbar(page, 'Settings');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  await page.waitForFunction(() => {
+    const panel = document.querySelector('.onboarding-panel');
+    if (!panel) return false;
+    const transform = getComputedStyle(panel).transform;
+    if (transform === 'none') return true;
+    const values = transform.match(/^matrix\(([^)]+)\)$/)?.[1].split(',').map(Number);
+    return Array.isArray(values)
+      && Math.abs(values[0] - 1) < 0.001
+      && Math.abs(values[3] - 1) < 0.001
+      && Math.abs(values[4]) < 0.001
+      && Math.abs(values[5]) < 0.001;
+  });
   const settingsPanel = page.locator('.onboarding-panel').filter({
     has: page.getByRole('heading', { name: 'Settings', exact: true }),
   });
@@ -1335,6 +1347,45 @@ try {
   );
   const bridgeSettings = settingsPanel.getByRole('group', { name: 'ChatGPT bridge controls' });
   await bridgeSettings.waitFor();
+  const originalWindowSize = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getSize());
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(320, 800));
+  await page.waitForFunction(() => window.innerWidth <= 320);
+  const narrowSettingsLayout = await settingsPanel.evaluate((panel) => {
+    const bounds = panel.getBoundingClientRect();
+    return {
+      clientWidth: panel.clientWidth,
+      scrollWidth: panel.scrollWidth,
+      left: bounds.left,
+      right: bounds.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  assert(narrowSettingsLayout.scrollWidth <= narrowSettingsLayout.clientWidth + 1, 'narrow Settings must not create horizontal scroll');
+  assert(narrowSettingsLayout.left >= -0.5 && narrowSettingsLayout.right <= narrowSettingsLayout.viewportWidth + 0.5, 'narrow Settings must remain inside the viewport');
+  const bridgeLayout = await bridgeSettings.evaluate((group) => {
+    const groupBounds = group.getBoundingClientRect();
+    const buttons = Array.from(group.querySelectorAll('.bridge-button-primary, .bridge-button-secondary, .bridge-button-danger')).map((button) => {
+      const bounds = button.getBoundingClientRect();
+      const style = getComputedStyle(button);
+      return { left: bounds.left, right: bounds.right, height: bounds.height, display: style.display };
+    });
+    return {
+      clientWidth: group.clientWidth,
+      scrollWidth: group.scrollWidth,
+      left: groupBounds.left,
+      right: groupBounds.right,
+      viewportWidth: window.innerWidth,
+      buttons,
+    };
+  });
+  assert(bridgeLayout.buttons.length >= 4, 'Settings must render setup, panel, and danger actions with the shared button styles');
+  assert(bridgeLayout.scrollWidth <= bridgeLayout.clientWidth + 1, 'bridge Settings must not create horizontal scroll');
+  for (const button of bridgeLayout.buttons) {
+    assert(['inline-flex', 'flex'].includes(button.display), 'bridge actions must use the compact shared flex button layout');
+    assert(button.height >= 35.5, `bridge action targets must remain accessible in Settings (height=${button.height})`);
+    assert(button.left >= bridgeLayout.left - 0.5 && button.right <= bridgeLayout.right + 0.5, 'bridge actions must remain inside the Settings group');
+  }
+  assert(bridgeLayout.left >= -0.5 && bridgeLayout.right <= bridgeLayout.viewportWidth + 0.5, 'bridge Settings must remain inside a narrow viewport');
   const bridgeSwitch = bridgeSettings.getByRole('checkbox').first();
   assert.equal(await bridgeSwitch.isDisabled(), true, 'ordinary E2E bridge switch must render disabled');
   await bridgeSettings.getByText('The bridge is disabled during automated test runs.', { exact: true }).waitFor();
@@ -1366,6 +1417,28 @@ try {
     for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
   }, syntheticLive);
   await bridgeSettings.getByText(/^Ready:/).waitFor();
+  await bridgeSettings.getByRole('button', { name: 'Manage…', exact: true }).click();
+  const bridgeSetupDialog = page.getByRole('dialog', { name: 'Set up ChatGPT bridge', exact: true });
+  await bridgeSetupDialog.waitFor();
+  await page.waitForFunction(() => {
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+    return Boolean(dialog) && document.activeElement === dialog;
+  });
+  const narrowSetupLayout = await bridgeSetupDialog.evaluate((dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    return {
+      clientWidth: dialog.clientWidth,
+      scrollWidth: dialog.scrollWidth,
+      left: bounds.left,
+      right: bounds.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  assert(narrowSetupLayout.scrollWidth <= narrowSetupLayout.clientWidth + 1, 'narrow bridge setup must not create horizontal scroll');
+  assert(narrowSetupLayout.left >= -0.5 && narrowSetupLayout.right <= narrowSetupLayout.viewportWidth + 0.5, 'narrow bridge setup must remain inside the viewport');
+  await bridgeSetupDialog.getByRole('button', { name: 'Close setup', exact: true }).click();
+  await bridgeSetupDialog.waitFor({ state: 'hidden' });
+  await bridgeSettings.getByText(/^Ready:/).waitFor();
   const syntheticPaused = {
     ...syntheticLive,
     seq: syntheticLive.seq + 1,
@@ -1377,9 +1450,28 @@ try {
     for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
   }, syntheticPaused);
   await bridgeSettings.getByText(/^Paused:/).waitFor();
-
-  await page.keyboard.press('Escape');
+  await bridgeSettings.getByRole('button', { name: 'Open panel', exact: true }).click();
+  // Opening the popover from Settings must dismiss the higher-z-index modal;
+  // otherwise the popover is present but cannot be interacted with.
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ state: 'hidden' });
+  const bridgePopover = page.getByRole('complementary', { name: 'ChatGPT bridge', exact: true });
+  await bridgePopover.waitFor();
+  const narrowPopoverLayout = await bridgePopover.evaluate((panel) => {
+    const bounds = panel.getBoundingClientRect();
+    return {
+      clientWidth: panel.clientWidth,
+      scrollWidth: panel.scrollWidth,
+      left: bounds.left,
+      right: bounds.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  assert(narrowPopoverLayout.scrollWidth <= narrowPopoverLayout.clientWidth + 1, 'narrow bridge popover must not create horizontal scroll');
+  assert(narrowPopoverLayout.left >= -0.5 && narrowPopoverLayout.right <= narrowPopoverLayout.viewportWidth + 0.5, 'narrow bridge popover must remain inside the viewport');
+  await bridgePopover.getByRole('button', { name: 'Close bridge panel', exact: true }).click();
+  await bridgePopover.waitFor({ state: 'hidden' });
+  await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(size[0], size[1]), originalWindowSize);
+  await page.waitForFunction(width => window.innerWidth >= width - 1, originalWindowSize[0]);
 
   step('exercise sidebar drag/drop panels and issue reporter');
   await page.locator('button[title="Jobs"]').click();
