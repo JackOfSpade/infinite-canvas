@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
-import { AVAILABILITY_REASONS, CHAT_STATES, EMPTY_BRIDGE_STATUS, FAULT_CODES, JOB_PHASES, JOB_REASONS, LINK_STATES, normalizeBridgeStatus, PROBE_STATES, TUNNEL_EXIT_CODES, TUNNEL_STATES } from '../../src/utils/handoffBridgeStatus.js';
+import { AVAILABILITY_REASONS, CHAT_STATES, EMPTY_BRIDGE_STATUS, FAULT_CODES, JOB_PHASES, JOB_REASONS, LINK_STATES, normalizeBridgeStatus, PROBE_REASONS, PROBE_STATES, TUNNEL_EXIT_CODES, TUNNEL_STATES } from '../../src/utils/handoffBridgeStatus.js';
 import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoffBridgeStatus, hasHandoffBridgeApi, startHandoffBridgeStatusSync } from '../../src/utils/handoffBridgeStore.js';
 import { BRIDGE_ACTION_COPY, BRIDGE_COPY, IPC_ERROR_COPY, ipcErrorMessage, sanitizeTunnelLogLine } from '../../src/utils/handoffBridgeCopy.js';
 import { HEALTH_IDS, describeJobRow, deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
@@ -43,7 +43,10 @@ export default [
     assert(deriveBridgeHealth(rawStatus(1, { availability: { ok: false, reason: 'e2e' } }), NOW).id === 'off', 'unavailable status must select off');
     for (const reason of AVAILABILITY_REASONS) assert(normalizeBridgeStatus(rawStatus(1, { availability: { ok: false, reason } })).availability.reason === reason, `availability enum ${reason} must survive`);
     for (const state of TUNNEL_STATES) assert(typeof normalizeBridgeStatus(rawStatus(1, { tunnel: { state } })).tunnel.state === 'string', `tunnel enum ${state} must be normalized`);
-    for (const state of PROBE_STATES) assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { probe: { state, reason: state } } })).tunnel.probe.state === state, `probe enum ${state} must be normalized`);
+    for (const state of PROBE_STATES) assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { probe: { state } } })).tunnel.probe.state === state, `probe state ${state} must be normalized`);
+    assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { probe: { state: 'failing' } } })).tunnel.probe.state === 'failing', 'the aggregate failing probe state must survive normalization');
+    for (const reason of PROBE_REASONS) assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { probe: { state: 'failing', reason } } })).tunnel.probe.reason === reason, `closed probe reason ${reason} must survive`);
+    for (const reason of ['failing', 'untrusted detail', 'synthetic-token', '<script>']) assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { probe: { state: 'failing', reason } } })).tunnel.probe.reason === null, `unknown probe reason ${reason} must be dropped`);
     for (const code of TUNNEL_EXIT_CODES) assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { lastExit: code } })).tunnel.lastExit === code, `tunnel exit enum ${code} must be normalized`);
     for (const code of FAULT_CODES) assert(normalizeBridgeStatus(rawStatus(1, { fault: { code } })).fault?.code === code, `fault enum ${code} must be normalized`);
     for (const state of LINK_STATES) assert(typeof normalizeBridgeStatus(rawStatus(1, { link: { state } })).link.state === 'string', `link enum ${state} must be normalized`);
