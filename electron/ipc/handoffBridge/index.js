@@ -9,6 +9,7 @@ import { IPC_EVENTS, STATUS_SNAPSHOT_EXAMPLE } from './contracts.js';
 import { fixedError } from './errors.js';
 import { forgetConfig, readConfig, writeConfig } from './store.js';
 import { isValidHostname, isValidPluginName } from '../../../src/utils/handoffBridgeConfig.js';
+import { setReportRedactedHosts } from '../bugReport/helpers.js';
 import { createAuditSink } from './audit.js';
 import { createHandoffBridgeLog } from './log.js';
 import { createApplicationSource } from './sources/application.js';
@@ -104,6 +105,15 @@ function userDataFor(deps, app) { return deps.userData ?? app?.getPath?.('userDa
 function packagedFor(deps, app) { return deps.isPackaged ?? app?.isPackaged ?? false; }
 function socketPathFor(userData) { return path.join(userData, CONSTANTS.SOCKET_RELATIVE_PATH); }
 const noOp = () => undefined;
+
+function syncReportRedactedHosts(loaded) {
+  // An unreadable config does not prove that its previous hostname stopped
+  // being sensitive, so leave the last known redaction set intact.
+  if (!loaded || loaded.state === 'unreadable') return loaded;
+  const config = loaded.config ?? loaded;
+  setReportRedactedHosts(isValidHostname(config?.hostname) ? [config.hostname] : []);
+  return loaded;
+}
 
 // Both OAuth and HTTP sit on untrusted/identifier-bearing boundaries.  Keep
 // their composition adapter deliberately smaller than the audit schema: it
@@ -277,6 +287,7 @@ function readBootstrapState(context) {
     if (loaded && typeof loaded.then === 'function') loaded = null;
   } catch { loaded = null; }
   const configUnreadable = !loaded || loaded.state === 'unreadable';
+  if (!bootstrapCleared && !configUnreadable) syncReportRedactedHosts(loaded);
   let setup = null;
   // Read the injected setup seam only when status is requested.  Even when
   // config is unreadable, its paths may be needed internally to report the
@@ -400,7 +411,7 @@ function tunnelUiPort(setup = null) {
 
 function enableConsentPort({ userData, deps = {} } = {}) {
   const load = () => {
-    try { return (deps.readConfig || readConfig)(userData, deps)?.config || null; } catch { return null; }
+    try { return syncReportRedactedHosts((deps.readConfig || readConfig)(userData, deps))?.config || null; } catch { return null; }
   };
   const describe = async () => {
     const config = load();
@@ -661,7 +672,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       cancelPairing: pairing.cancel,
     }, publicProbe: options => probe(options),
     store: {
-      readConfig: () => (deps.readConfig || readConfig)(userData, deps),
+      readConfig: () => syncReportRedactedHosts((deps.readConfig || readConfig)(userData, deps)),
       setEnabled: async enabled => (deps.writeEnabled ? deps.writeEnabled(enabled) : true),
       forget: () => (deps.forgetConfig || forgetConfig)(userData, { fsImpl: deps.fsImpl }),
     },
@@ -947,33 +958,43 @@ async function clearBootstrapSetup() {
 }
 
 async function forgetActiveRuntime(current, status) {
-  if (!current) {
-    const deps = bootstrapContext?.deps || {};
-    const userData = bootstrapContext?.userData;
-    if (!userData) return { success: false, code: 'UNAVAILABLE', status: status() };
-    let wiped = false;
-    try { wiped = await (deps.forgetConfig || forgetConfig)(userData, { fsImpl: deps.fsImpl }); } catch { wiped = false; }
-    if (wiped !== true) return { success: false, code: 'persist_failed', status: status() };
-    bootstrapCleared = true;
-    await clearBootstrapSetup();
-    controllerBridge?.publishBootstrap?.();
-    return { success: true, status: bootstrapSnapshot() };
+  // Disable leaves config.json in place, so it deliberately keeps report
+  // redaction. Forget is the distinct destructive action and must clear it
+  // even when revocation or the durable wipe later reports a failure.
+  setReportRedactedHosts([]);
+  try {
+    if (!current) {
+      const deps = bootstrapContext?.deps || {};
+      const userData = bootstrapContext?.userData;
+      if (!userData) return { success: false, code: 'UNAVAILABLE', status: status() };
+      let wiped = false;
+      try { wiped = await (deps.forgetConfig || forgetConfig)(userData, { fsImpl: deps.fsImpl }); } catch { wiped = false; }
+      if (wiped !== true) return { success: false, code: 'persist_failed', status: status() };
+      bootstrapCleared = true;
+      await clearBootstrapSetup();
+      controllerBridge?.publishBootstrap?.();
+      return { success: true, status: bootstrapSnapshot() };
+    }
+    // Remove all externally reachable runtime ports before revocation starts. If
+    // revocation fails, we still force Disable so a failed Forget cannot leave a
+    // live listener, pairing timer, process, or socket behind.
+    detachRuntime(current);
+    let result;
+    try { result = await current.controller?.forget?.(); } catch { result = { success: false, code: 'persist_failed' }; }
+    if (result?.success) {
+      bootstrapCleared = true;
+      await clearBootstrapSetup();
+      await disposeDetachedRuntime(current, { controllerAlreadyDisabled: true });
+      controllerBridge?.publishBootstrap?.();
+      return { success: true, status: bootstrapSnapshot() };
+    }
+    await disposeDetachedRuntime(current);
+    return { success: false, code: result?.code || 'persist_failed', status: bootstrapSnapshot() };
+  } finally {
+    // Detaching publishes a bootstrap snapshot synchronously; clear again so
+    // that publication cannot re-install an old hostname during Forget.
+    setReportRedactedHosts([]);
   }
-  // Remove all externally reachable runtime ports before revocation starts. If
-  // revocation fails, we still force Disable so a failed Forget cannot leave a
-  // live listener, pairing timer, process, or socket behind.
-  detachRuntime(current);
-  let result;
-  try { result = await current.controller?.forget?.(); } catch { result = { success: false, code: 'persist_failed' }; }
-  if (result?.success) {
-    bootstrapCleared = true;
-    await clearBootstrapSetup();
-    await disposeDetachedRuntime(current, { controllerAlreadyDisabled: true });
-    controllerBridge?.publishBootstrap?.();
-    return { success: true, status: bootstrapSnapshot() };
-  }
-  await disposeDetachedRuntime(current);
-  return { success: false, code: result?.code || 'persist_failed', status: bootstrapSnapshot() };
 }
 
 async function invalidateRuntimeForMutation() {
@@ -998,7 +1019,10 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
   bootstrapContext = { deps, userData: bootstrapUserData, app, isPackaged: packagedFor(deps, app) };
   // A same-process IPC re-registration must not resurrect facts after a
   // successful Forget. A different user-data root is a fresh app context.
-  if (priorUserData && priorUserData !== bootstrapUserData) bootstrapCleared = false;
+  if (priorUserData && priorUserData !== bootstrapUserData) {
+    bootstrapCleared = false;
+    setReportRedactedHosts([]);
+  }
   controllerBridge ||= createControllerBridge();
   const controller = controllerBridge;
   const getCanvasWindows = deps.getCanvasWindows || (() => []);
@@ -1016,7 +1040,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       try { linked = (createOAuthStore({ filePath: path.join(targetUserData, 'handoff-bridge', 'oauth-state.json'), fsImpl: deps.fsImpl }).read()?.families || []).some(family => family?.revoked !== true); } catch { linked = true; }
     }
     let persisted = null;
-    try { persisted = (deps.readConfig || readConfig)(targetUserData, { fsImpl: deps.fsImpl }); } catch { persisted = null; }
+    try { persisted = syncReportRedactedHosts((deps.readConfig || readConfig)(targetUserData, { fsImpl: deps.fsImpl })); } catch { persisted = null; }
     const oldHostname = persisted?.config?.hostname ?? null;
     const changedHostname = Object.hasOwn(patch, 'hostname') && patch.hostname !== oldHostname;
     const safePatch = changedHostname ? { ...patch, consentVersion: 0 } : patch;
@@ -1028,6 +1052,8 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
     if (result?.ok === true) {
       bootstrapCleared = false;
+      if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
+      else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
       // UI calls reloadConfig once after this adapter returns. Hostname is a
       // captured graph value, so detach first and let that one reload publish
       // the newly persisted bootstrap projection rather than reloading twice.
@@ -1055,7 +1081,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     application: deps.application || runtimePort('application', ['describeForConfirm']),
     tunnel: tunnelUiPort(setupPortFromDeps(deps)),
     oauth: deps.oauth || Object.freeze({ openPairing: (...args) => openRuntimePairing(...args), cancelPairing: (...args) => runtime?.pairing?.cancel?.(...args) || Promise.resolve({ ok: false, code: 'NOT_READY' }) }),
-    engine: deps.engine || runtimePort('engine', ['hold', 'resume']),
+    engine: deps.engine || runtimePort('engine', ['hold', 'resume', 'hint']),
     push: deps.push || Object.freeze({
       release: keys => controller.releasePushHubs?.(keys),
       unrelease: key => controller.unreleasePushHub?.(key),
@@ -1089,6 +1115,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
   const userData = userDataFor(deps, app);
   const prior = bootstrapContext;
   const inherited = prior?.userData === userData ? prior?.deps : {};
+  if (prior?.userData && prior.userData !== userData) setReportRedactedHosts([]);
   const composedDeps = mergeDefinedDeps(inherited, deps);
   bootstrapContext = { deps: composedDeps, userData, app, isPackaged };
   bootstrapCleared = false;
@@ -1108,7 +1135,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
   const lifecycleTicket = lifecycle;
   const operation = (async () => {
     let loaded;
-    try { loaded = composedDeps.loadedConfig || (composedDeps.readConfig || readConfig)(userData, { fsImpl: composedDeps.fsImpl }); } catch { return refusalResult('state_unreadable', reason); }
+    try { loaded = syncReportRedactedHosts(composedDeps.loadedConfig || (composedDeps.readConfig || readConfig)(userData, { fsImpl: composedDeps.fsImpl })); } catch { return refusalResult('state_unreadable', reason); }
     if (!loaded || loaded.state === 'unreadable') return refusalResult('state_unreadable', reason);
     const refusal = refusalForStart({ env, isPackaged, paths: { binaryPath: setup.binaryPath, credentialsPath: setup.credentialsPath, userData }, tmpdir: composedDeps.tmpdir || os.tmpdir(), enabled: true, config: loaded.config, setup: { binaryPath: setup.binaryPath, binaryTrusted: setup.binaryTrusted, credentialsPath: setup.credentialsPath, configValid: loaded.state === 'ok' || loaded.state === 'missing', socketUnavailable: setup.socketUnavailable, tunnelFailed: setup.tunnelFailed } });
     if (refusal) return refusalResult(refusal, reason);
@@ -1150,7 +1177,7 @@ export function scheduleHandoffBridgeLaunch({ userData = '', setTimeoutImpl = se
   return setTimeoutImpl(async () => {
     const pidfile = path.join(userData, 'handoff-bridge', 'tunnel', 'tunnel.pid.json'); let exists = false;
     try { await stat(pidfile); exists = true; } catch { /* no pidfile means no process inspection */ }
-    let loaded; try { loaded = loadConfig(userData); } catch { return; }
+    let loaded; try { loaded = syncReportRedactedHosts(loadConfig(userData)); } catch { return; }
     if (exists) try { await reapOrphans({ reason: 'launch', pidfile }); } catch { return; }
   if (loaded?.config?.autoStart) {
     // Keep the loaded value both as the launch contract and in the default

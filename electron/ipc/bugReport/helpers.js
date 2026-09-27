@@ -2,6 +2,63 @@
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
 // they live here rather than being duplicated or buried in one module.
 
+// Bridge setup lives in the main process while reports may be assembled long
+// after a particular bridge runtime stopped. Keep the hostname list here,
+// rather than teaching each report builder about bridge configuration.
+let reportRedactedHosts = new Set();
+let reportRedactedHostPatterns = [];
+
+function escapeReportRedactedHostForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Set the configured hostnames that must not be exposed in a bug report.
+ * Calling without hosts intentionally restores the historical no-op behavior.
+ */
+export function setReportRedactedHosts(hosts) {
+  const values = typeof hosts === 'string'
+    ? [hosts]
+    : Array.isArray(hosts)
+      ? hosts
+      : hosts instanceof Set
+        ? [...hosts]
+        : [];
+  const normalized = new Set();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const hostname = value.trim().toLowerCase();
+    if (hostname) normalized.add(hostname);
+  }
+  reportRedactedHosts = normalized;
+  // Keep hostname boundaries explicit: a configured host must not redact a
+  // longer hostname or an identifier that merely contains it as a substring.
+  // A final dot is the DNS root marker (and ordinary prose punctuation), not
+  // the beginning of another label, so it is intentionally a safe boundary.
+  reportRedactedHostPatterns = [...normalized].map(hostname => new RegExp(
+    `(^|[^a-z0-9_.-])${escapeReportRedactedHostForRegExp(hostname)}(?=$|[^a-z0-9_.-]|\\.(?=$|[^a-z0-9_-]))`,
+    'gi',
+  ));
+}
+
+function redactConfiguredReportHosts(value) {
+  if (reportRedactedHostPatterns.length === 0) return value;
+  let redacted = value;
+  for (const pattern of reportRedactedHostPatterns) {
+    redacted = redacted.replace(pattern, (_match, prefix) => `${prefix}<bridge-host>`);
+  }
+  return redacted;
+}
+
+function redactedReportOrigin(parsed) {
+  // A terminal root dot is equivalent to the configured DNS hostname. URL
+  // parsers retain it, so compare the canonical spelling before deciding
+  // whether a report may show the origin.
+  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
+  if (!reportRedactedHosts.has(hostname)) return parsed.origin;
+  return `${parsed.protocol}//<bridge-host>${parsed.port ? `:${parsed.port}` : ''}`;
+}
+
 /**
  * Keep the diagnostic identity of a URL while removing query/hash data.
  *
@@ -16,17 +73,17 @@ export function redactReportUrl(value) {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return `${parsed.origin}${parsed.pathname}`;
+      return redactConfiguredReportHosts(`${redactedReportOrigin(parsed)}${parsed.pathname}`);
     }
-    return raw.split(/[?#]/, 1)[0];
+    return redactConfiguredReportHosts(raw.split(/[?#]/, 1)[0]);
   } catch {
-    return raw.split(/[?#]/, 1)[0];
+    return redactConfiguredReportHosts(raw.split(/[?#]/, 1)[0]);
   }
 }
 
 /** Remove query/hash data from every absolute HTTP(S) URL embedded in prose. */
 export function redactReportUrlsInText(value) {
-  return String(value || '').replace(/https?:\/\/[^\s`<>"|]+/gi, (match) => {
+  const text = String(value || '').replace(/https?:\/\/[^\s`<>"|]+/gi, (match) => {
     // Sentence/table punctuation is not part of the URL. Preserve it after the
     // redacted identity so prose remains readable.
     const suffixMatch = match.match(/[)\]}.,;:]+$/);
@@ -34,6 +91,7 @@ export function redactReportUrlsInText(value) {
     const url = suffix ? match.slice(0, -suffix.length) : match;
     return `${redactReportUrl(url)}${suffix}`;
   });
+  return redactConfiguredReportHosts(text);
 }
 
 // Renderer events are deliberately a human-readable ring rather than a rigid
