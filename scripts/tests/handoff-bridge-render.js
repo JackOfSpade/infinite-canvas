@@ -205,7 +205,20 @@ export default [
           Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
           let rootNode;
           try {
-            window.electronAPI = { handoffBridgeGetStatus: async () => ({ status: status(1) }), onHandoffBridgeStatus: () => () => {} };
+            const enableCalls = [];
+            const enableResults = [{ success: false, code: 'INTERNAL' }, { success: true }];
+            const setupCalls = [];
+            window.electronAPI = {
+              handoffBridgeGetStatus: async () => ({ status: status(1) }),
+              onHandoffBridgeStatus: () => () => {},
+              handoffBridgeChooseBinary: async () => { setupCalls.push('binary'); return { success: true }; },
+              handoffBridgeApproveBinary: async () => { setupCalls.push('approve'); return { success: true }; },
+              handoffBridgeChooseCredentials: async () => { setupCalls.push('credentials'); return { success: true }; },
+              handoffBridgeSetEnabled: async ({ enabled }) => {
+                enableCalls.push(enabled);
+                return enableResults.shift() || { success: false, code: 'INTERNAL' };
+              },
+            };
             bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests();
             rootNode = bundle.module.createRoot(window.document.getElementById('root'));
             const incomplete = status(1, { setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: true, toolsListed: false, firstCallSeen: false } });
@@ -213,16 +226,76 @@ export default [
             const lockedDialog = window.document.querySelector('[role="dialog"]');
             assert(lockedDialog?.getAttribute('aria-modal') === 'true' && window.document.activeElement === lockedDialog, 'setup must focus its labelled modal when opened');
             assert(lockedDialog.textContent.includes('Tunnel'), 'a direct request for First chat must stop at Tunnel when a previously linked bridge is unreachable');
+            assert(lockedDialog.textContent.includes('The bridge is starting. Wait for the tunnel to be online before continuing.'), 'an enabled bridge that is not reachable must state that it is waiting for the tunnel');
             const lockedSteps = [...lockedDialog.querySelectorAll('button[aria-label^="Go to"]')];
             assert(lockedSteps.slice(2).every(button => button.disabled), 'plugin and first-chat progress controls must stay disabled before their prerequisites');
             assert([...lockedDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'Next must be disabled while tunnel setup is incomplete');
 
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(2)); bundle.module.openBridgeSetup(2); });
+            const bootstrapSelection = status(2, {
+              enabled: false,
+              serving: 'off',
+              setup: { hostnameOk: true, binaryApproved: false, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'off', binary: null, probe: { state: 'off' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(bootstrapSelection); bundle.module.openBridgeSetup(2); });
+            const bootstrapDialog = window.document.querySelector('[role="dialog"]');
+            const chooseBinary = [...bootstrapDialog.querySelectorAll('button')].find(button => button.textContent.includes('Choose cloudflared'));
+            const approveBinary = [...bootstrapDialog.querySelectorAll('button')].find(button => button.textContent.includes('Approve cloudflared'));
+            const chooseCredentials = [...bootstrapDialog.querySelectorAll('button')].find(button => button.textContent.includes('Choose credentials'));
+            assert(chooseBinary && approveBinary && !approveBinary.disabled && chooseCredentials?.disabled,
+              'a bootstrap status without presentation-only binary details must still permit main to authoritatively approve a chosen binary, while credentials await durable approval');
+            await bundle.module.act(async () => { chooseBinary.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(setupCalls[0] === 'binary' && !approveBinary.disabled,
+              'a successful binary choice must leave Approve callable without inventing a renderer trusted state');
+            await bundle.module.act(async () => { approveBinary.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(setupCalls[1] === 'approve', 'Approve must delegate selection validation and native consent to main');
+            const approvedBootstrap = status(3, {
+              enabled: false,
+              serving: 'off',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'off', binary: null, probe: { state: 'off' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(approvedBootstrap); await Promise.resolve(); await Promise.resolve(); });
+            assert(!chooseCredentials.disabled, 'durable binary approval must unlock credentials even when bootstrap cannot retain a presentation-only binary version');
+            await bundle.module.act(async () => { chooseCredentials.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(setupCalls[2] === 'credentials', 'the unlocked credentials action must reach its main-process authority');
+
+            const offReady = status(4, {
+              enabled: false,
+              serving: 'off',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'off', probe: { state: 'off' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(offReady); bundle.module.openBridgeSetup(2); });
+            const offReadyDialog = window.document.querySelector('[role="dialog"]');
+            const enableBridge = [...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Turn on bridge'));
+            assert(enableBridge && !enableBridge.disabled && offReadyDialog.textContent.includes('Tunnel setup is saved. Turn on the bridge to start the tunnel.'), 'a saved off-state tunnel must expose the in-dialog enable action and explain why plugin setup is locked');
+            await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(enableCalls.length === 1 && enableCalls[0] === true && !enableBridge.disabled, 'a failed enable must remain non-optimistic, retain the saved off-state and allow a retry');
+            assert(offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'an in-dialog enable failure must show only fixed feedback');
+            await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(enableCalls.length === 2 && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'a successful enable request must show a bounded pending state until main publishes status');
+            const starting = status(5, {
+              enabled: true,
+              serving: 'starting',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'starting', probe: { state: 'checking' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(starting); await Promise.resolve(); await Promise.resolve(); });
+            assert(!offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.') && offReadyDialog.textContent.includes('The bridge is starting. Wait for the tunnel to be online before continuing.'), 'a newer main status must clear prior enable feedback and state the live tunnel wait');
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(6)); await Promise.resolve(); await Promise.resolve(); });
+            assert(![...offReadyDialog.querySelectorAll('button[aria-label^="Go to"]')][2].disabled && ![...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'the online status refresh must unlock Plugin and link without remounting setup');
+
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(7)); bundle.module.openBridgeSetup(2); });
             const liveDialog = window.document.querySelector('[role="dialog"]');
             const hostname = liveDialog.querySelector('input[aria-label="Public address"]');
             hostname.value = 'draft.example.com';
             hostname.dispatchEvent(new window.Event('input', { bubbles: true }));
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(3, { config: { hostname: 'saved.example.com' } })); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(8, { config: { hostname: 'saved.example.com' } })); });
             assert(hostname.value === 'draft.example.com', 'a newer status sequence must not replace an address draft');
 
             const focusable = [...liveDialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];
@@ -290,7 +363,7 @@ export default [
     },
   },
   {
-    name: 'handoff bridge: render: every Settings checkbox waits for a newer status and sends its exact patch',
+    name: 'handoff bridge: render: every active Settings checkbox waits for a newer status and sends its exact patch',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-checkboxes-'));
       const entry = path.join(directory, 'CheckboxProbe.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js');
@@ -313,7 +386,6 @@ export default [
             autoStart: false,
             autoRelease: false,
             scope: { applications: true, scoring: false },
-            telemetryInBugReports: false,
           };
           let nextSequence = 1;
           const publishSaved = () => emit(snapshot(++nextSequence, {
@@ -322,7 +394,6 @@ export default [
             autoRelease: persisted.autoRelease,
             config: {
               scope: { ...persisted.scope },
-              telemetryInBugReports: persisted.telemetryInBugReports,
             },
           }));
           window.electronAPI = {
@@ -336,7 +407,6 @@ export default [
               if (patch.scope) Object.assign(persisted.scope, patch.scope);
               if (Object.hasOwn(patch, 'autoStart')) persisted.autoStart = patch.autoStart;
               if (Object.hasOwn(patch, 'autoRelease')) persisted.autoRelease = patch.autoRelease;
-              if (Object.hasOwn(patch, 'telemetryInBugReports')) persisted.telemetryInBugReports = patch.telemetryInBugReports;
               // The original failure was two sibling saves from one stale
               // render. Withhold the first acknowledgement snapshot so the
               // Scoring save alone must carry both durable scope values.
@@ -365,6 +435,7 @@ export default [
             });
             const applications = checkbox('Applications');
             const scoring = checkbox('Let ChatGPT handle scoring handoffs');
+            assert(!window.document.body.textContent.includes('Include bridge counts in bug reports'), 'the unimplemented bug-report telemetry option must not present a no-op control');
             assert(applications.checked && !scoring.checked, 'the initial scope must enable applications only');
             await bundle.module.act(async () => { applications.click(); scoring.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(JSON.stringify(saves.slice(0, 2)) === JSON.stringify([
@@ -392,15 +463,9 @@ export default [
               && bundle.module.getHandoffBridgeStatus().seq === 5 && enabled.checked,
             'the master switch must call its dedicated port and wait for the newer main status');
 
-            const telemetry = checkbox('Include bridge counts in bug reports');
-            assert(!telemetry.checked, 'the initial telemetry preference must be off');
-            await bundle.module.act(async () => { telemetry.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(JSON.stringify(saves[4]) === JSON.stringify({ telemetryInBugReports: true })
-              && bundle.module.getHandoffBridgeStatus().seq === 6 && telemetry.checked,
-            'bug-report telemetry must send its exact durable preference patch and wait for its newer main status');
             await bundle.module.act(async () => { autoRelease.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(JSON.stringify(saves[5]) === JSON.stringify({ autoRelease: false }), 'the controlled failure must request the auto-release value the user selected');
-            assert(bundle.module.getHandoffBridgeStatus().seq === 6 && autoRelease.checked, 'a failed config save must not optimistically change a controlled checkbox');
+            assert(JSON.stringify(saves[4]) === JSON.stringify({ autoRelease: false }), 'the controlled failure must request the auto-release value the user selected');
+            assert(bundle.module.getHandoffBridgeStatus().seq === 5 && autoRelease.checked, 'a failed config save must not optimistically change a controlled checkbox');
             assert(window.document.body.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'a failed checkbox save must provide fixed feedback instead of pretending it was saved');
             assert(entries.length === 0, 'checkbox status transitions must emit no console warnings or errors');
           } finally {

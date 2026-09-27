@@ -76,7 +76,7 @@ export default [
     assert(hostile.tunnel.lastExit === null && hostile.link.renewalCause === null && hostile.link.sources.length === 1, 'diagnostic enums and sources must be closed and validated');
     assert(hostile.queue.jobs.length === 0 && hostile.push.selectedHubs.length === 0 && hostile.push.discovered.length === 0 && hostile.alarms.length === 0, 'opaque action identifiers must have strict safe shapes');
     const line = sanitizeTunnelLogLine('token=synthetic-token https://example.com/a /Users/ada/file 203.0.113.1');
-    assert(line && !line.includes('synthetic-token') && !line.includes('example.com') && !line.includes('/Users/ada') && !line.includes('203.0.113.1'), 'tunnel log lines must redact sensitive diagnostics');
+    assert(line === 'token=<redacted> <url> <path> <address>', 'tunnel log lines must retain only safe diagnostic labels while redacting every sensitive value');
   } },
   { name: 'handoff bridge: ui: dynamic health detail states facts without exposing status data', run: () => {
     const setup = deriveBridgeHealth(rawStatus(1, { setup: { binaryApproved: false } }), NOW);

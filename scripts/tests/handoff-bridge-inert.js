@@ -1236,6 +1236,27 @@ export default [
         statSync: () => ({ size: 42 }), codesignImpl: () => ({ verified: true, summary: 'ad-hoc signed' }), now: () => stamp,
       };
       try {
+        // Adapters are created by distinct IPC registrations. The second one
+        // can be asked first, so hydration must belong to their shared session
+        // rather than to whichever adapter happened to construct first.
+        const hydrationRoot = path.join(root, 'shared-hydration');
+        let hydrationReads = 0;
+        const hydrationDisk = normalize({ binaryPath: copy, pin, approvedAt: null });
+        const hydrationDeps = {
+          ...deps,
+          readTunnelStateImpl: () => { hydrationReads += 1; return hydrationDisk; },
+          writeTunnelStateImpl: async (_userData, candidate) => normalize(candidate),
+        };
+        const hydrationFirst = createSetup(hydrationRoot, hydrationDeps);
+        const hydrationSecond = createSetup(hydrationRoot, hydrationDeps);
+        sessions.push(hydrationFirst, hydrationSecond);
+        const [secondDetails, firstDetails] = await Promise.all([
+          hydrationSecond.getApprovalDetails(), hydrationFirst.getApprovalDetails(),
+        ]);
+        assert(hydrationReads === 1 && secondDetails.ok && firstDetails.ok
+          && secondDetails.sha256 === pin && firstDetails.sha256 === pin,
+        'two setup adapters share exactly one durable hydration even when the later adapter reads first');
+
         const setup = createSetup(root, deps); sessions.push(setup);
         assert((await setup.chooseBinary(source)).ok && disk?.binaryPath === copy && disk?.approvedAt === null && !disk?.credentialsPath,
           'an accepted binary selection durably records only its unapproved copy and pin');
@@ -1243,7 +1264,7 @@ export default [
         assert((await setup.chooseCredentials(credentials)).code === 'STATE_UNREADABLE',
           'a credentials selection reports the fixed durable-write failure');
         failWrite = false;
-        assert((await setup.approveBinary()).ok && writes.at(-1).credentialsPath === undefined && disk?.approvedAt === stamp,
+        assert((await setup.approveBinary(pin)).ok && writes.at(-1).credentialsPath === undefined && disk?.approvedAt === stamp,
           'failed credential staging rolls back memory, so later approval cannot persist its stale path');
         assert((await setup.chooseCredentials(credentials)).ok && disk?.credentialsPath === credentials && disk?.binaryTrusted === true,
           'accepted credentials are persisted with the already-approved binary state');
@@ -1251,10 +1272,241 @@ export default [
         const restarted = createSetup(root, deps); sessions.push(restarted);
         const details = await restarted.getApprovalDetails();
         assert(details.ok && details.sha256 === pin,
-          'a fresh setup session rehydrates the durable partial schema rather than depending on old process memory');
+          'a reset shared setup session rehydrates the durable partial schema rather than depending on stale process memory');
         assert((await restarted.chooseCredentials(replacementCredentials)).ok
           && writes.at(-1).approvedAt === stamp && disk?.credentialsPath === replacementCredentials && disk?.binaryTrusted === true,
         'a restart derives trust and retained approval from the stored result while persisting a later credentials mutation');
+
+        // Native file chooser completions may overlap. Hold the binary write
+        // until the credentials completion has queued behind it: the second
+        // durable candidate must retain the first selection instead of taking
+        // a stale pre-write snapshot and later erasing it.
+        const concurrentRoot = path.join(root, 'concurrent');
+        let concurrentDisk = null;
+        const concurrentWrites = [];
+        let firstWriteStarted;
+        const firstWriteReady = new Promise(resolve => { firstWriteStarted = resolve; });
+        let releaseFirstWrite;
+        const firstWriteGate = new Promise(resolve => { releaseFirstWrite = resolve; });
+        const concurrent = createSetup(concurrentRoot, {
+          ...deps,
+          readTunnelStateImpl: () => concurrentDisk,
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            concurrentWrites.push({ ...candidate });
+            if (concurrentWrites.length === 1) {
+              firstWriteStarted();
+              await firstWriteGate;
+            }
+            concurrentDisk = normalize(candidate);
+            return concurrentDisk;
+          },
+        });
+        sessions.push(concurrent);
+        const binarySelection = concurrent.chooseBinary(source);
+        await firstWriteReady;
+        const credentialsSelection = concurrent.chooseCredentials(credentials);
+        await Promise.resolve();
+        releaseFirstWrite();
+        assert((await binarySelection).ok && (await credentialsSelection).ok
+          && concurrentWrites.length === 2
+          && concurrentWrites[0].binaryPath === copy && !concurrentWrites[0].credentialsPath
+          && concurrentWrites[1].binaryPath === copy && concurrentWrites[1].credentialsPath === credentials
+          && concurrentDisk?.binaryPath === copy && concurrentDisk?.credentialsPath === credentials,
+        'overlapping setup selections serialize snapshot, mutation, durable write and rollback so neither accepted selection is lost');
+        const resetCache = concurrent.clearSession();
+        const sharedAdapter = createSetup(concurrentRoot, {
+          ...deps,
+          readTunnelStateImpl: () => concurrentDisk,
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            concurrentDisk = normalize(candidate);
+            return concurrentDisk;
+          },
+        });
+        sessions.push(sharedAdapter);
+        await resetCache;
+        assert((await concurrent.chooseCredentials(replacementCredentials)).ok
+          && (await sharedAdapter.getApprovalDetails()).ok
+          && concurrentDisk?.credentialsPath === replacementCredentials,
+        'a cleared registered adapter remains usable and every same-root adapter shares its rehydrated cache and queue');
+
+        // Clear itself is queued behind an in-flight mutation. Once the write
+        // finishes, it resets only memory; the original adapter may then read
+        // and act on the durable result without a main-process re-registration.
+        const orderedRoot = path.join(root, 'clear-after-write');
+        let orderedDisk = null;
+        let orderedWriteStarted;
+        const orderedWriteReady = new Promise(resolve => { orderedWriteStarted = resolve; });
+        let releaseOrderedWrite;
+        const orderedWriteGate = new Promise(resolve => { releaseOrderedWrite = resolve; });
+        const ordered = createSetup(orderedRoot, {
+          ...deps,
+          readTunnelStateImpl: () => orderedDisk,
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            orderedWriteStarted();
+            await orderedWriteGate;
+            orderedDisk = normalize(candidate);
+            return orderedDisk;
+          },
+        });
+        sessions.push(ordered);
+        const pendingSelection = ordered.chooseBinary(source);
+        await orderedWriteReady;
+        const orderedClear = ordered.clearSession();
+        releaseOrderedWrite();
+        assert((await pendingSelection).ok && (await orderedClear) === true
+          && (await ordered.getApprovalDetails()).ok && orderedDisk?.binaryPath === copy,
+        'clear waits for an already-started durable mutation, then the same adapter rehydrates and remains usable');
+
+        // A native chooser may take time copying and hashing. Queue that work,
+        // not just its final write: otherwise a later chooser can commit first
+        // and an earlier completion can overwrite it out of invocation order.
+        const invocationRoot = path.join(root, 'invocation-order');
+        const sourceA = path.join(root, 'source-a');
+        const sourceB = path.join(root, 'source-b');
+        const copyA = path.join(root, 'copy-a');
+        const copyB = path.join(root, 'copy-b');
+        const pinA = 'c'.repeat(64);
+        const pinB = 'd'.repeat(64);
+        let invocationDisk = null;
+        const invocationWrites = [];
+        let firstPrepareStarted;
+        const firstPrepareReady = new Promise(resolve => { firstPrepareStarted = resolve; });
+        let releaseFirstPrepare;
+        const firstPrepareGate = new Promise(resolve => { releaseFirstPrepare = resolve; });
+        const invocation = createSetup(invocationRoot, {
+          ...deps,
+          readTunnelStateImpl: () => invocationDisk,
+          prepareBinaryImpl: async ({ sourcePath }) => {
+            if (sourcePath === sourceA) {
+              firstPrepareStarted();
+              await firstPrepareGate;
+              return { ok: true, copyPath: copyA, sha256: pinA, version: '2026.9.3' };
+            }
+            return { ok: true, copyPath: copyB, sha256: pinB, version: '2026.9.4' };
+          },
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            invocationWrites.push({ ...candidate });
+            invocationDisk = normalize(candidate);
+            return invocationDisk;
+          },
+        });
+        sessions.push(invocation);
+        const firstInvocation = invocation.chooseBinary(sourceA);
+        await firstPrepareReady;
+        const secondInvocation = invocation.chooseBinary(sourceB);
+        await Promise.resolve();
+        releaseFirstPrepare();
+        assert((await firstInvocation).ok && (await secondInvocation).ok
+          && invocationWrites.length === 2 && invocationWrites[0].pin === pinA && invocationWrites[1].pin === pinB
+          && invocationDisk?.pin === pinB,
+        'a deferred first binary selection commits before a later selection, preserving chooser invocation order');
+
+        // Forget must enqueue after an initiated (but still copying) selection.
+        // The observable rehydrate after Forget proves its cache reset happened
+        // after the durable write, rather than overtaking pre-queue preparation.
+        const clearDuringPrepareRoot = path.join(root, 'clear-during-prepare');
+        let clearDuringPrepareDisk = null;
+        const clearDuringPrepareEvents = [];
+        let clearPrepareStarted;
+        const clearPrepareReady = new Promise(resolve => { clearPrepareStarted = resolve; });
+        let releaseClearPrepare;
+        const clearPrepareGate = new Promise(resolve => { releaseClearPrepare = resolve; });
+        const clearDuringPrepare = createSetup(clearDuringPrepareRoot, {
+          ...deps,
+          readTunnelStateImpl: () => {
+            clearDuringPrepareEvents.push('read');
+            return clearDuringPrepareDisk;
+          },
+          prepareBinaryImpl: async () => {
+            clearPrepareStarted();
+            await clearPrepareGate;
+            return { ok: true, copyPath: copyA, sha256: pinA, version: '2026.9.3' };
+          },
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            clearDuringPrepareEvents.push('write');
+            clearDuringPrepareDisk = normalize(candidate);
+            return clearDuringPrepareDisk;
+          },
+        });
+        sessions.push(clearDuringPrepare);
+        const pendingPrepare = clearDuringPrepare.chooseBinary(sourceA);
+        await clearPrepareReady;
+        const clearDuringPrepareResult = clearDuringPrepare.clearSession();
+        releaseClearPrepare();
+        assert((await pendingPrepare).ok && (await clearDuringPrepareResult) === true
+          && (await clearDuringPrepare.getApprovalDetails()).ok
+          && JSON.stringify(clearDuringPrepareEvents) === JSON.stringify(['read', 'write', 'read']),
+        'Forget queues behind binary preparation and resets cache only after its durable selection commits');
+
+        // The approval sheet is built from the old digest. If another native
+        // chooser commits before the person confirms it, that sheet must not
+        // approve the replacement binary merely because approval was queued.
+        const approvalRoot = path.join(root, 'approval-pin');
+        const approvalPinA = 'e'.repeat(64);
+        const approvalPinB = 'f'.repeat(64);
+        const approvalCopyA = path.join(root, 'approval-copy-a');
+        const approvalCopyB = path.join(root, 'approval-copy-b');
+        let approvalDisk = normalize({ binaryPath: approvalCopyA, pin: approvalPinA, approvedAt: null });
+        const approvalWrites = [];
+        const approval = createSetup(approvalRoot, {
+          ...deps,
+          readTunnelStateImpl: () => approvalDisk,
+          prepareBinaryImpl: async () => ({ ok: true, copyPath: approvalCopyB, sha256: approvalPinB, version: '2026.9.4' }),
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            approvalWrites.push({ ...candidate });
+            approvalDisk = normalize(candidate);
+            return approvalDisk;
+          },
+        });
+        sessions.push(approval);
+        const oldApprovalDetails = await approval.getApprovalDetails();
+        assert(oldApprovalDetails.ok && oldApprovalDetails.sha256 === approvalPinA
+          && (await approval.chooseBinary(sourceB)).ok
+          && (await approval.approveBinary(oldApprovalDetails.sha256)).code === 'NOT_READY'
+          && approvalWrites.length === 1 && approvalDisk?.pin === approvalPinB && approvalDisk?.approvedAt === null,
+        'approval binds to the digest shown in its sheet and refuses a replacement binary selected before confirmation');
+
+        // A failed binary copy is kept entirely in its transaction candidate.
+        // A concurrent read and approval must still address the prior durable
+        // binary, never the uncommitted copy that will be rolled back.
+        const transactionRoot = path.join(root, 'transaction');
+        const committedPin = 'b'.repeat(64);
+        const committedCopy = path.join(root, 'committed-cloudflared');
+        let transactionDisk = normalize({ binaryPath: committedCopy, pin: committedPin, approvedAt: null });
+        const transactionWrites = [];
+        let selectionWriteStarted;
+        const selectionWriteReady = new Promise(resolve => { selectionWriteStarted = resolve; });
+        let releaseSelectionWrite;
+        const selectionWriteGate = new Promise(resolve => { releaseSelectionWrite = resolve; });
+        let failSelectionWrite = false;
+        const transactional = createSetup(transactionRoot, {
+          ...deps,
+          readTunnelStateImpl: () => transactionDisk,
+          writeTunnelStateImpl: async (_userData, candidate) => {
+            transactionWrites.push({ ...candidate });
+            if (transactionWrites.length === 1) {
+              selectionWriteStarted();
+              await selectionWriteGate;
+              if (failSelectionWrite) throw new Error('selected copy failed to persist');
+            }
+            transactionDisk = normalize(candidate);
+            return transactionDisk;
+          },
+        });
+        sessions.push(transactional);
+        const failedSelection = transactional.chooseBinary(source);
+        await selectionWriteReady;
+        const stagedDetails = transactional.getApprovalDetails();
+        const priorApproval = transactional.approveBinary(committedPin);
+        failSelectionWrite = true;
+        releaseSelectionWrite();
+        const [failedSelectionResult, stagedDetailsResult, priorApprovalResult] = await Promise.all([failedSelection, stagedDetails, priorApproval]);
+        assert(failedSelectionResult.code === 'STATE_UNREADABLE' && stagedDetailsResult.ok && stagedDetailsResult.sha256 === committedPin
+          && priorApprovalResult.ok && transactionWrites.length === 2
+          && transactionWrites[1].binaryPath === committedCopy && transactionWrites[1].pin === committedPin
+          && transactionWrites[1].approvedAt === stamp && transactionDisk?.binaryPath === committedCopy
+          && transactionDisk?.binaryTrusted === true,
+        'a failed staged binary never leaks to details or causes a queued approval to approve the wrong binary');
       } finally {
         for (const setup of sessions) await setup.clearSession?.();
         fs.rmSync(root, { recursive: true, force: true });

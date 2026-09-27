@@ -45,7 +45,17 @@ export function recordTunnelIntent(userData, data, { fsImpl = fs, random = crypt
   const paths = tunnelPaths(userData); const tmp = `${paths.pid}.tmp-${random(6).toString('hex')}`; let fd;
   try {
     fd = fsImpl.openSync(tmp, 'wx', TUNNEL_CONSTANTS.FILE_MODE_OCTAL);
-    fsImpl.writeSync(fd, JSON.stringify({ v: 1, pid: data.pid, pgid: data.pgid, lstart: data.lstart, configPath: data.configPath, createdAt: data.createdAt }));
+    const serialized = Buffer.from(JSON.stringify({ v: 1, pid: data.pid, pgid: data.pgid, lstart: data.lstart, configPath: data.configPath, createdAt: data.createdAt }), 'utf8');
+    let offset = 0;
+    while (offset < serialized.length) {
+      const written = fsImpl.writeSync(fd, serialized, offset, serialized.length - offset);
+      // writeSync may legally make a short write. A zero, negative,
+      // non-integer, or overlong result cannot make forward progress safely.
+      if (!Number.isInteger(written) || written <= 0 || written > serialized.length - offset) {
+        throw new Error('could not write complete tunnel intent');
+      }
+      offset += written;
+    }
     fsImpl.fsyncSync?.(fd); fsImpl.closeSync?.(fd); fd = null;
     fsImpl.renameSync(tmp, paths.pid); fsImpl.chmodSync?.(paths.pid, TUNNEL_CONSTANTS.FILE_MODE_OCTAL);
     // Durability of the rename matters after a forced quit.  Directory fsync

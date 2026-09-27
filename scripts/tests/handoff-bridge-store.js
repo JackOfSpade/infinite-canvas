@@ -18,6 +18,12 @@ async function save(userData, patch, options = {}) {
   });
 }
 
+function deferred() {
+  let resolve; let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 function persisted(userData) {
   const result = readConfig(userData);
   assert(result.state === 'ok', 'config must be readable after a successful save');
@@ -165,6 +171,44 @@ export default [
       assert(blocked.code === 'LINK_WOULD_BREAK' && confirmations === 0, 'linked hostname change must require confirmBreak first');
       const accepted = await save(userData, { hostname: 'new-bridge.example.com', confirmBreak: true }, { linked: true });
       assert(accepted.ok && persisted(userData).hostname === 'new-bridge.example.com', 'confirmed link break must persist hostname');
+      const malformedChecker = await save(userData, { hostname: 'malformed-checker.example.com' }, {
+        isLinked: () => undefined,
+        confirmHostnameChange: async () => { confirmations++; return true; },
+      });
+      assert(malformedChecker.code === 'LINK_WOULD_BREAK' && confirmations === 0,
+        'a malformed injected linked checker must fail closed before native confirmation');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: linked checker is evaluated inside its queue and again after hostname consent',
+    run: () => withStore(async userData => {
+      await save(userData, { hostname: 'bridge.example.com' });
+      const firstConsent = deferred();
+      const first = save(userData, { hostname: 'queued.example.com' }, { confirmHostnameChange: () => firstConsent.promise });
+      await Promise.resolve();
+      let linked = false; let secondConfirmations = 0;
+      const queued = save(userData, { hostname: 'later.example.com' }, {
+        isLinked: () => linked,
+        confirmHostnameChange: async () => { secondConfirmations += 1; return true; },
+      });
+      linked = true;
+      firstConsent.resolve(true);
+      assert((await first).ok, 'the queued predecessor must complete before the later hostname mutation');
+      const queuedResult = await queued;
+      assert(queuedResult.code === 'LINK_WOULD_BREAK' && secondConfirmations === 0 && persisted(userData).hostname === 'queued.example.com',
+        'a link created while a hostname save waits in the config queue must block before a second native confirmation');
+
+      let linkedDuringConsent = false; const secondConsent = deferred();
+      const duringConsent = save(userData, { hostname: 'after-consent.example.com' }, {
+        isLinked: () => linkedDuringConsent,
+        confirmHostnameChange: () => secondConsent.promise,
+      });
+      await Promise.resolve();
+      linkedDuringConsent = true;
+      secondConsent.resolve(true);
+      const consentResult = await duringConsent;
+      assert(consentResult.code === 'LINK_WOULD_BREAK' && persisted(userData).hostname === 'queued.example.com',
+        'a link created while hostname consent is open must be checked again immediately before the atomic write');
     }),
   },
   {

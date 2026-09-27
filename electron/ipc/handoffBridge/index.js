@@ -1228,11 +1228,25 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     if (!patch || typeof patch !== 'object') return { ok: false, code: 'INVALID' };
     const targetUserData = runtime?.userData || bootstrapUserData;
     if (!targetUserData) return { ok: false, code: 'NOT_READY' };
-    const links = runtime?.oauth?.linkStatus?.() || [];
-    let linked = links.some(link => link?.revoked !== true);
-    if (!linked) {
-      try { linked = (createOAuthStore({ filePath: path.join(targetUserData, 'handoff-bridge', 'oauth-state.json'), fsImpl: deps.fsImpl }).read()?.families || []).some(family => family?.revoked !== true); } catch { linked = true; }
-    }
+    // `writeConfig` evaluates this in its serialized mutation and again after
+    // native hostname consent. Never carry a pre-queue authorization snapshot:
+    // an OAuth code exchange may link this hostname while a config write waits.
+    const isLinked = () => {
+      try {
+        const activeRuntime = runtime?.userData === targetUserData ? runtime : null;
+        const links = activeRuntime?.oauth?.linkStatus?.();
+        if (links !== undefined && (!Array.isArray(links) || links.some(link => link?.revoked !== true))) return true;
+        const oauthStatePath = path.join(targetUserData, 'handoff-bridge', 'oauth-state.json');
+        let rawState;
+        try { rawState = (deps.fsImpl || fs).readFileSync(oauthStatePath, 'utf8'); }
+        catch (error) { return error?.code === 'ENOENT' ? false : true; }
+        if (typeof rawState !== 'string' || Buffer.byteLength(rawState, 'utf8') > 4 * 1024 * 1024) return true;
+        let parsed;
+        try { parsed = JSON.parse(rawState); } catch { return true; }
+        if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.families)) return true;
+        return parsed.families.some(family => family?.revoked !== true);
+      } catch { return true; }
+    };
     let persisted = null;
     try { persisted = syncReportRedactedHosts((deps.readConfig || readConfig)(targetUserData, { fsImpl: deps.fsImpl })); } catch { persisted = null; }
     const oldHostname = persisted?.config?.hostname ?? null;
@@ -1241,7 +1255,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     let result;
     try {
       result = await Promise.resolve((deps.writeConfig || writeConfig)(targetUserData, safePatch, {
-        ...options, linked, confirmHostnameChange: async () => true, fsImpl: deps.fsImpl,
+        ...options, isLinked, confirmHostnameChange: async () => true, fsImpl: deps.fsImpl,
       }));
     } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
     if (result?.ok === true) {

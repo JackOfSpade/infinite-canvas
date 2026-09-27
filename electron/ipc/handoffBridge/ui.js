@@ -371,10 +371,12 @@ export function registerHandoffBridgeUi({
         const answer = await confirm(sender, kind, kind === 'hostname' || kind === 'linkBreak'
           ? { hostname: patch.hostname }
           : undefined);
+        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
         if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
       }
       // confirmBreak is part of the same atomic patch the store validates;
       // passing it as a second argument silently bypasses its link-break gate.
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       const result = await safeCall(store, 'writeConfig', { ...patch, confirmBreak: payload?.confirmBreak === true });
       if (fixedCode(result?.code) === 'LINK_WOULD_BREAK') return fixed('LINK_WOULD_BREAK');
       if (!acknowledged(result)) {
@@ -386,6 +388,7 @@ export function registerHandoffBridgeUi({
     }),
     [IPC_CHANNELS.CHOOSE_BINARY]: invoke(async ({ sender, window }) => {
       if (!window) return fixed('NO_WINDOW'); const picked = await dialogs.choose?.(sender, 'binary');
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       if (!picked?.ok) return fixed(picked?.code || 'DECLINED'); const result = await safeCall(tunnel, 'chooseBinary', picked.filePath);
       return acknowledged(result) ? success({ chosen: true }) : resultFailure(result, 'INVALID');
     }),
@@ -393,9 +396,13 @@ export function registerHandoffBridgeUi({
       if (!window) return fixed('NO_WINDOW');
       const details = await safeCall(tunnel, 'getApprovalDetails');
       if (!details || details.ok === false) return fixed('NOT_READY');
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       const answer = await confirm(sender, 'binaryApproval', details);
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
-      const result = await safeCall(tunnel, 'approveBinary');
+      // Bind the durable approval to the pin that the main-owned details port
+      // showed in this native sheet. The renderer supplies no approval value.
+      const result = await safeCall(tunnel, 'approveBinary', details.sha256);
       if (!acknowledged(result)) return resultFailure(result, 'NOT_READY');
       // Do not detach on a failed/ambiguous adapter acknowledgement. Once an
       // approval has succeeded, its captured trust state requires a new graph.
@@ -404,6 +411,7 @@ export function registerHandoffBridgeUi({
     }),
     [IPC_CHANNELS.CHOOSE_CREDENTIALS]: invoke(async ({ sender, window }) => {
       if (!window) return fixed('NO_WINDOW'); const picked = await dialogs.choose?.(sender, 'credentials');
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       if (!picked?.ok) return fixed(picked?.code || 'DECLINED'); const result = await safeCall(tunnel, 'chooseCredentials', picked.filePath);
       if (!acknowledged(result)) return resultFailure(result, 'INVALID');
       // Credentials are captured by the supervisor, so this applies only after
@@ -428,7 +436,7 @@ export function registerHandoffBridgeUi({
       if (!window) return fixed('NO_WINDOW');
       let status = currentStatus();
       if (status?.enabled !== true || status?.setup?.tunnelReachable !== true) return fixed('TUNNEL_NOT_READY');
-      { const answer = await confirm(sender, 'pairing'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
+      { const answer = await confirm(sender, 'pairing'); if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
       // Disable can detach the runtime while the parented confirmation is open.
       // Re-read the closed status before the pairing port is reachable.
       status = currentStatus();
@@ -458,6 +466,7 @@ export function registerHandoffBridgeUi({
         const details = anomalyResumeDetails(status);
         if (!details) return fixed('NOT_READY');
         const answer = await confirm(sender, 'resume', details);
+        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
         if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
       }
       const result = await safeCall(controller, 'resume'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
@@ -466,7 +475,7 @@ export function registerHandoffBridgeUi({
       const result = await safeCall(controller, 'revokeAll'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
     }),
     [IPC_CHANNELS.FORGET_SETUP]: invoke(async ({ sender, window }) => {
-      if (!window) return fixed('NO_WINDOW'); { const answer = await confirm(sender, 'forget'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
+      if (!window) return fixed('NO_WINDOW'); { const answer = await confirm(sender, 'forget'); if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
       const result = await safeCall(controller, 'forget'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
     }),
     [IPC_CHANNELS.RELEASE]: invoke(async ({ sender, window }, payload) => release(sender, window, payload)),
@@ -476,7 +485,7 @@ export function registerHandoffBridgeUi({
       if (!Array.isArray(payload?.hubs) || payload.hubs.length === 0 || payload.hubs.length > 50 || new Set(payload.hubs).size !== payload.hubs.length || !payload.hubs.every(key => typeof key === 'string' && HUB_KEY.test(key))) return fixed('INVALID');
       // Hub identifiers are renderer-originated routing values, never dialog
       // text. The consent is fixed and intentionally names no listing data.
-      { const answer = await confirm(sender, 'releasePush'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
+      { const answer = await confirm(sender, 'releasePush'); if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
       return fromResult(await safeCall(push, 'release', payload.hubs));
     }),
     [IPC_CHANNELS.UNRELEASE_PUSH]: invoke(async (_checked, payload) => typeof payload?.hub === 'string' && HUB_KEY.test(payload.hub) ? fromResult(await safeCall(push, 'unrelease', payload.hub)) : fixed('INVALID')),

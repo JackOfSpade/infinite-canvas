@@ -55,19 +55,23 @@ export function createHandoffBridgeTunnelSetup(userData, {
   versionImpl = null,
 } = {}) {
   const existing = handoffBridgeSetupSessions.get(userData);
-  const setup = existing || {};
-  let hydrated = Boolean(existing);
-  handoffBridgeSetupSessions.set(userData, setup);
+  // Every setup port for one user-data root shares both the staged fields and
+  // one mutation queue.  Native chooser callbacks can overlap, and a writer
+  // must never snapshot half of another callback's transaction then roll that
+  // newer state back after its own durable write fails.
+  const session = existing || { setup: {}, mutationTail: Promise.resolve(), hydrated: false };
+  const setup = session.setup;
+  handoffBridgeSetupSessions.set(userData, session);
   const presentationFields = ['binarySourcePath', 'binarySize', 'signature', 'binaryVersion', 'tunnelId', 'credentialsMode'];
   const cloneSetup = () => Object.fromEntries(Object.entries(setup));
   const replaceSetup = next => {
     for (const key of Object.keys(setup)) delete setup[key];
     for (const [key, value] of Object.entries(next || {})) setup[key] = value;
   };
-  const applyStoredSetup = stored => {
+  const applyStoredSetup = (stored, presentationSource = setup) => {
     const presentation = Object.fromEntries(presentationFields
-      .filter(key => Object.hasOwn(setup, key))
-      .map(key => [key, setup[key]]));
+      .filter(key => Object.hasOwn(presentationSource, key))
+      .map(key => [key, presentationSource[key]]));
     const next = { ...presentation };
     if (typeof stored?.binaryPath === 'string') {
       next.binaryPath = stored.binaryPath;
@@ -84,41 +88,50 @@ export function createHandoffBridgeTunnelSetup(userData, {
   // response to a setup IPC; the separate three-second launch path owns its
   // one pidfile stat and config read.
   const hydrate = () => {
-    if (hydrated) return setup;
-    hydrated = true;
+    if (session.hydrated) return setup;
+    session.hydrated = true;
     try {
       const stored = readTunnelStateImpl(userData) || null;
       if (stored) applyStoredSetup(stored);
     } catch { /* setup remains empty */ }
     return setup;
   };
-  const persist = async () => {
-    hydrate();
+  const persist = async candidateSetup => {
     const candidate = {};
-    if (typeof setup.binaryPath === 'string' && typeof setup.pin === 'string') {
-      candidate.binaryPath = setup.binaryPath;
-      candidate.pin = setup.pin;
-      candidate.approvedAt = Number.isFinite(setup.approvedAt) ? setup.approvedAt : null;
+    if (typeof candidateSetup.binaryPath === 'string' && typeof candidateSetup.pin === 'string') {
+      candidate.binaryPath = candidateSetup.binaryPath;
+      candidate.pin = candidateSetup.pin;
+      candidate.approvedAt = Number.isFinite(candidateSetup.approvedAt) ? candidateSetup.approvedAt : null;
     }
-    if (typeof setup.credentialsPath === 'string') candidate.credentialsPath = setup.credentialsPath;
+    if (typeof candidateSetup.credentialsPath === 'string') candidate.credentialsPath = candidateSetup.credentialsPath;
     if (!candidate.binaryPath && !candidate.credentialsPath) return { ok: false, code: 'STATE_UNREADABLE' };
     try {
       const stored = await writeTunnelStateImpl(userData, candidate);
       if (!stored) return { ok: false, code: 'STATE_UNREADABLE' };
-      applyStoredSetup(stored);
-      return { ok: true };
+      return { ok: true, stored };
     } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
   };
-  const mutateAndPersist = async mutate => {
-    const before = cloneSetup();
+  const enqueueSessionMutation = operation => {
+    // Keep the tail fulfilled after every result so a rejected write cannot
+    // strand later chooser actions. `operation` owns its own fixed failure
+    // result, but this second guard also protects future maintenance changes.
+    const queued = session.mutationTail.then(operation, operation);
+    session.mutationTail = queued.then(() => undefined, () => undefined);
+    return queued;
+  };
+  const persistMutation = async mutate => {
+    hydrate();
+    // The staged candidate is deliberately not published to `setup` until
+    // the write returns a newly parsed durable record. Reads and queued
+    // approvals therefore see only the last committed selection.
+    const candidate = cloneSetup();
     try {
-      mutate();
-      const persisted = await persist();
-      if (persisted?.ok) return persisted;
-      replaceSetup(before);
-      return persisted || { ok: false, code: 'STATE_UNREADABLE' };
+      mutate(candidate);
+      const persisted = await persist(candidate);
+      if (!persisted?.ok) return persisted || { ok: false, code: 'STATE_UNREADABLE' };
+      applyStoredSetup(persisted.stored, candidate);
+      return { ok: true };
     } catch {
-      replaceSetup(before);
       return { ok: false, code: 'STATE_UNREADABLE' };
     }
   };
@@ -160,63 +173,80 @@ export function createHandoffBridgeTunnelSetup(userData, {
   });
   return Object.freeze({
     async chooseBinary(sourcePath) {
-      hydrate();
       if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
-      let prepared;
-      try { prepared = await prepareBinaryImpl({ userData, sourcePath, pin: null }, { xattr, codesign, version }); } catch { prepared = null; }
-      if (!prepared?.ok) return { ok: false, code: 'INVALID' };
-      let size = null; try { size = statSync(sourcePath).size; } catch { /* copy is authoritative; display falls back safely */ }
-      let signature; try { signature = codesign(prepared.copyPath); } catch { signature = null; }
-      if (signature?.verified !== true) return { ok: false, code: 'INVALID' };
-      const persisted = await mutateAndPersist(() => {
-        setup.binaryPath = prepared.copyPath;
-        setup.pin = prepared.sha256;
-        setup.approvedAt = null;
-        setup.binaryTrusted = false;
-        setup.binaryVersion = prepared.version;
-        setup.binarySourcePath = sourcePath;
-        setup.binarySize = Number.isSafeInteger(size) ? size : null;
-        setup.signature = signature.summary;
+      // Copy/hash/signature inspection is part of the selection transaction,
+      // not a speculative prelude.  Two native chooser completions can arrive
+      // in either order; queue the work itself so commit order follows request
+      // order and Forget cannot overtake an already initiated selection.
+      return enqueueSessionMutation(async () => {
+        hydrate();
+        let prepared;
+        try { prepared = await prepareBinaryImpl({ userData, sourcePath, pin: null }, { xattr, codesign, version }); } catch { prepared = null; }
+        if (!prepared?.ok) return { ok: false, code: 'INVALID' };
+        let size = null; try { size = statSync(sourcePath).size; } catch { /* copy is authoritative; display falls back safely */ }
+        let signature; try { signature = codesign(prepared.copyPath); } catch { signature = null; }
+        if (signature?.verified !== true) return { ok: false, code: 'INVALID' };
+        const persisted = await persistMutation(candidate => {
+          candidate.binaryPath = prepared.copyPath;
+          candidate.pin = prepared.sha256;
+          candidate.approvedAt = null;
+          candidate.binaryTrusted = false;
+          candidate.binaryVersion = prepared.version;
+          candidate.binarySourcePath = sourcePath;
+          candidate.binarySize = Number.isSafeInteger(size) ? size : null;
+          candidate.signature = signature.summary;
+        });
+        return persisted?.ok ? { ok: true } : persisted;
       });
-      return persisted?.ok ? { ok: true } : persisted;
     },
     async getApprovalDetails() {
-      hydrate();
-      if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
-      return {
-        ok: true,
-        sourcePath: typeof setup.binarySourcePath === 'string' ? setup.binarySourcePath : null,
-        version: typeof setup.binaryVersion === 'string' && /^[0-9A-Za-z._-]{1,48}$/.test(setup.binaryVersion) ? setup.binaryVersion : null,
-        size: Number.isSafeInteger(setup.binarySize) && setup.binarySize >= 0 ? setup.binarySize : null,
-        sha256: setup.pin,
-        sha256Prefix: setup.pin.slice(0, 12),
-        signature: ['ad-hoc signed', 'Developer ID signed', 'other signed', 'unsigned'].includes(setup.signature) ? setup.signature : 'unavailable',
-        pinLimits: 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID',
-      };
+      return enqueueSessionMutation(() => {
+        hydrate();
+        if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
+        return {
+          ok: true,
+          sourcePath: typeof setup.binarySourcePath === 'string' ? setup.binarySourcePath : null,
+          version: typeof setup.binaryVersion === 'string' && /^[0-9A-Za-z._-]{1,48}$/.test(setup.binaryVersion) ? setup.binaryVersion : null,
+          size: Number.isSafeInteger(setup.binarySize) && setup.binarySize >= 0 ? setup.binarySize : null,
+          sha256: setup.pin,
+          sha256Prefix: setup.pin.slice(0, 12),
+          signature: ['ad-hoc signed', 'Developer ID signed', 'other signed', 'unsigned'].includes(setup.signature) ? setup.signature : 'unavailable',
+          pinLimits: 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID',
+        };
+      });
     },
-    async approveBinary() {
-      hydrate();
-      if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
-      let approvedAt;
-      try { approvedAt = Number(now()); } catch { approvedAt = NaN; }
-      if (!Number.isFinite(approvedAt) || approvedAt < 0) return { ok: false, code: 'STATE_UNREADABLE' };
-      return mutateAndPersist(() => {
-        setup.approvedAt = approvedAt;
-        // `persist` replaces this with the trusted bit from readTunnelState.
-        setup.binaryTrusted = false;
+    async approveBinary(expectedPin) {
+      if (typeof expectedPin !== 'string' || !/^[0-9a-f]{64}$/.test(expectedPin)) return { ok: false, code: 'INVALID' };
+      return enqueueSessionMutation(async () => {
+        hydrate();
+        if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
+        // The native approval sheet names this exact digest.  A later chooser
+        // result must never let that sheet approve a different binary.
+        if (setup.pin !== expectedPin) return { ok: false, code: 'NOT_READY' };
+        let approvedAt;
+        try { approvedAt = Number(now()); } catch { approvedAt = NaN; }
+        if (!Number.isFinite(approvedAt) || approvedAt < 0) return { ok: false, code: 'STATE_UNREADABLE' };
+        return persistMutation(candidate => {
+          candidate.approvedAt = approvedAt;
+          // `persist` replaces this with the trusted bit from readTunnelState.
+          candidate.binaryTrusted = false;
+        });
       });
     },
     async chooseCredentials(sourcePath) {
-      hydrate();
       if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
-      let inspected; try { inspected = inspectCredentialsImpl(sourcePath); } catch { inspected = null; }
-      if (!inspected?.ok) return { ok: false, code: 'INVALID' };
-      const persisted = await mutateAndPersist(() => {
-        setup.credentialsPath = inspected.credentialsPath;
-        setup.tunnelId = inspected.tunnelId;
-        setup.credentialsMode = inspected.credentialsMode;
+      // Match binary selection's transaction scope: inspect and persist under
+      // the shared queue, so the durable state reflects invocation order.
+      return enqueueSessionMutation(() => {
+        hydrate();
+        let inspected; try { inspected = inspectCredentialsImpl(sourcePath); } catch { inspected = null; }
+        if (!inspected?.ok) return { ok: false, code: 'INVALID' };
+        return persistMutation(candidate => {
+          candidate.credentialsPath = inspected.credentialsPath;
+          candidate.tunnelId = inspected.tunnelId;
+          candidate.credentialsMode = inspected.credentialsMode;
+        }).then(persisted => persisted?.ok ? { ok: true } : persisted);
       });
-      return persisted?.ok ? { ok: true } : persisted;
     },
     restart: async () => ({ ok: false, code: 'NOT_READY' }),
     // This intentionally takes no arguments. The renderer can request a
@@ -235,7 +265,14 @@ export function createHandoffBridgeTunnelSetup(userData, {
         : { ok: false, code: 'NOT_FOUND' };
     },
     getLog: async () => [],
-    clearSession: async () => { handoffBridgeSetupSessions.delete(userData); return true; },
+    clearSession: () => enqueueSessionMutation(() => {
+      // Forget clears only this cache. The registered main-process adapter is
+      // reused after Forget, so retain its shared queue and let the next setup
+      // call rehydrate the durable tunnel state it intentionally did not erase.
+      replaceSetup({});
+      session.hydrated = false;
+      return true;
+    }),
   });
 }
 // Electron smoke runs must remain invisible to the person using the desktop.

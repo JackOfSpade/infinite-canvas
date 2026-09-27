@@ -197,7 +197,6 @@ export const BRIDGE_UI_COPY = Object.freeze({
   scoringSetting: 'Let ChatGPT handle scoring handoffs',
   autoStart: 'Turn on when the app starts',
   autoRelease: 'Automatically release new application handoffs this session',
-  telemetry: 'Include bridge counts in bug reports',
   dangerZone: 'Danger zone',
   forget: 'Forget setup…',
   confirmForgetTitle: 'Forget bridge setup?',
@@ -225,7 +224,7 @@ export function sanitizeTunnelLogLine(value) {
     .replace(/(?:\/[^\s'"\\]+)+/g, '<path>')
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<tunnel-id>')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '<address>')
-    .replace(/\b(?:token|secret|credential|authorization|bearer|password)\s*[=:]\s*[^\s]+/gi, '$1=<redacted>')
+    .replace(/\b(token|secret|credential|authorization|bearer|password)\s*[=:]\s*[^\s]+/gi, '$1=<redacted>')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 200);
@@ -288,7 +287,11 @@ export const BRIDGE_SETUP_COPY = Object.freeze({
   earlyBlock: 'A brand-new plugin can be blocked for its first few minutes. If the first call is blocked, wait a few minutes and start a fresh chat.',
   reconnect: 'If ChatGPT shows Reconnect, open pairing here first, then press Reconnect and enter the code shown by this app.',
   firstChat: 'Start a new chat. Type @ and choose the plugin so it appears as a chip. Paste and send the starter, then leave the chat alone while it drains the queue.',
-  completeTunnelFirst: 'Finish the tunnel setup before continuing to the plugin.',
+  completeTunnelPrerequisites: 'Choose and approve cloudflared, choose the credentials file, and save the public address before continuing.',
+  turnOnBridge: 'Turn on bridge',
+  turningOnBridge: 'Turning on bridge…',
+  turnOnBridgeFirst: 'Tunnel setup is saved. Turn on the bridge to start the tunnel.',
+  waitForTunnel: 'The bridge is starting. Wait for the tunnel to be online before continuing.',
   completeLinkFirst: 'Link ChatGPT before starting a chat.',
   bridgeMustBeReady: 'Turn on the bridge and finish setup before starting a chat.',
   invalid: 'That value is not valid.',

@@ -229,6 +229,16 @@ export default [
     // tunnel port; renderer payload never participates in this IPC.
     const result = await invoke(h, IPC_CHANNELS.APPROVE_BINARY);
     assert(result.code === 'DECLINED' && approved === 0 && asked[0][0] === 'binaryApproval', 'cancelled binary approval must not call the tunnel approve port');
+    const pin = 'b'.repeat(64); let forwarded = null;
+    const bound = setup({
+      tunnel: {
+        getApprovalDetails: async () => ({ ok: true, sha256: pin, version: '2026.9.3' }),
+        approveBinary: async expectedPin => { forwarded = expectedPin; return { ok: true }; },
+      },
+    });
+    const confirmed = await invoke(bound, IPC_CHANNELS.APPROVE_BINARY, { sha256: 'renderer-cannot-choose-the-pin' });
+    assert(confirmed.success && forwarded === pin,
+      'approval forwards only the main-derived confirmed pin, never renderer payload data');
   } },
   { name: 'handoff bridge: ipc: setup invalidation follows only acknowledged approval or credentials mutations', async run() {
     const invalidations = [];
@@ -374,6 +384,69 @@ export default [
     const replacementResult = await duringReplacement;
     assert(replacementResult.code === 'NO_WINDOW' && enables === 0,
       'a replacement window with the same sender id cannot inherit a prior enable confirmation');
+  } },
+  { name: 'handoff bridge: ipc: every setup confirmation or chooser loses authority with its canvas window', async run() {
+    const anomalyStatus = { pauseCause: 'anomaly', alarms: [{ id: 'rate_limited-1', kind: 'rate_limited', at: 1, acknowledged: false }] };
+    const cases = [
+      ['save config', IPC_CHANNELS.SAVE_CONFIG, { patch: { scope: { scoring: true } } }, 'ask', hit => ({ store: { writeConfig: async () => { hit(); return { ok: true }; } } })],
+      ['choose binary', IPC_CHANNELS.CHOOSE_BINARY, undefined, 'choose', hit => ({ tunnel: { chooseBinary: async () => { hit(); return { ok: true }; } } })],
+      ['approve binary', IPC_CHANNELS.APPROVE_BINARY, undefined, 'ask', hit => ({ tunnel: { approveBinary: async () => { hit(); return { ok: true }; } } })],
+      ['choose credentials', IPC_CHANNELS.CHOOSE_CREDENTIALS, undefined, 'choose', hit => ({ tunnel: { chooseCredentials: async () => { hit(); return { ok: true }; } } })],
+      ['open pairing', IPC_CHANNELS.OPEN_PAIRING, undefined, 'ask', hit => ({ oauth: { openPairing: async () => { hit(); return { ok: true }; } } })],
+      ['anomaly resume', IPC_CHANNELS.RESUME, undefined, 'ask', hit => ({ controller: { snapshot: () => anomalyStatus, resume: async () => { hit(); return { success: true }; } } })],
+      ['forget setup', IPC_CHANNELS.FORGET_SETUP, undefined, 'ask', hit => ({ controller: { forget: async () => { hit(); return { success: true }; } } })],
+      ['release push', IPC_CHANNELS.RELEASE_PUSH, { hubs: ['a'.repeat(64)] }, 'ask', hit => ({ push: { release: async () => { hit(); return { ok: true }; } } })],
+    ];
+    for (const [label, channel, payload, dialogKind, optionsFor] of cases) {
+      const response = deferred(); let windows = []; let dialogCalls = 0; let mutations = 0;
+      const dialogs = dialogKind === 'choose'
+        ? { choose: () => { dialogCalls += 1; return response.promise; } }
+        : { ask: () => { dialogCalls += 1; return response.promise; } };
+      const h = setup({ getCanvasWindows: () => windows, dialogs, ...optionsFor(() => { mutations += 1; }) });
+      windows = [h.window];
+      const pending = invoke(h, channel, payload);
+      await settle();
+      assert(dialogCalls === 1, `${label} race must reach its native ${dialogKind} before losing authority`);
+      windows = [];
+      response.resolve(dialogKind === 'choose' ? { ok: true, filePath: '/tmp/synthetic-selection' } : { ok: true });
+      const result = await pending;
+      assert(result.code === 'NO_WINDOW' && mutations === 0,
+        `${label} must not mutate or expose bridge state after its native ${dialogKind} loses the exact canvas owner`);
+    }
+  } },
+  { name: 'handoff bridge: ipc: authorized durable setup mutations finish their consistency follow-up after window loss', async run() {
+    const cases = [
+      ['save config', IPC_CHANNELS.SAVE_CONFIG, { patch: { scope: { scoring: true } } }, gate => ({
+        store: { writeConfig: () => gate.promise },
+        controller: { reloadConfig: async () => ({ success: true }) },
+      })],
+      ['approve binary', IPC_CHANNELS.APPROVE_BINARY, undefined, gate => ({
+        tunnel: { approveBinary: () => gate.promise }, onSetupMutation: async () => ({ ok: true }),
+      })],
+      ['choose credentials', IPC_CHANNELS.CHOOSE_CREDENTIALS, undefined, gate => ({
+        tunnel: { chooseCredentials: () => gate.promise }, onSetupMutation: async () => ({ ok: true }),
+      })],
+    ];
+    for (const [label, channel, payload, optionsFor] of cases) {
+      const gate = deferred(); let windows = []; let followUps = 0;
+      const options = optionsFor(gate);
+      if (options.controller?.reloadConfig) {
+        const reloadConfig = options.controller.reloadConfig;
+        options.controller.reloadConfig = async () => { followUps += 1; return reloadConfig(); };
+      } else {
+        const onSetupMutation = options.onSetupMutation;
+        options.onSetupMutation = async () => { followUps += 1; return onSetupMutation(); };
+      }
+      const h = setup({ getCanvasWindows: () => windows, ...options });
+      windows = [h.window];
+      const pending = invoke(h, channel, payload);
+      await settle();
+      windows = [];
+      gate.resolve({ ok: true });
+      const result = await pending;
+      assert(result.success && followUps === 1,
+        `${label} must finish its mandatory runtime consistency follow-up after an authorized durable mutation`);
+    }
   } },
   { name: 'handoff bridge: ipc: rejects duplicate publication ids and validates push hub keys', async run() {
     let released = 0; const h = setup({ push: { release: async () => { released++; return { ok: true }; } } }); const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);

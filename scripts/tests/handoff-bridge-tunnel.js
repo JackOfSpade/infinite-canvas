@@ -537,6 +537,33 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
       const intent = { pid: 401, pgid: 401, lstart: 'Mon Jan  1 00:00:00 2026', configPath: paths.config, createdAt: 10 };
       recordTunnelIntent(root, intent, { fsImpl: mem, random: () => Buffer.from('123456') });
       assert(JSON.parse(mem.readFileSync(paths.pid, 'utf8')).pid === 401 && (mem.entries.get(paths.pid).mode & 0o777) === 0o600, 'pid intent must be atomic and mode 0600');
+      const shortWriteMem = createMemoryBinaryFs();
+      for (const directory of ['/', '/safe', root, paths.bridge, paths.root]) shortWriteMem.mkdirSync(directory);
+      const writeSync = shortWriteMem.writeSync;
+      let writeCalls = 0;
+      recordTunnelIntent(root, intent, {
+        fsImpl: {
+          ...shortWriteMem,
+          writeSync(fd, bytes, offset, length) {
+            writeCalls += 1;
+            return writeSync(fd, bytes, offset, Math.min(7, length));
+          },
+        },
+        random: () => Buffer.from('shorty'),
+      });
+      assert(writeCalls > 1 && JSON.parse(shortWriteMem.readFileSync(paths.pid, 'utf8')).configPath === paths.config,
+        'a short write must loop until the complete Buffer intent is durably written');
+      const zeroWriteMem = createMemoryBinaryFs();
+      for (const directory of ['/', '/safe', root, paths.bridge, paths.root]) zeroWriteMem.mkdirSync(directory);
+      let zeroWriteError;
+      try {
+        recordTunnelIntent(root, intent, {
+          fsImpl: { ...zeroWriteMem, writeSync: () => 0 },
+          random: () => Buffer.from('zeroed'),
+        });
+      } catch (error) { zeroWriteError = error; }
+      assert(zeroWriteError && !zeroWriteMem.existsSync(paths.pid),
+        'a write with no valid forward progress must fail closed without publishing an intent');
       for (const bad of [{ ...intent, pid: 1 }, { ...intent, pgid: 0 }, { ...intent, configPath: 'relative' }, { ...intent, lstart: '' }]) {
         let error; try { recordTunnelIntent(root, bad, { fsImpl: mem }); } catch (caught) { error = caught; }
         assert(error instanceof TypeError, 'malformed pid intent must be rejected before a write');

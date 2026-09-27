@@ -331,6 +331,7 @@ export function readConfig(userDataPath, { fsImpl = fs } = {}) {
 export function writeConfig(userDataPath, patch, {
   fsImpl = fs,
   linked = false,
+  isLinked = null,
   confirmHostnameChange = async () => false,
   randomBytes = crypto.randomBytes,
 } = {}) {
@@ -342,7 +343,14 @@ export function writeConfig(userDataPath, patch, {
     if (merged.fieldErrors) return { ok: false, code: 'INVALID', fieldErrors: merged.fieldErrors };
 
     const hostnameChanged = merged.config.hostname !== loaded.config.hostname;
-    if (hostnameChanged && linked && patch.confirmBreak !== true) {
+    // The linked fact is security-sensitive and this callback is serialized.
+    // Resolve an injected synchronous checker here, not before a caller waits
+    // behind another config mutation. A checker failure is fail-closed.
+    const linkedNow = () => {
+      if (typeof isLinked !== 'function') return linked === true;
+      try { return isLinked() !== false; } catch { return true; }
+    };
+    if (hostnameChanged && linkedNow() && patch.confirmBreak !== true) {
       return { ok: false, code: 'LINK_WOULD_BREAK' };
     }
     if (hostnameChanged) {
@@ -353,6 +361,11 @@ export function writeConfig(userDataPath, patch, {
     }
 
     try {
+      // The native hostname confirmation is asynchronous. Check the live
+      // linked state again in the same turn immediately before the sync write.
+      if (hostnameChanged && linkedNow() && patch.confirmBreak !== true) {
+        return { ok: false, code: 'LINK_WOULD_BREAK' };
+      }
       atomicWriteConfig(filePath, merged.config, { fsImpl, randomBytes });
       return { ok: true, config: merged.config };
     } catch {

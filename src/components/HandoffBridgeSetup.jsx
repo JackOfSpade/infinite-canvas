@@ -211,18 +211,6 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.autoRelease}</span>
           </label>
-          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
-            <input
-              className="mt-0.5 shrink-0"
-              type="checkbox"
-              checked={status.config.telemetryInBugReports}
-              disabled={unavailable}
-              onChange={event => void call('handoffBridgeSaveConfig', {
-                patch: { telemetryInBugReports: event.target.checked },
-              })}
-            />
-            <span className="min-w-0">{BRIDGE_UI_COPY.telemetry}</span>
-          </label>
           <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-white/10 pt-1">
             <span className="text-[11px] text-white/35">{BRIDGE_UI_COPY.dangerZone}</span>
             <button

@@ -81,6 +81,9 @@ export function HandoffBridgeSetupDialog() {
   const [notice, setNotice] = useState('');
   const [pendingAddress, setPendingAddress] = useState(null);
   const [logLines, setLogLines] = useState([]);
+  const [enabling, setEnabling] = useState(false);
+  const [enableRequestSequence, setEnableRequestSequence] = useState(null);
+  const [enableError, setEnableError] = useState(null);
   const hostnameRef = useRef(null);
   const pluginNameRef = useRef(null);
   const dialogRef = useRef(null);
@@ -89,7 +92,15 @@ export function HandoffBridgeSetupDialog() {
   const copy = BRIDGE_SETUP_COPY;
   const visible = Boolean(ui.setup) && status.availability.ok;
   const requestedStep = ui.setup?.step || 1;
+  const { seq: statusSequence } = status;
+  const tunnelPrerequisitesSaved = status.setup.hostnameOk
+    && status.setup.binaryApproved
+    && status.setup.credentialsOk;
   const tunnelReady = status.enabled && status.setup.tunnelReachable;
+  const enablePending = enabling
+    && !status.enabled
+    && statusSequence <= (enableRequestSequence ?? statusSequence);
+  const visibleEnableError = enableError?.sequence >= statusSequence ? enableError.message : '';
   const linkReady = status.enabled && status.setup.linked;
   const canAccessStep = target => target <= 2
     || (target === 3 && tunnelReady)
@@ -186,6 +197,24 @@ export function HandoffBridgeSetupDialog() {
     }
   }, [call]);
 
+  const enableBridge = useCallback(async () => {
+    const awaitingMain = enabling
+      && !status.enabled
+      && statusSequence <= (enableRequestSequence ?? statusSequence);
+    if (awaitingMain || status.enabled || !tunnelPrerequisitesSaved) return;
+    setEnableRequestSequence(statusSequence);
+    setEnabling(true);
+    setEnableError(null);
+    setNotice('');
+    const result = await invoke(globalThis.window?.electronAPI, 'handoffBridgeSetEnabled', { enabled: true });
+    if (!mountedRef.current) return;
+    if (result?.success === false) {
+      setEnabling(false);
+      setEnableError({ message: ipcErrorMessage(result.code), sequence: statusSequence });
+      return;
+    }
+  }, [enableRequestSequence, enabling, status.enabled, statusSequence, tunnelPrerequisitesSaved]);
+
   const openPlugins = useCallback(async () => {
     const result = await openExternalUrl('https://chatgpt.com/plugins', {
       dispatcher: globalThis.window?.electronAPI?.openExternal,
@@ -222,8 +251,15 @@ export function HandoffBridgeSetupDialog() {
   const goToStep = target => {
     if (canAccessStep(target)) openBridgeSetup(target);
   };
+  const tunnelProgressMessage = !tunnelPrerequisitesSaved
+    ? copy.completeTunnelPrerequisites
+    : !status.enabled
+      ? copy.turnOnBridgeFirst
+      : !tunnelReady
+        ? copy.waitForTunnel
+        : null;
   const lockedNextMessage = step === 2 && !tunnelReady
-    ? copy.completeTunnelFirst
+    ? tunnelProgressMessage
     : step === 3 && !linkReady
       ? copy.completeLinkFirst
       : null;
@@ -238,8 +274,8 @@ export function HandoffBridgeSetupDialog() {
       </div>
       <div className="flex min-w-0 flex-wrap gap-2">
         <button type="button" className="bridge-button-secondary" onClick={() => void call('handoffBridgeChooseBinary')}>{copy.chooseBinary}</button>
-        <button type="button" className="bridge-button-secondary" disabled={!status.tunnel.binary?.version} onClick={() => void call('handoffBridgeApproveBinary')}>{copy.approveBinary}</button>
-        <button type="button" className="bridge-button-secondary" disabled={!status.tunnel.binary?.approved} onClick={() => void call('handoffBridgeChooseCredentials')}>{copy.chooseCredentials}</button>
+        <button type="button" className="bridge-button-secondary" onClick={() => void call('handoffBridgeApproveBinary')}>{copy.approveBinary}</button>
+        <button type="button" className="bridge-button-secondary" disabled={!status.setup.binaryApproved} onClick={() => void call('handoffBridgeChooseCredentials')}>{copy.chooseCredentials}</button>
       </div>
       <label className="block min-w-0 text-xs text-white/70">
         {copy.publicAddress}
@@ -255,6 +291,17 @@ export function HandoffBridgeSetupDialog() {
       <p className="text-[11px] text-white/45">{copy.status}: {copy.tunnelStates[status.tunnel.state] || copy.tunnelStates.unknown}</p>
       <div className="flex min-w-0 flex-wrap gap-2">
         <button type="button" className="bridge-button-secondary" onClick={saveAddress}>{copy.saveAddress}</button>
+        {tunnelPrerequisitesSaved && !status.enabled && (
+          <button
+            type="button"
+            className="bridge-button-primary"
+            disabled={enablePending}
+            aria-busy={enablePending || undefined}
+            onClick={() => void enableBridge()}
+          >
+            {enablePending ? copy.turningOnBridge : copy.turnOnBridge}
+          </button>
+        )}
         <button type="button" className="bridge-button-secondary" disabled={!status.enabled} onClick={() => void call('handoffBridgeRestartTunnel')}>{copy.restartTunnel}</button>
         <button type="button" className="bridge-button-secondary" onClick={() => void showTunnelLog()}>{copy.showLog}</button>
       </div>
@@ -361,7 +408,7 @@ export function HandoffBridgeSetupDialog() {
           <div className="mt-5 min-w-0 space-y-3 break-words text-sm leading-relaxed text-white/75">
             {body}
             {lockedNextMessage && <p className="text-[11px] text-amber-200">{lockedNextMessage}</p>}
-            {notice && <p role="status" className="text-xs text-amber-200">{notice}</p>}
+            {(notice || visibleEnableError) && <p role="status" className="text-xs text-amber-200">{notice || visibleEnableError}</p>}
           </div>
           <footer className="mt-6 flex min-w-0 flex-wrap items-center justify-between gap-2">
             <button type="button" onClick={() => goToStep(Math.max(1, step - 1))} disabled={step === 1} className="bridge-button-secondary"><ChevronLeft size={14} /> {copy.back}</button>

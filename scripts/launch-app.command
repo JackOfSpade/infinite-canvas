@@ -78,13 +78,13 @@ source_manifest() {
 }
 
 # Integrity gate: true only if the app exists, its binary is executable, and
-# its code signature verifies. Plain --verify (not --deep) stays fast on a
-# 385MB bundle. On the known-corrupt half-signed build this fails with
-# "code has no resources but signature indicates they must be present".
+# its complete nested signature verifies. This matches npm run build's strict
+# deep gate, so an unchanged launch cannot trust an app more weakly than its
+# packaging step did.
 verify_app() {
   [[ -d "$RELEASE_APP" ]] || return 1
   [[ -x "$RELEASE_APP/Contents/MacOS/infinite-canvas" ]] || return 1
-  codesign --verify "$RELEASE_APP" >/dev/null 2>&1
+  codesign --verify --deep --strict "$RELEASE_APP" >/dev/null 2>&1
 }
 
 fail() {

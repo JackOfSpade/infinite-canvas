@@ -263,9 +263,10 @@ export default [
   {
     name: 'macOS packaging: npm build uses the signing and integrity gate',
     run: async () => {
-      const [{ electronBuilderInvocation, usesMacIntegrityGate }, packageConfig] = await Promise.all([
+      const [{ electronBuilderInvocation, usesMacIntegrityGate }, packageConfig, launcher] = await Promise.all([
         import('../../scripts/build-macos.mjs'),
         fs.readFile(path.join(process.cwd(), 'package.json'), 'utf8').then(JSON.parse),
+        fs.readFile(path.join(process.cwd(), 'scripts', 'launch-app.command'), 'utf8'),
       ]);
       assert(packageConfig.scripts?.build === 'node scripts/build-macos.mjs',
         'npm run build must use the macOS signing/integrity entry point');
@@ -287,6 +288,12 @@ export default [
         && checked.length === 1
         && checked[0] === invocation.args[0],
       'the generic build invokes electron-builder through Node and validates the exact installed JS CLI, never a platform-specific shim');
+      const verifyStart = launcher.indexOf('verify_app() {');
+      const verifyEnd = launcher.indexOf('\n}', verifyStart);
+      const verifyApp = verifyStart >= 0 && verifyEnd > verifyStart ? launcher.slice(verifyStart, verifyEnd) : '';
+      assert(verifyApp.includes('codesign --verify --deep --strict "$RELEASE_APP"')
+        && !verifyApp.includes('codesign --verify "$RELEASE_APP"'),
+      'the launcher must use the same strict deep codesign policy as npm run build before opening an existing bundle');
       return { ok: true };
     },
   },
