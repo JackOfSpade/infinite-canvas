@@ -49,7 +49,7 @@ export function frameCorrections(items, suppliedPrompt = '') {
     .map(item => clipCorrectionItem(item));
   if (!validationErrors.length) return {};
   const correctionPrompt = typeof suppliedPrompt === 'string' && suppliedPrompt.trim()
-    ? scrubPath(suppliedPrompt)
+    ? clipQuotedSpans(scrubPath(suppliedPrompt))
     : `Fix ${validationErrors.length === 1 ? 'this item' : `these ${validationErrors.length} items`}. ${REJECTED_CAUTION}\n${validationErrors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
   return { validationErrors, correctionPrompt };
 }

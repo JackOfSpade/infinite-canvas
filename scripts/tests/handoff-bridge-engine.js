@@ -214,10 +214,18 @@ const tests = [
   {
     name: 'handoff bridge: engine: correction framing clips paths quoted spans and item volume safely',
     run: () => {
-      const quoted = `bad "${'q'.repeat(500)}" at /Users/Marisol/private.json`;
+      const firstQuoted = 'q'.repeat(500);
+      const secondQuoted = 's'.repeat(201);
+      const quoted = `bad "${firstQuoted}" and '${secondQuoted}' at /Users/Marisol/private.json`;
       const framed = frameCorrections(Array(32).fill(quoted));
       assert(framed.validationErrors.length === 30, 'corrections cap at 30');
       assert(framed.validationErrors[0].includes('…') && !framed.validationErrors[0].includes('/Users/Marisol'), 'quoted spans and paths must scrub');
+      assert(framed.correctionPrompt.includes(`"${firstQuoted.slice(0, 200)}…"`) && framed.correctionPrompt.includes(`'${secondQuoted.slice(0, 200)}…'`),
+        'generated correction prompts must clip every overlong quoted span');
+      const supplied = frameCorrections(['fix it'], quoted);
+      assert(supplied.correctionPrompt.includes(`"${firstQuoted.slice(0, 200)}…"`) && supplied.correctionPrompt.includes(`'${secondQuoted.slice(0, 200)}…'`)
+        && !supplied.correctionPrompt.includes(firstQuoted) && !supplied.correctionPrompt.includes(secondQuoted),
+      'supplied app correction prompts must receive the same quoted-span clip after path scrubbing');
       assert(clipCorrectionItem('x'.repeat(1600)).length === 1500, 'long correction must use exact 1500 clip');
     },
   },
