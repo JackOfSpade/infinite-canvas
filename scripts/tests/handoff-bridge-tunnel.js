@@ -53,7 +53,7 @@ function createMemoryBinaryFs() {
     },
     writeFileSync(fd, value) { const bytes = Buffer.from(String(value)); const handle = fds.get(fd); entries.get(handle.name).bytes = bytes; },
     readFileSync(name, encoding) { const bytes = entries.get(name)?.bytes; if (!bytes) throw new Error(`missing ${name}`); return encoding ? bytes.toString(encoding) : Buffer.from(bytes); },
-    fsyncSync() {}, closeSync(fd) { fds.delete(fd); }, renameSync(from, to) { const value = entries.get(from); if (!value || entries.has(to)) throw new Error('rename'); entries.set(to, value); entries.delete(from); }, unlinkSync(name) { entries.delete(name); },
+    fsyncSync() {}, closeSync(fd) { fds.delete(fd); }, renameSync(from, to) { const value = entries.get(from); if (!value) throw new Error('rename'); entries.set(to, value); entries.delete(from); }, unlinkSync(name) { entries.delete(name); },
   };
 }
 
@@ -446,9 +446,53 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
       const paths = await ensureTunnelDirectory(root, { fsImpl: mem, uid: 501, ensureDirectory });
       assert(walked.join('|') === [root, paths.bridge, paths.root, paths.bin].join('|'), 'every state component must be walked by the shared symlink-safe helper');
       assert([paths.bridge, paths.root, paths.bin].every(target => (mem.entries.get(target).mode & 0o777) === 0o700), 'all bridge directories must be 0700');
-      const state = { binaryPath: '/opt/homebrew/bin/cloudflared', credentialsPath: `/users/synthetic/.cloudflared/${TUNNEL_ID}.json`, pin: 'a'.repeat(64), approvedAt: 123 };
-      const saved = await writeTunnelState(root, state, { fsImpl: mem, uid: 501, ensureDirectory });
-      assert(saved?.pin === state.pin && readTunnelState(root, { fsImpl: mem, uid: 501 })?.credentialsPath === state.credentialsPath, 'bounded setup state must round trip');
+      const binaryPath = '/opt/homebrew/bin/cloudflared';
+      const credentialsPath = `/users/synthetic/.cloudflared/${TUNNEL_ID}.json`;
+      const pin = 'a'.repeat(64);
+      const variants = [
+        ['binary implicit draft', { binaryPath, pin }, { binaryPath, pin, approvedAt: null, binaryTrusted: false }],
+        ['binary draft', { binaryPath, pin, approvedAt: null }, { binaryPath, pin, approvedAt: null, binaryTrusted: false }],
+        ['binary approved', { binaryPath, pin, approvedAt: 123 }, { binaryPath, pin, approvedAt: 123, binaryTrusted: true }],
+        ['credentials only', { credentialsPath }, { credentialsPath, binaryTrusted: false }],
+        ['combined draft', { binaryPath, pin, approvedAt: null, credentialsPath }, { binaryPath, pin, approvedAt: null, credentialsPath, binaryTrusted: false }],
+        ['combined approved', { binaryPath, pin, approvedAt: 456, credentialsPath }, { binaryPath, pin, approvedAt: 456, credentialsPath, binaryTrusted: true }],
+      ];
+      for (const [label, state, expected] of variants) {
+        let nowCalls = 0;
+        const saved = await writeTunnelState(root, { ...state, binaryTrusted: !expected.binaryTrusted, ignored: 'never stored' }, {
+          fsImpl: mem, uid: 501, ensureDirectory, now: () => { nowCalls += 1; throw new Error('approval must not be defaulted'); },
+        });
+        assert(JSON.stringify(saved) === JSON.stringify({ v: 1, ...expected }) && Object.isFrozen(saved), `${label} must round trip as a frozen, derived setup projection`);
+        assert(JSON.stringify(readTunnelState(root, { fsImpl: mem, uid: 501 })) === JSON.stringify(saved), `${label} must survive a fresh read`);
+        const stored = JSON.parse(mem.readFileSync(paths.state, 'utf8'));
+        assert(JSON.stringify(stored) === JSON.stringify({ v: 1, ...Object.fromEntries(Object.entries(expected).filter(([key]) => key !== 'binaryTrusted')) }), `${label} must write only canonical durable fields`);
+        assert(!Object.hasOwn(stored, 'binaryTrusted') && nowCalls === 0 && (mem.entries.get(paths.state).mode & 0o777) === 0o600, `${label} may not serialize a trust bit, default approval, or relaxed mode`);
+      }
+      mem.entries.get(paths.state).bytes = Buffer.from(JSON.stringify({ v: 1, binaryPath, pin }));
+      mem.entries.get(paths.state).mode = 0o600;
+      assert(JSON.stringify(readTunnelState(root, { fsImpl: mem, uid: 501 })) === JSON.stringify({ v: 1, binaryPath, pin, approvedAt: null, binaryTrusted: false }), 'an older binary record without approval must rehydrate only as an untrusted draft');
+      const invalidStates = [
+        {}, { binaryPath }, { pin }, { binaryPath, pin: 'bad', approvedAt: null },
+        { credentialsPath, pin }, { credentialsPath, approvedAt: null },
+        { binaryPath, pin, approvedAt: '123' }, { binaryPath, pin, approvedAt: Number.POSITIVE_INFINITY },
+        { v: 2, credentialsPath }, { binaryPath: 'relative/cloudflared', pin, approvedAt: null }, { credentialsPath: 'relative.json' },
+      ];
+      for (const state of invalidStates) {
+        let rejected = null;
+        try { await writeTunnelState(root, state, { fsImpl: mem, uid: 501, ensureDirectory }); } catch (error) { rejected = error; }
+        assert(rejected?.code === 'config-rejected', `incoherent partial state must reject: ${JSON.stringify(state)}`);
+      }
+      const malformed = [
+        { v: 1 }, { v: 1, binaryPath }, { v: 1, pin }, { v: 1, credentialsPath, approvedAt: null },
+        { v: 1, binaryPath, pin, approvedAt: '123' }, { v: 2, credentialsPath },
+      ];
+      for (const state of malformed) {
+        mem.entries.get(paths.state).bytes = Buffer.from(JSON.stringify(state));
+        mem.entries.get(paths.state).mode = 0o600;
+        assert(readTunnelState(root, { fsImpl: mem, uid: 501 }) === null, `malformed on-disk partial state must fail closed: ${JSON.stringify(state)}`);
+      }
+      // Restore a good state before the existing ownership/mode checks below.
+      await writeTunnelState(root, { binaryPath, pin, approvedAt: 123, credentialsPath }, { fsImpl: mem, uid: 501, ensureDirectory });
       mem.entries.get(paths.state).mode = 0o644;
       assert(readTunnelState(root, { fsImpl: mem, uid: 501 }) === null, 'a relaxed setup-state mode must fail closed');
       mem.entries.get(paths.root).mode = 0o722;
