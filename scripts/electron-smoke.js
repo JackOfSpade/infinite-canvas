@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { _electron as electron } from 'playwright';
 import { buildResumeDocument } from '../electron/ipc/resumeHtml.js';
 import { BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS } from '../electron/utils/backgroundE2e.js';
@@ -23,6 +25,15 @@ const previewFixtureRoot = await fs.mkdtemp(path.join(
 const workspacePath = path.join(userDataDir, 'roundtrip.json');
 const env = { ...process.env };
 const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
+const BRIDGE_PRELOAD_KEYS = [
+  'handoffBridgeGetStatus', 'handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary',
+  'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeStopOrphan',
+  'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat',
+  'handoffBridgeContinueChat', 'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
+  'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
+  'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
+  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeOpenPanel',
+].sort();
 
 // Codex and some CI environments use Electron as a Node runtime. Playwright
 // needs the normal Electron runtime for renderer automation.
@@ -31,7 +42,9 @@ env.INFINITE_CANVAS_E2E = '1';
 env.INFINITE_CANVAS_E2E_BACKGROUND = '1';
 
 let app;
+let bridgeUserDataDir = null;
 const rendererErrors = [];
+const execFileAsync = promisify(execFile);
 
 async function expectVisible(page, text) {
   await page.getByText(text, { exact: true }).filter({ visible: true }).first().waitFor();
@@ -53,6 +66,56 @@ async function clickToolbar(page, label) {
 async function nodeCount(page, type) {
   const suffix = type ? `-${type}` : '';
   return page.locator(`.react-flow__node${suffix}`).count();
+}
+
+// The ordinary E2E mode must be unable to start a tunnel.  Looking only for a
+// socket would miss a child that escaped before binding, so inspect just this
+// Electron process tree.  Do not include process command text in an assertion:
+// a host command line could itself contain sensitive user data.
+async function tunnelDescendants(parentPid) {
+  assert(Number.isInteger(parentPid) && parentPid > 1, 'Electron must expose a live pid for descendant inspection');
+  const { stdout } = await execFileAsync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], { maxBuffer: 2 * 1024 * 1024 });
+  const rows = String(stdout).split('\n').flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+([\s\S]+)$/);
+    return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : [];
+  });
+  const children = new Map();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid) || [];
+    siblings.push(row);
+    children.set(row.ppid, siblings);
+  }
+  const found = [];
+  const pending = [parentPid];
+  const visited = new Set(pending);
+  while (pending.length) {
+    const current = pending.shift();
+    for (const child of children.get(current) || []) {
+      if (visited.has(child.pid)) continue;
+      visited.add(child.pid);
+      found.push(child);
+      pending.push(child.pid);
+    }
+  }
+  return found;
+}
+
+async function assertNoTunnelDescendant(application, label) {
+  const rows = await tunnelDescendants(application.process().pid);
+  assert.equal(
+    rows.some(row => /(?:\bcloudflared(?:-|\b)|\btunnel\s+--config\b)/.test(row.command)),
+    false,
+    `${label}: ordinary E2E must not leave a cloudflared/tunnel descendant`,
+  );
+}
+
+function objectKeys(value, keys = []) {
+  if (!value || typeof value !== 'object') return keys;
+  for (const [key, child] of Object.entries(value)) {
+    keys.push(key.toLowerCase());
+    objectKeys(child, keys);
+  }
+  return keys;
 }
 
 // Poll a locator count until the predicate holds — asserting the instant an
@@ -273,6 +336,31 @@ try {
     assert.equal(backgroundWindowState.activationPolicy, 'prohibited',
       'background smoke must prohibit macOS app activation when Electron exposes the policy');
   }
+  step('bridge remains inert during the ordinary E2E smoke');
+  await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
+  const bridgeOff = await page.evaluate(async () => ({
+    keys: Object.keys(window.electronAPI || {}).filter(key => key.startsWith('handoffBridge') || key.startsWith('onHandoffBridge')).sort(),
+    status: await window.electronAPI.handoffBridgeGetStatus(),
+    enable: await window.electronAPI.handoffBridgeSetEnabled({ enabled: true }),
+    statusAfterEnable: await window.electronAPI.handoffBridgeGetStatus(),
+  }));
+  bridgeUserDataDir = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+  assert.equal(bridgeOff.enable.success, false, 'ordinary E2E must refuse bridge enablement');
+  assert.equal(bridgeOff.enable.code, 'UNAVAILABLE', 'ordinary E2E refusal must use the fixed unavailable IPC code');
+  assert.equal(bridgeOff.status.status.serving, 'off', 'ordinary E2E bridge status must stay off');
+  assert.equal(bridgeOff.statusAfterEnable.status.availability.reason, 'e2e', 'ordinary E2E status must expose its unavailable reason');
+  assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge', 'b.sock')).then(() => true, () => false), false,
+    'ordinary E2E must not create a bridge Unix socket');
+  assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
+    'ordinary E2E must not create bridge state or a Unix socket');
+  assert.deepEqual(bridgeOff.keys, BRIDGE_PRELOAD_KEYS, 'ordinary E2E must retain the exact closed, non-secret bridge preload surface');
+  const forbiddenStatusKeys = new Set([
+    'accesstoken', 'refreshtoken', 'sessioncode', 'chatkey', 'handoffcode', 'pairingcode',
+    'tunnelsecret', 'credentialspath', 'canvasfilepath', 'label', 'prompt', 'response',
+  ]);
+  assert(objectKeys(bridgeOff.status.status).every(key => !forbiddenStatusKeys.has(key)),
+    'bridge-off status must not expose any secret or content-bearing key');
+  await assertNoTunnelDescendant(app, 'initial bridge-off check');
   // All subsequent renderer documents are test fixtures. Prevent their
   // beforeunload guard from registering so a late Chromium dialog cannot race
   // Playwright's navigation machinery. The initial document is handled by
@@ -1133,6 +1221,50 @@ try {
     await settingsPanel.getByPlaceholder('sk-ant-api...').count(), 0,
     'Settings must not expose an Anthropic API key field',
   );
+  const bridgeSettings = settingsPanel.getByRole('group', { name: 'ChatGPT bridge controls' });
+  await bridgeSettings.waitFor();
+  const bridgeSwitch = bridgeSettings.getByRole('checkbox').first();
+  assert.equal(await bridgeSwitch.isDisabled(), true, 'ordinary E2E bridge switch must render disabled');
+  await bridgeSettings.getByText('The bridge is disabled during automated test runs.', { exact: true }).waitFor();
+  // The main-owned status event must also reach the renderer status store.
+  // Exercise a normal live state and a paused state through the actual preload
+  // event channel, never by writing renderer state directly.
+  const syntheticLive = JSON.parse(JSON.stringify(bridgeOff.status.status));
+  syntheticLive.seq += 100;
+  syntheticLive.availability = { ok: true, reason: null };
+  syntheticLive.enabled = true;
+  syntheticLive.serving = 'live';
+  syntheticLive.paused = false;
+  syntheticLive.pauseCause = null;
+  syntheticLive.setup = {
+    ...syntheticLive.setup,
+    hostnameOk: true,
+    binaryApproved: true,
+    credentialsOk: true,
+    tunnelReachable: true,
+    linked: true,
+  };
+  syntheticLive.tunnel = {
+    ...syntheticLive.tunnel,
+    state: 'up',
+    probe: { state: 'ok', okAt: Date.now(), failingSince: null, consecutiveFailures: 0, reason: null },
+  };
+  syntheticLive.link = { ...syntheticLive.link, state: 'linked' };
+  await app.evaluate(({ BrowserWindow }, snapshot) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
+  }, syntheticLive);
+  await bridgeSettings.getByText(/^Ready:/).waitFor();
+  const syntheticPaused = {
+    ...syntheticLive,
+    seq: syntheticLive.seq + 1,
+    serving: 'paused',
+    paused: true,
+    pauseCause: 'user',
+  };
+  await app.evaluate(({ BrowserWindow }, snapshot) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
+  }, syntheticPaused);
+  await bridgeSettings.getByText(/^Paused:/).waitFor();
 
   await page.keyboard.press('Escape');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ state: 'hidden' });
@@ -1311,6 +1443,7 @@ try {
     `screen pagination should retain all six fixed-height shadow columns: ${JSON.stringify(paginationState)}`,
   );
   assert.deepEqual(rendererErrors, [], 'generated pagination workspace should not emit runtime errors');
+  await assertNoTunnelDescendant(app, 'final bridge-off check');
   console.log('Electron smoke test passed');
 } finally {
   // Playwright's ElectronApplication.close() explicitly calls app.quit(), which
@@ -1344,6 +1477,10 @@ try {
     }
   }
   await new Promise((resolve) => setTimeout(resolve, 250));
+  if (bridgeUserDataDir) {
+    assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
+      'ordinary E2E shutdown must leave no bridge state directory');
+  }
   await Promise.allSettled([
     fs.rm(userDataDir, { recursive: true, force: true }),
     fs.rm(previewFixtureRoot, { recursive: true, force: true }),
