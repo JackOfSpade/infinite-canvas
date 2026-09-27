@@ -147,3 +147,21 @@ The clean-clone adversarial pass caught and closed four issues before merge: the
 | G10 | Green after persistence, scheduling, error-text, audit and semaphore/watchdog review. No prompt, answer, job id, handoff code, path or label reaches a ledger or logger. |
 
 The temporary clean clone was removed. Nothing was pushed.
+
+## B5b — scoring push adapter and engine integration (2026-09-27)
+
+Implemented directly on local `main` in commit `0d2bb58` (`feat: add ChatGPT bridge scoring push adapter`). The stage adds the default-deny task policy, process-scoped hub selection, per-epoch push routing and tombstones, bounded verdict caching, successor-grace polling, and the application-continuation / push / fresh-application scheduler order.
+
+Adversarial review closed stale Save-As selections, two-sender node collisions, held-reason loss, post-hold push polling, prompt-budget replay, accepted-verdict double framing, and incomplete injected-fault coverage. A settled accepted replay now increments counters and polls for its successor exactly once; every relevant adapter await can fail without poisoning the following operation.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The stage commit contains exactly `electron/ipc/handoffBridge/sources/push.js`, `electron/ipc/handoffBridge/engine.js`, and `scripts/tests/handoff-bridge-push.js`; the new path is not ignored and `git diff --check` is clean. |
+| G1 | Green in an isolated clone: `npm run test:unit` passed 2014 tests with 0 failed. The required filtered comparison with `~/ic-baseline-units.txt` printed nothing. Focused push (42), engine (60), and source-scan (4) groups passed immediately before commit. |
+| G2 | Green. `npm test` passed the complete unit and resume-PDF suites. |
+| G3 | Green. `npm run lint` and targeted ESLint passed. |
+| G4 | Green. `npm run build:compile` passed with only the existing chunk-size warnings. |
+| G8 | The B8 conformance runner does not exist yet; the complete in-process push and engine groups passed as the plan's stated equivalent. |
+| G9 | Green. All frozen files and `package-lock.json` are byte-untouched. Only `sources/push.js` imports the four `nonApiAi.js` seam names and `snapshotActiveNodeTasks`. |
+
+The isolated gate clone was removed after the clean run. Nothing was pushed.
