@@ -24,6 +24,9 @@ import {
   makeRejectedBody,
   makeResultBody,
   makeServedBody,
+  PUSH_INSTRUCTIONS,
+  REJECTED_CAUTION,
+  RESULT_NOTES,
   supersededStageNote,
 } from './framing.js';
 
@@ -130,14 +133,17 @@ export function createHandoffEngine({
   autoStart = false,
 } = {}) {
   const application = sources?.application ?? source;
+  const push = sources?.push ?? null;
   if (!application || typeof application.read !== 'function' || typeof application.status !== 'function'
       || typeof application.submit !== 'function') throw new TypeError('An application source is required');
+  if (push && (typeof push.get !== 'function' || typeof push.submit !== 'function')) throw new TypeError('A push source must implement get and submit');
 
   let limits = normalizeLimits(initialLimits);
   const lanes = [];
   const codeIndex = new Map();
   const tombstones = new Map();
   const verdicts = new Map();
+  const pushVerdicts = new Map();
   const retiredEpochs = [];
   const badKeyTimes = [];
   const waiters = new Set();
@@ -238,11 +244,20 @@ export function createHandoffEngine({
 
   function retireEpoch(reason) {
     if (!epoch) return;
+    const retiringPushEpoch = pushEpochId(epoch);
+    try { push?.closeEpoch?.(retiringPushEpoch); } catch { /* push state is disposable */ }
+    for (const [key, value] of pushVerdicts) if (value.epochId === retiringPushEpoch) pushVerdicts.delete(key);
     retiredEpochs.push({ hash: epoch.keyHash, linkId: epoch.linkId, endedAt: safeNow(now), reason });
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
     auditEvent('epoch_closed', { reason });
     epoch = null;
     wake();
+  }
+
+  function pushEpochId(value = epoch) {
+    // This id is deliberately derived only from the in-memory epoch ordinal;
+    // neither the chat key nor a stable external identifier crosses the seam.
+    return value ? `epoch-${value.n}` : null;
   }
 
   function checkIdlePause() {
@@ -420,15 +435,79 @@ export function createHandoffEngine({
       && epoch.bytesServed + epoch.bytesReceived < limits.epochSoftBytes;
   }
 
-  function chooseAwaiting() {
+  function chooseApplicationContinuation() {
     if (!epoch) return null;
     const focus = lanes.find(lane => lane.ord === epoch.focusLaneOrd && lane.phase === 'awaiting' && canAssign(lane));
     if (focus) return focus;
     const outstanding = lanes.find(lane => lane.phase === 'awaiting' && lane.servedAt != null && canAssign(lane));
     if (outstanding) return outstanding;
+    // A correction is an application continuation even after a chat rotation;
+    // it must never be displaced by an unrelated scoring handoff.
+    return [...lanes]
+      .filter(lane => lane.phase === 'awaiting' && lane.current?.corrections?.length && canAssign(lane))
+      .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
+  }
+
+  function chooseFreshApplication() {
+    if (!epoch) return null;
     return [...lanes]
       .filter(lane => lane.phase === 'awaiting' && canAssign(lane))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
+  }
+
+  function combinedRemaining(pushRemaining = null) {
+    const applicationRemaining = remainingCounts(lanes);
+    return {
+      ready: applicationRemaining.ready + Number(pushRemaining?.ready || 0),
+      working: applicationRemaining.working + Number(pushRemaining?.working || 0),
+      needsYou: applicationRemaining.needsYou + Number(pushRemaining?.needsYou || 0),
+    };
+  }
+
+  function framePushGet(raw) {
+    const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
+    const remaining = combinedRemaining(decision.remaining);
+    if (decision.status === 'served') {
+      const body = {
+        status: 'served',
+        handoffCode: typeof decision.handoffCode === 'string' ? decision.handoffCode : '',
+        kind: 'push',
+        stage: null,
+        task: typeof decision.task === 'string' ? decision.task : null,
+        batch: Number.isFinite(decision.batch) ? decision.batch : null,
+        batchTotal: Number.isFinite(decision.batchTotal) ? decision.batchTotal : null,
+        attempt: Number.isInteger(decision.attempt) ? decision.attempt : 1,
+        instructions: PUSH_INSTRUCTIONS,
+        prompt: typeof decision.prompt === 'string' ? decision.prompt : '',
+        correction: typeof decision.correction === 'string' ? decision.correction : '',
+        remaining,
+      };
+      if (decision.correctionOnly !== true && typeof decision.note === 'string') {
+        body.note = decision.note;
+      }
+      const stamp = safeNow(now);
+      // The push adapter returns a private, once-per-request prompt charge.
+      // Do not charge a ChatGPT retry again: re-serving is intentionally
+      // idempotent and can happen several times while a run is settling.
+      const promptBytes = Number(decision.promptBytes);
+      epoch.bytesServed += Number.isFinite(promptBytes) && promptBytes >= 0
+        ? Math.floor(promptBytes)
+        : Buffer.byteLength(JSON.stringify(body), 'utf8');
+      epoch.lastGetAt = stamp;
+      counts.getServed++;
+      auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: 'push' });
+      return body;
+    }
+    if (decision.status === 'needs_user') return makeResultBody('needs_user', { reason: 'app_only_handoffs', remaining });
+    if (decision.status === 'waiting') return makeResultBody('waiting', { retryAfterSeconds: 3, remaining });
+    if (decision.status === 'queue_empty') return makeResultBody('queue_empty', { remaining });
+    return makeResultBody('retry');
+  }
+
+  async function readPush() {
+    if (!push || !epoch) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+    try { return await push.get({ epoch: pushEpochId() }); }
+    catch { return { status: 'retry' }; }
   }
 
   async function refreshOneLane() {
@@ -498,38 +577,75 @@ export function createHandoffEngine({
     lastGetAt = stamp;
 
     if (lanes.some(item => item.needsRefresh === true)) await refreshOneLane();
-    let lane = chooseAwaiting();
-    if (!lane) {
-      await refreshOneLane();
-      lane = chooseAwaiting();
-    }
+    let lane = chooseApplicationContinuation();
     if (lane) return serveLane(lane);
 
-    const working = lanes.some(item => ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+    // Scoring handoffs are preferred only at application job boundaries. A
+    // focused, outstanding, or correction application lane has already won.
+    let pushDecision = await readPush();
+    if (pushDecision?.status === 'served') return framePushGet(pushDecision);
+
+    // A lazy read can reveal a correction or a newly-open continuation after
+    // the push poll; give it another chance before starting fresh work.
+    await refreshOneLane();
+    lane = chooseApplicationContinuation();
+    if (lane) return serveLane(lane);
+    lane = chooseFreshApplication();
+    if (lane) return serveLane(lane);
+
+    const pushWorking = pushDecision?.status === 'waiting';
+    const pushNeedsUser = pushDecision?.status === 'needs_user';
+    const working = pushWorking || lanes.some(item => ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
     if (working) {
       await waitForWake(holdMs);
       await refreshOneLane();
-      lane = chooseAwaiting();
+      lane = chooseApplicationContinuation();
       if (lane) return serveLane(lane);
+      // A successor can be published during the held poll. Preserve the
+      // ordering at the boundary: continuations first, then push, then a
+      // fresh application lane.
+      pushDecision = await readPush();
+      if (pushDecision?.status === 'served') return framePushGet(pushDecision);
+      lane = chooseFreshApplication();
+      if (lane) return serveLane(lane);
+      const stillWorking = pushDecision?.status === 'waiting'
+        || lanes.some(item => ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+      if (!stillWorking) {
+        if (lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
+          counts.getPaused++;
+          return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
+        }
+        if (lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
+          return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
+        }
+        if (pushDecision?.status === 'needs_user') return framePushGet(pushDecision);
+        if (pushDecision?.status === 'retry') return makeResultBody('retry');
+        counts.getEmpty++;
+        const drained = framePushGet(pushDecision);
+        if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
+        return drained;
+      }
       epoch.consecutiveWaits++;
       if (epoch.consecutiveWaits >= CONSTANTS.MAX_CONSECUTIVE_WAITS) {
         counts.getPaused++;
-        return makeResultBody('paused', { reason: 'waiting_limit', remaining: remainingCounts(lanes) });
+        return makeResultBody('paused', { reason: 'waiting_limit', remaining: combinedRemaining(pushDecision?.remaining) });
       }
       counts.getWaiting++;
-      return makeResultBody('waiting', { pollCount: epoch.consecutiveWaits, retryAfterSeconds: 5, remaining: remainingCounts(lanes) });
+      return makeResultBody('waiting', { pollCount: epoch.consecutiveWaits, retryAfterSeconds: 5, remaining: combinedRemaining(pushDecision?.remaining) });
     }
 
     if (lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
       counts.getPaused++;
-      return makeResultBody('paused', { reason: 'needs_user', remaining: remainingCounts(lanes) });
+      return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
     }
     if (lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
-      return makeResultBody('session_full', { remaining: remainingCounts(lanes) });
+      return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
     }
+    if (pushNeedsUser) return framePushGet(pushDecision);
+    if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
-    const result = makeResultBody('queue_empty', { remaining: remainingCounts(lanes) });
-    if (terminalDrain()) retireEpoch('drained');
+    const result = framePushGet(pushDecision);
+    if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
     return result;
   }
 
@@ -708,6 +824,78 @@ export function createHandoffEngine({
     }
   }
 
+  async function framePushSubmit(raw, { successorBudgetMs = 0 } = {}) {
+    const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
+    if (decision.status === 'rejected') {
+      const body = {
+        status: 'rejected',
+        handoffCode: typeof decision.handoffCode === 'string' ? decision.handoffCode : '',
+        attempt: Number.isInteger(decision.attempt) ? decision.attempt : 1,
+        caution: REJECTED_CAUTION,
+        note: typeof decision.note === 'string' ? decision.note : RESULT_NOTES.rejected,
+      };
+      if (typeof decision.validationCode === 'string') body.validationCode = decision.validationCode;
+      if (typeof decision.correction === 'string' && decision.correction) body.correction = decision.correction;
+      counts.submitRejected++;
+      return body;
+    }
+    if (decision.status === 'accepted') {
+      counts.submitAccepted++;
+      let next = null;
+      if (successorBudgetMs > 0 && typeof push?.nextAfterAccept === 'function') {
+        let successor;
+        try {
+          successor = await raceWithBudget(
+            push.nextAfterAccept({ epoch: pushEpochId(), budgetMs: successorBudgetMs }),
+            successorBudgetMs,
+            { status: 'waiting' },
+          );
+        } catch { successor = { status: 'waiting' }; }
+        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor);
+      }
+      return { status: 'accepted', jobComplete: false, next };
+    }
+    if (decision.status === 'duplicate') { counts.submitDuplicate++; return makeResultBody('duplicate'); }
+    if (decision.status === 'superseded') { counts.submitSuperseded++; return makeResultBody('superseded'); }
+    if (decision.status === 'held') {
+      counts.submitHeld++;
+      const reason = ['person_editing', 'hub_not_selected', 'task_disabled'].includes(decision.reason)
+        ? decision.reason
+        : 'task_disabled';
+      return makeResultBody('held', { reason });
+    }
+    if (decision.status === 'needs_user') {
+      const reason = ['rejection_cap', 'commit_failed'].includes(decision.reason)
+        ? decision.reason
+        : 'commit_failed';
+      return makeResultBody('needs_user', { reason });
+    }
+    if (decision.status === 'junk') { counts.submitJunk++; return makeResultBody('junk'); }
+    if (decision.status === 'misrouted') { counts.submitMisrouted++; return makeResultBody('misrouted'); }
+    if (decision.status === 'too_large') { counts.submitTooLarge++; return makeResultBody('too_large'); }
+    return makeResultBody('retry', { inFlight: decision.status === 'retry' });
+  }
+
+  function runPushSubmit(code, text) {
+    const epochId = pushEpochId();
+    const key = verdictKey(`push\n${epochId ?? ''}\n${code}`, text);
+    const cached = pushVerdicts.get(key);
+    if (cached && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) return cached;
+    let rawPromise;
+    rawPromise = Promise.resolve()
+      .then(() => semaphore.acquire())
+      .then(() => push.submit({ epoch: epochId, handoffCode: code, response: text }))
+      .catch(() => ({ status: 'retry' }))
+      .finally(() => semaphore.release());
+    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId };
+    pushVerdicts.set(key, record);
+    rawPromise.finally(() => {
+      const current = pushVerdicts.get(key);
+      if (current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
+    });
+    return record;
+  }
+
   async function submit(args = {}) {
     const blocked = gate(args);
     if (blocked) return blocked;
@@ -726,6 +914,29 @@ export function createHandoffEngine({
     epoch.bytesReceived += bytes;
     epoch.lastSubmitAt = safeNow(now);
     const code = trimHandoffCode(args.handoffCode);
+    // Push owns its served-code/tombstone namespace. It has to be consulted
+    // before the application unknown-code path so an accepted scoring retry is
+    // never reported as an application unknown handoff.
+    if (push) {
+      const pushStartedAt = safeNow(now);
+      const pushRecord = runPushSubmit(code, text);
+      const pushTimeout = Symbol('push-submit-timeout');
+      const pushDecision = await raceWithBudget(pushRecord.rawPromise, submitBudgetMs, pushTimeout);
+      if (pushDecision === pushTimeout) return makeResultBody('retry', { inFlight: true });
+      if (pushDecision?.status !== 'unknown_handoff') {
+        const elapsed = Math.max(0, safeNow(now) - pushStartedAt);
+        if (!pushRecord.framedPromise) {
+          pushRecord.framedPromise = Promise.resolve(pushDecision).then(decision => framePushSubmit(decision, {
+            successorBudgetMs: Math.max(0, submitBudgetMs - elapsed),
+          }));
+        }
+        return raceWithBudget(
+          pushRecord.framedPromise,
+          Math.max(0, submitBudgetMs - elapsed),
+          makeResultBody('retry', { inFlight: true }),
+        );
+      }
+    }
     const entry = codeIndex.get(code);
     if (!entry?.lane) return tombstoneResult(code);
     const lane = entry.lane;
@@ -1012,6 +1223,10 @@ export function createHandoffEngine({
 
   function snapshot() {
     const queue = remainingCounts(lanes);
+    let pushState = { served: 0, held: 0, selectedHubs: 0, working: 0, needsYou: 0 };
+    try {
+      if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
+    } catch { /* status is advisory and must never break the control plane */ }
     return Object.freeze({
       paused,
       pauseCause,
@@ -1025,7 +1240,7 @@ export function createHandoffEngine({
         bytesServed: epoch?.bytesServed ?? 0,
         bytesReceived: epoch?.bytesReceived ?? 0,
       }),
-      queue: Object.freeze({ ...queue, jobs: lanes.map(lane => Object.freeze({ ord: lane.ord, phase: lane.phase, reason: lane.reason })) }),
+      queue: Object.freeze({ ...queue, push: Object.freeze(pushState), jobs: lanes.map(lane => Object.freeze({ ord: lane.ord, phase: lane.phase, reason: lane.reason })) }),
       counts: Object.freeze({ ...counts }),
     });
   }
@@ -1039,9 +1254,22 @@ export function createHandoffEngine({
     return { ...limits };
   }
 
+  function selectPushHub(value) {
+    try { return push?.selectHub?.(value) === true; } catch { return false; }
+  }
+
+  function clearPushHubs(value) {
+    try { push?.clearHubs?.(value); return true; } catch { return false; }
+  }
+
+  function prunePushHubs() {
+    try { push?.pruneHubs?.(); return true; } catch { return false; }
+  }
+
   async function close() {
     closed = true;
     retireEpoch('closed');
+    clearPushHubs();
     for (const timer of hintTimers.values()) clearTimer(timer);
     hintTimers.clear();
     semaphore.close();
@@ -1067,6 +1295,9 @@ export function createHandoffEngine({
     status: snapshot,
     debugState,
     setLimits,
+    selectPushHub,
+    clearPushHubs,
+    prunePushHubs,
     close,
   });
 }
