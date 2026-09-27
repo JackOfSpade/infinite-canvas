@@ -314,6 +314,12 @@ export function registerHandoffBridgeUi({
       if (payload.enabled) {
         if (!window) return fixed('NO_WINDOW');
         const status = currentStatus();
+        // Availability is a main-owned refusal ladder (for example ordinary
+        // E2E, packaged/platform, or the hard-off environment switch).  Do
+        // not open a consent sheet for an enable that cannot proceed: besides
+        // being misleading, an incomplete setup can make the dialog builder
+        // return INVALID before the authoritative UNAVAILABLE result.
+        if (status?.availability?.ok === false) return fixed('UNAVAILABLE');
         const details = await safeCall(enableConsent, 'describe', status) || {};
         const long = details.long !== false;
         const enableDetails = {

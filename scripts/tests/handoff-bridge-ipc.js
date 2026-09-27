@@ -66,6 +66,26 @@ export default [
     }
     assert(dialogCalls === 0, 'no-window must never issue a parentless dialog');
   } },
+  { name: 'handoff bridge: ipc: unavailable enable refuses before consent or a native dialog', async run() {
+    let described = 0; let dialogCalls = 0; let enabled = 0;
+    const h = setup({
+      controller: {
+        snapshot: () => ({
+          enabled: false,
+          availability: { ok: false, reason: 'e2e' },
+          setup: { tunnelReachable: false },
+          config: { hostname: null, scope: { applications: true, scoring: false } },
+          limits: { idlePauseMinutes: 1440 },
+        }),
+        enable: async () => { enabled += 1; return { success: true }; },
+      },
+      enableConsent: { describe: async () => { described += 1; return {}; } },
+      dialogs: { ask: async () => { dialogCalls += 1; return { ok: true }; } },
+    });
+    const result = await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: true });
+    assert(result.success === false && result.code === 'UNAVAILABLE', 'the authoritative availability ladder must keep its fixed IPC code');
+    assert(described === 0 && dialogCalls === 0 && enabled === 0, 'an unavailable enable must have no consent, dialog, or controller side effect');
+  } },
   { name: 'handoff bridge: ipc: release resolves canonical main path and ignores hostile renderer text', async run() {
     const seen = []; const h = setup({ controller: { release: async value => { seen.push(value); return { success: true, released: 1 }; } } });
     h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS)(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 's' }] });
