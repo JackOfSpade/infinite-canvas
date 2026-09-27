@@ -307,6 +307,8 @@ const tests = [
       for (let index = 0; index < 7; index++) assert((await engine.get({ session: `old-${index}`, linkId: LINK })).status === 'session_ended', 'no epoch must not count stale key');
       const chat = await engine.newChat({ linkId: LINK }); await engine.continueChat({ linkId: LINK });
       assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_ended', 'rotation must retire old epoch');
+      assert((await engine.get({ session: chat.sessionCode, linkId: 'other-link' })).status === 'unauthorized',
+        'a retired epoch digest must remain bound to its original link identity');
       assert(engine.snapshot().pauseCause === null, 'old/no epoch requests cannot cause anomaly pause');
     },
   },

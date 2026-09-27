@@ -11,6 +11,8 @@ export const PROBE_PATH = '/.well-known/oauth-protected-resource/mcp';
 export const PROBE_MAX_BYTES = 16 * 1024;
 export const PROBE_TIMEOUT_MS = 8_000;
 const MAX_ACTIVE_PROBE_NONCES = 8;
+const PROBE_NONCE_RE = /^[A-Za-z0-9_-]{24}$/;
+const PROBE_MAC_RE = /^[A-Za-z0-9_-]{43}$/;
 
 const isHostname = value => typeof value === 'string'
   && value.length <= 253
@@ -231,13 +233,14 @@ export function createProbeAuthenticator({ randomBytes = crypto.randomBytes, key
   const verify = header => {
     if (typeof header !== 'string' || header.length > 256) return false;
     const [value, mac, extra] = header.split('.');
-    if (!value || !mac || extra !== undefined || !active.has(value)) return false;
+    if (extra !== undefined || !PROBE_NONCE_RE.test(value) || !PROBE_MAC_RE.test(mac)) return false;
+    const expected = sign(value);
+    const left = Buffer.from(mac, 'base64url'); const right = Buffer.from(expected, 'base64url');
+    if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return false;
     const stamp = currentTime();
     const expiresAt = active.get(value);
-    if (stamp === null || expiresAt < stamp) { active.delete(value); return false; }
-    const expected = sign(value);
-    const left = Buffer.from(mac); const right = Buffer.from(expected);
-    if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return false;
+    if (stamp === null || expiresAt === undefined) return false;
+    if (expiresAt < stamp) { active.delete(value); return false; }
     active.delete(value); // one observed request per nonce
     return true;
   };

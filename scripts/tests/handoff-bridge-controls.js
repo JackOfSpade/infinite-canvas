@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { assert } from './testHelpers.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffBridgeController } from '../../electron/ipc/handoffBridge/controller.js';
@@ -970,6 +971,21 @@ export default [
     assert(pairing.recordOwnEgress({ header: token.header, address: '203.0.113.40' }) === true
       && pairing.networkMatches('203.0.113.40') && publishes === 1,
     'rejecting a forged header must not consume the valid one-shot observation that follows it');
+  } },
+  { name: 'handoff bridge: controls: a valid bounded probe MAC for an absent nonce leaves the live nonce usable', run: () => {
+    const key = Buffer.alloc(32, 7);
+    const authenticator = createProbeAuthenticator({
+      key,
+      now: () => 1_000_000,
+      randomBytes: size => Buffer.alloc(size, 9),
+    });
+    const absentNonce = Buffer.alloc(18, 8).toString('base64url');
+    const absentMac = crypto.createHmac('sha256', key).update(absentNonce).digest('base64url');
+    const live = authenticator.issue();
+    assert(live && authenticator.verify(`${absentNonce}.${absentMac}`) === false,
+      'a syntactically valid, correctly signed but inactive nonce must fail closed');
+    assert(authenticator.verify(live.header) === true,
+      'an inactive nonce observation must not consume the separately live one-shot nonce');
   } },
   { name: 'handoff bridge: controls: a 500-request consent flood coalesces native notices', async run() {
     const sender = { id: 17, __isCanvasRenderer: true }; const parent = { webContents: sender, isDestroyed: () => false };

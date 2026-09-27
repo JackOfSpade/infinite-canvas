@@ -86,6 +86,17 @@ export function hexEqual(left, right) {
   return crypto.timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
 }
 
+// Token maps are keyed by digest for bounded storage and deletion, but a
+// digest made from caller input must never select a map bucket directly. Scan
+// every bounded record and compare the fixed-size digests in constant time.
+function fixedDigestLookup(records, digest) {
+  let match = null;
+  for (const candidate of records.values()) {
+    if (hexEqual(digest, candidate.hash)) match = candidate;
+  }
+  return match;
+}
+
 export function sendOAuthError(res, error) {
   sendJson(res, error.status || 400, {
     error: error.code,
@@ -840,7 +851,7 @@ export function createOAuthServer({
     const redirectUri = required(params, 'redirect_uri');
     const codeVerifier = required(params, 'code_verifier');
     if (!/^[A-Za-z0-9\-._~]{43,128}$/.test(codeVerifier)) throw new OAuthError('invalid_request', 'code_verifier is malformed');
-    const record = codes.get(shaHex(raw));
+    const record = fixedDigestLookup(codes, shaHex(raw));
     if (!record) throw new OAuthError('invalid_grant', 'The authorization code is unknown or expired');
     if (record.used) {
       const family = record.familyId ? families.get(record.familyId) : null;
@@ -913,7 +924,7 @@ export function createOAuthServer({
   function refreshGrant(client, params) {
     const raw = required(params, 'refresh_token');
     if (!sameResource(params.resource)) throw new OAuthError('invalid_target', 'resource does not match the grant');
-    const record = refreshTokens.get(shaHex(raw));
+    const record = fixedDigestLookup(refreshTokens, shaHex(raw));
     const family = record ? families.get(record.familyId) : null;
     if (!record || !family || family.revoked) throw knownGrantError('invalid_grant', 'The refresh token is unknown, expired or revoked', family);
     if (family.clientId !== client.id) {
@@ -938,11 +949,13 @@ export function createOAuthServer({
         throw knownGrantError('invalid_grant', 'The refresh token was already used', family);
       }
       const pair = openPair(raw, record.grace);
-      if (!pair || record.successor !== shaHex(pair.refresh) || !refreshTokens.has(record.successor)) {
+      const successorDigest = pair ? shaHex(pair.refresh) : '';
+      const successor = pair ? fixedDigestLookup(refreshTokens, successorDigest) : null;
+      if (!pair || !hexEqual(record.successor, successorDigest) || !successor) {
         markNeedsRenewal(family, 'invalid_grant');
         throw knownGrantError('invalid_grant', 'The refresh token is invalid', family);
       }
-      const existing = accessTokens.get(shaHex(pair.access));
+      const existing = fixedDigestLookup(accessTokens, shaHex(pair.access));
       if (!existing) {
         if (!capacityFor(family, { access: 1 })) {
           markNeedsRenewal(family, 'invalid_grant');
@@ -989,9 +1002,9 @@ export function createOAuthServer({
     const params = await requestParams(req, res);
     const client = await authenticateClient(params, serverContext);
     const raw = required(params, 'token');
-    const hash = shaHex(raw);
-    const refresh = refreshTokens.get(hash);
-    const access = accessTokens.get(hash);
+    const digest = shaHex(raw);
+    const refresh = fixedDigestLookup(refreshTokens, digest);
+    const access = fixedDigestLookup(accessTokens, digest);
     let family = refresh ? families.get(refresh.familyId) : (access ? families.get(access.familyId) : null);
     let changed = false;
     let disconnected = false;

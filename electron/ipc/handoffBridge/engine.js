@@ -341,7 +341,7 @@ export function createHandoffEngine({
     const retiringPushEpoch = pushEpochId(epoch);
     try { push?.closeEpoch?.(retiringPushEpoch); } catch { /* push state is disposable */ }
     for (const [key, value] of pushVerdicts) if (value.epochId === retiringPushEpoch) pushVerdicts.delete(key);
-    retiredEpochs.push({ n: epoch.n, hash: epoch.keyHash, linkId: epoch.linkId, endedAt: safeNow(now), reason });
+    retiredEpochs.push({ n: epoch.n, hash: epoch.keyHash, endedAt: safeNow(now), reason });
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
     auditEvent('epoch_closed', { reason });
     log('epoch_closed', { cause: LOG_EPOCH_CAUSES.has(reason) ? reason : 'other' });
@@ -369,14 +369,15 @@ export function createHandoffEngine({
   function authenticate(session, linkId) {
     if (!epoch) return 'session_ended';
     const presented = typeof session === 'string' ? session.trim() : '';
-    const digest = epochHash(String(linkId ?? ''), presented);
-    if (sameDigest(digest, epoch.keyHash) && linkId === epoch.linkId) {
+    const boundLinkId = typeof linkId === 'string' ? linkId : '';
+    const digest = epochHash(boundLinkId, presented);
+    if (sameDigest(digest, epoch.keyHash)) {
       if (limits.chatKeyMaxAgeHours > 0
           && safeNow(now) - epoch.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000) return 'session_ended';
       return 'ok';
     }
     for (const retired of retiredEpochs) {
-      if (retired.linkId === linkId && sameDigest(digest, retired.hash)) return 'session_ended';
+      if (sameDigest(digest, retired.hash)) return 'session_ended';
     }
     const stamp = safeNow(now);
     badKeyTimes.push(stamp);
@@ -1251,7 +1252,6 @@ export function createHandoffEngine({
     const sessionCode = makeChatKey(random);
     const prepared = {
       n: epochOrdinal + 1,
-      linkId,
       keyHash: epochHash(linkId, sessionCode),
       mintedAt: safeNow(now),
       bytesServed: 0,

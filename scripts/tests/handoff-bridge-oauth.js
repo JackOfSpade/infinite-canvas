@@ -1115,6 +1115,24 @@ const phaseOneTests = [
     },
   },
   {
+    name: 'handoff bridge: oauth: a sealed grace successor digest mismatch fails closed',
+    run: async () => {
+      const env = boot();
+      const linked = await grant(env);
+      const rotated = await refresh(env, linked.token.refresh_token);
+      assert.equal(rotated.status, 200);
+      const state = env.store.state();
+      const predecessor = state.refresh.find(record => record.hash === shaHex(linked.token.refresh_token));
+      assert.ok(predecessor, 'the rotated predecessor must remain available for its bounded grace replay');
+      predecessor.successor = shaHex('synthetic-swapped-successor');
+      const restored = boot({ now: env.now, store: memoryStore(state) });
+      const replay = await refresh(restored, linked.token.refresh_token);
+      assert.equal(replay.json.error, 'invalid_grant');
+      assert.equal(restored.oauth.stats().activeFamilies, 0,
+        'a mismatched sealed successor digest must revoke rather than return a token pair');
+    },
+  },
+  {
     name: 'handoff bridge: oauth: pairing can only be armed through the main-process object and is never serialized',
     run: () => {
       const env = boot();
@@ -1692,7 +1710,7 @@ const assertionTests = [
 ];
 
 assert.equal(LAB_STEP_NAMES.length, 100);
-assert.equal(phaseOneTests.length, 21);
+assert.equal(phaseOneTests.length, 22);
 assert.equal(assertionTests.length, 42);
 
 export default [...portedLabTests, ...phaseOneTests, ...assertionTests];
