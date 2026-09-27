@@ -1,84 +1,154 @@
 # ChatGPT bridge: stable hostname runbook
 
-**Purpose:** give the bridge (and the Phase 0 tests) a fixed public HTTPS address, `https://bridge.<newdomain>`, so the ChatGPT plugin is created once and never re-pointed.
-**Decision (2026-09-26):** a new cheap domain registered at Porkbun; only that domain's nameservers point at a dedicated Cloudflare account; Cloudflare Tunnel (free) does the forwarding. `jackwu.ca` and `shuttersheep.com` are not touched. Background and alternatives: `docs/chatgpt-mcp-bridge-design.md` section 1 and D1/D2.
+**Purpose:** operate the Phase 1 bridge on a stable public HTTPS address without putting a tunnel credential in an argument, environment variable, repository, screenshot, chat, or routine backup. This is an operational checklist for Jack. It does not authorize or perform registrar, Cloudflare, DNS, or ChatGPT account changes.
 
-Only Jack can do the account, payment and DNS steps. Nothing here is automated.
+The existing domain is `lullascape.com`, registered at Porkbun and hosted in a dedicated Cloudflare account. `jackwu.ca` and `shuttersheep.com` remain out of scope. The lab hostname is `bridge-lab.lullascape.com`. Production uses one generated `b-<20-lowercase-hex>` label; its concrete value has not yet been generated or created.
 
-## 0. Chosen domain: `lullascape.com` (2026-09-26)
+## 0. Before any production plugin
 
-Jack chose an existing domain instead of buying a new one. Findings from public lookups on 2026-09-26:
+Choose the production label once, before creating its DNS route or ChatGPT plugin:
 
-- Registered at Porkbun on 2026-04-29, expires 2027-04-29, registrar lock on, DNS at Porkbun. A mainstream `.com` with a neutral coined name: it fits the naming guide in section 1.
-- Still on Porkbun's defaults, no site of Jack's own: the apex redirects (302) to a Porkbun link-in-bio page `https://lullascape-com.l.ink/`; **any subdomain** is a wildcard CNAME to Porkbun's parking host `uixie.porkbun.com`; MX points at Porkbun email forwarding (`fwd1/fwd2.porkbun.com`) and there is Porkbun's SPF TXT.
-- **DNSSEC is on** (a DS record exists at the `.com` registry), as on Jack's other two Porkbun domains.
+```sh
+openssl rand -hex 10
+```
 
-What moving its DNS to Cloudflare changes, and the ordering it needs:
+Use the result only to form `b-<20-lowercase-hex>.lullascape.com`; for example, the command output is not a credential, but do not paste the resulting production hostname into public tickets or screenshots. Record the selected hostname in the password manager and in the app setup, not in this repository. A hostname change later means a new plugin, a fresh warm-up, and dropped OAuth grants.
 
-1. **Decide what to keep.** Moving the nameservers stops the `l.ink` redirect and the parking records unless you recreate them, and stops email forwarding unless you recreate the MX and SPF records. If Jack has no aliases and no use for the `l.ink` page, nothing is lost. **Ask before moving:** does `lullascape.com` have email forwarding aliases or a page you rely on?
-2. **Add the domain to Cloudflare first** (Free plan). Cloudflare imports the existing records. Delete the imported apex `A` and wildcard `*` CNAME (the parking records) so they cannot shadow the tunnel. Keep the two MX records and the SPF TXT record only if forwarding is in use.
-3. **Turn DNSSEC off at Porkbun** for this domain (remove the DS record) **before** changing nameservers. If the DS record is left in place, validating resolvers get SERVFAIL for the whole domain once Cloudflare's nameservers answer. Then wait about a day for the old DS to expire from resolver caches. Because nothing important depends on this domain, waiting less is a low-risk shortcut if forwarding is not in use, but the tunnel hostname itself would fail to resolve for validating resolvers during any gap, including ChatGPT's if it validates.
-4. **Switch the nameservers** at Porkbun to Cloudflare's two and wait for **Active**.
-5. **Optional later:** enable DNSSEC in Cloudflare and add its DS record at Porkbun.
-6. **Hostnames:** `bridge.lullascape.com` (production) and `bridge-lab.lullascape.com` (lab). Keep every tunnel hostname on a subdomain so a future public site on the apex stays separate.
+The random label reduces scanner noise and pairing-hint spam. It is not an authorization boundary.
 
-Jack confirmed there is **no email forwarding** on this domain, so the imported MX and parking records are simply deleted and the SPF record becomes `v=spf1 -all`. Only **`bridge-lab.lullascape.com`** is published first (pointing at the Phase 0 spike on `127.0.0.1:8787`); `bridge.lullascape.com` is created later, for Phase 1.
+### Certificate Transparency correction
 
-The literal, step-by-step prompts for Claude in Chrome are in `docs/chatgpt-bridge-hostname-chrome-prompts.md` (Stage 1 now; Stage 2 after about 24 hours).
+Cloudflare's normal edge certificate covers a one-level hostname with a wildcard such as `*.lullascape.com`; issuance of that wildcard certificate does not put the individual `b-...` label in Certificate Transparency. This does not make the hostname secret: DNS, edge traffic, Cloudflare account access, and active scanning can still reveal it. Before production, confirm the certificate behavior and current issuance with `crt.sh`; do not infer it from this runbook alone.
 
-Sections 2 to 6 below apply unchanged, except that in section 1 the registration steps are already done: do not buy a new domain.
+## 1. Domain and DNS handoff status
 
-## 1. Pick and register the domain (Porkbun, about 5 minutes)
+`lullascape.com` was moved from Porkbun DNS to Cloudflare after removing its old parking/wildcard records. DNSSEC had to be disabled at Porkbun before that nameserver move. Before production, Jack must complete the reverse, safe DNSSEC handoff:
 
-**Choose it as shared infrastructure for many projects, not as this app's name.** One domain gives unlimited subdomains, and one Cloudflare tunnel can map several hostnames to different local ports, so later projects cost nothing extra.
+1. In Cloudflare, enable DNSSEC for `lullascape.com` and obtain the DS values Cloudflare displays.
+2. At Porkbun, add exactly those DS values at the registrar.
+3. Confirm DNSSEC validation after propagation. Do not remove or replace a DS record speculatively; a mismatched DS can make the entire zone fail for validating resolvers.
 
-- **Neutral and boring:** a short (about 6-12 letters), pronounceable, coined or two-unrelated-word name. Not `infinitecanvas`, `resume`, `jobs`, `career` or your own name: the hostname shows up in ChatGPT's plugin settings, DNS and Cloudflare logs and must not describe or expose what runs behind it. Subdomain names are discoverable, so never rely on them being secret; auth is what protects the data.
-- **Avoid brand and security words:** `openai`, `chatgpt`, `gpt`, `cloudflare`, `login`, `auth`, `secure`, `verify`, `account`, `pay`. They resemble phishing patterns and can trip safety filters. Also avoid hyphens and digits.
-- **Mainstream TLD:** `.com` (safest) or `.ca`. Avoid the very cheapest TLDs (`.xyz`, `.top` and similar): poorer reputation, and ChatGPT has rejected connectors on some domains as "not safe" (judgement, not verified for this case). Expect roughly 10-15 USD or CAD a year (unverified).
-- **Separate from anything personal or branded:** do not use `jackwu.ca` or `shuttersheep.com`. A dedicated domain keeps a registrar or Cloudflare problem, and any reputation damage, away from your email and site.
-- **Renewal must never lapse:** turn on auto-renew, keep the card valid, consider registering 2 or more years. If a lapsed domain were re-registered by someone else, the ChatGPT plugin would point at them.
-- **Registrar settings:** leave registrar lock on, turn on the free WHOIS privacy, and do **not** enable email forwarding, URL forwarding or DNSSEC on it.
+Do not add a wildcard DNS record. The production route must be only the selected `b-<20 hex>.lullascape.com` hostname. Keep the lab route separate.
 
-**Hostname plan (one level only: Cloudflare's free certificate covers `*.domain` but not `a.b.domain`):**
+## 2. Registrar and Cloudflare account hardening
 
-| Hostname | Use |
+Before carrying real data, Jack must verify all of the following. These are account-holder actions, not automated application steps.
+
+- Porkbun auto-renew is enabled, the payment method works, and the registration term is at least two years. The currently recorded expiration is 2027-04-29; renew before it becomes a deadline.
+- Registrar lock and WHOIS privacy remain enabled. Do not enable email forwarding or URL forwarding for the bridge hostname.
+- The dedicated Cloudflare account has a unique password-manager password and hardware-key 2FA (not SMS). Keep its recovery material protected.
+- DNSSEC is enabled at Cloudflare and the matching Cloudflare DS record is published at Porkbun, as described above.
+- Add a restrictive CAA record that permits the certificate authority Cloudflare documents for this zone. Verify the exact CA value in Cloudflare's current documentation before publishing it; a wrong CAA can prevent renewal.
+- Keep Cloudflare Access off for this hostname. ChatGPT cannot complete an Access login flow.
+- Keep Bot Fight Mode and AI-bot blocking off for this zone/hostname. The bridge relies on explicit route and source controls, not a generic bot challenge that may block connector traffic.
+
+Cloudflare terminates TLS. A Cloudflare account holder can see zone configuration and DNS, change routes and rules, and may be able to inspect or stream traffic/log data depending on enabled products and permissions. The account, its recovery channels, and anyone with its privileged access are therefore part of the bridge credential trust root. Keep Logpush and unnecessary traffic retention off, restrict account membership, and perform the planned `cloudflared tail --level debug` check before treating debug output as safe.
+
+## 3. Create the named tunnel with a credentials file
+
+Use a dedicated tunnel, for example `infinite-canvas-bridge`. From a local terminal while authenticated to the dedicated Cloudflare account:
+
+```sh
+cloudflared tunnel create infinite-canvas-bridge
+cloudflared tunnel route dns infinite-canvas-bridge b-<20-lowercase-hex>.lullascape.com
+chmod 600 "$HOME/.cloudflared/<tunnel-uuid>.json"
+```
+
+`tunnel create` writes a per-tunnel credential file named `<tunnel-uuid>.json` under `~/.cloudflared`. It contains the tunnel secret. Do not rename it, commit it, attach it, or copy its contents. The repository `.gitignore` does **not** protect an arbitrary `<uuid>.json` credential file; only storage discipline does. If `cloudflared login` was used for setup, delete the account-wide `~/.cloudflared/cert.pem` when it is no longer needed. That certificate is more powerful than the per-tunnel credential file.
+
+For Phase 1, save the selected hostname in Bridge Setup, choose and explicitly approve the `cloudflared` binary copy, then choose the credentials JSON. At enable time the app accepts only an owner-owned, non-symlink UUID-named JSON file with matching `TunnelID` and mode `0400` or `0600`; it writes its own generated `handoff-bridge/tunnel/config.yml` and starts the approved app-owned copy with a credentials-file configuration and a Unix-socket origin. Do not create a launchd service, a shell wrapper, a token environment variable, or a manual foreground connector for the production bridge. Before the app manages a tunnel ID, stop any hand-run lab connector using that same ID. The generated configuration uses this shape:
+
+```yaml
+tunnel: <tunnel-uuid>
+credentials-file: "/Users/<you>/.cloudflared/<tunnel-uuid>.json"
+ingress:
+  - hostname: b-<20-lowercase-hex>.lullascape.com
+    service: "unix:/Users/<you>/Library/Application Support/infinite-canvas/handoff-bridge/b.sock"
+    originRequest:
+      httpHostHeader: b-<20-lowercase-hex>.lullascape.com
+      connectTimeout: 5s
+      keepAliveConnections: 8
+      keepAliveTimeout: 30s
+  - service: http_status:404
+```
+
+The actual app path is chosen from its Electron user-data directory; the example is illustrative. Never place a tunnel token in argv. The app owns its generated configuration and exact run arguments: the tunnel ID is positional, the log level is `info`, the metrics listener is loopback-only, and `--no-autoupdate`, `--grace-period 2s`, `--label infinite-canvas`, and `--management-diagnostics=false` are required.
+
+## 4. Cloudflare edge rules before real data
+
+Create and test the following rules for the production hostname. Rule availability and quotas on the selected Cloudflare plan are unverified; record the result of the X7 check before depending on them.
+
+1. Create a WAF custom rule for the production hostname that allows only `/mcp`, `/oauth/*`, and `/.well-known/*` and blocks every other path. Keep the origin catch-all 404 as a separate backstop.
+2. Add a source-range rule for `/mcp`, `/oauth/token`, and `/oauth/revoke`. During S1 through S6 it is **log mode**. Before S7, switch it to enforcement only after validating OpenAI's published connector ranges and the measured source prefixes. Keep `/oauth/authorize` and `/.well-known/*` open so discovery and the human pairing flow work. The in-app policy remains the backstop.
+3. Add a rate-limit rule for `/oauth/*` and `/.well-known/*`. It is defense in depth; preserve the application-side limits.
+4. Do not put an Access application, generic browser challenge, Bot Fight Mode, or AI-bot blocking in front of the bridge.
+
+The Phase 0 observation was `52.255.111.0/28`, but it is not a permanent authority list. Refresh `OPENAI_CONNECTOR_RANGES` from the published source and the staged measurements before enabling enforcement. A range change can require a re-pair; do not silently widen rules to all Internet traffic just to restore service.
+
+## 5. Plugin creation and warm-up
+
+Only after the packaged app is healthy, the public protected-resource self-probe succeeds, and the production edge rules are ready:
+
+1. Create one ChatGPT MCP app with URL `https://b-<20-lowercase-hex>.lullascape.com/mcp`.
+2. Complete the staged S7 checks with synthetic data first: discovery, link, refresh, Disconnect/Reconnect, one drain, and the hostile-input check.
+3. Wait at least 30 minutes before treating a newly created plugin or any URL/tool-metadata edit as usable. A URL edit is a warm-up reset.
+4. Only then move the range rule from log mode to enforce and proceed to the monitored first real job.
+
+Use a dedicated ChatGPT Project or chat for handoffs, with memory, browsing, and unrelated connected apps configured intentionally. Delete handoff chats when appropriate for the selected data controls. Never paste the pairing code, chat epoch key, OAuth tokens, or tunnel credential into a chat.
+
+## 6. Backup and local credential hygiene
+
+The default safe choice is to keep tunnel credentials and bridge state out of Time Machine. On the Mac that owns the bridge, run the following paths after confirming the app's user-data location:
+
+```sh
+tmutil addexclusion "$HOME/.cloudflared"
+tmutil addexclusion "$HOME/Library/Application Support/infinite-canvas/handoff-bridge"
+```
+
+`tmutil` exclusions are local-machine settings; verify them after an OS migration or a new backup destination. If Jack deliberately needs disaster recovery, store the minimum required credentials in an encrypted, access-controlled backup outside Time Machine, document who can restore it, and understand that restoring a credential restores the ability to run that tunnel. Do not rely on `.gitignore`: it does not cover a tunnel `<uuid>.json` credential file.
+
+Keep the credential file owner-only (`0600`, or `0400` where the setup validator accepts it). Remove stale `cert.pem`, screenshots, terminal history containing sensitive setup material, and abandoned tunnel credentials. Rotate/delete a suspected credential in Cloudflare rather than attempting to redact it from a backup.
+
+## 7. What survives a restart
+
+| Item | After quit, crash, Force Quit, or relaunch |
 |---|---|
-| `bridge.<domain>` | The production ChatGPT bridge |
-| `bridge-lab.<domain>` | Lab/test copy of the bridge (the design requires a separate lab hostname for tests) |
-| `<project>.<domain>` | Any later project, each with its own tunnel and token so one leak never covers the others |
+| Enabled state | Does not survive. The bridge is off after every launch unless its separately persisted, opt-in `autoStart` setting was enabled. |
+| Chat epoch key and in-memory chat state | Does not survive. Every chat ends. |
+| OAuth link and persisted release/lane state | Can survive, subject to its expiry and the app's persisted state. |
+| Restored released lanes | Are held for `restart` unless already held or `needs_user`; they require the per-launch native confirmation before serving. |
+| Tunnel setup selections | A credentials-file selection can persist independently. A binary path and its pin persist only together and are never trusted without explicit approval; the credential file itself remains outside bridge state. |
+| Running cloudflared child after an app crash | The watchdog should terminate it in under about 5 seconds; the next launch also reaps a verified survivor. |
+| `autoStart` | Can bring up the tunnel and OAuth link only. It never restores a chat epoch or serves released work by itself. |
 
-OAuth tokens are bound to the hostname they were issued for, so projects on different subdomains cannot use each other's tokens.
+Do not assume a restart resumes a chat. Start a new chat/epoch through the native confirmation and use the generated starter again.
 
-## 2. Dedicated Cloudflare account (about 10 minutes)
+## 8. Recovery from refresh-reuse revocation
 
-- Create a **new** Cloudflare account (not one shared with anything else) with a unique password from your password manager and 2FA. Prefer a hardware key; otherwise an authenticator app, never SMS.
-- Cloudflare may ask for a payment method even on the free plan (unverified). The free plan is enough.
+`refresh_reuse` is intentionally fail-closed: it revokes the OAuth family, retires the epoch, and pauses the bridge. It can be a real compromise, a false positive, or - before client assertion enforcement is proven - an availability attack by a holder of a stale refresh token from an allowed network. Nothing is exposed while revoked: new protected calls fail, and recovery requires a new pairing at the Mac.
 
-## 3. Put the new domain's DNS on Cloudflare (minutes to a few hours of propagation)
+| Situation | Immediate result | Jack's recovery when back at the Mac | Expected downtime |
+|---|---|---|---|
+| Confirmed or suspected hostile refresh reuse while away | Family revoked; epoch retired; bridge paused; no new handoff data is served. | Treat the credential path and Cloudflare account as suspect; review the security event, rotate/revoke the tunnel credential if indicated, then use Revoke/Forget as appropriate and open a fresh native pairing window. | Until Jack can act, plus about 2 minutes for the re-pair drill. |
+| Likely false reuse or interrupted concurrent refresh | Same safe failure; do not try to revive the revoked family. | At the Mac, open pairing deliberately, link a new OAuth family, create a new chat epoch, and verify a synthetic protected request before resuming work. | About 2 minutes at the Mac; no data exposure during the outage. |
+| Range rule blocks legitimate connector traffic | Protected calls fail closed; no automatic broadening. | Confirm the observed prefix against OpenAI's published ranges and staged evidence, update the narrow rule/config under change control, then re-pair if required. | Until corrected and re-paired. |
 
-1. Cloudflare dashboard: **Add a domain** -> enter the new domain -> **Free** plan. It scans for records (there are none).
-2. Cloudflare shows two nameservers. In Porkbun, open that domain's **Authoritative Nameservers** and replace Porkbun's with Cloudflare's two.
-3. Wait until Cloudflare shows the domain as **Active**. Nothing else on your Porkbun account changes.
+Perform the M20 drill with synthetic data: revoke/reuse, verify that nothing is served, re-pair from the Mac, create a new chat, and measure the recovery. Do not conduct this drill by exposing a real refresh token.
 
-## 4. Create the tunnel (dashboard method, no `cert.pem`)
+## 9. Reversal ladder
 
-1. Cloudflare **Zero Trust** -> **Networks** -> **Tunnels** -> **Create a tunnel** -> connector type **Cloudflared** -> name it `infinite-canvas-bridge`.
-2. Choose **macOS**. Copy the **tunnel token** from the install command into your password manager. **Treat it as a secret:** anyone holding it can run a connector for your tunnel. Never paste it into chat, a file in the repo or a screenshot.
-3. Add a **public hostname**: subdomain `bridge`, your domain, service type **HTTP**, URL `http://127.0.0.1:8787` (the Phase 0 spike port; Phase 1 will use its own port).
-4. Run it by hand for the tests (a foreground process that stops when you close the terminal; the always-on launchd agent is a Phase 1/2 decision): `cloudflared tunnel run --token <TOKEN>`.
+Use the smallest effective step first. Preserve evidence before deleting a possibly compromised credential.
 
-## 5. Cloudflare zone settings that matter for ChatGPT
+1. **Stop exposure now:** Disable the bridge in Settings or Tray. Confirm the Unix socket is gone and no owned cloudflared process remains.
+2. **Remove application authorization:** Revoke all links or use Forget Setup. A revoked link is not restored; use a new pairing if service resumes.
+3. **Remove remote reachability:** Disconnect and delete the ChatGPT plugin, then remove the Cloudflare DNS route and tunnel. Deleting the plugin alone does not revoke tokens.
+4. **Remove local credentials:** revoke/delete the per-tunnel credential in Cloudflare, then securely remove the local credential file and any account-level `cert.pem` if present. Rotate account recovery material if account compromise is suspected.
+5. **Revert software only if required:** revert the bridge controller/renderer wiring, then run the bridge gate suite and verify the bridge is inert. Do not delete unrelated application state.
 
-- Turn **Bot Fight Mode** and **Block AI bots** **off** for this zone for now. Reports say they return 403 to ChatGPT's connector traffic. Later replace that with a narrow WAF skip rule for `/mcp`, `/oauth/*` and `/.well-known/*`.
-- Do **not** put Cloudflare Access (a login page) in front of the hostname: ChatGPT cannot pass it.
+## 10. Do not
 
-## 6. Verify (I can do this once you tell me the hostname)
-
-- With the spike server running on 8787: `curl -i https://bridge.<newdomain>/` should return the spike's `404 {"error":"not_found"}`, proving the whole path (Cloudflare edge -> tunnel -> your Mac -> the server).
-- Then create the ChatGPT plugin once at chatgpt.com/plugins -> Add -> Create MCP App with URL `https://bridge.<newdomain>/mcp/<token>` (spike, fake data, "No auth" only) and run the Phase 0 tests on that fixed URL.
-
-## Do not
-
-- Move `jackwu.ca` or `shuttersheep.com` to Cloudflare.
-- Reuse this Cloudflare account or domain for anything unrelated.
-- Commit the tunnel token, any hostname secret path or the spike's URL token.
+- Do not create or guess a production hostname in source control.
+- Do not put a tunnel secret, OAuth token, pairing code, chat key, or credential-file contents in a URL, argument, environment variable, repository, log, bug report, screenshot, or chat.
+- Do not use the production hostname for lab or fake-data experimentation.
+- Do not move `jackwu.ca` or `shuttersheep.com` to this Cloudflare account.
+- Do not weaken DNSSEC, CAA, source rules, rate limits, or account protection just to make a failed connector test pass; diagnose the measured failure first.
