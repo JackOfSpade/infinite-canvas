@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { isValidHostname, isValidPluginName } from '../../../src/utils/handoffBridgeConfig.js';
 
 export const CONFIG_VERSION = 1;
@@ -14,6 +15,15 @@ const DEFAULT_LIMITS = Object.freeze({
 });
 const LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
 const SOURCE_POLICIES = new Set(['enforce', 'alert', 'off']);
+const CONFIG_FIELDS = new Set([
+  'hostname', 'pluginName', 'scope', 'autoStart', 'autoRelease', 'limits',
+  'prefs', 'telemetryInBugReports', 'consentVersion',
+]);
+const PERSISTED_CONFIG_FIELDS = new Set(['v', ...CONFIG_FIELDS]);
+const PATCH_FIELDS = new Set([...CONFIG_FIELDS, 'confirmBreak']);
+const SCOPE_FIELDS = new Set(['applications', 'scoring']);
+const PREFS_FIELDS = new Set(['sourcePolicy', 'pairingNetworkCheck']);
+const writeQueues = new Map();
 
 function freezeConfig(config) {
   Object.freeze(config.scope);
@@ -47,12 +57,12 @@ function isPlainObject(value) {
 
 function normalizeLimits(value) {
   if (value === undefined) return { ...DEFAULT_LIMITS };
-  if (!isPlainObject(value)) return null;
+  if (!ownKeysAre(value, new Set(LIMIT_KEYS))) return null;
   const limits = { ...DEFAULT_LIMITS };
   for (const key of LIMIT_KEYS) {
     if (!Object.hasOwn(value, key)) continue;
     const item = value[key];
-    if (!Number.isFinite(item) || item < 0) return null;
+    if (!Number.isSafeInteger(item) || item < 0) return null;
     limits[key] = item;
   }
   if (!Number.isInteger(limits.jobsPerChat) || limits.jobsPerChat < 1 || limits.jobsPerChat > 3) return null;
@@ -61,7 +71,7 @@ function normalizeLimits(value) {
 }
 
 function normalizeConfig(value) {
-  if (!isPlainObject(value) || value.v !== CONFIG_VERSION) return null;
+  if (!ownKeysAre(value, PERSISTED_CONFIG_FIELDS) || value.v !== CONFIG_VERSION) return null;
   const defaults = emptyConfig();
   const hostname = Object.hasOwn(value, 'hostname') ? value.hostname : defaults.hostname;
   const pluginName = Object.hasOwn(value, 'pluginName') ? value.pluginName : defaults.pluginName;
@@ -70,10 +80,10 @@ function normalizeConfig(value) {
   const limits = normalizeLimits(value.limits);
   if ((hostname !== null && !isValidHostname(hostname))
       || (pluginName !== '' && !isValidPluginName(pluginName))
-      || !isPlainObject(scope)
+      || !ownKeysAre(scope, SCOPE_FIELDS)
       || typeof scope.applications !== 'boolean'
       || typeof scope.scoring !== 'boolean'
-      || !isPlainObject(prefs)
+      || !ownKeysAre(prefs, PREFS_FIELDS)
       || !SOURCE_POLICIES.has(prefs.sourcePolicy)
       || typeof prefs.pairingNetworkCheck !== 'boolean'
       || !limits) return null;
@@ -100,10 +110,165 @@ function normalizeConfig(value) {
   });
 }
 
+function ownKeysAre(value, allowed) {
+  return isPlainObject(value) && Object.keys(value).every(key => allowed.has(key));
+}
+
+function fieldError(fieldErrors, field, code = 'FORMAT') {
+  fieldErrors[field] = code;
+}
+
+function mergePatch(current, patch) {
+  if (!isPlainObject(patch)) return { fieldErrors: { patch: 'FORMAT' } };
+  const fieldErrors = {};
+  for (const key of Object.keys(patch)) {
+    if (!PATCH_FIELDS.has(key)) fieldError(fieldErrors, key, 'UNKNOWN');
+  }
+  if (Object.keys(fieldErrors).length) return { fieldErrors };
+
+  const next = {
+    v: CONFIG_VERSION,
+    hostname: current.hostname,
+    pluginName: current.pluginName,
+    scope: { ...current.scope },
+    autoStart: current.autoStart,
+    autoRelease: current.autoRelease,
+    limits: { ...current.limits },
+    prefs: { ...current.prefs },
+    telemetryInBugReports: current.telemetryInBugReports,
+    consentVersion: current.consentVersion,
+  };
+
+  if (Object.hasOwn(patch, 'hostname')) {
+    if (patch.hostname !== null && !isValidHostname(patch.hostname)) fieldError(fieldErrors, 'hostname');
+    else next.hostname = patch.hostname;
+  }
+  if (Object.hasOwn(patch, 'pluginName')) {
+    if (patch.pluginName !== '' && !isValidPluginName(patch.pluginName)) fieldError(fieldErrors, 'pluginName');
+    else next.pluginName = patch.pluginName;
+  }
+  if (Object.hasOwn(patch, 'scope')) {
+    if (!ownKeysAre(patch.scope, SCOPE_FIELDS)) fieldError(fieldErrors, 'scope');
+    else {
+      for (const key of SCOPE_FIELDS) {
+        if (Object.hasOwn(patch.scope, key)) {
+          if (typeof patch.scope[key] !== 'boolean') fieldError(fieldErrors, `scope.${key}`);
+          else next.scope[key] = patch.scope[key];
+        }
+      }
+    }
+  }
+  for (const key of ['autoStart', 'autoRelease', 'telemetryInBugReports']) {
+    if (Object.hasOwn(patch, key)) {
+      if (typeof patch[key] !== 'boolean') fieldError(fieldErrors, key);
+      else next[key] = patch[key];
+    }
+  }
+  if (Object.hasOwn(patch, 'limits')) {
+    if (!ownKeysAre(patch.limits, new Set(LIMIT_KEYS))) fieldError(fieldErrors, 'limits');
+    else {
+      for (const key of LIMIT_KEYS) {
+        if (!Object.hasOwn(patch.limits, key)) continue;
+        const value = patch.limits[key];
+        if (!Number.isSafeInteger(value) || value < 0) fieldError(fieldErrors, `limits.${key}`);
+        else next.limits[key] = value;
+      }
+      if (!Number.isInteger(next.limits.jobsPerChat)
+          || next.limits.jobsPerChat < 1 || next.limits.jobsPerChat > 3) fieldError(fieldErrors, 'limits.jobsPerChat');
+      if (next.limits.epochSoftBytes > next.limits.epochHardBytes) fieldError(fieldErrors, 'limits');
+    }
+  }
+  if (Object.hasOwn(patch, 'prefs')) {
+    if (!ownKeysAre(patch.prefs, PREFS_FIELDS)) fieldError(fieldErrors, 'prefs');
+    else {
+      if (Object.hasOwn(patch.prefs, 'sourcePolicy')) {
+        if (!SOURCE_POLICIES.has(patch.prefs.sourcePolicy)) fieldError(fieldErrors, 'prefs.sourcePolicy');
+        else next.prefs.sourcePolicy = patch.prefs.sourcePolicy;
+      }
+      if (Object.hasOwn(patch.prefs, 'pairingNetworkCheck')) {
+        if (typeof patch.prefs.pairingNetworkCheck !== 'boolean') fieldError(fieldErrors, 'prefs.pairingNetworkCheck');
+        else next.prefs.pairingNetworkCheck = patch.prefs.pairingNetworkCheck;
+      }
+    }
+  }
+  if (Object.hasOwn(patch, 'consentVersion')) {
+    if (!Number.isSafeInteger(patch.consentVersion) || patch.consentVersion < 0) fieldError(fieldErrors, 'consentVersion');
+    else next.consentVersion = patch.consentVersion;
+  }
+  if (Object.keys(fieldErrors).length) return { fieldErrors };
+  return { config: freezeConfig(next) };
+}
+
+function callFs(fsImpl, method, ...args) {
+  if (typeof fsImpl[method] !== 'function') return undefined;
+  return fsImpl[method](...args);
+}
+
+function assertSafeExistingConfig(fsImpl, filePath) {
+  if (typeof fsImpl.lstatSync !== 'function') return true;
+  try {
+    const stat = fsImpl.lstatSync(filePath);
+    return stat.isFile();
+  } catch (error) {
+    return error?.code === 'ENOENT';
+  }
+}
+
+function atomicWriteConfig(filePath, config, { fsImpl, randomBytes }) {
+  const directory = path.dirname(filePath);
+  let fd;
+  let temporaryPath;
+  try {
+    callFs(fsImpl, 'mkdirSync', directory, { recursive: true, mode: 0o700 });
+    callFs(fsImpl, 'chmodSync', directory, 0o700);
+    if (!assertSafeExistingConfig(fsImpl, filePath)) throw Object.assign(new Error('unsafe config'), { code: 'EUNSAFE' });
+    const encoded = Buffer.from(`${JSON.stringify(config)}\n`);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      temporaryPath = path.join(directory, `.config.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
+      try {
+        fd = fsImpl.openSync(temporaryPath, 'wx', 0o600);
+        break;
+      } catch (error) {
+        if (error?.code !== 'EEXIST' || attempt === 7) throw error;
+      }
+    }
+    let offset = 0;
+    while (offset < encoded.length) {
+      const written = fsImpl.writeSync(fd, encoded, offset, encoded.length - offset, offset);
+      if (!Number.isInteger(written) || written < 1) throw Object.assign(new Error('short config write'), { code: 'EWRITE' });
+      offset += written;
+    }
+    fsImpl.fsyncSync(fd);
+    fsImpl.closeSync(fd);
+    fd = undefined;
+    fsImpl.renameSync(temporaryPath, filePath);
+    temporaryPath = undefined;
+    callFs(fsImpl, 'chmodSync', filePath, 0o600);
+    // fsyncing the containing directory makes the rename durable on filesystems
+    // that support it; a compact fake filesystem need not expose this operation.
+    const directoryFd = callFs(fsImpl, 'openSync', directory, fs.constants.O_RDONLY);
+    if (directoryFd !== undefined) {
+      try { callFs(fsImpl, 'fsyncSync', directoryFd); }
+      finally { callFs(fsImpl, 'closeSync', directoryFd); }
+    }
+    return true;
+  } finally {
+    if (fd !== undefined) {
+      try { fsImpl.closeSync(fd); } catch { /* best-effort cleanup */ }
+    }
+    if (temporaryPath) {
+      try { fsImpl.unlinkSync(temporaryPath); } catch { /* never mask the write error */ }
+    }
+  }
+}
+
 // Reading is deliberately tolerant: a corrupted or unknown version does not
 // get rewritten merely because the app launched.
 export function readConfig(userDataPath, { fsImpl = fs } = {}) {
   try {
+    if (!assertSafeExistingConfig(fsImpl, configPathFor(userDataPath))) {
+      return { config: emptyConfig(), state: 'unreadable' };
+    }
     const parsed = JSON.parse(fsImpl.readFileSync(configPathFor(userDataPath), 'utf8'));
     const config = normalizeConfig(parsed);
     if (!config) return { config: emptyConfig(), state: 'unreadable' };
@@ -112,4 +277,48 @@ export function readConfig(userDataPath, { fsImpl = fs } = {}) {
     if (error?.code === 'ENOENT') return { config: emptyConfig(), state: 'missing' };
     return { config: emptyConfig(), state: 'unreadable' };
   }
+}
+
+/**
+ * Persist a user-approved configuration patch. Confirmation is deliberately an
+ * injected capability: the store has no Electron or renderer dependency and
+ * cannot silently treat a renderer value as a native approval.
+ */
+export function writeConfig(userDataPath, patch, {
+  fsImpl = fs,
+  linked = false,
+  confirmHostnameChange = async () => false,
+  randomBytes = crypto.randomBytes,
+} = {}) {
+  const filePath = configPathFor(userDataPath);
+  const previous = writeQueues.get(filePath) || Promise.resolve();
+  const write = previous.catch(() => undefined).then(async () => {
+    const loaded = readConfig(userDataPath, { fsImpl });
+    if (loaded.state === 'unreadable') return { ok: false, code: 'STATE_UNREADABLE' };
+    const merged = mergePatch(loaded.config, patch);
+    if (merged.fieldErrors) return { ok: false, code: 'INVALID', fieldErrors: merged.fieldErrors };
+
+    const hostnameChanged = merged.config.hostname !== loaded.config.hostname;
+    if (hostnameChanged && linked && patch.confirmBreak !== true) {
+      return { ok: false, code: 'LINK_WOULD_BREAK' };
+    }
+    if (hostnameChanged) {
+      let confirmed = false;
+      try { confirmed = await confirmHostnameChange({ previous: loaded.config.hostname, next: merged.config.hostname }); }
+      catch { confirmed = false; }
+      if (confirmed !== true) return { ok: false, code: 'DECLINED' };
+    }
+
+    try {
+      atomicWriteConfig(filePath, merged.config, { fsImpl, randomBytes });
+      return { ok: true, config: merged.config };
+    } catch {
+      return { ok: false, code: 'STATE_UNREADABLE' };
+    }
+  });
+  const settled = write.finally(() => {
+    if (writeQueues.get(filePath) === settled) writeQueues.delete(filePath);
+  });
+  writeQueues.set(filePath, settled);
+  return settled;
 }
