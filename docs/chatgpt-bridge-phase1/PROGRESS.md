@@ -262,3 +262,25 @@ The remediation also sends scope changes as independent partial patches, prevent
 | G10 | Green after independent sequence/lifecycle, privacy/spec, UI/accessibility, test-quality and final integrated reviews. No open finding remains. |
 
 Nothing was pushed. The remaining B9–B11 real-network and ChatGPT steps still require Jack.
+
+### B9 implementation audit remediation (2026-09-27)
+
+The full local bridge delta was re-audited and corrected in commit `301a5dd` (`fix: harden ChatGPT bridge setup flows`). Three independent gpt-5.6-terra passes covered runtime/security, renderer/setup UX, and packaging/test integrity, followed by integrated adversarial review.
+
+The remediation closes stale-window mutations after native sheets; a queued hostname change using a stale pre-link OAuth fact; lost or out-of-order tunnel selections; reads of uncommitted setup state; approval of a different cloudflared digest than the one shown in the native sheet; cache reset making the registered setup adapter unusable; partial PID-intent writes; and an off-state setup flow that could not progress from binary selection through approval, credentials, tunnel start and plugin setup. The setup dialog now offers a non-optimistic Turn on bridge action when its durable prerequisites are complete, uses durable approval readiness instead of unavailable presentation fields, and distinguishes incomplete, off-ready and tunnel-starting states. The unimplemented D10 telemetry checkbox is no longer presented, tunnel-log redaction keeps safe labels, and the launcher verifies the complete nested signature with `codesign --verify --deep --strict`.
+
+Cross-review found and fixed three patch-level races before the gate: consistency reload/invalidation must finish after an already-authorized durable mutation even if its window then closes; binary preparation must be inside the same per-session queue as persistence and cache reset; and approval must be bound to the exact main-derived SHA-256 displayed by its native sheet. Regression tests cover each interleaving with deferred synthetic ports and no network, socket or cloudflared process.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. The code commit contains exactly 16 explicitly staged production/test/launcher paths; `git diff --check` was clean. The temporary conformance dependencies and isolated CI clone were removed. Frozen files, root package files and the `nonApiAi.js` prototype result (`4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`) are unchanged. |
+| G1 | Green with an explicit final summary: 66 groups, 2249 passed, 0 failed. The exact filtered comparison with `~/ic-baseline-units.txt` printed nothing. |
+| G2 | Green. `npm test` completed all unit and resume-PDF suites. |
+| G3/G4 | Green. `npm run lint` and `npm run build:compile` passed with only the existing Vite chunk-size warnings. |
+| G5/G6 | Green. `npm run test:e2e` printed `Electron smoke test passed`; `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. |
+| G7 | Green at `301a5dd69f877977e19501b9fb18c2adb4c341b6` under Node 22.23.2/npm 10.9.8. The isolated full-clone `act` CI job completed lint, 2249 unit tests, resume-PDF tests and compile; only `.github/workflows/ci.yml` ran. |
+| G8 | Green. The macOS watchdog self-test passed its five generated child/process-group cases. The production-paced SDK conformance run passed wire (81 ms), OAuth (12 ms), drain (107 ms), push (1 ms), abuse (1775 ms), soak (600004 ms), tunnel (4745 ms) and orphan (1685 ms). |
+| Packaging | Green. `scripts/launch-app.command` rebuilt, signed, strict-deep-verified and relaunched the packaged app. Mounted setup regressions exercise the real React controls through bootstrap selection, approval, credentials, enable retry/pending and tunnel-ready transitions. A later native accessibility snapshot timed out after Settings was opened, so no force-close or real-network action was taken. |
+| G10 | Green after the independent runtime/security, UI/accessibility, packaging/test-quality and final integrated reviews. No open code-level finding remains. |
+
+Nothing was pushed. The app remains bridge-off for real traffic; B9–B11 still require Jack's Cloudflare, ChatGPT plugin, pairing-code and synthetic-only manual observations.
