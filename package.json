@@ -15,6 +15,9 @@
     "test:resume-pdf": "npm --prefix 'Job Application Design System/build' test",
     "test": "npm run test:unit && npm run test:resume-pdf",
     "test:e2e": "npm run build:compile && node scripts/electron-smoke.js",
+    "test:e2e:bridge": "npm run build:compile && node scripts/electron-bridge-smoke.js",
+    "test:tunnel": "node scripts/tunnel-supervisor-selftest.js",
+    "selftest:handoff-bridge": "node --import ./scripts/test-stubs/register.mjs scripts/handoff-bridge-conformance.js --suite=all",
     "test:job-apis": "node --import ./scripts/test-stubs/register.mjs scripts/run-api-tests.js",
     "preview": "vite preview"
   },

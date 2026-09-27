@@ -48,6 +48,23 @@ import application_handoff_dock from './tests/application-handoff-dock.js';
 import paste_identity_guard from './tests/paste-identity-guard.js';
 import paste_review_delta from './tests/paste-review-delta.js';
 import event_log_deletion_batching from './tests/event-log-deletion-batching.js';
+import handoff_bridge_inert from './tests/handoff-bridge-inert.js';
+import handoff_bridge_http from './tests/handoff-bridge-http.js';
+import handoff_bridge_mcp from './tests/handoff-bridge-mcp.js';
+import handoff_bridge_oauth from './tests/handoff-bridge-oauth.js';
+import handoff_bridge_engine from './tests/handoff-bridge-engine.js';
+import handoff_bridge_application from './tests/handoff-bridge-application.js';
+import handoff_bridge_push from './tests/handoff-bridge-push.js';
+import non_api_ai_bridge_seam from './tests/non-api-ai-bridge-seam.js';
+import handoff_bridge_store from './tests/handoff-bridge-store.js';
+import handoff_bridge_tunnel from './tests/handoff-bridge-tunnel.js';
+import handoff_bridge_controls from './tests/handoff-bridge-controls.js';
+import handoff_bridge_ipc from './tests/handoff-bridge-ipc.js';
+import handoff_bridge_privacy from './tests/handoff-bridge-privacy.js';
+import handoff_bridge_hostile from './tests/handoff-bridge-hostile.js';
+import handoff_bridge_source_scan from './tests/handoff-bridge-source-scan.js';
+import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
+import handoff_bridge_render from './tests/handoff-bridge-render.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -101,6 +118,23 @@ const testGroups = [
   ['paste-identity-guard.js', paste_identity_guard],
   ['paste-review-delta.js', paste_review_delta],
   ['event-log-deletion-batching.js', event_log_deletion_batching],
+  ['handoff-bridge-inert.js', handoff_bridge_inert],
+  ['handoff-bridge-http.js', handoff_bridge_http],
+  ['handoff-bridge-mcp.js', handoff_bridge_mcp],
+  ['handoff-bridge-oauth.js', handoff_bridge_oauth],
+  ['handoff-bridge-engine.js', handoff_bridge_engine],
+  ['handoff-bridge-application.js', handoff_bridge_application],
+  ['handoff-bridge-push.js', handoff_bridge_push],
+  ['non-api-ai-bridge-seam.js', non_api_ai_bridge_seam],
+  ['handoff-bridge-store.js', handoff_bridge_store],
+  ['handoff-bridge-tunnel.js', handoff_bridge_tunnel],
+  ['handoff-bridge-controls.js', handoff_bridge_controls],
+  ['handoff-bridge-ipc.js', handoff_bridge_ipc],
+  ['handoff-bridge-privacy.js', handoff_bridge_privacy],
+  ['handoff-bridge-hostile.js', handoff_bridge_hostile],
+  ['handoff-bridge-source-scan.js', handoff_bridge_source_scan],
+  ['handoff-bridge-ui.js', handoff_bridge_ui],
+  ['handoff-bridge-render.js', handoff_bridge_render],
 ];
 
 function validateTestRegistry(groups) {
