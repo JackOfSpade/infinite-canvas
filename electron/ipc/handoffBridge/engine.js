@@ -38,6 +38,8 @@ const STATUS_REASONS = new Set([
   'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
+const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'closed']);
+const LOG_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 // Composition reuses the push source when it replaces a terminal engine after
 // Disable. Keep discovery visibility owned by the current engine instance so
 // a late old refresh cannot leak its cache into the next lifecycle's status.
@@ -263,7 +265,10 @@ export function createHandoffEngine({
     } catch {
       if (!sourceCurrent(generation)) return false;
       fault = 'persist_failed';
-      log('persist_failed', { kind: 'lanes' });
+      // `persist_failed` has a deliberately narrow log schema. Do not send a
+      // made-up `kind` field here: a production logger correctly rejects it,
+      // which used to make this important fault invisible in bug reports.
+      log('persist_failed', { store: 'lanes', code: 'persist_failed' });
       return false;
     }
   }
@@ -339,6 +344,7 @@ export function createHandoffEngine({
     retiredEpochs.push({ n: epoch.n, hash: epoch.keyHash, linkId: epoch.linkId, endedAt: safeNow(now), reason });
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
     auditEvent('epoch_closed', { reason });
+    log('epoch_closed', { cause: LOG_EPOCH_CAUSES.has(reason) ? reason : 'other' });
     epoch = null;
     wake();
   }
@@ -356,6 +362,7 @@ export function createHandoffEngine({
       pauseCause = 'idle';
       counts.pauses++;
       auditEvent('pause', { cause: 'idle' });
+      log('pause', { cause: 'idle' });
     }
   }
 
@@ -379,6 +386,7 @@ export function createHandoffEngine({
       pauseCause = 'anomaly';
       counts.pauses++;
       auditEvent('pause', { cause: 'anomaly' });
+      log('pause', { cause: 'anomaly' });
     }
     counts.getUnauthorized++;
     return 'unauthorized';
@@ -1233,6 +1241,7 @@ export function createHandoffEngine({
       return false;
     }
     auditEvent('restart_confirmed');
+    log('restart_confirmed');
     return true;
   }
 
@@ -1276,6 +1285,7 @@ export function createHandoffEngine({
         if (kind === 'continue') counts.chatsContinued++;
         else counts.chatsStarted++;
         auditEvent(kind === 'continue' ? 'continue' : 'new_chat');
+        log(kind === 'continue' ? 'continue' : 'new_chat', { chatOrdinal: prepared.n });
         wake();
         return true;
       },
@@ -1345,6 +1355,7 @@ export function createHandoffEngine({
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     humanAction();
     auditEvent('release', { count: unique.size });
+    log('release', { kind: 'application', count: unique.size });
     wake();
     return { ok: true, count: unique.size };
   }
@@ -1372,6 +1383,7 @@ export function createHandoffEngine({
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     humanAction();
     auditEvent('unrelease');
+    log('unrelease', { kind: 'application', count: 1 });
     wake();
     return { ok: true };
   }
@@ -1419,6 +1431,7 @@ export function createHandoffEngine({
     }
     humanAction();
     auditEvent('resume', { cause: jobId ? 'lane' : 'bridge' });
+    log('resume', { cause: jobId ? 'lane' : 'bridge' });
     wake();
     return { ok: true };
   }
@@ -1428,6 +1441,7 @@ export function createHandoffEngine({
     pauseCause = cause;
     counts.pauses++;
     auditEvent('pause', { cause });
+    log('pause', { cause: LOG_PAUSE_CAUSES.has(cause) ? cause : 'user' });
     wake();
     return { ok: true };
   }

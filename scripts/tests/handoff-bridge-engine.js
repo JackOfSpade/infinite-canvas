@@ -13,7 +13,7 @@ import { APPLICATION_INSTRUCTIONS, REJECTED_CAUTION, RESULT_NOTES, clipCorrectio
 import { createApplicationLane, holdLane, isHumanAdvance, makeChatKey, rehydrateApplicationLane, remainingCounts, resumeLane, tombstoneCode } from '../../electron/ipc/handoffBridge/lanes.js';
 import { AUDIT_LINE_EXAMPLE, ENGINE_PORT_SHAPE, SOURCE_ADAPTER_SHAPE, STATUS_SNAPSHOT_EXAMPLE, TUNNEL_PORT_SHAPE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { classifyThrow, fixedError } from '../../electron/ipc/handoffBridge/errors.js';
-import { makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
+import { createHandoffBridgeLog, makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
@@ -93,6 +93,37 @@ const tests = [
         () => makeAuditLine({ event: 'not_enumerated', fields: {} }),
       ]) { let threw = false; try { attempt(); } catch { threw = true; } assert(threw, 'free-form log or audit input must be rejected'); }
       assert(makeAuditLine({ at: 1, event: 'served', fields: { tool: 'get_handoff', outcome: 'ok', argBytes: 12 } }).ev === 'served', 'enumerated serve audit must pass');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: concrete bridge logger validates exact output and bounds redacted Activity',
+    run: async () => {
+      let stamp = 100; const lines = [];
+      const log = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => ++stamp });
+      log.record('tool_call', { ms: 7, outcome: 'served', tool: 'get' });
+      assert(lines[0] === '[HandoffBridge] tool_call tool=get outcome=served ms=7', 'app logger output must use the exact closed record format and field order');
+      assert(JSON.stringify(log.getRecent()) === JSON.stringify([{ kind: 'get-served', at: 101, outcome: 'served' }]) && log.getVersion() === 1,
+        'a safe credential record becomes one redacted Activity item and increments its monotonic version');
+      let threw = false;
+      try { log.record('tool_call', { tool: 'get', outcome: 'secret prompt with spaces', ms: 8 }); } catch { threw = true; }
+      assert(threw && lines.length === 1 && log.getRecent().length === 1 && log.getVersion() === 1,
+        'unsafe fields must be rejected before either the app logger or Activity ring changes');
+      for (let index = 0; index < 205; index += 1) log.record('pause', { cause: 'user' });
+      const activity = log.getRecent();
+      assert(activity.length === 200 && log.getVersion() === 206 && activity.every(item => item.kind === 'paused' && item.outcome === 'paused'),
+        'Activity retains only its newest 200 safe projections while its version never wraps with the ring');
+
+      let failPersistence = false; const persistLines = [];
+      const engine = createHandoffEngine({
+        source: source().api,
+        store: { saveLanes: async () => !failPersistence },
+        logger: createHandoffBridgeLog({ logger: { info: line => persistLines.push(line) }, now: () => stamp }),
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'fixture lane must persist before its injected failure');
+      failPersistence = true;
+      assert((await engine.hold(JOB_A)).code === 'persist_failed', 'a failed lane write must fail closed');
+      assert(persistLines.includes('[HandoffBridge] persist_failed code=persist_failed store=lanes'),
+        'engine persistence failures use only the frozen persist_failed field schema');
     },
   },
   {
