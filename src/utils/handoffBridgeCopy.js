@@ -264,7 +264,7 @@ export const BRIDGE_SETUP_COPY = Object.freeze({
   certPresent: 'A cert.pem file is present. This bridge uses the named-tunnel credentials file instead.',
   advanced: 'Advanced',
   status: 'Tunnel status',
-  tunnelStates: Object.freeze({ off: 'Off', blocked: 'Blocked', 'needs-setup': 'Setup needed', 'needs-trust': 'Needs approval', starting: 'Starting', connecting: 'Connecting', 'checking-public': 'Checking public address', online: 'Online', degraded: 'Degraded', backoff: 'Waiting to retry', paused: 'Paused', stopping: 'Stopping', failed: 'Failed', unknown: 'Unknown' }),
+  tunnelStates: Object.freeze({ off: 'Off', blocked: 'Blocked', 'needs-setup': 'Setup needed', 'needs-trust': 'Needs approval', starting: 'Starting', connecting: 'Connecting', 'checking-public': 'Checking public address', up: 'Online', degraded: 'Degraded', backoff: 'Waiting to retry', paused: 'Paused', stopping: 'Stopping', failed: 'Failed', unknown: 'Unknown' }),
   defaultPluginName: 'Infinite Canvas',
   commandPreview: 'The app starts the approved tunnel program with its private configuration. This is an illustration, not a command to copy.',
   pairingLead: 'Open pairing here before creating or reconnecting the plugin in ChatGPT.',

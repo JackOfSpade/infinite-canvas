@@ -16,7 +16,7 @@ import { __resetBridgeUiForTests } from '../../src/utils/handoffBridgeUiStore.js
 const NOW = 1_700_000_000_000;
 const root = path.resolve('.');
 const source = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-function status(seq, extra = {}) { return { v: 1, seq, at: NOW, availability: { ok: true }, enabled: true, serving: 'live', setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true }, tunnel: { state: 'online', probe: { state: 'ok' } }, link: { state: 'linked' }, chat: { state: 'none' }, queue: { applications: {}, scoring: {} }, ...extra }; }
+function status(seq, extra = {}) { return { v: 1, seq, at: NOW, availability: { ok: true }, enabled: true, serving: 'live', setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true }, tunnel: { state: 'up', probe: { state: 'ok' } }, link: { state: 'linked' }, chat: { state: 'none' }, queue: { applications: {}, scoring: {} }, ...extra }; }
 
 function sameDescriptor(first, second) {
   return ['configurable', 'enumerable', 'writable', 'value', 'get', 'set'].every(key => first?.[key] === second?.[key]);
@@ -148,7 +148,7 @@ export default [
       let seed = 0x517a;
       const next = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
       for (let index = 1; index <= 300; index += 1) {
-        const odd = index % 5 === 0 ? { v: 1, seq: index, availability: { ok: true }, enabled: true, tunnel: { state: next() % 2 ? 'online' : 'not-real' }, queue: { jobs: Array.from({ length: next() % 70 }, () => ({ jobId: String(next()), phase: next() % 2 ? 'awaiting' : 'unknown' })) }, leak: { label: 'Marisol Quenby', code: '555-0101' } } : [null, {}, { v: 9 }][next() % 3];
+        const odd = index % 5 === 0 ? { v: 1, seq: index, availability: { ok: true }, enabled: true, tunnel: { state: next() % 2 ? 'up' : 'not-real' }, queue: { jobs: Array.from({ length: next() % 70 }, () => ({ jobId: String(next()), phase: next() % 2 ? 'awaiting' : 'unknown' })) }, leak: { label: 'Marisol Quenby', code: '555-0101' } } : [null, {}, { v: 9 }][next() % 3];
         const normalized = normalizeBridgeStatus(odd);
         const health = deriveBridgeHealth(normalized, NOW);
         assert(typeof health.id === 'string' && !Object.hasOwn(normalized, 'leak'), `snapshot ${index} must remain display-safe`);
@@ -254,7 +254,7 @@ export default [
           const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
           await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.MountedFuzzProbe))); bundle.module.openBridgePopover(); });
           for (let sequence = 1; sequence <= 300; sequence += 1) {
-            const hostile = sequence % 3 === 0 ? { v: 1, seq: sequence, availability: { ok: true }, enabled: true, setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, linked: true }, tunnel: { state: sequence % 2 ? 'online' : 'hostile-state', binary: { path: '/Users/ada/secret' } }, link: { state: 'linked' }, chat: { state: 'working', outstanding: { stage: sequence % 2 ? 'resume' : 'hostile text', task: 'job-scoring' } }, queue: { applications: { ready: sequence % 4 }, jobs: [{ jobId: 'not-a-uuid', phase: 'awaiting' }] }, leak: { label: 'Marisol Quenby', code: '555-0101' } } : status(sequence, { power: { keepAwake: sequence % 2 === 0 } });
+            const hostile = sequence % 3 === 0 ? { v: 1, seq: sequence, availability: { ok: true }, enabled: true, setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, linked: true }, tunnel: { state: sequence % 2 ? 'up' : 'hostile-state', binary: { path: '/Users/ada/secret' } }, link: { state: 'linked' }, chat: { state: 'working', outstanding: { stage: sequence % 2 ? 'resume' : 'hostile text', task: 'job-scoring' } }, queue: { applications: { ready: sequence % 4 }, jobs: [{ jobId: 'not-a-uuid', phase: 'awaiting' }] }, leak: { label: 'Marisol Quenby', code: '555-0101' } } : status(sequence, { power: { keepAwake: sequence % 2 === 0 } });
             await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(hostile); });
           }
           assert(!window.document.body.textContent.includes('Marisol Quenby') && !window.document.body.textContent.includes('555-0101'), 'mounted renderer fuzz must not render hostile snapshot fields');
