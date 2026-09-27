@@ -1233,6 +1233,122 @@ const phaseOneTests = [
       assert.equal(env.oauth.stats().pairings, 0);
     },
   },
+  {
+    name: 'handoff bridge: oauth: an expired refresh becomes a source-free renewal marker and changed-network code grant recovers',
+    run: async () => {
+      const hints = [];
+      const env = boot({ onAuthorizeWithoutWindow: value => hints.push(value) });
+      const initialCode = await obtainCode(env);
+      const initial = await call(env, 'POST', '/oauth/token', {
+        headers: FORM,
+        body: form({ grant_type: 'authorization_code', code: initialCode.code, redirect_uri: REDIRECT, code_verifier: initialCode.started.proof.verifier, resource: RESOURCE, client_id: CLIENT_ID }),
+        serverContext: { sourcePrefix: '203.0.113.0/24' },
+      });
+      assert.equal(initial.status, 200);
+      env.now.advance(CONSTANTS.REFRESH_IDLE_MS + 1);
+      assert.equal((await refresh(env, initial.json.refresh_token)).json.error, 'invalid_grant');
+      const marker = env.oauth.linkStatus()[0];
+      assert.equal(marker.state, 'needs-renewal');
+      assert.equal(marker.renewalCause, 'refresh_expired');
+      assert.equal(marker.revoked, true);
+      assert.deepEqual(marker.sources, []);
+      assert.equal(env.disconnected.at(-1).reason, 'refresh_expired');
+      assert.throws(() => env.oauth.authenticate({ headers: { authorization: `Bearer ${initial.json.access_token}` } }), error => error?.code === 'invalid_token',
+        'an expired family must not leave an access token authenticatable on any source');
+
+      const proof = pkce();
+      const closed = await call(env, 'GET', `/oauth/authorize?${form({
+        response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT, state: 'Ada-state', code_challenge: proof.challenge,
+        code_challenge_method: 'S256', resource: RESOURCE,
+      })}`, { serverContext: { source: '203.0.113.44' } });
+      assert.equal(closed.status, 403);
+      assert.deepEqual(hints, [{ source: '203.0.113.44', linkState: 'needs-renewal', knownFamily: true }],
+        'a closed known-family authorize forwards only bounded reconnect facts');
+      assert.deepEqual(env.oauth.unarmedStatus(), { count: 1, lastAt: env.now() }, 'anonymous authorize accounting is bounded status-only state');
+
+      const replacement = await obtainCode(env);
+      const recovered = await call(env, 'POST', '/oauth/token', {
+        headers: FORM,
+        body: form({ grant_type: 'authorization_code', code: replacement.code, redirect_uri: REDIRECT, code_verifier: replacement.started.proof.verifier, resource: RESOURCE, client_id: CLIENT_ID }),
+        serverContext: { sourcePrefix: '198.51.100.0/24' },
+      });
+      assert.equal(recovered.status, 200);
+      const linked = env.oauth.linkStatus();
+      assert.equal(linked.length, 1);
+      assert.equal(linked[0].state, 'linked');
+      assert.deepEqual(linked[0].sources, ['198.51.100.0/24']);
+      assert.doesNotThrow(() => env.oauth.authenticate({ headers: { authorization: `Bearer ${recovered.json.access_token}` } }));
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: load-time GC bounds revoked relinks while preserving active grace replay',
+    run: async () => {
+      const env = boot(); const linked = await grant(env); const rotated = await refresh(env, linked.token.refresh_token);
+      assert.equal(rotated.status, 200);
+      const seeded = env.store.state();
+      for (let familyIndex = 0; familyIndex < 20; familyIndex += 1) {
+        const id = `revoked-family-${familyIndex}`;
+        seeded.families.push({ ...seeded.families[0], id, revoked: true, revokedAt: env.now() - familyIndex - 1, renewalCause: null, renewalAt: null, sourcePrefix: null });
+        for (let tokenIndex = 0; tokenIndex < 128; tokenIndex += 1) {
+          seeded.refresh.push({ hash: shaHex(`refresh-${familyIndex}-${tokenIndex}`), familyId: id, supersededAt: null, successor: null, grace: null });
+          seeded.access.push({ hash: shaHex(`access-${familyIndex}-${tokenIndex}`), familyId: id, scope: 'handoff', expiresAt: env.now() + CONSTANTS.ACCESS_TTL_MS, revoked: true });
+        }
+      }
+      const store = memoryStore(seeded); const restored = boot({ now: env.now, store });
+      const stats = restored.oauth.stats();
+      assert.ok(stats.families <= 9 && stats.refreshTokens <= 1024 && stats.accessTokens <= 1024,
+        'load compaction must leave a fixed family/token-map ceiling after repeated relinks');
+      const compact = store.state();
+      const retainedByFamily = records => records.filter(record => record.familyId.startsWith('revoked-family-')).reduce((counts, record) => {
+        counts.set(record.familyId, (counts.get(record.familyId) || 0) + 1); return counts;
+      }, new Map());
+      assert.ok(compact.families.length <= 9 && [...retainedByFamily(compact.refresh).values(), ...retainedByFamily(compact.access).values()].every(count => count <= 8),
+        'revoked forensic family records retain only a fixed bounded token-hash sample on disk');
+      const replay = await refresh(restored, linked.token.refresh_token);
+      assert.equal(replay.status, 200);
+      assert.deepEqual(replay.json, rotated.json, 'the active predecessor grace replay survives compaction exactly');
+      assert.doesNotThrow(() => restored.oauth.authenticate({ headers: { authorization: `Bearer ${rotated.json.access_token}` } }),
+        'the active successor remains authenticatable after load-time compaction');
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: a malformed renewal marker is revoked before a loaded bearer can authenticate and expires durably',
+    run: async () => {
+      const env = boot(); const linked = await grant(env); const state = env.store.state();
+      state.families[0] = {
+        ...state.families[0], renewalCause: 'refresh_expired', renewalAt: env.now(), revoked: false, revokedAt: 0,
+      };
+      const store = memoryStore(state); const restored = boot({ now: env.now, store });
+      assert.throws(() => restored.oauth.authenticate({ headers: { authorization: `Bearer ${linked.token.access_token}` } }), error => error?.code === 'invalid_token',
+        'a renewalCause/revoked:false corruption must fail closed before any loaded access token is accepted');
+      const marker = restored.oauth.linkStatus()[0];
+      assert.equal(marker.state, 'needs-renewal'); assert.equal(marker.revoked, true); assert.deepEqual(marker.sources, []);
+      assert.equal(store.state().families[0].revoked, true, 'load normalization must be persisted rather than surviving only in memory');
+      env.now.advance(30 * 60_000 + 1);
+      assert.equal(restored.oauth.linkStatus().length, 0, 'a stale renewal marker must disappear from the public link projection');
+      assert.equal(store.state().families[0].renewalCause, null,
+        'marker expiry must commit the bounded durable projection rather than reappearing on restart');
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: an oversized active durable family is made source-free and non-authenticatable at load',
+    run: async () => {
+      const env = boot(); const linked = await grant(env); const state = env.store.state(); const familyId = state.families[0].id;
+      for (let index = 0; index < 1025; index += 1) {
+        state.access.push({ hash: shaHex(`oversized-active-${index}`), familyId, scope: CONSTANTS.SCOPE, expiresAt: env.now() + CONSTANTS.ACCESS_TTL_MS, revoked: false });
+      }
+      const store = memoryStore(state); const restored = boot({ now: env.now, store });
+      assert.throws(() => restored.oauth.authenticate({ headers: { authorization: `Bearer ${linked.token.access_token}` } }), error => error?.code === 'invalid_token',
+        'load-time capacity overflow must revoke the formerly active bearer family');
+      const marker = restored.oauth.linkStatus()[0];
+      assert.equal(marker.state, 'needs-renewal'); assert.equal(marker.renewalCause, 'invalid_grant'); assert.deepEqual(marker.sources, []);
+      const compact = store.state();
+      assert.equal(compact.families[0].revoked, true);
+      assert.equal(compact.access.filter(record => record.familyId === familyId).length, 0);
+      assert.equal(compact.refresh.filter(record => record.familyId === familyId).length, 0,
+        'an oversized family retains only the safe renewal marker, not a usable credential history');
+    },
+  },
 ];
 
 const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -1576,7 +1692,7 @@ const assertionTests = [
 ];
 
 assert.equal(LAB_STEP_NAMES.length, 100);
-assert.equal(phaseOneTests.length, 17);
+assert.equal(phaseOneTests.length, 21);
 assert.equal(assertionTests.length, 42);
 
 export default [...portedLabTests, ...phaseOneTests, ...assertionTests];

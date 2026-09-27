@@ -12,6 +12,19 @@ const TOKEN_PATH = '/oauth/token';
 const REVOKE_PATH = '/oauth/revoke';
 const CODE_RETAIN_MS = CONSTANTS.REFRESH_ABSOLUTE_MS;
 const MAX_CODES = 64;
+const RENEWAL_CAUSES = new Set(['refresh_expired', 'invalid_grant']);
+const UNARMED_STATUS_CAP = 999;
+// Durable OAuth state contains only hashes, but it must still have a hard
+// memory/disk ceiling.  Rather than silently forget a rotation (which would
+// weaken refresh-reuse detection), a family at the ceiling is fail-closed and
+// made to re-pair.  The values leave ample room for normal client retries.
+const MAX_TOKEN_RECORDS_PER_FAMILY = 1024;
+const MAX_REVOKED_FAMILIES = 8;
+const MAX_REVOKED_TOKEN_RECORDS_PER_FAMILY = 8;
+const MAX_RETAINED_FAMILIES = 1 + MAX_REVOKED_FAMILIES + 1;
+const MAX_RENEWAL_MARKERS = 1;
+const RENEWAL_MARKER_MS = 30 * 60_000;
+const REVOKED_FAMILY_RETENTION_MS = CONSTANTS.REFRESH_ABSOLUTE_MS;
 const b64u = value => Buffer.from(value).toString('base64url');
 const sha = value => crypto.createHash('sha256').update(String(value)).digest();
 const shaHex = value => sha(value).toString('hex');
@@ -19,6 +32,7 @@ const fingerprint = value => shaHex(value).slice(0, 8);
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const finiteTime = value => Number.isSafeInteger(value) && value >= 0;
+const safeRenewalCause = value => RENEWAL_CAUSES.has(value) ? value : null;
 // This is a canonical network prefix supplied by http.js, never a raw IP.
 // Keeping its validation here avoids accepting arbitrary persisted text into
 // linkStatus or the security ledger while preserving oauth.js's crypto-only
@@ -202,6 +216,9 @@ export function createOAuthServer({
     clientAuthFailures: 0,
   };
   let pairing = null;
+  // Anonymous authorize attempts are status-only diagnostics. They are never
+  // persisted, logged, audited, or used as a remote notification trigger.
+  let unarmedRequests = { count: 0, lastAt: null };
 
   const safeCall = (fn, ...args) => {
     try { return fn(...args); } catch { return undefined; }
@@ -211,9 +228,10 @@ export function createOAuthServer({
   const newId = () => b64u(randomBytes(18));
 
   function load() {
+    let normalized = false;
     let state;
     try { state = store.read?.(); } catch { state = null; }
-    if (!isObject(state) || state.v !== 1 || state.issuer !== base) return;
+    if (!isObject(state) || state.v !== 1 || state.issuer !== base) return normalized;
     for (const item of Array.isArray(state.clients) ? state.clients : []) {
       if (!isObject(item) || item.id !== pinnedClientId || item.clientKind !== 'cimd' || item.clientHost !== 'chatgpt.com'
         || typeof item.name !== 'string' || !Array.isArray(item.redirectUris) || item.redirectUris.length !== 1 || item.redirectUris[0] !== REDIRECT_URI
@@ -237,6 +255,14 @@ export function createOAuthServer({
     for (const item of Array.isArray(state.families) ? state.families : []) {
       if (!isObject(item) || typeof item.id !== 'string' || item.clientId !== pinnedClientId || typeof item.clientKind !== 'string'
         || !finiteTime(item.createdAt) || !finiteTime(item.lastRefreshedAt) || !finiteTime(item.idleExpiresAt) || !finiteTime(item.absoluteExpiresAt)) continue;
+      const renewalCause = safeRenewalCause(item.renewalCause);
+      const renewalAt = finiteTime(item.renewalAt) ? item.renewalAt : null;
+      // A renewal marker is an explicit proof that the credential family must
+      // no longer authenticate. Treat a malformed durable combination
+      // (`renewalCause` plus `revoked:false`) as revoked during load, before
+      // access hashes are ever made available to authenticate().
+      const renewalRevoked = Boolean(renewalCause);
+      if (renewalRevoked && item.revoked !== true) normalized = true;
       families.set(item.id, {
         id: item.id,
         linkId: shaHex(`link\n${item.id}`).slice(0, 12),
@@ -250,8 +276,14 @@ export function createOAuthServer({
         idleExpiresAt: item.idleExpiresAt,
         absoluteExpiresAt: item.absoluteExpiresAt,
         sourcePrefix: safeSourcePrefix(item.sourcePrefix),
-        revoked: item.revoked === true,
-        revokedAt: finiteTime(item.revokedAt) ? item.revokedAt : 0,
+        renewalCause,
+        renewalAt,
+        revoked: item.revoked === true || renewalRevoked,
+        // A corrupt live family has no trustworthy prior revocation time; the
+        // marker's own time becomes its conservative revocation boundary.
+        revokedAt: renewalRevoked && item.revoked !== true
+          ? (renewalAt ?? now())
+          : (finiteTime(item.revokedAt) ? item.revokedAt : (renewalRevoked ? (renewalAt ?? now()) : 0)),
       });
     }
     for (const item of Array.isArray(state.codes) ? state.codes : []) {
@@ -289,10 +321,18 @@ export function createOAuthServer({
         revoked: item.revoked === true,
       });
     }
+    return normalized;
   }
-  load();
+  const loadWasNormalized = load();
+  // Function declarations below are hoisted.  Compact immediately after load
+  // as well as on every route so a malformed/old durable file cannot create an
+  // unbounded in-memory map for the lifetime of a process.
+  const loadWasCompacted = sweep() || loadWasNormalized;
 
   function persistedState() {
+    // Commit only the bounded projection. This also catches a revoked family
+    // produced by a just-completed grant before its hashes reach disk again.
+    sweep();
     return {
       v: 1,
       issuer: base,
@@ -318,6 +358,8 @@ export function createOAuthServer({
         idleExpiresAt: family.idleExpiresAt,
         absoluteExpiresAt: family.absoluteExpiresAt,
         sourcePrefix: family.sourcePrefix,
+        renewalCause: safeRenewalCause(family.renewalCause),
+        renewalAt: finiteTime(family.renewalAt) ? family.renewalAt : null,
         revoked: family.revoked,
         revokedAt: family.revokedAt,
       })),
@@ -341,21 +383,195 @@ export function createOAuthServer({
   const commit = () => {
     try { return store.commit?.(persistedState()) === true; } catch { return false; }
   };
+  // A successful compaction is a safe, smaller projection of the validated
+  // state we just read. Failure remains fail-closed in memory and is retried by
+  // the next normal durable OAuth transition.
+  if (loadWasCompacted) { try { commit(); } catch { /* durable writes are checked by mutations */ } }
   const persistOrThrow = () => {
     if (!commit()) throw new OAuthError('temporarily_unavailable', 'State could not be saved', 503, { 'Retry-After': '5' });
+  };
+  const sweepAndCommit = () => {
+    if (!sweep()) return false;
+    // Sweep-only expiry/GC is a safe reduction. If disk happens to be
+    // unavailable, retain the smaller in-memory state and retry on the next
+    // mutation; it must never resurrect an expired or revoked family here.
+    try { return commit(); } catch { return false; }
   };
   const knownGrantError = (code, description, family) => {
     const error = new OAuthError(code, description);
     if (family) { error.knownFamily = true; error.linkId = family.linkId; }
     return error;
   };
+  const unarmedStatus = () => Object.freeze({
+    count: Math.max(0, Math.min(UNARMED_STATUS_CAP, Number(unarmedRequests.count) || 0)),
+    lastAt: finiteTime(unarmedRequests.lastAt) ? unarmedRequests.lastAt : null,
+  });
+  const activeRenewalFamily = () => [...families.values()].find(family => safeRenewalCause(family.renewalCause)
+    && finiteTime(family.renewalAt)
+    && now() - family.renewalAt <= RENEWAL_MARKER_MS) || null;
+  const boundedSource = value => typeof value === 'string' && value.length <= 128 && /^[0-9a-f.:/]+$/i.test(value) ? value : null;
+  function noteUnarmedAuthorize(serverContext = {}) {
+    unarmedRequests = {
+      count: Math.min(UNARMED_STATUS_CAP, (Number(unarmedRequests.count) || 0) + 1),
+      lastAt: now(),
+    };
+    counters.authorizeWithoutWindow += 1;
+    const family = activeRenewalFamily();
+    // This port carries only a bounded source shape and closed status enums.
+    // It never has authority to open a sheet, display a notice, or write an
+    // audit/log entry; pairing's maybeHint applies the final own-egress gate.
+    safeCall(onAuthorizeWithoutWindow, {
+      source: boundedSource(serverContext.source),
+      linkState: family ? 'needs-renewal' : ([...families.values()].some(item => !item.revoked) ? 'linked' : 'unlinked'),
+      knownFamily: Boolean(family),
+    });
+  }
+  function markNeedsRenewal(family, cause) {
+    if (!family || !safeRenewalCause(cause)) return false;
+    // A renewal marker is retained only as safe status metadata. The expired
+    // family itself is no longer authenticatable or source-authoritative:
+    // recovery is a new authorization-code exchange, never an old access or
+    // refresh bearer from a newly permitted network.
+    if (family.revoked && !safeRenewalCause(family.renewalCause)) return false;
+    family.renewalCause = cause;
+    family.renewalAt = now();
+    markRevoked(family);
+    persistOrThrow();
+    safeCall(onDisconnected, { linkId: family.linkId, reason: cause });
+    return true;
+  }
   const activePairing = () => pairing && pairing.expiresAt > now() ? pairing : null;
+
+  function deleteFamilyTokens(familyId) {
+    for (const [hash, record] of refreshTokens) if (record.familyId === familyId) refreshTokens.delete(hash);
+    for (const [hash, record] of accessTokens) if (record.familyId === familyId) accessTokens.delete(hash);
+  }
+
+  function tokenCount(records, familyId) {
+    let count = 0;
+    for (const record of records.values()) if (record.familyId === familyId) count += 1;
+    return count;
+  }
+
+  function capacityFor(family, { access = 0, refresh = 0 } = {}) {
+    if (!family || family.revoked) return false;
+    return tokenCount(accessTokens, family.id) + access <= MAX_TOKEN_RECORDS_PER_FAMILY
+      && tokenCount(refreshTokens, family.id) + refresh <= MAX_TOKEN_RECORDS_PER_FAMILY;
+  }
+
+  function trimRevokedFamilyTokens(familyId) {
+    let changed = false;
+    for (const records of [accessTokens, refreshTokens]) {
+      const owned = [...records.entries()].filter(([, record]) => record.familyId === familyId);
+      while (owned.length > MAX_REVOKED_TOKEN_RECORDS_PER_FAMILY) {
+        const [hash] = owned.shift();
+        records.delete(hash);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function compactDurableState(current) {
+    let changed = false;
+    // Expired access hashes cannot authenticate. Keep a revoked-but-unexpired
+    // record while its family is retained: authenticate() can then classify a
+    // known revoked credential without weakening reuse/grace semantics.
+    for (const [hash, record] of accessTokens) {
+      const family = families.get(record.familyId);
+      if (!family || record.expiresAt <= current) {
+        accessTokens.delete(hash); changed = true;
+      }
+    }
+    const active = [...families.values()].filter(family => !family.revoked)
+      .sort((left, right) => right.createdAt - left.createdAt || right.lastRefreshedAt - left.lastRefreshedAt);
+    // Normal code grants already enforce one active family. A corrupted state
+    // with more than one is reduced fail-closed to its newest one.
+    for (const family of active.slice(1)) {
+      family.renewalCause = 'invalid_grant';
+      family.renewalAt = current;
+      markRevoked(family);
+      changed = true;
+    }
+    for (const family of active.slice(0, 1)) {
+      if (tokenCount(accessTokens, family.id) > MAX_TOKEN_RECORDS_PER_FAMILY
+          || tokenCount(refreshTokens, family.id) > MAX_TOKEN_RECORDS_PER_FAMILY) {
+        family.renewalCause = 'invalid_grant';
+        family.renewalAt = current;
+        markRevoked(family);
+        changed = true;
+      }
+    }
+    // A reconnect marker is short-lived UI/pairing state, not a second
+    // durable link. Once its hint window closes, retain at most the ordinary
+    // revoked forensic family but remove the marker so linkStatus cannot keep
+    // advertising a stale renewal path forever.
+    for (const family of families.values()) {
+      if (!family.revoked || !safeRenewalCause(family.renewalCause)) continue;
+      if (!finiteTime(family.renewalAt) || family.renewalAt > current || current - family.renewalAt > RENEWAL_MARKER_MS) {
+        family.renewalCause = null;
+        family.renewalAt = null;
+        changed = true;
+      }
+    }
+    const renewal = [...families.values()]
+      .filter(family => family.revoked && safeRenewalCause(family.renewalCause)
+        && finiteTime(family.renewalAt) && family.renewalAt <= current
+        && current - family.renewalAt <= RENEWAL_MARKER_MS)
+      .sort((left, right) => right.renewalAt - left.renewalAt);
+    const keepMarkers = new Set(renewal.slice(0, MAX_RENEWAL_MARKERS).map(family => family.id));
+    const retainedRevoked = [...families.values()]
+      .filter(family => family.revoked && !keepMarkers.has(family.id)
+        && finiteTime(family.revokedAt) && family.revokedAt <= current
+        && current - family.revokedAt <= REVOKED_FAMILY_RETENTION_MS)
+      .sort((left, right) => right.revokedAt - left.revokedAt);
+    const keepRevoked = new Set(retainedRevoked.slice(0, MAX_REVOKED_FAMILIES).map(family => family.id));
+    for (const family of [...families.values()]) {
+      if (!family.revoked) continue;
+      if (keepMarkers.has(family.id)) {
+        const hadTokens = tokenCount(accessTokens, family.id) > 0 || tokenCount(refreshTokens, family.id) > 0;
+        deleteFamilyTokens(family.id);
+        if (hadTokens) changed = true;
+        continue;
+      }
+      if (keepRevoked.has(family.id)) {
+        // Retain a tiny bounded set so a recently revoked/replaced bearer can
+        // still be classified as a known family (and isolated by HTTP's grant
+        // limiter), while preventing relink/rotation history from expanding
+        // either durable token map. Grace replay is only meaningful for the
+        // active family and is never trimmed here.
+        if (trimRevokedFamilyTokens(family.id)) changed = true;
+        continue;
+      }
+      if (!keepRevoked.has(family.id)) {
+        deleteFamilyTokens(family.id);
+        families.delete(family.id);
+        changed = true;
+      }
+    }
+    // Keep at most the one active family plus the newest renewal marker. This
+    // last belt applies when a hostile durable file supplied odd timestamps.
+    if (families.size > MAX_RETAINED_FAMILIES) {
+      const removable = [...families.values()].filter(family => family.revoked)
+        .sort((left, right) => left.createdAt - right.createdAt);
+      while (families.size > MAX_RETAINED_FAMILIES && removable.length) {
+        const family = removable.shift();
+        deleteFamilyTokens(family.id);
+        families.delete(family.id);
+        changed = true;
+      }
+    }
+    return changed;
+  }
 
   function sweep() {
     const current = now();
-    for (const [id, transaction] of transactions) if (transaction.expiresAt <= current) transactions.delete(id);
-    for (const [hash, code] of codes) if (code.retainUntil <= current) codes.delete(hash);
-    if (pairing && pairing.expiresAt <= current) endPairing();
+    let changed = false;
+    for (const [id, transaction] of transactions) if (transaction.expiresAt <= current) { transactions.delete(id); changed = true; }
+    for (const [hash, code] of codes) if (code.retainUntil <= current) { codes.delete(hash); changed = true; }
+    while (codes.size > MAX_CODES) { codes.delete(codes.keys().next().value); changed = true; }
+    if (pairing && pairing.expiresAt <= current) { endPairing(); changed = true; }
+    return compactDurableState(current) || changed;
   }
 
   async function clientFor(clientId, { forceFetch = false } = {}) {
@@ -413,11 +629,10 @@ export function createOAuthServer({
     return true;
   }
 
-  async function authorizeGet(req, res) {
+  async function authorizeGet(req, res, serverContext = {}) {
     sweep();
     if (!activePairing() || !gateAllows(req)) {
-      counters.authorizeWithoutWindow += 1;
-      safeCall(onAuthorizeWithoutWindow);
+      noteUnarmedAuthorize(serverContext);
       throw new PageError('No pairing session is open on this Mac. Open pairing, then try again from ChatGPT.', 403);
     }
     const parsed = authorizationQuery(req);
@@ -648,7 +863,17 @@ export function createOAuthServer({
     }
 
     const replaced = [];
-    for (const family of families.values()) if (!family.revoked && markRevoked(family)) replaced.push(family);
+    for (const family of families.values()) {
+      if (!family.revoked && markRevoked(family)) replaced.push(family);
+      // A successful authorization-code exchange is the only recovery from a
+      // renewal marker. It consumes that marker immediately, preventing an
+      // old closed authorize request from continuing to produce reconnect
+      // hints after the fresh linked family exists.
+      if (family.revoked && safeRenewalCause(family.renewalCause)) {
+        family.renewalCause = null;
+        family.renewalAt = null;
+      }
+    }
     const current = now();
     const id = newId();
     const family = {
@@ -664,6 +889,8 @@ export function createOAuthServer({
       idleExpiresAt: current + CONSTANTS.REFRESH_IDLE_MS,
       absoluteExpiresAt: current + CONSTANTS.REFRESH_ABSOLUTE_MS,
       sourcePrefix: safeSourcePrefix(sourcePrefix),
+      renewalCause: null,
+      renewalAt: null,
       revoked: false,
       revokedAt: 0,
     };
@@ -689,10 +916,14 @@ export function createOAuthServer({
     const record = refreshTokens.get(shaHex(raw));
     const family = record ? families.get(record.familyId) : null;
     if (!record || !family || family.revoked) throw knownGrantError('invalid_grant', 'The refresh token is unknown, expired or revoked', family);
-    if (family.clientId !== client.id) throw new OAuthError('invalid_grant', 'The refresh token was issued to another client');
+    if (family.clientId !== client.id) {
+      markNeedsRenewal(family, 'invalid_grant');
+      throw knownGrantError('invalid_grant', 'The refresh token was issued to another client', family);
+    }
     const current = now();
     if (current >= family.absoluteExpiresAt || current >= family.idleExpiresAt) {
       counters.refreshExpired += 1;
+      markNeedsRenewal(family, 'refresh_expired');
       emit('refresh_expired', { linkId: family.linkId, clientKind: family.clientKind });
       throw knownGrantError('invalid_grant', 'The refresh token expired', family);
     }
@@ -708,15 +939,26 @@ export function createOAuthServer({
       }
       const pair = openPair(raw, record.grace);
       if (!pair || record.successor !== shaHex(pair.refresh) || !refreshTokens.has(record.successor)) {
+        markNeedsRenewal(family, 'invalid_grant');
         throw knownGrantError('invalid_grant', 'The refresh token is invalid', family);
       }
       const existing = accessTokens.get(shaHex(pair.access));
-      if (!existing) issueAccess(pair.access, family, scope);
+      if (!existing) {
+        if (!capacityFor(family, { access: 1 })) {
+          markNeedsRenewal(family, 'invalid_grant');
+          throw knownGrantError('invalid_grant', 'The refresh token is invalid', family);
+        }
+        issueAccess(pair.access, family, scope);
+      }
       else if (!existing.revoked) existing.expiresAt = current + CONSTANTS.ACCESS_TTL_MS;
       persistOrThrow();
       return tokenBody(pair.access, pair.refresh, existing?.scope || scope);
     }
 
+    if (!capacityFor(family, { access: 1, refresh: 1 })) {
+      markNeedsRenewal(family, 'invalid_grant');
+      throw knownGrantError('invalid_grant', 'The refresh token is invalid', family);
+    }
     const refresh = newSecret();
     const access = newSecret();
     record.supersededAt = current;
@@ -839,10 +1081,10 @@ export function createOAuthServer({
     const known = discoveryDocument(pathname) !== null || pathname === AUTHORIZATION_PATH || pathname === TOKEN_PATH || pathname === REVOKE_PATH;
     if (!known && !pathname.startsWith('/.well-known/') && !pathname.startsWith('/oauth/')) return false;
     try {
-      sweep();
+      sweepAndCommit();
       if (pathname.startsWith('/.well-known/')) { wellKnownRoute(req, res, pathname); return true; }
       if (pathname === AUTHORIZATION_PATH) {
-        if (req.method === 'GET') await authorizeGet(req, res);
+        if (req.method === 'GET') await authorizeGet(req, res, serverContext);
         else if (req.method === 'POST') await authorizePost(req, res);
         else methodNotAllowed(res, 'GET, POST');
         return true;
@@ -886,25 +1128,45 @@ export function createOAuthServer({
     pendingPairings: () => activePairing() ? 1 : 0,
     flush: () => { try { return store.flush?.() !== false; } catch { return false; } },
     close: () => { closePairing(); try { return store.flush?.() !== false; } catch { return false; } },
-    stats: () => ({
-      ...counters,
-      pendingTransactions: transactions.size,
-      pairings: activePairing() ? 1 : 0,
-      clients: clients.size,
-      codes: codes.size,
-      families: families.size,
-      activeFamilies: [...families.values()].filter(family => !family.revoked).length,
-      accessTokens: accessTokens.size,
-      refreshTokens: refreshTokens.size,
-    }),
-    linkStatus: () => [...families.values()].filter(family => !family.revoked).map(family => ({
-      linkId: family.linkId,
-      clientKind: family.clientKind,
-      createdAt: family.createdAt,
-      idleExpiresAt: family.idleExpiresAt,
-      absoluteExpiresAt: family.absoluteExpiresAt,
-      sources: family.sourcePrefix ? [family.sourcePrefix] : [],
-    })),
+    stats: () => {
+      sweepAndCommit();
+      return {
+        ...counters,
+        pendingTransactions: transactions.size,
+        pairings: activePairing() ? 1 : 0,
+        clients: clients.size,
+        codes: codes.size,
+        families: families.size,
+        activeFamilies: [...families.values()].filter(family => !family.revoked).length,
+        accessTokens: accessTokens.size,
+        refreshTokens: refreshTokens.size,
+      };
+    },
+    linkStatus: () => {
+      sweepAndCommit();
+      return [...families.values()]
+      // A renewal marker remains visible to the UI but is deliberately marked
+      // revoked for the HTTP source-policy reader. That permits the new
+      // authorization-code exchange from a changed network while never
+      // treating an expired credential's old prefix as an allow rule.
+      .filter(family => !family.revoked || safeRenewalCause(family.renewalCause))
+      .map(family => {
+        const renewalCause = safeRenewalCause(family.renewalCause);
+        return {
+          linkId: family.linkId,
+          clientKind: family.clientKind,
+          createdAt: family.createdAt,
+          idleExpiresAt: family.idleExpiresAt,
+          absoluteExpiresAt: family.absoluteExpiresAt,
+          state: renewalCause ? 'needs-renewal' : 'linked',
+          renewalCause,
+          revoked: family.revoked === true || Boolean(renewalCause),
+          sources: renewalCause ? [] : (family.sourcePrefix ? [family.sourcePrefix] : []),
+          unarmedRequests: unarmedStatus(),
+        };
+      });
+    },
+    unarmedStatus,
     challengeHeader: error => {
       let value = `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp", scope="${CONSTANTS.SCOPE}"`;
       if (error?.presented) value += ', error="invalid_token"';
