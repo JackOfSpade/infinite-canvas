@@ -50,9 +50,12 @@ Use a dedicated tunnel, for example `infinite-canvas-bridge`. From a local termi
 
 ```sh
 cloudflared tunnel create infinite-canvas-bridge
-cloudflared tunnel route dns infinite-canvas-bridge b-<20-lowercase-hex>.lullascape.com
+cloudflared tunnel route dns <tunnel-uuid> b-<20-lowercase-hex>.lullascape.com
 chmod 600 "$HOME/.cloudflared/<tunnel-uuid>.json"
+dig +short b-<20-lowercase-hex>.lullascape.com @1.1.1.1
 ```
+
+Record the `<tunnel-uuid>` printed by `tunnel create` and use it for the route command; do not use the tunnel name. With cloudflared 2026.9.3, a non-UUID tunnel argument can resolve to the `credentials-file` in a default config before Cloudflare looks up the supplied name. Confirm in the Cloudflare DNS dashboard that the record target is exactly `<tunnel-uuid>.cfargotunnel.com`; the command output must also report that UUID. Because Cloudflare flattens proxied CNAMEs, public `dig CNAME` can be empty. The ordinary `dig` check should return Cloudflare addresses rather than `NXDOMAIN`. If correcting an already-created DNS record, first confirm the hostname, then rerun the UUID route command with `--overwrite-dns`.
 
 `tunnel create` writes a per-tunnel credential file named `<tunnel-uuid>.json` under `~/.cloudflared`. It contains the tunnel secret. Do not rename it, commit it, attach it, or copy its contents. The repository `.gitignore` does **not** protect an arbitrary `<uuid>.json` credential file; only storage discipline does. If `cloudflared login` was used for setup, delete the account-wide `~/.cloudflared/cert.pem` when it is no longer needed. That certificate is more powerful than the per-tunnel credential file.
 

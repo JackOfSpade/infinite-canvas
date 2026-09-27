@@ -2,13 +2,14 @@ import fs from 'node:fs';
 import { assert } from './testHelpers.js';
 import { AVAILABILITY_REASONS, CHAT_STATES, EMPTY_BRIDGE_STATUS, FAULT_CODES, JOB_PHASES, JOB_REASONS, LINK_STATES, normalizeBridgeStatus, PROBE_REASONS, PROBE_STATES, TUNNEL_EXIT_CODES, TUNNEL_STATES } from '../../src/utils/handoffBridgeStatus.js';
 import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoffBridgeStatus, hasHandoffBridgeApi, startHandoffBridgeStatusSync } from '../../src/utils/handoffBridgeStore.js';
-import { BRIDGE_ACTION_COPY, BRIDGE_COPY, IPC_ERROR_COPY, ipcErrorMessage, sanitizeTunnelLogLine } from '../../src/utils/handoffBridgeCopy.js';
+import { BRIDGE_ACTION_COPY, BRIDGE_COPY, BRIDGE_SETUP_COPY, IPC_ERROR_COPY, ipcErrorMessage, sanitizeTunnelLogLine } from '../../src/utils/handoffBridgeCopy.js';
 import { HEALTH_IDS, describeJobRow, deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { projectDockItemsForBridge, startBridgeJobPublisher } from '../../src/utils/handoffBridgeQueue.js';
 import { APPLICATION_HANDOFF_LIMIT } from '../../src/utils/applicationHandoffDock.js';
 import { isValidHostname, isValidPluginName, isValidSocketPath } from '../../src/utils/handoffBridgeConfig.js';
 
 const configUrl = new URL('../../src/utils/handoffBridgeConfig.js', import.meta.url);
+const copyUrl = new URL('../../src/utils/handoffBridgeCopy.js', import.meta.url);
 const IMPORT_SYNTAX = /\bimport(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*(?:\(|['"{*A-Za-z_$])/;
 const NOW = 1_700_000_000_000;
 
@@ -99,6 +100,10 @@ export default [
     for (const [id, label] of Object.entries(BRIDGE_ACTION_COPY)) assert(typeof label === 'string' && label, `action ${id} must have copy`);
     for (const code of Object.keys(IPC_ERROR_COPY)) assert(ipcErrorMessage(code) === IPC_ERROR_COPY[code], `IPC code ${code} must have exact copy`);
     assert(ipcErrorMessage('NOT_A_CODE') === IPC_ERROR_COPY.INTERNAL, 'unknown IPC codes must have a fixed fallback');
+    assert(BRIDGE_SETUP_COPY.tunnelCommandList[2] === 'cloudflared tunnel route dns <UUID_FROM_CREATE_OUTPUT> bridge.your-domain.com', 'tunnel setup must route with the UUID printed by create');
+    assert(BRIDGE_SETUP_COPY.tunnelCommands.toLowerCase().includes('do not route by name'), 'tunnel setup must warn that a default config can make name routing unsafe');
+    const copySource = fs.readFileSync(copyUrl, 'utf8');
+    assert(!copySource.includes('cloudflared tunnel route dns NAME'), 'renderer copy must never instruct cloudflared to route DNS by tunnel name');
     const items = Array.from({ length: APPLICATION_HANDOFF_LIMIT + 4 }, (_, index) => ({ kind: 'application', jobId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, canvasFilePath: `/tmp/${index}.canvas`, handoffCode: `code-${index}`, prompt: 'synthetic', label: `Marisol Quenby ${index}`, stage: 'resume' })); const projected = projectDockItemsForBridge(items.reverse());
     assert(projected.length === APPLICATION_HANDOFF_LIMIT, 'dock projection must retain its fixed application limit'); assert(projected.every(item => !Object.hasOwn(item, 'label') && Object.hasOwn(item, 'sig')), 'publication projection may never contain renderer labels');
     const duplicate = { ...items[0], canvasFilePath: '/tmp/duplicate.canvas', handoffCode: 'other-code' }; const forward = projectDockItemsForBridge([items[0], duplicate]); const reverse = projectDockItemsForBridge([duplicate, items[0]]);

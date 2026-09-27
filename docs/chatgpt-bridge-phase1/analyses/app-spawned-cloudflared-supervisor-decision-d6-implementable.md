@@ -429,13 +429,14 @@ Already true **[V]**: cloudflared 2026.9.3 at /opt/homebrew/bin; ~/.cloudflared 
 cloudflared tunnel login
 # 2. create the production tunnel; note the UUID it prints; writes ~/.cloudflared/<UUID>.json (mode 0400)
 cloudflared tunnel create lullascape-bridge
-# 3. route the hostname (creates a proxied CNAME bridge -> <UUID>.cfargotunnel.com)
-cloudflared tunnel route dns lullascape-bridge bridge.lullascape.com
+# 3. route the hostname with the UUID printed by create (creates a proxied CNAME bridge -> <UUID>.cfargotunnel.com)
+# Do not route by name: a default config's readable credentials-file can select that configured tunnel first.
+cloudflared tunnel route dns <UUID_FROM_CREATE_OUTPUT> bridge.lullascape.com
 # 4. delete the broad certificate again (it can create/delete every tunnel in the zone)
 rm -f ~/.cloudflared/cert.pem
 # 5. checks
 ls -l ~/.cloudflared                        # expect <UUID>.json with -r--------, no cert.pem
-dig +short bridge.lullascape.com @1.1.1.1   # expect Cloudflare addresses (proxied), not NXDOMAIN
+dig +short bridge.lullascape.com @1.1.1.1       # expect Cloudflare addresses, not NXDOMAIN; verify the dashboard target is <UUID>.cfargotunnel.com
 # optional: stop Homebrew from upgrading (each upgrade needs a re-approval in the app)
 brew pin cloudflared
 ```
