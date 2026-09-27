@@ -19,6 +19,7 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 let createAuditSink;
+let CONSTANTS;
 let validateClientMetadata;
 let createHandoffEngine;
 let createRequestHandler;
@@ -38,8 +39,9 @@ let TOOLS_LIST;
 let exchange;
 
 async function loadLocalModules() {
-  const [audit, cimd, engine, httpBridge, laneStore, listener, mcp, oauth, oauthStore, tunnelConfig, tunnelReap, tunnelPs, tools, fakeHttp] = await Promise.all([
+  const [audit, constants, cimd, engine, httpBridge, laneStore, listener, mcp, oauth, oauthStore, tunnelConfig, tunnelReap, tunnelPs, tools, fakeHttp] = await Promise.all([
     import('../../electron/ipc/handoffBridge/audit.js'),
+    import('../../electron/ipc/handoffBridge/constants.js'),
     import('../../electron/ipc/handoffBridge/cimd.js'),
     import('../../electron/ipc/handoffBridge/engine.js'),
     import('../../electron/ipc/handoffBridge/http.js'),
@@ -55,6 +57,7 @@ async function loadLocalModules() {
     import('../../scripts/tests/fixtures/handoff-bridge/fakeHttp.js'),
   ]);
   ({ createAuditSink } = audit);
+  ({ CONSTANTS } = constants);
   ({ validateClientMetadata } = cimd);
   ({ createHandoffEngine } = engine);
   ({ createRequestHandler } = httpBridge);
@@ -1534,6 +1537,30 @@ function memoryAuditFs() {
   });
 }
 
+const SOAK_PRIMARY_MCP_REQUESTS = 2; // get_handoff + submit_handoff
+const SOAK_REFRESH_EVERY = 20;
+// A fresh Streamable HTTP client performs initialize, notifications/initialized,
+// and the explicit tools/list below. Keep this accounting tied to the concrete
+// protocol sequence rather than hiding a limiter failure behind a sleep.
+const SOAK_REFRESH_PEER_MCP_REQUESTS = 3;
+const SOAK_REFILL_HEADROOM = 0.75;
+
+function soakCycleDelayMs() {
+  const capacity = Number(CONSTANTS?.AUTHENTICATED_GRANT_BUCKET_CAPACITY);
+  const refillPerSecond = Number(CONSTANTS?.AUTHENTICATED_GRANT_BUCKET_REFILL_PER_SECOND);
+  assert.ok(Number.isFinite(capacity) && capacity >= SOAK_PRIMARY_MCP_REQUESTS,
+    'soak requires an authenticated grant bucket large enough for one tool cycle');
+  assert.ok(Number.isFinite(refillPerSecond) && refillPerSecond > 0,
+    'soak requires a positive authenticated grant bucket refill rate');
+  const averageRequests = SOAK_PRIMARY_MCP_REQUESTS + SOAK_REFRESH_PEER_MCP_REQUESTS / SOAK_REFRESH_EVERY;
+  const sustainedBudget = refillPerSecond * SOAK_REFILL_HEADROOM;
+  const delayMs = Math.ceil(1000 * averageRequests / sustainedBudget);
+  assert.ok(delayMs > 0 && Number.isSafeInteger(delayMs), 'soak cadence must be a positive safe interval');
+  assert.ok(averageRequests / (delayMs / 1000) <= sustainedBudget,
+    'soak authenticated request cadence exceeds its explicit sustained grant budget');
+  return delayMs;
+}
+
 async function soak(ctx, options, loaded) {
   const userData = ctx.make('soak');
   // Keep ledger rotation deterministic and in memory, while the actual soak
@@ -1547,6 +1574,7 @@ async function soak(ctx, options, loaded) {
     userData, source, audit, holdMs: 10, submitBudgetMs: 25000,
   });
   const until = Date.now() + (options.soakMs ?? 600000);
+  const cycleDelayMs = soakCycleDelayMs();
   const baselineHeap = process.memoryUsage().heapUsed;
   const baselineHandles = handles();
   try {
@@ -1564,8 +1592,12 @@ async function soak(ctx, options, loaded) {
     assert.ok(auditFs.existsSync(audit.servePath + '.1'), 'serve ledger did not rotate under synthetic call volume');
     assert.ok(!auditFs.existsSync(audit.securityPath + '.1'), 'security ledger rotated because of serve call volume');
     let iterations = 0;
+    let nextCycleAt = Date.now();
     await withSdkClient(env, loaded, token, async client => {
       while (Date.now() < until) {
+        const waitMs = nextCycleAt - Date.now();
+        if (waitMs > 0) await delay(Math.min(waitMs, Math.max(0, until - Date.now())));
+        if (Date.now() >= until) break;
         let served = await callSdkTool(client, 'get_handoff', { session }, 'soak get_handoff');
         if (served.status === 'session_full') {
           const continued = await env.engine.continueChat({ linkId: grant.linkId });
@@ -1586,7 +1618,9 @@ async function soak(ctx, options, loaded) {
           token = await refresh(env.socket, token);
           await withSdkClient(env, loaded, token, peer => peer.listTools());
         }
-        await delay(Math.min(50, Math.max(1, until - Date.now())));
+        // Advance from the scheduled start rather than adding arbitrary rest
+        // after work. A slow real request only lowers the request rate.
+        nextCycleAt = Math.max(nextCycleAt + cycleDelayMs, Date.now());
       }
     });
     assert.ok(iterations > 0, 'soak duration ended before one real SDK engine cycle');
