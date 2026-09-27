@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { exchange, parseContentLength } from './fixtures/handoff-bridge/fakeHttp.js';
 import { faultAt, withLeakCheck, withTimeout } from './fixtures/handoff-bridge/harness.js';
-import { createPermitPool, createRequestHandler, sourceKey } from '../../electron/ipc/handoffBridge/http.js';
+import { createPermitPool, createRequestHandler, isConnectorSource, sourceKey, sourcePrefix } from '../../electron/ipc/handoffBridge/http.js';
 import { createListener } from '../../electron/ipc/handoffBridge/listener.js';
 import { createSocketFsNet } from './fixtures/handoff-bridge/bridgeFixtures.js';
 import { methodNotAllowed, notFound, sendHtml, sendJson, sendRedirect } from '../../electron/ipc/handoffBridge/respond.js';
@@ -119,7 +119,7 @@ export default [
     async run() {
       let authenticates = 0;
       const audit = [];
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', mcp: async () => ({ status: 200, body: {} }), authenticate: async () => { authenticates++; return { linkId: 'L' }; }, audit: { write: entry => audit.push(entry) } });
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', mcp: async () => ({ status: 200, body: {} }), authenticate: async () => { authenticates++; return { linkId: 'L' }; }, audit: { write: entry => audit.push(entry) } });
       const absolute = await exchange(handler, { path: 'https://bridge.example.com/mcp', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert(absolute.status === 400 && absolute.readBytes === 0, 'absolute-form request targets must fail URL sanity before routing');
       const wrongMethod = await exchange(handler, { method: 'GET', path: '/mcp', body: '' });
@@ -235,7 +235,7 @@ export default [
     name: 'handoff bridge: http: host route and bearer checks reject before body consumption',
     async run() {
       const mcp = async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } });
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', mcp, authenticate: async () => { throw new Error('no token'); } });
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', mcp, authenticate: async () => { throw new Error('no token'); } });
       const unknown = await exchange(handler, { path: '/not-a-route', body: 'never parse' });
       assert(unknown.status === 404 && unknown.readBytes === 0, 'unknown paths must return before body read');
       const wrongHost = await exchange(handler, { path: '/mcp', headers: { host: 'localhost:43193' }, body: '{}' });
@@ -283,7 +283,7 @@ export default [
     async run() {
       let grant;
       const handler = createRequestHandler({
-        hostname: 'bridge.example.com',
+        hostname: 'bridge.example.com', sourcePolicy: 'off',
         authenticate: async () => ({ linkId: 'safe-link', clientKind: 'chatgpt' }),
         mcp: async (body, options) => { grant = options.grant; return { status: 200, body: { jsonrpc: '2.0', id: body.id, result: { ok: true } } }; },
       });
@@ -295,7 +295,7 @@ export default [
     name: 'handoff bridge: http: client close aborts an MCP hold through the port signal',
     async run() {
       let seen; let release;
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async (_body, { signal }) => {
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async (_body, { signal }) => {
         seen = signal; return new Promise(resolve => { release = resolve; });
       } });
       const req = new EventEmitter(); Object.assign(req, { url: '/mcp', method: 'POST', headers: { host: 'bridge.example.com', 'content-type': 'application/json', 'content-length': '41' }, rawHeaders: ['host', 'bridge.example.com'], complete: true, destroy() {} });
@@ -333,11 +333,11 @@ export default [
   {
     name: 'handoff bridge: http: MCP protocol failures stay JSON-RPC and anonymous 401 permits live through response completion',
     async run() {
-      const valid = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
+      const valid = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
       const wrongType = await exchange(valid, { path: '/mcp', headers: { 'content-type': 'text/plain' }, body: '{}' });
       assert(wrongType.status === 415 && JSON.parse(wrongType.body).error.code === -32000, 'MCP content-type failures must use the JSON-RPC error envelope');
       const now = () => 0;
-      const limited = createRequestHandler({ hostname: 'bridge.example.com', now, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
+      const limited = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', now, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
       let last;
       for (let index = 0; index < 61; index++) last = await exchange(limited, { path: '/mcp', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
       assert(last.status === 429 && JSON.parse(last.body).error.code === -32000 && last.headers['retry-after'], 'per-grant throttling must be JSON-RPC with Retry-After');
@@ -364,10 +364,10 @@ export default [
       const throwingGate = createRequestHandler({ hostname: 'bridge.example.com', accepting() { throw new Error('gate'); }, mcp: async () => ({ status: 200, body: {} }) });
       const gateFailure = await exchange(throwingGate, { method: 'GET', path: '/.well-known/openid-configuration', body: '' });
       assert(gateFailure.status === 500 && !gateFailure.body.toString('utf8').includes('gate'), 'outer handler errors must become fixed non-leaking 500 responses');
-      const throwingAudit = createRequestHandler({ hostname: 'bridge.example.com', audit: { write() { throw new Error('audit'); } }, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
+      const throwingAudit = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', audit: { write() { throw new Error('audit'); } }, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
       const result = await exchange(throwingAudit, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://foreign.example' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
       assert(result.status === 200, 'best-effort audit failures must not affect an authenticated wire response');
-      const partial = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
+      const partial = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
       const req = new EventEmitter(); Object.assign(req, { url: '/mcp', method: 'POST', headers: { host: 'bridge.example.com', 'content-type': 'application/json' }, rawHeaders: ['host', 'bridge.example.com'], complete: true, destroy() {} });
       let destroyed = false;
       const res = new EventEmitter(); Object.assign(res, { headersSent: false, writableEnded: false, setHeader() {}, writeHead() { this.headersSent = true; }, end() { throw new Error('partial response'); }, destroy() { destroyed = true; } });
@@ -460,13 +460,13 @@ export default [
   {
     name: 'handoff bridge: http: MCP maps chunk overflow and a stalled body to fixed non-5xx responses',
     async run() {
-      const authenticated = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
+      const authenticated = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
       const overflow = await exchange(authenticated, { path: '/mcp', headers: { 'content-type': 'application/json' }, chunked: true, chunkSize: 8192, body: 'x'.repeat(2 * 1024 * 1024 + 1) });
       assert(overflow.status === 413 && !overflow.body.toString('utf8').includes('server_error'), 'chunked MCP overflow must be a fixed 413, not a 500');
       const clock = createFakeClock(0); let status = 0; let text = '';
       const req = { url: '/mcp', method: 'POST', headers: { host: 'bridge.example.com', 'content-type': 'application/json', 'content-length': '2' }, rawHeaders: ['host', 'bridge.example.com'], complete: false, on(event, callback) { this[event] = callback; }, once() {}, destroy() { this.destroyed = true; } };
       const res = { headersSent: false, setHeader() {}, once() {}, writeHead(code) { status = code; this.headersSent = true; }, end(body = '') { text = String(body); } };
-      const stalled = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'stalled' }), mcp: async () => ({ status: 200, body: {} }), setTimeoutImpl: clock.setTimeout, clearTimeoutImpl: clock.clearTimeout });
+      const stalled = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'stalled' }), mcp: async () => ({ status: 200, body: {} }), setTimeoutImpl: clock.setTimeout, clearTimeoutImpl: clock.clearTimeout });
       const pending = stalled(req, res);
       for (let i = 0; i < 8; i++) await Promise.resolve();
       clock.advance(30_000); await pending;
@@ -576,7 +576,7 @@ export default [
   {
     name: 'handoff bridge: http: full Expect preflight reserves only its own pool and refuses before Continue',
     async run() {
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: {} } }), oauth: { handle: async (_req, res) => { res.writeHead(200, { 'content-length': '0' }); res.end(); } } });
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: {} } }), oauth: { handle: async (_req, res) => { res.writeHead(200, { 'content-length': '0' }); res.end(); } } });
       const rejected = await exchange({ checkContinue: (req, res) => handler.preflight(req, res) }, { expectContinue: true, path: '/mcp', headers: { 'content-type': 'application/json', 'content-length': String(2 * 1024 * 1024 + 1) }, body: '' });
       assert(rejected.status === 413 && rejected.readBytes === 0, 'Expect MCP preflight must reject declared oversize before 100 Continue or a body read');
       const accepted = await exchange({ checkContinue: async (req, res) => { if (await handler.preflight(req, res)) await handler(req, res); } }, { expectContinue: true, path: '/oauth/authorize', method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
@@ -589,7 +589,7 @@ export default [
   {
     name: 'handoff bridge: http: anonymous slow OAuth reservations cannot starve authenticated MCP',
     async run() {
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => ({ linkId: 'grant' }), mcp: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: {} } }), oauth: { handle: async () => undefined } });
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: {} } }), oauth: { handle: async () => undefined } });
       const held = [];
       for (let i = 0; i < 3; i++) {
         const req = { url: '/oauth/authorize', method: 'POST', headers: { host: 'bridge.example.com', 'content-length': '7', 'cf-connecting-ip': `198.51.100.${i + 1}` }, rawHeaders: ['host', 'bridge.example.com'], once() {} };
@@ -611,7 +611,7 @@ export default [
       const audit = [];
       for (const mode of ['throw', 'reject']) {
         const port = faultAt({ call: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: {} } }) }, 1, { mode, error: new Error('synthetic dispatch fault') });
-        const handler = createRequestHandler({ hostname: 'bridge.example.com', audit: { write: entry => audit.push(entry) }, authenticate: async () => ({ linkId: `grant-${mode}` }), mcp: body => port.port.call(body) });
+        const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', audit: { write: entry => audit.push(entry) }, authenticate: async () => ({ linkId: `grant-${mode}` }), mcp: body => port.port.call(body) });
         const first = await exchange(handler, { path: '/mcp', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
         const second = await exchange(handler, { path: '/mcp', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":2,"method":"ping"}' });
         assert(first.status === 500 && second.status === 200 && handler.pools.authPool.held === 0 && handler.pools.mcpBodyPool.held === 0, `${mode} after an await must not strand MCP permits`);
@@ -630,6 +630,76 @@ export default [
         await exchange(handler, { method: 'GET', path: '/.well-known/openid-configuration', headers: { 'cf-connecting-ip': `2001:db8:${i.toString(16)}:0::1` }, body: '' });
       }
       assert(audit.some(entry => entry.ev === 'rate_lru_aggregate_only' && entry.kind === 'well_known'), 'more than fifty IPv6 LRU evictions in a minute must record aggregate-only mode');
+    },
+  },
+  {
+    name: 'handoff bridge: http: source policy canonicalizes /24 and /48 prefixes and honours pinned connector CIDRs',
+    run() {
+      assert(sourcePrefix({ headers: { 'cf-connecting-ip': '203.0.113.199' } }) === '203.0.113.0/24', 'IPv4 source policy must use the link-time /24');
+      assert(sourcePrefix({ headers: { 'cf-connecting-ip': '2001:db8:1234:abcd::99' } }) === '2001:db8:1234::/48', 'IPv6 source policy must use the link-time /48');
+      assert(sourcePrefix({ headers: { 'cf-connecting-ip': 'not-an-ip' } }) === 'unknown', 'invalid source headers must not become a policy prefix');
+      assert(isConnectorSource({ headers: { 'cf-connecting-ip': '52.255.111.5' } }), 'the seeded OpenAI /28 must be recognized');
+      assert(!isConnectorSource({ headers: { 'cf-connecting-ip': '52.255.111.16' } }), 'CIDR matching must not round a /28 up to a /24');
+      assert(isConnectorSource({ headers: { 'cf-connecting-ip': '2001:db8:1234:ffff::1' } }, ['2001:db8:1234::/48']), 'IPv6 connector CIDRs must compare the requested prefix width');
+      assert(!isConnectorSource({ headers: { 'cf-connecting-ip': '2001:db8:1235::1' } }, ['2001:db8:1234::/48']), 'IPv6 connector CIDRs must not accept an adjacent /48');
+    },
+  },
+  {
+    name: 'handoff bridge: http: source policy rejects before bearer/key work, preserves connector admission, and writes only closed ledger facts',
+    async run() {
+      const audit = []; let authenticates = 0; let securityCallbacks = 0; let mcpCalls = 0; let oauthCalls = 0;
+      const oauth = {
+        linkStatus: () => [{ linkId: 'grant', sources: ['203.0.113.0/24'] }],
+        handle: async (_req, res) => { oauthCalls += 1; res.writeHead(200); res.end(); },
+      };
+      const handler = createRequestHandler({
+        hostname: 'bridge.example.com', oauth, audit: { write: entry => audit.push(entry) },
+        authenticate: async () => { authenticates += 1; securityCallbacks += 1; return { linkId: 'grant' }; },
+        mcp: async () => { mcpCalls += 1; return { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }; },
+      });
+      const deniedMcp = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/json', authorization: 'Bearer malformed' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      const deniedReuse = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/json', authorization: 'Bearer reused-family-token' }, body: '{"jsonrpc":"2.0","id":2,"method":"ping"}' });
+      const deniedToken = await exchange(handler, { path: '/oauth/token', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&refresh_token=synthetic' });
+      const deniedRevoke = await exchange(handler, { path: '/oauth/revoke', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/x-www-form-urlencoded' }, body: 'token=synthetic' });
+      assert(deniedMcp.status === 401 && deniedReuse.status === 401 && deniedToken.status === 401 && deniedRevoke.status === 401, 'a mismatched family source must receive the fixed 401 on every protected route');
+      assert(authenticates === 0 && securityCallbacks === 0 && mcpCalls === 0 && oauthCalls === 0 && deniedMcp.readBytes === 0 && deniedReuse.readBytes === 0 && deniedToken.readBytes === 0 && deniedRevoke.readBytes === 0, 'wrong-prefix malformed and reused bearers must stop before authentication, security callbacks, key/reuse work, or a body read');
+      const mismatches = audit.filter(entry => entry.ev === 'source_mismatch');
+      assert(mismatches.length === 4 && mismatches.every(entry => Object.keys(entry).sort().join(',') === 'ev,route,statusClass' && ['mcp', 'oauth/token', 'oauth/revoke'].includes(entry.route) && entry.statusClass === '4xx') && !JSON.stringify(mismatches).includes('198.51.100'), 'pre-auth mismatch ledger entries must contain only enumerated event, route, and status-class facts, never an address or prefix');
+      const samePrefix = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '203.0.113.88', 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      const connector = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '52.255.111.5', 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      assert(samePrefix.status === 200 && connector.status === 200, 'the link prefix and a pinned connector CIDR must be accepted');
+      let multiAuthenticates = 0;
+      const multiFamily = createRequestHandler({ hostname: 'bridge.example.com', oauth: { linkStatus: () => [{ linkId: 'first', sources: ['198.51.100.0/24'] }, { linkId: 'second', sources: ['203.0.113.0/24'] }] }, authenticate: async () => { multiAuthenticates += 1; return { linkId: 'first' }; }, mcp: async () => ({ status: 200, body: {} }) });
+      const multi = await exchange(multiFamily, { path: '/mcp', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/json' }, body: '{}' });
+      assert(multi.status === 401 && multiAuthenticates === 0 && multi.readBytes === 0, 'pre-auth source admission must use exactly one active family, never whichever family happens to match a prefix');
+      let postAuthenticates = 0;
+      const postAuthExact = createRequestHandler({ hostname: 'bridge.example.com', oauth: { linkStatus: () => [{ linkId: 'sole', sources: ['203.0.113.0/24'] }] }, authenticate: async () => { postAuthenticates += 1; return { linkId: 'other' }; }, mcp: async () => ({ status: 200, body: {} }) });
+      assert((await exchange(postAuthExact, { path: '/mcp', headers: { 'cf-connecting-ip': '203.0.113.88', 'content-type': 'application/json' }, body: '{}' })).status === 401 && postAuthenticates === 1, 'the post-auth exact-family check must remain defensive after pre-auth admission');
+      let dynamicPolicy = 'alert'; const dynamicAudit = [];
+      const dynamic = createRequestHandler({ hostname: 'bridge.example.com', oauth, sourcePolicy: () => dynamicPolicy, audit: { write: entry => dynamicAudit.push(entry) }, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
+      assert((await exchange(dynamic, { path: '/mcp', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/json' }, body: '{}' })).status === 200 && dynamicAudit.every(entry => !('source' in entry)), 'dynamic alert records only safe facts but continues');
+      dynamicPolicy = 'off';
+      assert((await exchange(dynamic, { path: '/mcp', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/json' }, body: '{}' })).status === 200, 'dynamic off disables source enforcement without rebuilding the handler');
+      let rePairCalls = 0;
+      const rePair = createRequestHandler({ hostname: 'bridge.example.com', oauth: { linkStatus: () => [{ revoked: true, sources: ['203.0.113.0/24'] }], handle: async (_req, res) => { rePairCalls += 1; res.writeHead(200); res.end(); } }, mcp: async () => ({ status: 200, body: {} }) });
+      const renewed = await exchange(rePair, { path: '/oauth/token', headers: { 'cf-connecting-ip': '198.51.100.9', 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=authorization_code&code=synthetic' });
+      assert(renewed.status === 200 && rePairCalls === 1, 'only active families may constrain a replacement code exchange');
+    },
+  },
+  {
+    name: 'handoff bridge: http: an invalid bearer from an admitted source never creates a source ledger entry',
+    async run() {
+      let policyCalls = 0; const audit = [];
+      const handler = createRequestHandler({
+        hostname: 'bridge.example.com', sourcePolicy: () => { policyCalls += 1; return 'enforce'; },
+        oauth: { linkStatus: () => [{ linkId: 'grant', sources: ['203.0.113.0/24'] }] },
+        authenticate: async () => { throw new Error('invalid bearer'); }, audit: { write: entry => audit.push(entry) },
+        mcp: async () => ({ status: 200, body: {} }),
+      });
+      const missing = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '203.0.113.9', 'content-type': 'application/json' }, body: '{}' });
+      const malformed = await exchange(handler, { path: '/mcp', headers: { 'cf-connecting-ip': '203.0.113.9', authorization: 'Bearer malformed', 'content-type': 'application/json' }, body: '{}' });
+      assert(missing.status === 401 && malformed.status === 401 && policyCalls === 2, 'source admission must run before bearer handling even when the bearer is absent or invalid');
+      assert(!audit.some(entry => entry.ev === 'source_mismatch'), 'an invalid bearer from an admitted source must not create source-policy ledger noise');
     },
   },
   ...[
@@ -664,7 +734,7 @@ export default [
   ].map(([method, path]) => ({
     name: `handoff bridge: http: wrong method ${method} ${path} closes before body`,
     async run() {
-      const handler = createRequestHandler({ hostname: 'bridge.example.com', mcp: async () => ({ status: 200, body: {} }), authenticate: async () => ({ linkId: 'grant' }), oauth: {} });
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', mcp: async () => ({ status: 200, body: {} }), authenticate: async () => ({ linkId: 'grant' }), oauth: {} });
       const result = await exchange(handler, { method, path, body: 'unread' });
       assert(result.status === 405 && result.readBytes === 0 && result.headers.connection === 'close', 'wrong methods must not read a public request body');
     },

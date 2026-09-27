@@ -23,17 +23,73 @@ function hostMatches(req, hostname) {
   return actual === expected || actual === `${expected}:443`;
 }
 
+function sourceAddress(req) {
+  const value = String(req.headers?.['cf-connecting-ip'] || req.socket?.remoteAddress || '').trim();
+  return net.isIP(value) ? value.toLowerCase() : null;
+}
+
+function addressParts(address) {
+  const family = net.isIP(address);
+  if (family === 4) return { family, parts: address.split('.').map(Number) };
+  if (family !== 6) return null;
+  const [leftText, rightText = ''] = address.toLowerCase().split('::');
+  if (address.split('::').length > 2) return null;
+  const left = leftText ? leftText.split(':') : [];
+  const right = rightText ? rightText.split(':') : [];
+  if (left.length + right.length > 8 || [...left, ...right].some(part => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+  return { family, parts: [...left, ...Array(8 - left.length - right.length).fill('0'), ...right].map(part => parseInt(part, 16)) };
+}
+
+function prefixForAddress(address, bits) {
+  const parsed = addressParts(address);
+  if (!parsed || !Number.isInteger(bits) || bits < 0 || bits > parsed.family * 32) return null;
+  if (parsed.family === 4) {
+    const octets = parsed.parts.slice();
+    const whole = Math.floor(bits / 8); const rest = bits % 8;
+    for (let index = whole + (rest ? 1 : 0); index < 4; index += 1) octets[index] = 0;
+    if (rest) octets[whole] &= (0xff << (8 - rest));
+    return `${octets.join('.')}/${bits}`;
+  }
+  const groups = parsed.parts.slice();
+  const whole = Math.floor(bits / 16); const rest = bits % 16;
+  for (let index = whole + (rest ? 1 : 0); index < 8; index += 1) groups[index] = 0;
+  if (rest) groups[whole] &= (0xffff << (16 - rest));
+  return `${groups.slice(0, Math.max(1, Math.ceil(bits / 16))).map(part => part.toString(16)).join(':')}::/${bits}`;
+}
+
+function cidrContains(address, cidr) {
+  if (typeof cidr !== 'string') return false;
+  const slash = cidr.lastIndexOf('/');
+  if (slash < 1 || !/^\d{1,3}$/.test(cidr.slice(slash + 1))) return false;
+  const network = cidr.slice(0, slash); const bits = Number(cidr.slice(slash + 1));
+  const parsed = addressParts(address); const base = addressParts(network);
+  if (!parsed || !base || parsed.family !== base.family || bits < 0 || bits > parsed.family * 32) return false;
+  const unit = parsed.family === 4 ? 8 : 16;
+  let remaining = bits;
+  for (let index = 0; index < parsed.parts.length && remaining > 0; index += 1) {
+    const take = Math.min(unit, remaining);
+    const mask = take === unit ? (unit === 16 ? 0xffff : 0xff) : ((1 << take) - 1) << (unit - take);
+    if ((parsed.parts[index] & mask) !== (base.parts[index] & mask)) return false;
+    remaining -= take;
+  }
+  return true;
+}
+
 function sourceKey(req) {
-  const ip = String(req.headers?.['cf-connecting-ip'] || req.socket?.remoteAddress || 'unknown').trim();
-  const family = net.isIP(ip);
-  if (family === 4) return ip;
-  if (family !== 6) return 'unknown';
-  const [leftText, rightText = ''] = ip.toLowerCase().split('::');
-  const left = leftText ? leftText.split(':').filter(Boolean) : [];
-  const right = rightText ? rightText.split(':').filter(Boolean) : [];
-  const groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
-  if (groups.length !== 8 || groups.some(part => !/^[0-9a-f]{1,4}$/.test(part))) return 'unknown';
-  return `${groups.slice(0, 4).map(part => parseInt(part, 16).toString(16)).join(':')}::/64`;
+  const address = sourceAddress(req);
+  if (!address) return 'unknown';
+  return net.isIP(address) === 4 ? address : prefixForAddress(address, CONSTANTS.BUCKET_SOURCE_V6_BITS) || 'unknown';
+}
+
+export function sourcePrefix(req) {
+  const address = sourceAddress(req);
+  if (!address) return 'unknown';
+  return prefixForAddress(address, net.isIP(address) === 4 ? CONSTANTS.SOURCE_PREFIX_V4_BITS : CONSTANTS.SOURCE_PREFIX_V6_BITS) || 'unknown';
+}
+
+export function isConnectorSource(req, ranges = CONSTANTS.OPENAI_CONNECTOR_RANGES) {
+  const address = sourceAddress(req);
+  return Boolean(address && Array.isArray(ranges) && ranges.some(range => cidrContains(address, range)));
 }
 
 function closeEarly(req, res) {
@@ -117,11 +173,60 @@ const mcpFailure = (res, status, message, headers = undefined) => sendJson(res, 
 }, headers);
 const mcpBodyFailure = (res, status) => mcpFailure(res, status, status === 413 ? 'Request body too large' : 'Request body timed out');
 
-export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, accepting = () => true } = {}) {
+export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, sourcePolicy = CONSTANTS.SOURCE_POLICY, connectorRanges = CONSTANTS.OPENAI_CONNECTOR_RANGES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, accepting = () => true } = {}) {
   if (typeof hostname !== 'string' || !hostname) throw new TypeError('public hostname is required');
   if (typeof mcp !== 'function') throw new TypeError('MCP handler is required');
   const increment = (...args) => { try { counters.increment?.(...args); } catch { /* anonymous accounting is best effort */ } };
   const writeAudit = entry => { try { audit.write?.(entry); } catch { /* audit failure must not strand a request */ } };
+  const policyMode = async (req, route, source) => {
+    let value = sourcePolicy;
+    try { if (typeof value === 'function') value = await value({ request: req, route, source }); } catch { return 'enforce'; }
+    return value === 'alert' || value === 'off' ? value : 'enforce';
+  };
+  const activeFamilies = () => {
+    try {
+      const links = oauth.linkStatus?.();
+      return Array.isArray(links) ? links.filter(link => link?.revoked !== true) : [];
+    } catch {
+      // A failed link-state read must not silently turn an existing link's
+      // network boundary into an allow-all rule.
+      return null;
+    }
+  };
+  const familyAllowsSource = (family, source) => source !== 'unknown'
+    && Array.isArray(family?.sources) && family.sources.includes(source);
+  const sourceAllowedForActiveFamily = (source, grant = null) => {
+    const families = activeFamilies();
+    if (!families) return false;
+    if (typeof grant?.linkId === 'string') {
+      const exact = families.filter(family => family?.linkId === grant.linkId);
+      return exact.length === 1 && familyAllowsSource(exact[0], source);
+    }
+    // OAuth maintains one active family. Before bearer handling we can admit
+    // only that sole family (or a separately pinned connector range below);
+    // a corrupted/multi-family state is deliberately fail-closed.
+    if (families.length === 0) return true;
+    return families.length === 1 && familyAllowsSource(families[0], source);
+  };
+  const enforceSourcePolicy = async (req, res, route, grant = null) => {
+    const source = sourcePrefix(req);
+    const mode = await policyMode(req, route, source);
+    if (mode === 'off') return true;
+    const allowed = sourceAllowedForActiveFamily(source, grant) || isConnectorSource(req, connectorRanges);
+    if (allowed) return true;
+    increment('source_mismatch');
+    // A source prefix is sensitive link metadata. The ledger deliberately
+    // records only the closed event, route, and response-class vocabulary.
+    writeAudit({ ev: 'source_mismatch', route, statusClass: mode === 'alert' ? '2xx' : '4xx' });
+    if (mode === 'alert') return true;
+    closeEarly(req, res);
+    if (route === 'mcp') {
+      sendJson(res, 401, { error: 'invalid_token', error_description: 'A valid access token is required.' }, { 'WWW-Authenticate': challenge({ presented: bearerPresented(req) }) });
+      return false;
+    }
+    sendJson(res, 401, { error: 'invalid_token', error_description: 'A valid access token is required.' });
+    return false;
+  };
   const reportLeak = pool => { increment('permit_leak'); writeAudit({ ev: 'permit_leak', pool }); };
   const authPool = createPermitPool(CONSTANTS.MCP_AUTH_INFLIGHT, { timers, watchdogMs: CONSTANTS.AUTHENTICATED_BODY_TIMEOUT_MS * 2, onLeak: () => reportLeak('mcp_auth') });
   const mcpBodyPool = createPermitPool(CONSTANTS.MCP_BODY_READ, { timers, watchdogMs: CONSTANTS.AUTHENTICATED_BODY_TIMEOUT_MS * 2, onLeak: () => reportLeak('mcp_body') });
@@ -183,6 +288,11 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
     if (!knownRoute) { closeEarly(req, res); notFound(res); return null; }
     const source = sourceKey(req);
     if (pathname === '/mcp') {
+      // This boundary intentionally precedes bearer parsing/lookup: a caller
+      // outside the sole active family cannot exercise token reuse, key, or
+      // anomaly paths. The exact-family check below remains a defense against
+      // a state change between this decision and authentication.
+      if (!await enforceSourcePolicy(req, res, 'mcp')) return null;
       let grant;
       try { grant = req.__icHandoffGrant || await authenticate?.(req); if (!grant || typeof grant.linkId !== 'string') throw new Error('invalid bearer'); } catch (error) {
         const releaseGet = anonGetPool.acquire();
@@ -198,6 +308,10 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
         } finally { if (!retained) releaseGet(); }
         return null;
       }
+      // A valid bearer identifies the exact family whose link-time prefix is
+      // relevant. Anonymous or malformed credentials must take the ordinary
+      // challenge/limiter path and never create a source-policy ledger event.
+      if (!await enforceSourcePolicy(req, res, 'mcp', grant)) return null;
       if ((origin || fetchSite) && originServerRoutes === 'observe') writeAudit({ ev: 'origin_seen', origin: origin ? originHost(origin) : undefined, secFetchSite: fetchSite || undefined, route: 'mcp' });
       const wait = grantBuckets.take(grant.linkId); if (wait) { closeEarly(req, res); mcpFailure(res, 429, 'Request rate is limited', { 'Retry-After': String(wait) }); return null; }
       if (!allowed.includes(req.method)) { closeEarly(req, res); methodNotAllowed(res, 'POST'); return null; }
@@ -211,6 +325,7 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
     if (WELL_KNOWN.has(pathname)) { const wait = charge('well_known', source); if (wait) { throttled(req, res, wait); return null; } }
     if (pathname === '/oauth/authorize') { const wait = charge('authorize', source); if (wait) { throttled(req, res, wait); return null; } }
     if (req.method === 'POST') {
+      if ((pathname === '/oauth/token' || pathname === '/oauth/revoke') && !await enforceSourcePolicy(req, res, pathname.slice(1))) return null;
       if (declaredTooLarge(req, CONSTANTS.OAUTH_BODY_CAP_BYTES)) { closeEarly(req, res); sendJson(res, 413, { error: 'invalid_request', error_description: 'The request body is too large.' }); return null; }
       const releaseBody = anonBodyPool.acquire(); const releaseSource = releaseBody && anonBodyBySource.acquire(source);
       if (!releaseBody || !releaseSource) { releaseBody?.(); releaseSource?.(); busy(req, res); return null; }
@@ -236,6 +351,7 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
       const serverContext = {
         hostname,
         source: state.source,
+        sourcePrefix: sourcePrefix(req),
         now,
         // OAuth calls this before it writes a client-auth failure. Returning
         // true means the HTTP layer has written the 429 and OAuth must stop.
