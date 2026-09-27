@@ -109,3 +109,22 @@ The registered suite preserves the original lab step names and order while expli
 | G10 | Green after review of `oauth.js`, `oauthPages.js`, `cimd.js`, `oauthStore.js` and `clientAuth.js`; no credential or remote error text crosses the boundary. |
 
 The unchanged lab rows passed the local oracle comparison; rows intentionally changed by the Phase 1 decisions were excluded exactly as specified.
+
+## B3 — app-supervised cloudflared tunnel (2026-09-27)
+
+Implemented and merged directly on local `main` in commit `2e553f9` (`feat: supervise the ChatGPT bridge tunnel`). The stage adds the validated Unix-socket ingress config, copy-then-inspect binary trust, bounded credential parsing, constant watchdog launcher, process-table orphan reaper, loopback/public probe seam, redacted log ring and serialized supervisor state machine.
+
+Adversarial review covered every tunnel invariant I-1 through I-12, including the app-owned pinned binary copy, required flags, positional-argument shell wrapper, process-group ownership, PID-reuse checks, TERM/TERM/KILL escalation, metrics-port range, unrequested-exit loop, secret redaction and test-mode trust narrowing.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The diff is exactly `tunnel/`, its registered test, and the out-of-band self-test; no ignored or out-of-allow-list path. |
+| G1 | Green, 0 failed. The injected tunnel group passed 85 cases and the required baseline comparison was empty. |
+| G2 | Green. `npm test` passed without spawning a real child. |
+| G3 | Green. `npm run lint` and the final targeted ESLint run passed. |
+| G4 | Green. `npm run build:compile` passed. |
+| G8 | The B8 conformance runner does not exist yet; the full injected tunnel group is the stated equivalent. |
+| G9 | Green. Frozen files and `package-lock.json` were untouched. |
+| G10 | Green after review of every `tunnel/*` module and the literal watchdog script. |
+
+`npm run test:tunnel` passed outside the filesystem/process sandbox as required: five temporary fake children, exit status preserved, TERM during sleep completed in 213 ms, and the helper-crash/reaper path removed the TERM-ignoring connector and grandchild in 4037 ms across the 0/333/666 ms poll offsets; the different-config look-alike survived. The first sandboxed invocation could not call `/bin/ps` and was correctly treated as a harness restriction, not a product result.
