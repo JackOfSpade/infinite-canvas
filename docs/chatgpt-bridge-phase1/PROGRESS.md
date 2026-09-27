@@ -32,11 +32,11 @@ Checked before the stop (still true at this commit):
 
 Practical notes for whoever continues:
 - **Worktrees:** do not put worktrees inside the repo (for example under `.claude/`): `npx eslint .` in the main checkout lints everything that is not in its `globalIgnores`, so a worktree inside the tree gets linted twice. A worktree outside the repo needs `ln -s "<repo>/node_modules" node_modules` (the `.gitignore` pattern `node_modules` without a slash also ignores the symlink) and, for the B0.6 golden generator, the same symlink for `scripts/chatgpt-handoff-spike/node_modules` (git-ignored, so absent in a fresh worktree).
-- **G7 without pushing:** in a detached worktree at the SHA: `printf '{"ref":"refs/heads/main","after":"<sha>","before":"0000000000000000000000000000000000000000"}' > event.json && timeout --preserve-status 900 act push -W .github/workflows/ci.yml --eventpath event.json --container-architecture linux/arm64 --concurrent-jobs 1`. `-W` keeps act away from `auto-merge-to-main.yml`.
+- **G7 without pushing:** run the CI-only command from clean local `main` at the target SHA or an isolated full clone, **not** a linked detached worktree: act's container cannot resolve the linked worktree `.git` pointer for git-aware tests. The event file may live outside the checkout: `printf '{"ref":"refs/heads/main","after":"<sha>","before":"0000000000000000000000000000000000000000"}' > /tmp/ic-act-event.json && timeout --preserve-status 900 act push -W .github/workflows/ci.yml --eventpath /tmp/ic-act-event.json --container-architecture linux/arm64 --concurrent-jobs 1`. `-W` keeps act away from `auto-merge-to-main.yml`.
 - **Invisible characters:** after writing any file that mentions `•`, `…`, `\u200B`, `\u2028` or similar, scan it for Unicode categories Zs (other than a plain space), Zl, Zp and Cf and re-escape any literal character; then lint.
 - **Starter mask:** the UI analysis shows `STARTER_MASK` as `'•••••-•••••'` (the old 10-character code); round 2 made the chat key 26 symbols with no separator, so the mask must follow the 26-symbol key.
 - **Parallel streams after B0** (disjoint files, at most four worktrees): B1 and B2 in one worktree (B2.1 imports B1.1's `wire.js` and `respond.js`); B3 alone; B4 and B5a together (B5b needs B4.2, B4.4 and B5a.2); B7.1 to B7.4 plus B7.2 can start right after B0 (they depend only on B0.5 and B0.4). Then B5b, B6, B7.5, B8.
-- **Skeleton tests for B0.5** (one allocation that worked on paper; each file needs at least one real test): `-http` harness self-tests (fake exchange, fake clock, `faultAt`, `withLeakCheck`); `-tunnel` fake spawn and process table plus the launcher asserted as text; `-controls` constants pins; `-privacy` sentinels, fixture-folder scan, `git check-ignore`; `-mcp` golden, hash and starter/continue pins; `-oauth` client-metadata fixture and OAuth constants; `-ipc` the IPC contract (24 invoke channels, `publish-jobs`, 3 events, no `label`); `-engine` contracts, `errors.js`, `log.js`; `-store` tolerant `readConfig`; `-ui` `handoffBridgeConfig.js` validators and zero imports; `-render` mount-helper self-tests; `-application` `adaFlow` sanity and the four `localAiApplication.js` exports; `-push` and the seam file minimal source-text skeletons; `-hostile` hostile-fixture sanity; `-inert` from B0.3; `-source-scan` the whole table.
+- **Skeleton tests for B0.5** (one allocation that worked on paper; each file needs at least one real test): `-http` harness self-tests (fake exchange, fake clock, `faultAt`, `withLeakCheck`); `-tunnel` fake spawn and process table plus the launcher asserted as text; `-controls` constants pins; `-privacy` sentinels, fixture-folder scan, tracked-fixture `git ls-files --error-unmatch` check; `-mcp` golden, hash and starter/continue pins; `-oauth` client-metadata fixture and OAuth constants; `-ipc` the IPC contract (24 invoke channels, `publish-jobs`, 3 events, no `label`); `-engine` contracts, `errors.js`, `log.js`; `-store` tolerant `readConfig`; `-ui` `handoffBridgeConfig.js` validators and zero imports; `-render` mount-helper self-tests; `-application` `adaFlow` sanity and the four `localAiApplication.js` exports; `-push` and the seam file minimal source-text skeletons; `-hostile` hostile-fixture sanity; `-inert` from B0.3; `-source-scan` the whole table.
 
 ## B0 — inert skeleton and frozen contracts (2026-09-27)
 
@@ -284,3 +284,22 @@ Cross-review found and fixed three patch-level races before the gate: consistenc
 | G10 | Green after the independent runtime/security, UI/accessibility, packaging/test-quality and final integrated reviews. No open code-level finding remains. |
 
 Nothing was pushed. The app remains bridge-off for real traffic; B9–B11 still require Jack's Cloudflare, ChatGPT plugin, pairing-code and synthetic-only manual observations.
+
+### B9 saved tunnel setup status remediation (2026-09-27)
+
+Code commit `29a06c9` (`fix: show saved bridge tunnel setup`) and test commit `0ffaaab` (`test: require tracked bridge fixtures`) fix a packaged off-state setup dialog that kept showing no selected binary or credentials after durable `tunnel.json` writes. The root cause was a stale bootstrap projection after binary selection, compounded by a UI summary that treated deliberately redacted off-state binary and credential details as absent. The status projection now carries only safe readiness/selection facts: paths, pins, versions and tunnel identifiers remain redacted, while the dialog can say Selected, Needs approval or Approved accurately.
+
+Every acknowledged binary selection, approval and credential mutation now takes the same lifecycle-invalidating path. This fences an in-flight start and stops a graph that captured a replaced executable before a fresh bootstrap status is published; it never starts cloudflared as part of setup. The tracked-fixture gate replaces the privacy test's ignored-file wording with an explicit `git ls-files --error-unmatch` requirement.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. Clean scoped diff; frozen files untouched. |
+| G1 | Green. 2251 passed, 0 failed; baseline comparison empty. |
+| G2 | Green. `npm test` passed. |
+| G3/G4 | Green. Lint and compile passed. |
+| G5/G6 | Green. Both Electron smokes passed. |
+| G7 | Green at `0ffaaab` under Node 22.23.2/npm 10.9.8. The CI-only `act` run passed. |
+| G8 | Green. Tunnel watchdog self-test passed all five generated children. |
+| Packaging | Rebuilt, signed and relaunched. Safe real bootstrap status was bridge-off with `binaryApproved`, `credentialsOk` and `binarySelected` true, details redacted, and no cloudflared process. |
+
+CUA accessibility timed out after Settings opened, so it was not force-closed. The state and mounted-renderer regressions establish the displayed setup state instead. Nothing was pushed. Hostname, network and plugin work remain Jack-only.
