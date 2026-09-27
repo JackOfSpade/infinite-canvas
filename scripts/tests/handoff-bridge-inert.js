@@ -102,6 +102,29 @@ function deterministicTimers() {
   };
 }
 
+function bridgeClock(start = 0) {
+  let stamp = start;
+  const tasks = [];
+  const timers = {
+    setTimeout(fn, delay = 0) {
+      const task = { at: stamp + Math.max(0, Number(delay) || 0), fn, active: true };
+      tasks.push(task);
+      return { task, unref() {} };
+    },
+    clearTimeout(handle) { if (handle?.task) handle.task.active = false; },
+  };
+  const advance = target => {
+    stamp = target;
+    for (;;) {
+      const task = tasks.filter(item => item.active && item.at <= stamp).sort((left, right) => left.at - right.at)[0];
+      if (!task) break;
+      task.active = false;
+      task.fn();
+    }
+  };
+  return { now: () => stamp, timers, advance };
+}
+
 // This is deliberately an in-process request seam, never a socket or network
 // client. It lets the composed public-probe branch prove which request shape
 // it selected while returning the fixed protected-resource document.
@@ -790,6 +813,224 @@ export default [
       await stopHandoffBridge();
       const broadcast = canvas.sent.find(entry => entry.channel === IPC_EVENTS.STATUS)?.value;
       assert(broadcast?.enabled === false && broadcast?.serving === 'off' && !JSON.stringify(broadcast).includes('/private/secret'), 'off broadcasts use the same closed bootstrap projection');
+    },
+  },
+  {
+    name: 'handoff bridge: inert: off config saves advance public status and merge independent scope fields',
+    async run() {
+      await stopHandoffBridge();
+      const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-status-'));
+      const ipc = bridgeIpc(); const canvas = liveCanvas(109);
+      const clock = bridgeClock();
+      try {
+        assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+          isPackaged: true, userData, getCanvasWindows: () => [canvas],
+          dialogs: { ask: async () => ({ ok: true }) },
+          now: clock.now, timers: clock.timers,
+        } }), 'a fresh local IPC registry installs the off-bridge status projection');
+        const get = ipc.handlers.get(IPC_CHANNELS.GET_STATUS);
+        const save = ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG);
+        const first = await get({ sender: canvas.webContents });
+        assert(first.success && Number.isSafeInteger(first.status.seq) && first.status.autoStart === false,
+          'a fresh registration reads its own default bootstrap state instead of reusing the prior cached user-data projection');
+        const unchanged = await get({ sender: canvas.webContents });
+        assert(unchanged.status.seq === first.status.seq, 'repeated unchanged off status reads retain their public sequence');
+        assert((await save({ sender: canvas.webContents }, { patch: { autoStart: true } })).success,
+          'an off-bridge auto-start preference persists after fixed consent');
+        const published = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).at(-1)?.value;
+        const afterAutoStart = await get({ sender: canvas.webContents });
+        assert(published?.seq > first.status.seq && afterAutoStart.status.seq >= published.seq && afterAutoStart.status.autoStart,
+          'an off config save publishes a strictly newer status that carries the saved value');
+        assert((await save({ sender: canvas.webContents }, { patch: { scope: { applications: false } } })).success,
+          'the first partial scope patch saves');
+        assert((await save({ sender: canvas.webContents }, { patch: { scope: { scoring: true } } })).success,
+          'the second partial scope patch saves independently after scoring consent');
+        const persisted = JSON.parse(fs.readFileSync(path.join(userData, 'handoff-bridge', 'config.json'), 'utf8'));
+        assert(persisted.scope.applications === false && persisted.scope.scoring === true,
+          'partial scope patches merge at the durable boundary instead of restoring a stale sibling field');
+        const beforeAttach = (await get({ sender: canvas.webContents })).status.seq;
+        let notifyActive;
+        let activeStatus = { v: 1, seq: 0, enabled: true, serving: 'live', paused: false, config: { scope: { applications: false, scoring: true } } };
+        let throwActiveSnapshot = false;
+        const graph = {
+          controller: {
+            snapshot: () => {
+              if (throwActiveSnapshot) throw new Error('synthetic active snapshot failure');
+              return activeStatus;
+            },
+            subscribe: listener => { notifyActive = listener; return () => {}; },
+            disable: async () => ({ success: true }),
+          },
+        };
+        assert((await startHandoffBridge({ deps: completeStartDeps({ userData, compose: () => graph }) })).success,
+          'an inert attached graph is sufficient to exercise the public status owner transition');
+        const attached = await get({ sender: canvas.webContents });
+        assert(attached.status.seq > beforeAttach, 'attaching a fresh controller advances the public status sequence');
+        activeStatus = { ...activeStatus, seq: 1, paused: true };
+        const readBeforeCallback = await get({ sender: canvas.webContents });
+        const beforeRelay = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).length;
+        notifyActive?.(activeStatus);
+        clock.advance(250);
+        const afterRelay = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS);
+        const advancedActive = await get({ sender: canvas.webContents });
+        assert(afterRelay.length === beforeRelay + 1 && afterRelay.at(-1)?.value.seq === readBeforeCallback.status.seq,
+          'an equal active callback relays once when a status read observed that sequence first');
+        const staleSameSequence = activeStatus;
+        activeStatus = { ...activeStatus, setup: { tunnelReachable: true } };
+        const reachabilityRead = await get({ sender: canvas.webContents });
+        assert(reachabilityRead.status.seq > advancedActive.status.seq && reachabilityRead.status.setup.tunnelReachable,
+          'an authoritative read advances when tunnel reachability changes at the same controller sequence');
+        const beforeStaleSameSequence = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).length;
+        notifyActive?.(staleSameSequence);
+        clock.advance(500);
+        const afterStaleSameSequence = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS);
+        const afterStaleSameSequenceRead = await get({ sender: canvas.webContents });
+        assert(afterStaleSameSequence.length === beforeStaleSameSequence
+          && afterStaleSameSequenceRead.status.seq === reachabilityRead.status.seq
+          && afterStaleSameSequenceRead.status.setup.tunnelReachable,
+        'a delayed equal-sequence callback cannot roll back a GET-observed reachability change');
+        throwActiveSnapshot = true;
+        const failedRead = await get({ sender: canvas.webContents });
+        throwActiveSnapshot = false;
+        assert(failedRead.status.seq === reachabilityRead.status.seq && failedRead.status.enabled,
+          'a failed active status read retains the newest public projection instead of returning an older bootstrap cache');
+        notifyActive?.(activeStatus);
+        clock.advance(500);
+        assert(canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).length === afterStaleSameSequence.length + 1,
+          'a matching equal-sequence callback relays the GET-observed projection exactly once');
+        notifyActive?.({ ...activeStatus, seq: 0, paused: false });
+        const delayedActive = await get({ sender: canvas.webContents });
+        assert(reachabilityRead.status.seq > attached.status.seq && reachabilityRead.status.paused && delayedActive.status.seq === reachabilityRead.status.seq && delayedActive.status.paused,
+          'a delayed lower-sequence active callback cannot replace the current public projection');
+        await stopHandoffBridge();
+        const detached = await get({ sender: canvas.webContents });
+        assert(detached.status.seq > reachabilityRead.status.seq && detached.status.enabled === false,
+          'detaching a controller advances to a distinct closed bootstrap projection');
+      } finally {
+        await stopHandoffBridge();
+        fs.rmSync(userData, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: a cross-root IPC re-registration detaches the old graph before exposing the new root',
+    async run() {
+      await stopHandoffBridge();
+      const oldUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-old-root-'));
+      const newUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-new-root-'));
+      const oldHostname = 'b-aaaaaaaaaaaaaaaaaaaa.lullascape.com';
+      const newHostname = 'b-bbbbbbbbbbbbbbbbbbbb.lullascape.com';
+      const oldIpc = bridgeIpc(); const newIpc = bridgeIpc(); const canvas = liveCanvas(110);
+      let oldDisabled = 0; let staleCallback; let writeTarget = null;
+      const oldConfig = { ...READY_CONFIG, hostname: oldHostname };
+      const newConfig = { ...READY_CONFIG, hostname: newHostname };
+      try {
+        assert(registerHandoffBridgeHandlers({ ipcMain: oldIpc, deps: {
+          isPackaged: true, userData: oldUserData, getCanvasWindows: () => [canvas],
+          readConfig: () => ({ state: 'ok', config: oldConfig }),
+        } }), 'the old root registers its local IPC ports');
+        assert((await startHandoffBridge({ deps: completeStartDeps({
+          userData: oldUserData,
+          readConfig: () => ({ state: 'ok', config: oldConfig }),
+          compose: () => ({
+            userData: oldUserData,
+            controller: {
+              snapshot: () => ({ ...liveStatus(oldHostname), seq: 1 }),
+              subscribe: listener => { staleCallback = listener; return () => {}; },
+              disable: async () => { oldDisabled += 1; return { success: true }; },
+            },
+            listener: {}, tunnel: {}, power: {}, tray: {},
+          }),
+        }) })).success, 'the old root can attach a synthetic live graph');
+
+        assert(registerHandoffBridgeHandlers({ ipcMain: newIpc, deps: {
+          isPackaged: true, userData: newUserData, getCanvasWindows: () => [canvas],
+          dialogs: { ask: async () => ({ ok: true }) },
+          readConfig: () => ({ state: 'ok', config: newConfig }),
+          writeConfig: async (target, patch) => {
+            writeTarget = target;
+            return { ok: true, config: { ...newConfig, ...patch } };
+          },
+        } }), 'a distinct user-data root replaces its IPC registry');
+        assert(oldDisabled === 1, 'cross-root registration starts hard-off disposal of the old graph synchronously');
+
+        const get = newIpc.handlers.get(IPC_CHANNELS.GET_STATUS);
+        const save = newIpc.handlers.get(IPC_CHANNELS.SAVE_CONFIG);
+        const beforeStale = await get({ sender: canvas.webContents });
+        assert(beforeStale.success && beforeStale.status.enabled === false && beforeStale.status.serving === 'off'
+          && beforeStale.status.config.hostname === newHostname,
+        'the replacement registry exposes only a closed bootstrap status from its own root');
+        staleCallback?.({ ...liveStatus(oldHostname), seq: 2 });
+        const afterStale = await get({ sender: canvas.webContents });
+        assert(afterStale.status.seq === beforeStale.status.seq && afterStale.status.config.hostname === newHostname,
+          'a late callback from the detached old controller cannot republish old-root state');
+        assert((await save({ sender: canvas.webContents }, { patch: { autoStart: true } })).success && writeTarget === newUserData,
+          'the replacement registry saves only to its new user-data root');
+      } finally {
+        await stopHandoffBridge();
+        fs.rmSync(oldUserData, { recursive: true, force: true });
+        fs.rmSync(newUserData, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: a failed first snapshot publishes closed state for the newly attached root',
+    async run() {
+      await stopHandoffBridge();
+      const oldUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-attach-old-'));
+      const newUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-attach-new-'));
+      const oldHostname = 'b-cccccccccccccccccccc.lullascape.com';
+      const newHostname = 'b-dddddddddddddddddddd.lullascape.com';
+      const ipc = bridgeIpc(); let emitNew; let throwInitial = true;
+      const oldConfig = { ...READY_CONFIG, hostname: oldHostname };
+      const newConfig = { ...READY_CONFIG, hostname: newHostname };
+      try {
+        assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+          isPackaged: true, userData: oldUserData, getCanvasWindows: () => [],
+          readConfig: () => ({ state: 'ok', config: oldConfig }),
+        } }), 'the old root installs the controller bridge');
+        assert((await startHandoffBridge({ deps: completeStartDeps({
+          userData: oldUserData,
+          readConfig: () => ({ state: 'ok', config: oldConfig }),
+          compose: () => ({
+            userData: oldUserData,
+            controller: {
+              snapshot: () => ({ ...liveStatus(oldHostname), seq: 1 }),
+              subscribe: () => () => {}, disable: async () => ({ success: true }),
+            },
+            listener: {}, tunnel: {}, power: {}, tray: {},
+          }),
+        }) })).success, 'a first graph supplies an old live projection');
+        await stopHandoffBridge();
+        assert((await startHandoffBridge({ deps: completeStartDeps({
+          userData: newUserData,
+          readConfig: () => ({ state: 'ok', config: newConfig }),
+          compose: () => ({
+            userData: newUserData,
+            controller: {
+              snapshot: () => {
+                if (throwInitial) throw new Error('synthetic first snapshot failure');
+                return { ...liveStatus(newHostname), seq: 2 };
+              },
+              subscribe: listener => { emitNew = listener; return () => {}; },
+              disable: async () => ({ success: true }),
+            },
+            listener: {}, tunnel: {}, power: {}, tray: {},
+          }),
+        }) })).success, 'a replacement graph may attach even when its first snapshot fails');
+        const closed = getHandoffBridgeStatus();
+        assert(closed.enabled === false && closed.serving === 'off' && closed.config.hostname === newHostname,
+          'a failed first snapshot cannot relabel the old live state as the new controller');
+        throwInitial = false;
+        emitNew?.({ ...liveStatus(newHostname), seq: 2 });
+        const recovered = getHandoffBridgeStatus();
+        assert(recovered.seq > closed.seq && recovered.enabled && recovered.serving === 'live' && recovered.config.hostname === newHostname,
+          'a later valid callback still advances from the safe closed projection');
+      } finally {
+        await stopHandoffBridge();
+        fs.rmSync(oldUserData, { recursive: true, force: true });
+        fs.rmSync(newUserData, { recursive: true, force: true });
+      }
     },
   },
   {

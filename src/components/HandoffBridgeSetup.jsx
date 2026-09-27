@@ -68,7 +68,10 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
 
   const patchScope = (key, value) => {
     void call('handoffBridgeSaveConfig', {
-      patch: { scope: { ...status.config.scope, [key]: value } },
+      // The store merges this one field atomically. Sending the whole scope
+      // from a render snapshot can overwrite a preceding checkbox change
+      // while the status update is still in flight.
+      patch: { scope: { [key]: value } },
     });
   };
 

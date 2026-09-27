@@ -377,25 +377,175 @@ function activeRuntimeForController(current) {
   return activeController(current) ? runtime : null;
 }
 
+// Controller snapshots include an `at` timestamp that naturally changes on
+// every read.  Their source `seq` is normally the ordering authority, but a
+// port-derived field can change before that controller advances its sequence.
+// Compare the remaining complete projection deterministically so an
+// authoritative read can surface that fact without weakening callback order.
+function activeSnapshotContentKey(value) {
+  if (!isRecord(value)) return null;
+  const seen = new WeakSet();
+  const encode = (item, topLevel = false) => {
+    if (item === null) return 'null';
+    if (typeof item === 'string' || typeof item === 'boolean') return JSON.stringify(item);
+    if (typeof item === 'number') return Number.isFinite(item) ? `number:${item}` : `number:${String(item)}`;
+    if (typeof item === 'undefined') return 'undefined';
+    if (typeof item === 'bigint') return `bigint:${item}`;
+    if (typeof item === 'function' || typeof item === 'symbol') return `${typeof item}`;
+    if (typeof item !== 'object') return String(item);
+    if (seen.has(item)) return 'circular';
+    seen.add(item);
+    if (Array.isArray(item)) return `[${item.map(entry => encode(entry)).join(',')}]`;
+    const keys = Object.keys(item)
+      .filter(key => !topLevel || (key !== 'seq' && key !== 'at'))
+      .sort();
+    return `{${keys.map(key => `${JSON.stringify(key)}:${encode(item[key])}`).join(',')}}`;
+  };
+  try { return encode(value, true); } catch { return null; }
+}
+
 function createControllerBridge() {
   let current = null;
   const listeners = new Set();
   let unsubscribe = noOp;
+  // A controller instance starts its own sequence at zero, while the closed
+  // bootstrap projection has no live controller at all and also uses zero.
+  // The renderer quite correctly rejects equal or older snapshots. Give the
+  // public IPC stream one monotonic sequence across bootstrap, attach, detach
+  // and recompose, rather than asking the renderer to weaken that guard.
+  let publicSeq = 0;
+  let attachedGeneration = 0;
+  let lastActive = null;
+  let lastActiveSeq = null;
+  let lastActiveContent = null;
+  let lastPublic = null;
+  let lastPublicOwner = null;
+  let lastPublicPublished = false;
+  let lastBootstrap = null;
+  const project = (value, owner = null) => {
+    const base = isRecord(value) ? value : bootstrapSnapshot();
+    publicSeq += 1;
+    lastPublicOwner = owner;
+    lastPublic = { ...base, seq: publicSeq };
+    lastPublicPublished = false;
+    return lastPublic;
+  };
+  const projectActive = (active, value, { authoritativeRead = false } = {}) => {
+    const sourceSeq = Number.isSafeInteger(value?.seq) && value.seq >= 0 ? value.seq : null;
+    const content = activeSnapshotContentKey(value);
+    // A live controller already supplies a monotonic source sequence. Keep
+    // that ordering check here before translating it to the process-global
+    // public sequence, so a delayed live notification cannot roll state back.
+    if (lastActive === active && sourceSeq !== null && lastActiveSeq !== null && sourceSeq <= lastActiveSeq) {
+      if (sourceSeq < lastActiveSeq) return null;
+      // A controller's own sequence can lag a port-derived snapshot fact (for
+      // example, a tunnel reachability change).  Only a direct controller read
+      // is authoritative enough to accept that same-sequence content change;
+      // an equal subscriber callback may be a delayed older projection.
+      if (content !== null && content !== lastActiveContent) {
+        if (!authoritativeRead) return null;
+        lastActiveContent = content;
+        return project(value, active);
+      }
+      // A GET/status read can observe a fresh controller value before that
+      // controller's scheduled subscriber callback. The read must not cause
+      // the later equal callback to disappear for other renderer windows.
+      // Relay the cached public projection exactly once; lower callbacks and
+      // already-relayed duplicates remain no-ops.
+      if (sourceSeq === lastActiveSeq && lastPublicOwner === active && lastPublic && !lastPublicPublished) return lastPublic;
+      return null;
+    }
+    if (lastActive === active && sourceSeq === null && lastActiveSeq === null) {
+      if (content !== null && content === lastActiveContent) {
+        if (lastPublicOwner === active && lastPublic && !lastPublicPublished) return lastPublic;
+        return null;
+      }
+      // Legacy injected controllers without a source sequence have no
+      // callback ordering token. Preserve their historical update behavior,
+      // while still keeping identical reads stable.
+    }
+    if (lastActive === active && sourceSeq === null && lastActiveSeq !== null) return null;
+    lastActive = active;
+    lastActiveSeq = sourceSeq;
+    lastActiveContent = content;
+    return project(value, active);
+  };
+  const bootstrapStatus = ({ advance = false } = {}) => {
+    if (advance || !lastBootstrap) lastBootstrap = project(bootstrapSnapshot());
+    return lastBootstrap;
+  };
   const status = () => {
     const active = activeController(current);
-    try { return active?.snapshot?.() || bootstrapSnapshot(); } catch { return bootstrapSnapshot(); }
+    if (!active) return bootstrapStatus();
+    try {
+      const next = projectActive(active, active.snapshot?.(), { authoritativeRead: true });
+      // Re-reading an unchanged active controller is harmless. Return its
+      // last projection instead of minting a newer sequence for the same raw
+      // state; this preserves ordering when an IPC replay races a notification.
+      if (next) return next;
+      if (lastPublicOwner === active && lastPublic) return lastPublic;
+      return bootstrapStatus();
+    } catch {
+      // A controller read can fail while an older bootstrap cache still exists.
+      // Never return that lower sequence after this bridge has already exposed a
+      // newer active projection; callers may safely retain the last known state.
+      return lastPublic || bootstrapStatus();
+    }
   };
-  const publish = value => { for (const listener of listeners) try { listener(value); } catch { /* renderer isolation */ } };
+  const publish = value => {
+    if (value === lastPublic) lastPublicPublished = true;
+    for (const listener of listeners) try { listener(value); } catch { /* renderer isolation */ }
+  };
+  const publishBootstrap = () => publish(bootstrapStatus({ advance: true }));
   const attach = next => {
     try { unsubscribe(); } catch { /* old runtime is already stopped */ }
     current = next || null;
-    unsubscribe = typeof current?.subscribe === 'function' ? current.subscribe(publish) : noOp;
-    publish(status());
+    attachedGeneration += 1;
+    lastActive = null;
+    lastActiveSeq = null;
+    lastActiveContent = null;
+    const generation = attachedGeneration;
+    unsubscribe = typeof current?.subscribe === 'function'
+      ? current.subscribe(value => {
+        // An old controller may finish a scheduled callback after detach or
+        // replacement. Its status belongs to neither the current graph nor
+        // the public sequence stream.
+        if (generation !== attachedGeneration || current !== next || activeController(current) !== next) return;
+        const projected = projectActive(next, value);
+        if (projected) publish(projected);
+      })
+      : noOp;
+    // An attach or detach is a real public state transition even if both
+    // owners happen to report source sequence zero. Off-state reads, in
+    // contrast, keep their stable cached bootstrap snapshot until an explicit
+    // mutation/publish asks us to refresh it.
+    if (!next) {
+      publish(bootstrapStatus({ advance: true }));
+      return;
+    }
+    let initial;
+    try { initial = next.snapshot?.(); } catch {
+      // A newly attached controller has no usable public state yet.  Do not
+      // re-label the preceding controller's projection as this controller:
+      // that could show a stale live bridge after a failed recompose.  A
+      // synchronous injected subscriber may already have supplied this
+      // controller's status; otherwise publish a fresh, closed bootstrap
+      // projection for the new dependency/user-data context.
+      if (lastPublicOwner !== next) publish(project(bootstrapSnapshot(), next));
+      return;
+    }
+    const projected = projectActive(next, initial, { authoritativeRead: true });
+    if (projected) publish(projected);
   };
   const unavailable = () => ({ success: false, code: 'UNAVAILABLE', status: status() });
   const call = name => (...args) => activeController(current)?.[name]?.(...args) || Promise.resolve(unavailable());
   return Object.freeze({
-    attach, snapshot: status, status, publishBootstrap: () => publish(bootstrapSnapshot()),
+    attach, snapshot: status, status, publishBootstrap,
+    // Registration can replace the user-data/dependency context without
+    // attaching a runtime. Clear only the cached projection; the next status
+    // read performs the normal lazy bootstrap read and receives a new public
+    // sequence. This must not publish or touch disk during registration.
+    invalidateBootstrap: () => { lastBootstrap = null; },
     subscribe(listener) { if (typeof listener !== 'function') return noOp; listeners.add(listener); return () => listeners.delete(listener); },
     enable: async args => {
       const active = activeController(current);
@@ -412,7 +562,7 @@ function createControllerBridge() {
     reloadConfig: async () => {
       const active = activeController(current);
       if (active?.reloadConfig) return active.reloadConfig();
-      const fresh = bootstrapSnapshot(); publish(fresh); return { success: true, status: fresh };
+      const fresh = bootstrapStatus({ advance: true }); publish(fresh); return { success: true, status: fresh };
     },
     ackAlarm: call('ackAlarm'),
   });
@@ -1033,7 +1183,10 @@ async function invalidateRuntimeForMutation() {
 }
 
 export function getHandoffBridgeStatus() {
-  try { return runtime?.controller?.snapshot?.() || controllerBridge?.snapshot?.() || bootstrapSnapshot(); }
+  // Once IPC is registered, the bridge owns the renderer-facing monotonic
+  // sequence. Keep the direct runtime fallback only for callers that start a
+  // graph before registration has created that public projection.
+  try { return controllerBridge?.snapshot?.() || runtime?.controller?.snapshot?.() || bootstrapSnapshot(); }
   catch { return bootstrapSnapshot(); }
 }
 
@@ -1047,10 +1200,24 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
   // A same-process IPC re-registration must not resurrect facts after a
   // successful Forget. A different user-data root is a fresh app context.
   if (priorUserData && priorUserData !== bootstrapUserData) {
+    // A replacement IPC registry is a fresh application context, not a way
+    // to keep the prior root's live graph reachable.  Stop its UI publisher
+    // before detaching, then begin the existing hard-off disposer without
+    // awaiting it: registration stays synchronous and never starts a port or
+    // process for the new context.
+    try { uiRegistration?.dispose?.(); } catch { /* prior UI registry is already gone */ }
+    uiRegistration = null;
+    const priorRuntime = runtime;
+    if (priorRuntime) {
+      detachRuntime(priorRuntime);
+      detachingRuntime = priorRuntime;
+      void disposeDetachedRuntime(priorRuntime).catch(noOp);
+    }
     bootstrapCleared = false;
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
+  controllerBridge.invalidateBootstrap?.();
   const controller = controllerBridge;
   const getCanvasWindows = deps.getCanvasWindows || (() => []);
   // Enable is confirmed before a runtime exists, so this port must be real at
@@ -1115,6 +1282,8 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     }),
     enableConsent: enableConsentPort({ userData: bootstrapUserData, deps }),
     validateHostname: isValidHostname,
+    now: deps.now,
+    timers: deps.timers,
     onOpenPanel: openPanel,
     onSetupMutation: async () => invalidateRuntimeForMutation(),
   });

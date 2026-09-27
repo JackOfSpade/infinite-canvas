@@ -290,6 +290,127 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: render: every Settings checkbox waits for a newer status and sends its exact patch',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-checkboxes-'));
+      const entry = path.join(directory, 'CheckboxProbe.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nexport { applyHandoffBridgeStatus, getHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport function CheckboxProbe() { return <HandoffBridgeSetup />; }\n`);
+      const controller = new AbortController(); let bundle; __resetHandoffBridgeStoreForTests();
+      const snapshot = (seq, extra = {}) => status(seq, {
+        enabled: false,
+        autoStart: false,
+        autoRelease: false,
+        config: { scope: { applications: true, scoring: false }, telemetryInBugReports: false },
+        ...extra,
+      });
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const saves = []; const enables = []; const statusListeners = [];
+          const emit = value => statusListeners.forEach(listener => listener(value));
+          const persisted = {
+            enabled: false,
+            autoStart: false,
+            autoRelease: false,
+            scope: { applications: true, scoring: false },
+            telemetryInBugReports: false,
+          };
+          let nextSequence = 1;
+          const publishSaved = () => emit(snapshot(++nextSequence, {
+            enabled: persisted.enabled,
+            autoStart: persisted.autoStart,
+            autoRelease: persisted.autoRelease,
+            config: {
+              scope: { ...persisted.scope },
+              telemetryInBugReports: persisted.telemetryInBugReports,
+            },
+          }));
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: snapshot(1) }),
+            onHandoffBridgeStatus: listener => { statusListeners.push(listener); return () => statusListeners.splice(statusListeners.indexOf(listener), 1); },
+            handoffBridgeSaveConfig: async ({ patch }) => {
+              saves.push(patch);
+              // Preserve one failure path: no renderer-side optimism may make
+              // a rejected durable auto-release change appear unchecked.
+              if (patch.autoRelease === false) return { success: false, code: 'INTERNAL' };
+              if (patch.scope) Object.assign(persisted.scope, patch.scope);
+              if (Object.hasOwn(patch, 'autoStart')) persisted.autoStart = patch.autoStart;
+              if (Object.hasOwn(patch, 'autoRelease')) persisted.autoRelease = patch.autoRelease;
+              if (Object.hasOwn(patch, 'telemetryInBugReports')) persisted.telemetryInBugReports = patch.telemetryInBugReports;
+              // The original failure was two sibling saves from one stale
+              // render. Withhold the first acknowledgement snapshot so the
+              // Scoring save alone must carry both durable scope values.
+              if (patch.scope?.applications === false) return { success: true };
+              publishSaved();
+              return { success: true };
+            },
+            handoffBridgeSetEnabled: async ({ enabled }) => {
+              enables.push(enabled);
+              persisted.enabled = enabled;
+              publishSaved();
+              return { success: true };
+            },
+          };
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          const checkbox = label => {
+            const row = [...window.document.querySelectorAll('label')].find(item => item.textContent.trim() === label);
+            assert(row, `checkbox label ${label} must exist`);
+            return row.querySelector('input[type="checkbox"]');
+          };
+          try {
+            await bundle.module.act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.CheckboxProbe));
+              bundle.module.applyHandoffBridgeStatus(snapshot(1));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const applications = checkbox('Applications');
+            const scoring = checkbox('Let ChatGPT handle scoring handoffs');
+            assert(applications.checked && !scoring.checked, 'the initial scope must enable applications only');
+            await bundle.module.act(async () => { applications.click(); scoring.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(saves.slice(0, 2)) === JSON.stringify([
+              { scope: { applications: false } },
+              { scope: { scoring: true } },
+            ]), 'rapid independent scope changes must not resend a stale sibling value that overwrites the preceding click');
+            assert(bundle.module.getHandoffBridgeStatus().seq === 2 && !applications.checked && scoring.checked, 'the delayed sibling acknowledgement must carry the combined authoritative scope state');
+
+            const autoStart = checkbox('Turn on when the app starts');
+            const autoRelease = checkbox('Automatically release new application handoffs this session');
+            assert(!autoStart.checked && !autoRelease.checked, 'the initial startup and auto-release preferences must be off');
+            await bundle.module.act(async () => { autoStart.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(saves[2]) === JSON.stringify({ autoStart: true })
+              && bundle.module.getHandoffBridgeStatus().seq === 3 && autoStart.checked,
+            'auto-start must send its exact durable preference patch and wait for its newer main status');
+            await bundle.module.act(async () => { autoRelease.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(saves[3]) === JSON.stringify({ autoRelease: true })
+              && bundle.module.getHandoffBridgeStatus().seq === 4 && autoRelease.checked,
+            'auto-release must send its exact durable preference patch and wait for its newer main status');
+
+            const enabled = checkbox('Turn on the ChatGPT bridge');
+            assert(!enabled.checked, 'the initial master enable switch must be off');
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(enables) === JSON.stringify([true])
+              && bundle.module.getHandoffBridgeStatus().seq === 5 && enabled.checked,
+            'the master switch must call its dedicated port and wait for the newer main status');
+
+            const telemetry = checkbox('Include bridge counts in bug reports');
+            assert(!telemetry.checked, 'the initial telemetry preference must be off');
+            await bundle.module.act(async () => { telemetry.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(saves[4]) === JSON.stringify({ telemetryInBugReports: true })
+              && bundle.module.getHandoffBridgeStatus().seq === 6 && telemetry.checked,
+            'bug-report telemetry must send its exact durable preference patch and wait for its newer main status');
+            await bundle.module.act(async () => { autoRelease.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(saves[5]) === JSON.stringify({ autoRelease: false }), 'the controlled failure must request the auto-release value the user selected');
+            assert(bundle.module.getHandoffBridgeStatus().seq === 6 && autoRelease.checked, 'a failed config save must not optimistically change a controlled checkbox');
+            assert(window.document.body.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'a failed checkbox save must provide fixed feedback instead of pretending it was saved');
+            assert(entries.length === 0, 'checkbox status transitions must emit no console warnings or errors');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+          }
+        }));
+      } finally { __resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'handoff bridge: render: a bridge boundary isolates a failed child and recovers on a newer status sequence',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-boundary-'));
