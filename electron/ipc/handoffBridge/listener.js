@@ -191,8 +191,10 @@ export function createListener({ socketPath, handler, httpModule = http, fsModul
         if (!res.headersSent) sendServerError(req, res);
       }
     });
-    instance.on?.('clientError', (_error, socket) => {
-      const message = 'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\n\r\n';
+    instance.on?.('clientError', (error, socket) => {
+      const message = error?.code === 'HPE_HEADER_OVERFLOW'
+        ? 'HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\n\r\n'
+        : 'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\n\r\n';
       socket.end?.(message, () => socket.destroy?.());
     });
     instance.on?.('upgrade', (_req, socket) => socket.destroy?.());

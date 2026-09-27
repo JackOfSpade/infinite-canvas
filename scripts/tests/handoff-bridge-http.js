@@ -191,10 +191,17 @@ export default [
       await ladder.start(); exposed.get('handlers').get('close')();
       for (const delay of [1_000, 5_000, 30_000]) { for (let i = 0; i < 12; i++) await Promise.resolve(); clock.advance(delay); for (let i = 0; i < 24; i++) await Promise.resolve(); }
       assert(notices.some(notice => notice.terminal === true && notice.ok === false), 'three failed restarts must report an explicit terminal listener state');
-      const socket = { end: (text, done) => { socket.text = text; done?.(); }, destroy() { socket.destroyed = true; } };
-      // Client-error is server-level and must retain the universal response headers.
-      const clientError = exposed.get('handlers').get('clientError'); clientError(new Error('bad bytes'), socket);
-      assert(socket.destroyed && socket.text.includes('Cache-Control: no-store') && socket.text.includes('X-Content-Type-Options: nosniff'), 'clientError responses must carry fixed no-store/nosniff headers');
+      const clientError = exposed.get('handlers').get('clientError');
+      const captureClientError = error => {
+        const socket = { end: (text, done) => { socket.text = text; done?.(); }, destroy() { socket.destroyed = true; } };
+        clientError(error, socket);
+        return socket;
+      };
+      // clientError is server-level; fake HTTP exposes it without binding a socket.
+      const overflow = captureClientError(Object.assign(new Error('untrusted parser bytes'), { code: 'HPE_HEADER_OVERFLOW' }));
+      const parser = captureClientError(Object.assign(new Error('untrusted parser bytes'), { code: 'HPE_INVALID_METHOD' }));
+      assert(overflow.destroyed && overflow.text === 'HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\n\r\n', 'header overflow must use the fixed 431 parser response bytes');
+      assert(parser.destroyed && parser.text === 'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\n\r\n' && !parser.text.includes('untrusted parser bytes'), 'all non-overflow parser errors must use fixed unreflected 400 response bytes');
       await ladder.stop();
     },
   },
