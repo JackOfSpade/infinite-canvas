@@ -35,6 +35,7 @@ export async function runBackgroundE2EShutdownCleanup({
   closeAllPages,
   closeStealthBrowser,
   stopApplicationSyncServer,
+  stopHandoffBridge = () => undefined,
   timeoutMs = BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS,
 } = {}) {
   const cleanup = Promise.allSettled([
@@ -42,6 +43,7 @@ export async function runBackgroundE2EShutdownCleanup({
     Promise.resolve().then(() => closeAllPages()),
     Promise.resolve().then(() => closeStealthBrowser(true)),
     Promise.resolve().then(() => stopApplicationSyncServer()),
+    Promise.resolve().then(() => stopHandoffBridge()),
   ]);
 
   let timeoutId = null;

@@ -85,7 +85,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'tunnel/exec.js': { allow: ['node:child_process', 'node:fs', 'node:path', './constants.js', './redact.js'] },
   'tunnel/reap.js': { allow: ['node:fs', 'node:path', './constants.js', './exec.js', './psParse.js'] },
   'tunnel/probe.js': { allow: ['node:net', './constants.js', './classify.js'] },
-  'tunnel/supervisor.js': { allow: ['node:crypto', './constants.js', './config.js', './files.js', './binary.js', './credentials.js', './exec.js', './reap.js', './probe.js', './classify.js', './logRing.js'] },
+  'tunnel/supervisor.js': { allow: ['node:crypto', './constants.js', './config.js', './files.js', './binary.js', './credentials.js', './exec.js', './reap.js', './probe.js', './classify.js', './logRing.js', './redact.js'] },
   'tunnel/index.js': { allow: ['node:fs', 'node:path', './supervisor.js', './constants.js'] },
 });
 
@@ -356,6 +356,47 @@ export default [
         write(root, 'tunnel/probe.js', "fetch('http://127.0.0.1:49152/metrics');\n");
         assert(scanHandoffBridgeSource(root).length === 0, 'a conforming injected tunnel skeleton must pass');
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: source-scan: B6 cross-cutting seams keep env, test hook and main wiring contained',
+    run: () => {
+      const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+      const read = relative => fs.readFileSync(path.join(repoRoot, relative), 'utf8');
+      const bridge = path.join(repoRoot, 'electron/ipc/handoffBridge');
+      const bridgeFiles = listJavaScriptFiles(bridge);
+      const envReaders = bridgeFiles.filter(file => /\bINFINITE_CANVAS_HANDOFF_BRIDGE_[A-Z_]+\b/.test(read(path.join('electron/ipc/handoffBridge', file))));
+      assert(envReaders.length === 1 && envReaders[0] === 'index.js', 'only index.js may read bridge environment variables');
+      const hookReaders = [
+        ...bridgeFiles.map(file => `electron/ipc/handoffBridge/${file}`),
+        'electron/preload.js',
+      ].filter(file => read(file).includes('__icHandoffBridgeTest'));
+      assert(hookReaders.length === 1 && hookReaders[0] === 'electron/ipc/handoffBridge/index.js', 'test pairing hook is main-only and never preload/IPC');
+      const main = read('electron/main.js');
+      const cleanup = main.indexOf('const cleanup = async');
+      const stop = main.indexOf('stopHandoffBridge()', cleanup);
+      const authClose = main.indexOf('await closeAllAuthWindows()', cleanup);
+      assert(cleanup >= 0 && stop > cleanup && authClose > stop, 'hard stop must begin cleanup before auth windows close');
+      assert(main.includes('holdHandoffBridgeForQuit()') && main.includes('resumeHandoffBridgeAfterQuitCancel()'), 'quit handoff hooks remain additive');
+      const packageJson = JSON.parse(read('package.json'));
+      assert(Object.keys(packageJson.scripts).includes('test:e2e:bridge'), 'B0 bridge smoke script remains registered');
+      assert(main.includes('requestSingleInstanceLock'), 'main must retain the single-instance guard');
+    },
+  },
+  {
+    name: 'handoff bridge: source-scan: B6 composition keeps socket/test-mode branches and redacted tunnel relay explicit',
+    run: () => {
+      const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+      const read = relative => fs.readFileSync(path.join(repoRoot, relative), 'utf8');
+      const index = read('electron/ipc/handoffBridge/index.js');
+      const supervisor = read('electron/ipc/handoffBridge/tunnel/supervisor.js');
+      assert(index.includes('Buffer.byteLength(socketPath) > CONSTANTS.SOCKET_PATH_MAX_BYTES')
+        && index.includes("error.code = 'path_too_long'"), 'composition must reject an overlong shared Unix-socket path before transport creation');
+      assert(index.includes('socketPublicProbe({ ...options, socketPath') && index.includes('publicProbe({ ...options'), 'test mode must select a socket probe while production uses guarded public probe');
+      assert(index.includes('if (testMode) installPairingTestHook(candidate)')
+        && index.includes('delete globalThis.__icHandoffBridgeTest')
+        && index.includes('removePairingTestHook(current)'), 'the pairing hook is test-mode-only and removed when a candidate is hard-stopped/detached');
+      assert(SOURCE_SCAN_ROWS['tunnel/supervisor.js'].allow.includes('./redact.js') && supervisor.includes("from './redact.js'"), 'the reviewed bounded/redacted tunnel log relay must be allow-listed');
     },
   },
 ];

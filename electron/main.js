@@ -22,16 +22,222 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
+import { holdHandoffBridgeForQuit, registerHandoffBridgeHandlers, resumeHandoffBridgeAfterQuitCancel, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from './ipc/handoffBridge/index.js';
+import { readTunnelState, writeTunnelState } from './ipc/handoffBridge/tunnel/files.js';
+import { prepareBinary } from './ipc/handoffBridge/tunnel/binary.js';
+import { inspectCredentials } from './ipc/handoffBridge/tunnel/credentials.js';
+import { reapOrphans } from './ipc/handoffBridge/tunnel/reap.js';
 import fs from 'fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
-import { execFile as execFileCb } from 'node:child_process';
+import { execFile as execFileCb, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isBackgroundE2E as isBackgroundE2ERuntime, runBackgroundE2EShutdownCleanup } from './utils/backgroundE2e.js';
 import { createPendingGlobalQuitDeferral } from './utils/quitDeferral.js';
 
 const execFile = promisify(execFileCb);
+const handoffBridgeSetupSessions = new Map();
+
+// Setup paths come solely from Electron's native file chooser. Every accepted
+// partial selection is immediately persisted to tunnel.json; presentation
+// facts stay in memory and config.json never receives either class of value.
+export function createHandoffBridgeTunnelSetup(userData, {
+  readTunnelStateImpl = readTunnelState,
+  writeTunnelStateImpl = writeTunnelState,
+  prepareBinaryImpl = prepareBinary,
+  inspectCredentialsImpl = inspectCredentials,
+  reapOrphansImpl = reapOrphans,
+  statSync = fs.statSync,
+  now = Date.now,
+  xattrImpl = null,
+  codesignImpl = null,
+  versionImpl = null,
+} = {}) {
+  const existing = handoffBridgeSetupSessions.get(userData);
+  const setup = existing || {};
+  let hydrated = Boolean(existing);
+  handoffBridgeSetupSessions.set(userData, setup);
+  const presentationFields = ['binarySourcePath', 'binarySize', 'signature', 'binaryVersion', 'tunnelId', 'credentialsMode'];
+  const cloneSetup = () => Object.fromEntries(Object.entries(setup));
+  const replaceSetup = next => {
+    for (const key of Object.keys(setup)) delete setup[key];
+    for (const [key, value] of Object.entries(next || {})) setup[key] = value;
+  };
+  const applyStoredSetup = stored => {
+    const presentation = Object.fromEntries(presentationFields
+      .filter(key => Object.hasOwn(setup, key))
+      .map(key => [key, setup[key]]));
+    const next = { ...presentation };
+    if (typeof stored?.binaryPath === 'string') {
+      next.binaryPath = stored.binaryPath;
+      next.pin = stored.pin;
+      next.approvedAt = Number.isFinite(stored.approvedAt) ? stored.approvedAt : null;
+    }
+    if (typeof stored?.credentialsPath === 'string') next.credentialsPath = stored.credentialsPath;
+    // Trust is a derived property of the freshly re-read durable result, never
+    // a bit a caller can carry forward from staged memory.
+    next.binaryTrusted = stored?.binaryTrusted === true;
+    replaceSetup(next);
+  };
+  // Registration must stay read-inert. Load durable setup only in direct
+  // response to a setup IPC; the separate three-second launch path owns its
+  // one pidfile stat and config read.
+  const hydrate = () => {
+    if (hydrated) return setup;
+    hydrated = true;
+    try {
+      const stored = readTunnelStateImpl(userData) || null;
+      if (stored) applyStoredSetup(stored);
+    } catch { /* setup remains empty */ }
+    return setup;
+  };
+  const persist = async () => {
+    hydrate();
+    const candidate = {};
+    if (typeof setup.binaryPath === 'string' && typeof setup.pin === 'string') {
+      candidate.binaryPath = setup.binaryPath;
+      candidate.pin = setup.pin;
+      candidate.approvedAt = Number.isFinite(setup.approvedAt) ? setup.approvedAt : null;
+    }
+    if (typeof setup.credentialsPath === 'string') candidate.credentialsPath = setup.credentialsPath;
+    if (!candidate.binaryPath && !candidate.credentialsPath) return { ok: false, code: 'STATE_UNREADABLE' };
+    try {
+      const stored = await writeTunnelStateImpl(userData, candidate);
+      if (!stored) return { ok: false, code: 'STATE_UNREADABLE' };
+      applyStoredSetup(stored);
+      return { ok: true };
+    } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
+  };
+  const mutateAndPersist = async mutate => {
+    const before = cloneSetup();
+    try {
+      mutate();
+      const persisted = await persist();
+      if (persisted?.ok) return persisted;
+      replaceSetup(before);
+      return persisted || { ok: false, code: 'STATE_UNREADABLE' };
+    } catch {
+      replaceSetup(before);
+      return { ok: false, code: 'STATE_UNREADABLE' };
+    }
+  };
+  // These ports have fixed executable names/arguments and never incorporate a
+  // renderer string. prepareBinary performs the authoritative filesystem and
+  // hash checks; this supplies the macOS provenance/version facts it requires.
+  const xattr = xattrImpl || (target => {
+    try {
+      const value = String(execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim();
+      return { present: value.length > 0 };
+    } catch (error) {
+      // Absence is the one benign error.  Tool absence, a permissions failure,
+      // and any unrecognised platform output are provenance failures.
+      const output = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
+      if (error?.status === 1 && /(No such xattr|attribute not found)/i.test(output)) return { present: false };
+      throw error;
+    }
+  });
+  const codesign = codesignImpl || (target => {
+    try {
+      execFileSync('/usr/bin/codesign', ['--verify', '--strict', target], { stdio: 'ignore' });
+      // codesign writes its descriptive output to stderr even on success, so
+      // execFileSync's return value is insufficient for a truthful summary.
+      const inspected = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', target], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000, maxBuffer: 64 * 1024,
+      });
+      const details = inspected.status === 0 && !inspected.error
+        ? `${String(inspected.stdout || '')}\n${String(inspected.stderr || '')}`
+        : '';
+      const summary = !details ? 'unavailable'
+        : /Signature=adhoc/i.test(details) ? 'ad-hoc signed'
+          : /Authority=Developer ID/i.test(details) ? 'Developer ID signed'
+            : 'other signed';
+      return { verified: true, summary };
+    } catch { return { verified: false, summary: 'unsigned' }; }
+  });
+  const version = versionImpl || (target => {
+    try { return String(execFileSync(target, ['--version'], { encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } })).trim(); } catch { return ''; }
+  });
+  return Object.freeze({
+    async chooseBinary(sourcePath) {
+      hydrate();
+      if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
+      let prepared;
+      try { prepared = await prepareBinaryImpl({ userData, sourcePath, pin: null }, { xattr, codesign, version }); } catch { prepared = null; }
+      if (!prepared?.ok) return { ok: false, code: 'INVALID' };
+      let size = null; try { size = statSync(sourcePath).size; } catch { /* copy is authoritative; display falls back safely */ }
+      let signature; try { signature = codesign(prepared.copyPath); } catch { signature = null; }
+      if (signature?.verified !== true) return { ok: false, code: 'INVALID' };
+      const persisted = await mutateAndPersist(() => {
+        setup.binaryPath = prepared.copyPath;
+        setup.pin = prepared.sha256;
+        setup.approvedAt = null;
+        setup.binaryTrusted = false;
+        setup.binaryVersion = prepared.version;
+        setup.binarySourcePath = sourcePath;
+        setup.binarySize = Number.isSafeInteger(size) ? size : null;
+        setup.signature = signature.summary;
+      });
+      return persisted?.ok ? { ok: true } : persisted;
+    },
+    async getApprovalDetails() {
+      hydrate();
+      if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
+      return {
+        ok: true,
+        sourcePath: typeof setup.binarySourcePath === 'string' ? setup.binarySourcePath : null,
+        version: typeof setup.binaryVersion === 'string' && /^[0-9A-Za-z._-]{1,48}$/.test(setup.binaryVersion) ? setup.binaryVersion : null,
+        size: Number.isSafeInteger(setup.binarySize) && setup.binarySize >= 0 ? setup.binarySize : null,
+        sha256: setup.pin,
+        sha256Prefix: setup.pin.slice(0, 12),
+        signature: ['ad-hoc signed', 'Developer ID signed', 'other signed', 'unsigned'].includes(setup.signature) ? setup.signature : 'unavailable',
+        pinLimits: 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID',
+      };
+    },
+    async approveBinary() {
+      hydrate();
+      if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
+      let approvedAt;
+      try { approvedAt = Number(now()); } catch { approvedAt = NaN; }
+      if (!Number.isFinite(approvedAt) || approvedAt < 0) return { ok: false, code: 'STATE_UNREADABLE' };
+      return mutateAndPersist(() => {
+        setup.approvedAt = approvedAt;
+        // `persist` replaces this with the trusted bit from readTunnelState.
+        setup.binaryTrusted = false;
+      });
+    },
+    async chooseCredentials(sourcePath) {
+      hydrate();
+      if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
+      let inspected; try { inspected = inspectCredentialsImpl(sourcePath); } catch { inspected = null; }
+      if (!inspected?.ok) return { ok: false, code: 'INVALID' };
+      const persisted = await mutateAndPersist(() => {
+        setup.credentialsPath = inspected.credentialsPath;
+        setup.tunnelId = inspected.tunnelId;
+        setup.credentialsMode = inspected.credentialsMode;
+      });
+      return persisted?.ok ? { ok: true } : persisted;
+    },
+    restart: async () => ({ ok: false, code: 'NOT_READY' }),
+    // This intentionally takes no arguments. The renderer can request a
+    // bounded reap, but only this main-owned setup port supplies userData and
+    // the generated config path to the process-table implementation.
+    async reapOrphans() {
+      let result;
+      try {
+        result = await reapOrphansImpl({
+          userData,
+          configPath: path.join(userData, 'handoff-bridge', 'tunnel', 'config.yml'),
+        });
+      } catch { return { ok: false, code: 'NOT_FOUND' }; }
+      return Number.isInteger(result?.reaped) && result.reaped > 0
+        ? { ok: true, reaped: result.reaped }
+        : { ok: false, code: 'NOT_FOUND' };
+    },
+    getLog: async () => [],
+    clearSession: async () => { handoffBridgeSetupSessions.delete(userData); return true; },
+  });
+}
 // Electron smoke runs must remain invisible to the person using the desktop.
 // This is intentionally a separate flag from INFINITE_CANVAS_E2E: lightweight
 // automation can still opt into normal windows, whereas the Playwright smoke
@@ -1176,6 +1382,18 @@ if (!gotTheLock) {
     registerNetworkHandlers();
     registerSettingsHandlers();
     registerNonApiAiHandlers();
+    try {
+      const bridgeUserData = app.getPath('userData');
+      const tunnelSetup = createHandoffBridgeTunnelSetup(bridgeUserData);
+      registerHandoffBridgeHandlers({ ipcMain: electronPkg.ipcMain, deps: {
+        getCanvasWindows: () => [...canvasWindows], readTunnelState,
+        // The bridge factory receives the app logger through its composed
+        // dependency graph, so both direct and scheduled starts share the
+        // production bug-report ring without a second logger import.
+        appLogger: logger,
+        tunnelSetup,
+      } });
+    } catch { /* bridge registration must never block the app */ }
 
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by Claude design and replaced
@@ -1201,6 +1419,16 @@ if (!gotTheLock) {
 
     setupApplicationMenu();
     createWindow({ mode: 'auto' });
+    const bridgeUserData = app.getPath('userData');
+    scheduleHandoffBridgeLaunch({
+      userData: bridgeUserData,
+      stat: fs.promises.stat,
+      reapOrphans: () => reapOrphans({ userData: bridgeUserData, configPath: path.join(bridgeUserData, 'handoff-bridge', 'tunnel', 'config.yml') }),
+      start: ({ reason, loadedConfig }) => startHandoffBridge({ reason, deps: {
+        enabled: true, activate: true, tunnelState: readTunnelState(bridgeUserData), readTunnelState,
+        loadedConfig, getCanvasWindows: () => [...canvasWindows],
+      } }),
+    });
 
     if (process.env.INFINITE_CANVAS_E2E !== '1') {
       // Mark every platform pending before the delayed worker pool begins. The
@@ -1255,6 +1483,7 @@ app.on('before-quit', async (event) => {
       closeAllPages,
       closeStealthBrowser,
       stopApplicationSyncServer,
+      stopHandoffBridge,
     });
     try {
       await backgroundE2ECleanupInFlight;
@@ -1287,6 +1516,7 @@ app.on('before-quit', async (event) => {
   // quit, so subsequent events can safely no-op until it completes or cancels.
   if (quitHandshakeInFlight) return;
   quitHandshakeInFlight = true;
+  void holdHandoffBridgeForQuit();
   // A request can reach a renderer just before its ACK is lost to navigation or
   // timeout, so record it *before* awaiting the response. Every recorded
   // renderer must be released on every non-terminating path, including an
@@ -1354,6 +1584,7 @@ app.on('before-quit', async (event) => {
     // Cleanup with safety timeout
     try {
       const cleanup = async () => {
+        const handoffBridgeStop = stopHandoffBridge();
         // Visible login/native-auth windows own the same persistent profile.
         // Close and await them first so the singleton cannot race their final
         // cookie checkpoint during quit.
@@ -1362,6 +1593,7 @@ app.on('before-quit', async (event) => {
           closeAllPages(),
           closeStealthBrowser(true),
           stopApplicationSyncServer(),
+          handoffBridgeStop,
         ]);
       };
 
@@ -1397,6 +1629,7 @@ app.on('before-quit', async (event) => {
       // finally rather than only at expected early returns so a surviving UI is
       // never stranded non-interactive.
       releaseQuitCommit(attemptedCommitWindows);
+      void resumeHandoffBridgeAfterQuitCancel();
       quitHandshakeInFlight = false;
     }
   }

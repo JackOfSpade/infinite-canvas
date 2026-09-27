@@ -271,4 +271,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Lifecycle Control ────────────────────────────────────────────────────
   cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause),
   cancelNodeTaskAndWait: (nodeId, cause = null) => ipcRenderer.invoke('cancel-node-task-and-wait', { nodeId, cause }),
+
+  // ── ChatGPT handoff bridge ──────────────────────────────────────────────
+  // This closed surface mirrors contracts.js: 24 invoke channels, one
+  // renderer-to-main publisher, and the three main-to-renderer notifications.
+  handoffBridgeGetStatus: () => ipcRenderer.invoke('handoff-bridge:get-status'),
+  handoffBridgeSetEnabled: (payload) => ipcRenderer.invoke('handoff-bridge:set-enabled', payload),
+  handoffBridgeSaveConfig: (payload) => ipcRenderer.invoke('handoff-bridge:save-config', payload),
+  handoffBridgeChooseBinary: () => ipcRenderer.invoke('handoff-bridge:choose-binary'),
+  handoffBridgeApproveBinary: () => ipcRenderer.invoke('handoff-bridge:approve-binary'),
+  handoffBridgeChooseCredentials: () => ipcRenderer.invoke('handoff-bridge:choose-credentials'),
+  handoffBridgeRestartTunnel: () => ipcRenderer.invoke('handoff-bridge:restart-tunnel'),
+  handoffBridgeStopOrphan: () => ipcRenderer.invoke('handoff-bridge:stop-orphan'),
+  handoffBridgeGetTunnelLog: () => ipcRenderer.invoke('handoff-bridge:get-tunnel-log'),
+  handoffBridgeOpenPairing: () => ipcRenderer.invoke('handoff-bridge:open-pairing'),
+  handoffBridgeCancelPairing: () => ipcRenderer.invoke('handoff-bridge:cancel-pairing'),
+  handoffBridgeNewChat: () => ipcRenderer.invoke('handoff-bridge:new-chat'),
+  handoffBridgeContinueChat: () => ipcRenderer.invoke('handoff-bridge:continue-chat'),
+  handoffBridgePause: () => ipcRenderer.invoke('handoff-bridge:pause'),
+  handoffBridgeResume: () => ipcRenderer.invoke('handoff-bridge:resume'),
+  handoffBridgeRevokeAll: () => ipcRenderer.invoke('handoff-bridge:revoke-all'),
+  handoffBridgeForgetSetup: () => ipcRenderer.invoke('handoff-bridge:forget-setup'),
+  handoffBridgeRelease: (payload) => ipcRenderer.invoke('handoff-bridge:release', payload),
+  handoffBridgeUnrelease: (payload) => ipcRenderer.invoke('handoff-bridge:unrelease', payload),
+  handoffBridgeReleasePush: (payload) => ipcRenderer.invoke('handoff-bridge:release-push', payload),
+  handoffBridgeUnreleasePush: (payload) => ipcRenderer.invoke('handoff-bridge:unrelease-push', payload),
+  handoffBridgeHoldJob: (payload) => ipcRenderer.invoke('handoff-bridge:hold-job', payload),
+  handoffBridgeAckAlarm: (payload) => ipcRenderer.invoke('handoff-bridge:ack-alarm', payload),
+  handoffBridgeGetActivity: () => ipcRenderer.invoke('handoff-bridge:get-activity'),
+  handoffBridgePublishJobs: (payload) => ipcRenderer.send('handoff-bridge:publish-jobs', payload),
+  onHandoffBridgeStatus: createListener('handoff-bridge:status'),
+  onHandoffBridgeJobChanged: createListener('handoff-bridge:job-changed'),
+  onHandoffBridgeOpenPanel: createListener('handoff-bridge:open-panel'),
 });
