@@ -19,6 +19,17 @@ const fingerprint = value => shaHex(value).slice(0, 8);
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const finiteTime = value => Number.isSafeInteger(value) && value >= 0;
+// This is a canonical network prefix supplied by http.js, never a raw IP.
+// Keeping its validation here avoids accepting arbitrary persisted text into
+// linkStatus or the security ledger while preserving oauth.js's crypto-only
+// node-import boundary.
+function safeSourcePrefix(value) {
+  if (typeof value !== 'string') return null;
+  const ipv4 = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.0\/24$/.exec(value);
+  if (ipv4) return ipv4.slice(1).every(part => Number(part) <= 255) ? value : null;
+  const hextet = '(?:0|[1-9a-f][0-9a-f]{0,3})';
+  return new RegExp(`^${hextet}:${hextet}:${hextet}::/48$`).test(value) ? value : null;
+}
 
 const BLANK_LOOKALIKES = String.fromCodePoint(0x2800, 0x3164, 0xffa0);
 const INVISIBLE = new RegExp(`[\\p{Cc}\\p{Cf}\\p{Cs}\\p{Co}\\p{Cn}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}${BLANK_LOOKALIKES}]`, 'gu');
@@ -161,6 +172,7 @@ export function createOAuthServer({
   onConsentRequested = () => undefined,
   onLinked = () => undefined,
   onDisconnected = () => undefined,
+  onPairingClosed = () => undefined,
   pairingGate = () => true,
   readBody: readBodyImpl = readBody,
   tokenAuthMode = CONSTANTS.TOKEN_AUTH_MODE,
@@ -237,6 +249,7 @@ export function createOAuthServer({
         lastRefreshedAt: item.lastRefreshedAt,
         idleExpiresAt: item.idleExpiresAt,
         absoluteExpiresAt: item.absoluteExpiresAt,
+        sourcePrefix: safeSourcePrefix(item.sourcePrefix),
         revoked: item.revoked === true,
         revokedAt: finiteTime(item.revokedAt) ? item.revokedAt : 0,
       });
@@ -304,6 +317,7 @@ export function createOAuthServer({
         lastRefreshedAt: family.lastRefreshedAt,
         idleExpiresAt: family.idleExpiresAt,
         absoluteExpiresAt: family.absoluteExpiresAt,
+        sourcePrefix: family.sourcePrefix,
         revoked: family.revoked,
         revokedAt: family.revokedAt,
       })),
@@ -341,7 +355,7 @@ export function createOAuthServer({
     const current = now();
     for (const [id, transaction] of transactions) if (transaction.expiresAt <= current) transactions.delete(id);
     for (const [hash, code] of codes) if (code.retainUntil <= current) codes.delete(hash);
-    if (pairing && pairing.expiresAt <= current) { pairing = null; transactions.clear(); }
+    if (pairing && pairing.expiresAt <= current) endPairing();
   }
 
   async function clientFor(clientId, { forceFetch = false } = {}) {
@@ -385,9 +399,18 @@ export function createOAuthServer({
     return `${compact.slice(0, 5)}-${compact.slice(5)}`;
   }
 
-  function closePairing() {
+  // The only browser-side terminal pairing outcomes that need to close the
+  // native sheet are fixed enums.  The normal main-process close path remains
+  // silent so pairing can call it without a callback cycle.
+  function endPairing(reason = null) {
     pairing = null;
     transactions.clear();
+    if (reason === 'denied' || reason === 'locked') safeCall(onPairingClosed, reason);
+  }
+
+  function closePairing() {
+    endPairing();
+    return true;
   }
 
   async function authorizeGet(req, res) {
@@ -403,6 +426,10 @@ export function createOAuthServer({
       throw new PageError('The request is missing a client or a redirect address.');
     }
     const client = await clientFor(query.client_id, { forceFetch: true });
+    // Client metadata is the only awaited step before a consent transaction.
+    // A native cancel/expiry while it is in flight must not resurrect the
+    // pairing or enqueue a notice once that request eventually returns.
+    if (!activePairing() || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
     if (!client || query.redirect_uri !== REDIRECT_URI || !client.redirectUris.includes(query.redirect_uri)) {
       throw new PageError('The authorization request is not recognised.');
     }
@@ -446,6 +473,8 @@ export function createOAuthServer({
       timeoutMs: CONSTANTS.ANONYMOUS_OAUTH_BODY_DEADLINE_MS,
       response: res,
     });
+    const currentPairing = activePairing();
+    if (!currentPairing || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
     if (mimeOf(req) !== 'application/x-www-form-urlencoded') throw new PageError('Unsupported form encoding.');
     let parsed;
     try { parsed = parseForm(body.toString('utf8')); } catch { throw new PageError('The form could not be read.'); }
@@ -455,19 +484,19 @@ export function createOAuthServer({
       throw new PageError('This approval request expired or was already used. Start again from ChatGPT.');
     }
     if (parsed.values.action === 'deny') {
-      transactions.delete(transaction.id);
+      endPairing('denied');
       return redirectError(res, transaction.redirectUri, transaction.state, base, 'access_denied', 'The operator denied the request');
     }
     if (parsed.values.action !== 'approve') throw new PageError('Unknown action.');
     const compact = normalizePairingCode(parsed.values.pairing_code);
-    const matched = compact && hexEqual(pairing.hash, shaHex(compact));
+    const matched = compact && hexEqual(currentPairing.hash, shaHex(compact));
     if (!matched) {
       transaction.wrong += 1;
-      pairing.wrong += 1;
+      currentPairing.wrong += 1;
       const requestLocked = transaction.wrong >= CONSTANTS.PAIRING_WRONG_TRIES_PER_REQUEST;
-      const windowLocked = pairing.wrong >= CONSTANTS.PAIRING_WRONG_TRIES_PER_WINDOW;
+      const windowLocked = currentPairing.wrong >= CONSTANTS.PAIRING_WRONG_TRIES_PER_WINDOW;
       if (requestLocked) transactions.delete(transaction.id);
-      if (windowLocked) closePairing();
+      if (windowLocked) endPairing('locked');
       if (requestLocked || windowLocked) {
         return redirectError(res, transaction.redirectUri, transaction.state, base, 'access_denied', 'Too many wrong pairing codes');
       }
@@ -475,8 +504,7 @@ export function createOAuthServer({
       return sendHtml(res, 200, consentHtml(transaction, `That pairing code did not match. ${left} ${left === 1 ? 'try' : 'tries'} left.`), consentCsp(transaction));
     }
 
-    pairing = null;
-    transactions.delete(transaction.id);
+    endPairing();
     while (codes.size >= MAX_CODES) codes.delete(codes.keys().next().value);
     const raw = newSecret();
     const record = {
@@ -592,7 +620,7 @@ export function createOAuthServer({
     return CONSTANTS.SCOPE;
   }
 
-  function codeGrant(client, params) {
+  function codeGrant(client, params, sourcePrefix) {
     const raw = required(params, 'code');
     const redirectUri = required(params, 'redirect_uri');
     const codeVerifier = required(params, 'code_verifier');
@@ -635,6 +663,7 @@ export function createOAuthServer({
       lastRefreshedAt: current,
       idleExpiresAt: current + CONSTANTS.REFRESH_IDLE_MS,
       absoluteExpiresAt: current + CONSTANTS.REFRESH_ABSOLUTE_MS,
+      sourcePrefix: safeSourcePrefix(sourcePrefix),
       revoked: false,
       revokedAt: 0,
     };
@@ -709,7 +738,7 @@ export function createOAuthServer({
       throw new OAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported');
     }
     const client = await authenticateClient(params, serverContext);
-    const body = grant === 'authorization_code' ? codeGrant(client, params) : refreshGrant(client, params);
+    const body = grant === 'authorization_code' ? codeGrant(client, params, serverContext?.sourcePrefix) : refreshGrant(client, params);
     return sendJson(res, 200, body);
   }
 
@@ -874,6 +903,7 @@ export function createOAuthServer({
       createdAt: family.createdAt,
       idleExpiresAt: family.idleExpiresAt,
       absoluteExpiresAt: family.absoluteExpiresAt,
+      sources: family.sourcePrefix ? [family.sourcePrefix] : [],
     })),
     challengeHeader: error => {
       let value = `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp", scope="${CONSTANTS.SCOPE}"`;

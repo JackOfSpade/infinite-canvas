@@ -31,6 +31,12 @@ function clockAt(value = Date.UTC(2026, 8, 26, 12, 0, 0)) {
   return clock;
 }
 
+function deferred() {
+  let resolve; let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 const clone = value => JSON.parse(JSON.stringify(value));
 function memoryStore(seed = { v: 1, clients: [], codes: [], families: [], refresh: [], access: [] }) {
   let state = clone(seed);
@@ -84,6 +90,7 @@ function boot(options = {}) {
   const auth = [];
   const consent = [];
   const disconnected = [];
+  const pairingClosed = [];
   const metadata = options.metadata === undefined ? clientFrom() : options.metadata;
   const oauth = createOAuthServer({
     issuer: options.issuer || ISSUER,
@@ -96,13 +103,14 @@ function boot(options = {}) {
     recordClientAuth: entry => { auth.push(entry); options.recordClientAuth?.(entry); },
     onConsentRequested: entry => { consent.push(entry); options.onConsentRequested?.(entry); },
     onDisconnected: entry => { disconnected.push(entry); options.onDisconnected?.(entry); },
+    onPairingClosed: reason => { pairingClosed.push(reason); options.onPairingClosed?.(reason); },
     onAuthorizeWithoutWindow: options.onAuthorizeWithoutWindow,
     pairingGate: options.pairingGate || (() => true),
     readBody: options.readBody || bodyReader,
     tokenAuthMode: options.tokenAuthMode || 'observe-both',
     asAuthMethods: options.asAuthMethods || ['private_key_jwt', 'none'],
   });
-  return { oauth, now, store, events, auth, consent, disconnected };
+  return { oauth, now, store, events, auth, consent, disconnected, pairingClosed };
 }
 
 async function call(env, method, target, { headers = {}, body = '', serverContext = {} } = {}) {
@@ -1023,6 +1031,30 @@ const phaseOneTests = [
     },
   },
   {
+    name: 'handoff bridge: oauth: first code exchange persists only its safe link-time source prefix',
+    run: async () => {
+      const env = boot();
+      const issued = await obtainCode(env);
+      const result = await call(env, 'POST', '/oauth/token', {
+        headers: FORM,
+        body: form({
+          grant_type: 'authorization_code', code: issued.code, redirect_uri: REDIRECT,
+          code_verifier: issued.started.proof.verifier, resource: RESOURCE, client_id: CLIENT_ID,
+        }),
+        serverContext: { sourcePrefix: '2001:db8:1234::/48' },
+      });
+      assert.equal(result.status, 200);
+      assert.deepEqual(env.oauth.linkStatus()[0].sources, ['2001:db8:1234::/48']);
+      assert.equal(env.store.state().families[0].sourcePrefix, '2001:db8:1234::/48');
+      assert.ok(!JSON.stringify(env.store.state()).includes(result.json.access_token), 'source persistence must retain only hashes and the prefix, never issued secrets');
+      const tampered = env.store.state();
+      tampered.families[0].sourcePrefix = '999.999.999.0/24';
+      assert.deepEqual(boot({ store: memoryStore(tampered) }).oauth.linkStatus()[0].sources, [], 'tampered IPv4 prefix octets must not reach link status');
+      tampered.families[0].sourcePrefix = '2001:0db8:1234:1::/48';
+      assert.deepEqual(boot({ store: memoryStore(tampered) }).oauth.linkStatus()[0].sources, [], 'noncanonical or host-bearing IPv6 prefixes must not reach link status');
+    },
+  },
+  {
     name: 'handoff bridge: oauth: resource is canonical for the configured hostname',
     run: async () => {
       const env = boot();
@@ -1126,6 +1158,62 @@ const phaseOneTests = [
     },
   },
   {
+    name: 'handoff bridge: oauth: a close during deferred client metadata cannot resurrect consent state',
+    run: async () => {
+      const metadata = deferred(); let fetches = 0;
+      const env = boot({ fetchClientMetadata: () => { fetches += 1; return metadata.promise; } });
+      const pairing = env.oauth.openPairing(); const proof = pkce();
+      const request = call(env, 'GET', `/oauth/authorize?${form({
+        response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT, state: 'deferred-Ada',
+        code_challenge: proof.challenge, code_challenge_method: 'S256', resource: RESOURCE,
+      })}`);
+      await Promise.resolve();
+      assert.equal(fetches, 1);
+      assert.equal(env.oauth.closePairing(), true);
+      metadata.resolve(clientFrom());
+      const result = await request;
+      assert.equal(result.status, 403);
+      assert.deepEqual([env.oauth.stats().pendingTransactions, env.oauth.pendingPairings(), env.consent.length], [0, 0, 0]);
+      assert.ok(!result.text.includes(pairing), 'deferred cancellation must not echo a pairing code');
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: deny and the fifteenth wrong code emit only their closed enums',
+    run: async () => {
+      const denied = boot(); const deniedStart = await consentStart(denied, { state: 'deny-Ada' });
+      assert.equal((await approve(denied, deniedStart, { action: 'deny' })).status, 302);
+      assert.deepEqual(denied.pairingClosed, ['denied']);
+      assert.equal(denied.oauth.pendingPairings(), 0);
+
+      const locked = boot(); locked.oauth.openPairing();
+      for (let request = 0; request < 3; request += 1) {
+        const started = await consentStart(locked, { open: false, state: `lock-Ada-${request}` });
+        for (let attempt = 0; attempt < CONSTANTS.PAIRING_WRONG_TRIES_PER_REQUEST; attempt += 1) {
+          await approve(locked, started, { pairingCode: '22222-22222' });
+        }
+      }
+      assert.deepEqual(locked.pairingClosed, ['locked']);
+      assert.equal(locked.oauth.pendingPairings(), 0);
+      assert.equal(locked.oauth.stats().pendingTransactions, 0);
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: 500 valid authorize requests retain one pending transaction',
+    run: async () => {
+      const env = boot(); env.oauth.openPairing();
+      for (let index = 0; index < 500; index += 1) {
+        const proof = pkce();
+        const result = await call(env, 'GET', `/oauth/authorize?${form({
+          response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT, state: `flood-Ada-${index}`,
+          code_challenge: proof.challenge, code_challenge_method: 'S256', resource: RESOURCE,
+        })}`);
+        assert.equal(result.status, 200);
+      }
+      assert.equal(env.oauth.stats().pendingTransactions, 1);
+      assert.equal(env.consent.length, 500);
+    },
+  },
+  {
     name: 'handoff bridge: oauth: persisted OAuth state contains hashes and sealed grace but no raw credential',
     run: async () => {
       const env = boot();
@@ -1135,6 +1223,14 @@ const phaseOneTests = [
       for (const raw of [linked.code, linked.token.access_token, linked.token.refresh_token, linked.started.pairing, linked.started.proof.verifier]) assert.ok(!text.includes(raw));
       assert.ok(text.includes(shaHex(linked.token.refresh_token)));
       assert.ok(text.includes('grace'));
+    },
+  },
+  {
+    name: 'handoff bridge: oauth: closePairing returns an explicit durable controller acknowledgement',
+    run: () => {
+      const env = boot();
+      assert.equal(env.oauth.closePairing(), true);
+      assert.equal(env.oauth.stats().pairings, 0);
     },
   },
 ];
@@ -1480,7 +1576,7 @@ const assertionTests = [
 ];
 
 assert.equal(LAB_STEP_NAMES.length, 100);
-assert.equal(phaseOneTests.length, 12);
+assert.equal(phaseOneTests.length, 17);
 assert.equal(assertionTests.length, 42);
 
 export default [...portedLabTests, ...phaseOneTests, ...assertionTests];
