@@ -128,3 +128,22 @@ Adversarial review covered every tunnel invariant I-1 through I-12, including th
 | G10 | Green after review of every `tunnel/*` module and the literal watchdog script. |
 
 `npm run test:tunnel` passed outside the filesystem/process sandbox as required: five temporary fake children, exit status preserved, TERM during sleep completed in 213 ms, and the helper-crash/reaper path removed the TERM-ignoring connector and grandchild in 4037 ms across the 0/333/666 ms poll offsets; the different-config look-alike survived. The first sandboxed invocation could not call `/bin/ps` and was correctly treated as a harness restriction, not a product result.
+
+## B4 — application data plane (2026-09-27)
+
+Implemented and merged directly on local `main` in commit `f4b532b` (`feat: add ChatGPT bridge application engine`). The stage adds application lanes and framing, the memory-only chat epoch, depth-first scheduler, single-flight get/submit paths, application adapter, durable release metadata, split security/serve ledgers, and the sole validated config writer.
+
+The clean-clone adversarial pass caught and closed four issues before merge: the B0 framing import allowance, lifecycle audit events being dropped, an internal recovery submit that could retain a semaphore forever, and different replacement bytes overtaking retained crash-gap bytes. The audit schema now also rejects a field named `code`, even when its value looks safe.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. Against the separately committed B0 source-scan correction, the stage diff is exactly eight allowed production files and three allowed registered tests; no ignored path. |
+| G1 | Green in an isolated clean clone: 1628 passed, 0 failed; the required non-bridge baseline diff was empty. The final focused engine suite passed 60 cases. |
+| G2 | Green. `npm test` passed in the isolated clone. |
+| G3 | Green. `npm run lint` passed. |
+| G4 | Green. `npm run build:compile` passed. |
+| G8 | The B8 conformance runner does not exist yet; the engine plus real application integration groups passed as the stated equivalent. |
+| G9 | Green. SHA-1s of all seven frozen files were identical. |
+| G10 | Green after persistence, scheduling, error-text, audit and semaphore/watchdog review. No prompt, answer, job id, handoff code, path or label reaches a ledger or logger. |
+
+The temporary clean clone was removed. Nothing was pushed.
