@@ -303,3 +303,9 @@ Every acknowledged binary selection, approval and credential mutation now takes 
 | Packaging | Rebuilt, signed and relaunched. Safe real bootstrap status was bridge-off with `binaryApproved`, `credentialsOk` and `binarySelected` true, details redacted, and no cloudflared process. |
 
 An earlier CUA accessibility attempt timed out after Settings opened and was not force-closed; that result is superseded by the final packaged-app CUA visual verification. On the Tunnel screen it showed `Tunnel program: Selected · Approved`, `Credentials file: Selected`, a blank public address, and only `Save the public address before continuing.` with no visible layout overflow. The state and mounted-renderer regressions also establish the displayed setup state. Nothing was pushed. Hostname, network and plugin work remain Jack-only.
+
+### B9 DNS route safety remediation (2026-09-27)
+
+Commit `10e4d17` (`fix: route bridge DNS by tunnel UUID`) records the remediation. Jack created a dedicated production tunnel, but the route-by-name command was silently directed to configured lab credentials because of `cloudflared` 2026.9.3 `findID` precedence. No connector started and the bridge remained off. The UI guidance, build plan and runbook now require the UUID printed by tunnel creation, with a regression test guarding that requirement. Full `npm test` is green (2251 passed, 0 failed, including the PDF suites); lint and `npm run build:compile` are green.
+
+The actual DNS correction remains a Jack-only next action: use the explicit production UUID with `--overwrite-dns`, confirm that the command reports that same UUID, and confirm the target in Cloudflare's DNS dashboard. Public DNS should resolve to Cloudflare addresses, but a proxied CNAME is flattened and therefore cannot reveal its target through `dig CNAME`. No real identifiers are recorded here.
