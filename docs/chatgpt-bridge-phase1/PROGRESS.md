@@ -302,4 +302,4 @@ Every acknowledged binary selection, approval and credential mutation now takes 
 | G8 | Green. Tunnel watchdog self-test passed all five generated children. |
 | Packaging | Rebuilt, signed and relaunched. Safe real bootstrap status was bridge-off with `binaryApproved`, `credentialsOk` and `binarySelected` true, details redacted, and no cloudflared process. |
 
-CUA accessibility timed out after Settings opened, so it was not force-closed. The state and mounted-renderer regressions establish the displayed setup state instead. Nothing was pushed. Hostname, network and plugin work remain Jack-only.
+An earlier CUA accessibility attempt timed out after Settings opened and was not force-closed; that result is superseded by the final packaged-app CUA visual verification. On the Tunnel screen it showed `Tunnel program: Selected · Approved`, `Credentials file: Selected`, a blank public address, and only `Save the public address before continuing.` with no visible layout overflow. The state and mounted-renderer regressions also establish the displayed setup state. Nothing was pushed. Hostname, network and plugin work remain Jack-only.
