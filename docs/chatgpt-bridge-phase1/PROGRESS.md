@@ -73,3 +73,20 @@ Adversarial review covered IPC/bridge differential parity, exact return shapes, 
 | G9 | Green. Frozen files and `package-lock.json` are byte-untouched. The commit-1 moved-code review shows only the intended hoist/delegation, and the commit-2 file hash matches the unsplit prototype exactly. |
 
 The temporary full clone, detached gate worktree, Docker job container and gate artifacts were removed after the clean run. Nothing was pushed.
+
+## B1 — pre-auth transport surface (2026-09-27)
+
+Implemented and merged directly on local `main` in commit `ea046c1` (`feat: add ChatGPT bridge transport surface`). The stage adds the sole wire/body-parser and response helpers, the pinned v2s MCP tools, the stateless MCP JSON-RPC handler, the hardened HTTP request pipeline, and the Unix-socket listener. All tests use injected exchanges, clocks, HTTP, filesystem and network ports; none binds a socket.
+
+Adversarial review covered body-read ordering, Host/Origin/fetch-metadata policy, anonymous versus authenticated permit pools, timer/permit release after injected faults, listener ownership and stale-socket handling, exact tool-call argument copying, fixed error bodies, and the pre-auth import boundary.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The stage diff contains only the six B1 modules and its two owned registered test files; no ignored path or out-of-allow-list edit. |
+| G1 | Green, 0 failed. The required non-bridge per-file baseline diff was empty; focused HTTP (81), MCP (35), and source-scan (4) checks also passed immediately before commit. |
+| G2 | Green. `npm test` passed. |
+| G3 | Green. `npm run lint` passed; the final targeted ESLint run was also clean. |
+| G4 | Green. `npm run build:compile` passed. |
+| G8 | The B8 conformance runner does not exist yet; the complete in-process wire table passed as the plan's stated equivalent. |
+| G9 | Green. Frozen files and `package-lock.json` were untouched. |
+| G10 | Green after adversarial transport/listener review; no untrusted free text reaches a log or error response. |
