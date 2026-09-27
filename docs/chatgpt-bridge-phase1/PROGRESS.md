@@ -55,3 +55,21 @@ Adversarial review closed the following before the gate: arbitrary safe-looking 
 | G9 | Green. All frozen files and `package-lock.json` were byte-untouched; `package.json` changed by exactly the three B0 scripts. |
 
 Each placeholder command (`test:e2e:bridge`, `test:tunnel`, `selftest:handoff-bridge`) was also invoked at its underlying script boundary and exited 2 with `not implemented yet`, as required until B7.5, B3.5 and B8.1 respectively.
+
+## B5a — non-API AI push/scoring seam (2026-09-27)
+
+Implemented the required split on local `main`: commit `c76c425` (`refactor: hoist non-API AI response acceptance`) is the verbatim handler hoist, and commit `137cf6d` (`feat: add non-API AI bridge seam`) adds the bridge-only seam and its full record-kind/response-scenario coverage. The final SHA-256 of `electron/ipc/nonApiAi.js` is the required prototype result, `4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`.
+
+Adversarial review covered IPC/bridge differential parity, exact return shapes, lifecycle isolation, durable-write failure recovery, all 25 known task ids, duplicate-fingerprint behavior, and the frozen log/runtime/abort-listener pins. No module state, IPC channel, safe code or lifecycle field was added by the seam.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The stage diff is exactly `electron/ipc/nonApiAi.js` and `scripts/tests/non-api-ai-bridge-seam.js`; no ignored or out-of-allow-list path, `TunnelSecret`, whitespace error, or unstaged stage path. |
+| G1 | Green. `npm run test:unit`: 1532 passed, 0 failed, 66 groups, 18.64 s. The exact required filtered diff against `~/ic-baseline-units.txt` was empty; the five pinned existing groups remained 75/269/56/40/42. |
+| G2 | Green. `npm test`: 1532 unit tests and 420 resume-PDF tests passed, 0 failed, 18.99 s. |
+| G3 | Green. `npm run lint`, 6.72 s. |
+| G4 | Green. `npm run build:compile`, 0.72 s (only the existing Vite chunk-size warning). |
+| G7 | Green under CI's Node 22.23.2. The exact `act` command from this file completed lint, test and build in 42 s from a temporary full local clone at `137cf6d`. A first detached-worktree attempt false-failed because `act` mounted the worktree's external `.git` gitfile without its target, making in-container `git check-ignore` exit 128; the full-clone rerun removes that harness artifact. |
+| G9 | Green. Frozen files and `package-lock.json` are byte-untouched. The commit-1 moved-code review shows only the intended hoist/delegation, and the commit-2 file hash matches the unsplit prototype exactly. |
+
+The temporary full clone, detached gate worktree, Docker job container and gate artifacts were removed after the clean run. Nothing was pushed.
