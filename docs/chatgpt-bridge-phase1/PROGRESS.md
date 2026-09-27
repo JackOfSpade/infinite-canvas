@@ -165,3 +165,24 @@ Adversarial review closed stale Save-As selections, two-sender node collisions, 
 | G9 | Green. All frozen files and `package-lock.json` are byte-untouched. Only `sources/push.js` imports the four `nonApiAi.js` seam names and `snapshotActiveNodeTasks`. |
 
 The isolated gate clone was removed after the clean run. Nothing was pushed.
+
+## B6 — controller, exposure controls and Electron integration (2026-09-27)
+
+Implemented directly on local `main` in commit `c4475cf` (`feat: integrate ChatGPT bridge controls`). The stage composes the controller, Unix-socket listener and supervised tunnel; pairing and guarded probes; fixed-schema IPC and native dialogs; Tray, Dock, notification and power policy; durable partial tunnel setup; main/preload lifecycle hooks; status/log/activity projection; and the complete B6 controls, IPC, privacy, source-scan and inert test ownership.
+
+Adversarial review closed pairing sheets that were acknowledged without appearing, stale explicit and automatic release ownership after renderer/window changes, partial-setup rollback and restart semantics, public-reachability normalization, fixed-argument orphan cleanup, Tray state/nudge gaps, Disable/quit lifecycle races, and a canvas disappearing during the enable consent flow. The first Node 22 gate then exposed a synthetic-UID portability bug and a TEST MODE version-probe precedence bug; commit `272031a` (`fix: harden bridge platform test mode`) corrected both and moved the macOS system-alias regression into the bridge-owned test group. The underlying narrow `/var`, `/tmp` and `/etc` canonical-alias fix is commit `de5d6ae`.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. Commit `c4475cf` contains exactly the eleven allowed B6 production paths and five B6-owned registered tests; no ignored path. Separately reviewed corrective changes are isolated in `de5d6ae` and `272031a`. |
+| G1 | Green: 2209 tests passed with 0 failed under Node 22 at the gate SHA; the required filtered comparison with `~/ic-baseline-units.txt` printed nothing locally. Focused controls, IPC, inert, privacy and source-scan groups also passed. |
+| G2 | Green. `npm test` passed locally and under Node 22. |
+| G3 | Green. `npm run lint` and targeted ESLint passed locally and under Node 22. |
+| G4 | Green. `npm run build:compile` passed locally and under Node 22 with only the existing chunk-size warnings. |
+| G5/G6 | Deferred exactly to B7.5, which owns the inert and enabled-path Electron smokes and lands next. |
+| G7 | Green at `272031a837a0b13f8d18913258e42047222d8793` through the recorded `act` command on Node 22.23.2. The first run's synthetic UID failure was fixed and the rerun completed lint, 2209 unit tests, résumé-PDF tests and compile. |
+| G8 | The complete in-process B6 equivalents passed. The B8.1 shortened all-suite also passed during its independent audit; the mandatory full suite and ten-minute soak remain B8's gate. |
+| G9 | Green. All user-frozen files and `package-lock.json` are byte-untouched. |
+| G10 | Green after two independent reviews of the controller, pairing/probes, IPC/dialogs, Tray/power, composition and Electron lifecycle hunks. No open B6 security finding remains. |
+
+The temporary clean clone used by `act` was removed. Nothing was pushed.
