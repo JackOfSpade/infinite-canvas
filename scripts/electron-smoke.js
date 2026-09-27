@@ -189,14 +189,14 @@ async function killSmokeElectronProcesses(directory) {
   }
 }
 
-async function closeElectron(application) {
-  if (application) {
+async function closeElectron(app) {
+  if (app) {
     let timeoutId;
     try {
       // This is the normal path: Electron's app.quit lifecycle performs its
       // own background cleanup before process termination.
       await Promise.race([
-        application.close(),
+        app.close(),
         new Promise(resolve => {
           timeoutId = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000);
         }),

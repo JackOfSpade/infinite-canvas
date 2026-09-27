@@ -546,16 +546,16 @@ async function assertBackgroundWindow(application) {
     'TEST-mode bridge smoke must not show or focus an Electron window');
 }
 
-async function closeElectron(application, { restoreHttps = false } = {}) {
-  if (application && restoreHttps) {
-    try { await application.evaluate(() => globalThis.__icBridgeSmokeRestoreHttps?.()); } catch { /* a crash may already have ended main */ }
+async function closeElectron(app, { restoreHttps = false } = {}) {
+  if (app && restoreHttps) {
+    try { await app.evaluate(() => globalThis.__icBridgeSmokeRestoreHttps?.()); } catch { /* a crash may already have ended main */ }
   }
-  if (application) {
+  if (app) {
     let timeout;
     try {
       // This remains the primary, lifecycle-aware shutdown path.
       await Promise.race([
-        application.close(),
+        app.close(),
         new Promise(resolve => { timeout = setTimeout(resolve, BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS + 5_000); }),
       ]);
     } catch { /* retain the OS-verified SIGKILL-only fallback below */ }
