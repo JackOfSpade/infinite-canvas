@@ -1367,6 +1367,37 @@ const phaseOneTests = [
         'an oversized family retains only the safe renewal marker, not a usable credential history');
     },
   },
+  {
+    name: 'handoff bridge: oauth: durable state fsyncs its parent after rename and reports directory-sync failure',
+    run: async () => withTempDirectory('ic-oauth-directory-sync-', async directory => {
+      const filePath = path.join(directory, 'oauth.json'); const operations = []; const descriptorPaths = new Map();
+      const recordingFs = new Proxy(fs, {
+        get(target, property) {
+          if (property === 'openSync') return (...args) => { const descriptor = target.openSync(...args); descriptorPaths.set(descriptor, args[0]); operations.push(`open:${args[0]}`); return descriptor; };
+          if (property === 'fsyncSync') return descriptor => { operations.push(`fsync:${descriptorPaths.get(descriptor)}`); return target.fsyncSync(descriptor); };
+          if (property === 'renameSync') return (...args) => { operations.push('rename'); return target.renameSync(...args); };
+          return target[property];
+        },
+      });
+      const state = { v: 1, issuer: ISSUER, clients: [], codes: [], families: [], refresh: [], access: [] };
+      assert.equal(createOAuthStore({ filePath, fsImpl: recordingFs }).commit(state), true);
+      const rename = operations.indexOf('rename'); const directorySync = operations.lastIndexOf(`fsync:${directory}`);
+      assert(rename >= 0 && directorySync > rename, 'the parent directory must fsync after the atomic rename');
+
+      const failingDescriptors = new Map();
+      const failingFs = new Proxy(fs, {
+        get(target, property) {
+          if (property === 'openSync') return (...args) => { const descriptor = target.openSync(...args); failingDescriptors.set(descriptor, args[0]); return descriptor; };
+          if (property === 'fsyncSync') return descriptor => {
+            if (failingDescriptors.get(descriptor) === directory) throw new Error('injected directory fsync crash');
+            return target.fsyncSync(descriptor);
+          };
+          return target[property];
+        },
+      });
+      assert.equal(createOAuthStore({ filePath, fsImpl: failingFs }).commit(state), false, 'a parent-directory durability error must never report OAuth state commit success');
+    }),
+  },
 ];
 
 const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -1710,7 +1741,7 @@ const assertionTests = [
 ];
 
 assert.equal(LAB_STEP_NAMES.length, 100);
-assert.equal(phaseOneTests.length, 22);
+assert.equal(phaseOneTests.length, 23);
 assert.equal(assertionTests.length, 42);
 
 export default [...portedLabTests, ...phaseOneTests, ...assertionTests];

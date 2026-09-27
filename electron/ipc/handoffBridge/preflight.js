@@ -4,6 +4,7 @@ import {
   normalizePastedResponse,
   responseFingerprint,
 } from '../../../src/utils/pasteIdentityGuard.js';
+import { createHandoffCodeGuard, isHandoffCodeGuard, trimHandoffCode } from './lanes.js';
 
 export {
   DUPLICATE_RESPONSE_MIN_CHARS,
@@ -17,15 +18,7 @@ export {
 export const APPLICATION_FENCE_RE = /^```(?:json)?\s*\n([\s\S]*?)\n```$/i;
 export const MAX_RESPONSE_BYTES = 1_000_000;
 
-const EDGE_CODE_CHARS = /^[\s'"`\u200B-\u200D\u2060\uFEFF]+|[\s'"`\u200B-\u200D\u2060\uFEFF]+$/g;
-
-export function trimHandoffCode(value) {
-  if (typeof value !== 'string') return '';
-  // An oversized value stays byte-for-byte intact. The argument validator,
-  // not a normalizer, owns its rejection and therefore cannot be bypassed by
-  // trimming a large wrapper down to a valid code.
-  return value.length > 512 ? value : value.replace(EDGE_CODE_CHARS, '');
-}
+export { trimHandoffCode };
 
 export function normalizePushCode(value) {
   const trimmed = trimHandoffCode(value);
@@ -68,7 +61,8 @@ function hasAcceptedFingerprint(lane, fingerprint) {
  * Pure, post-authentication submission classifier. It never calls a source
  * adapter and returns only the fixed routing vocabulary.
  */
-export function classifySubmission({ response, lane, lanes = [], kind = 'application', codeEnforced = true } = {}) {
+export function classifySubmission({ response, lane, lanes = [], kind = 'application', codeEnforced = true, codeGuard: injectedCodeGuard = null } = {}) {
+  const codeGuard = isHandoffCodeGuard(injectedCodeGuard) ? injectedCodeGuard : createHandoffCodeGuard();
   const normalized = stringifySubmission(response);
   if (!normalized.ok) return 'junk';
   const text = normalized.text;
@@ -76,7 +70,7 @@ export function classifySubmission({ response, lane, lanes = [], kind = 'applica
   if (kind === 'push') {
     const stamps = extractPasteEnvelopeIdentity(text).pushStamps;
     const expected = normalizePushCode(lane?.current?.code ?? lane?.code ?? '');
-    if (stamps.some(stamp => normalizePushCode(stamp) !== expected)) return 'misrouted';
+    if (stamps.some(stamp => !codeGuard.equal(normalizePushCode(stamp), expected))) return 'misrouted';
     const short = ['', '{}', '[]', 'null', '""'].includes(text.trim());
     return codeEnforced && short ? 'junk' : 'pass';
   }

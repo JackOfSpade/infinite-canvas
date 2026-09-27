@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { CONSTANTS } from './constants.js';
 
 export const LANE_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
@@ -20,6 +20,42 @@ export function makeChatKey(random = randomBytes) {
 // Compatibility alias for the inert B0 surface. This creates chat keys,
 // never application handoff codes (those come only from the app).
 export const makeHandoffCode = makeChatKey;
+
+const EDGE_CODE_CHARS = /^[\s'"`\u2018\u2019\u201C\u201D\u200B-\u200D\u2060\uFEFF]+|[\s'"`\u2018\u2019\u201C\u201D\u200B-\u200D\u2060\uFEFF]+$/g;
+
+// The sole handoff-code edge normalizer. Protocol adapters normalize before
+// creating routing identities; deliberately oversized input remains exact so
+// validation, rather than trimming, rejects it.
+export function trimHandoffCode(value) {
+  if (typeof value !== 'string') return '';
+  return value.length > 512 ? value : value.replace(EDGE_CODE_CHARS, '');
+}
+
+/**
+ * The only owner of handoff-code routing identity.  Callers use the digest
+ * key for Maps and re-check the fixed-length stored digest on every hit, so a
+ * caller-controlled code never selects state by a raw-string comparison.
+ */
+export function createHandoffCodeGuard() {
+  const digest = value => createHash('sha256').update(trimHandoffCode(value)).digest();
+  const key = value => digest(value).toString('hex');
+  const sameDigest = (left, right) => Buffer.isBuffer(left)
+    && Buffer.isBuffer(right)
+    && left.length === 32
+    && right.length === 32
+    && timingSafeEqual(left, right);
+  const equal = (left, right) => sameDigest(digest(left), digest(right));
+  return Object.freeze({ canonicalize: trimHandoffCode, digest, key, sameDigest, equal });
+}
+
+export function isHandoffCodeGuard(value) {
+  return Boolean(value
+    && typeof value.canonicalize === 'function'
+    && typeof value.digest === 'function'
+    && typeof value.key === 'function'
+    && typeof value.sameDigest === 'function'
+    && typeof value.equal === 'function');
+}
 
 function makeCounters(value = {}) {
   return {
@@ -53,14 +89,15 @@ export function normalizeCurrentHandoff(handoff, readAt = 0) {
   };
 }
 
-export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt = 0, handoff = null, phase } = {}) {
+export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt = 0, handoff = null, phase, codeGuard = createHandoffCodeGuard() } = {}) {
   if (!Number.isInteger(ord) || ord < 1 || typeof jobId !== 'string' || !jobId || typeof canvasFilePath !== 'string' || !canvasFilePath) {
     throw new TypeError('A lane requires an ordinal, job and canvas path');
   }
   const current = normalizeCurrentHandoff(handoff, releasedAt);
   const lanePhase = phase ?? (current ? 'awaiting' : 'unread');
   if (!LANE_PHASES.includes(lanePhase)) throw new TypeError('Invalid lane phase');
-  const issuedCodes = new Set(current?.code ? [current.code] : []);
+  const issuedCodes = new Map();
+  if (current?.code) issuedCodes.set(codeGuard.key(current.code), codeGuard.digest(current.code));
   return {
     ord,
     kind: 'application',
@@ -126,35 +163,40 @@ export function restoreLane(lane, now = 0) {
   return lane;
 }
 
-export function indexLaneCode(index, lane, metadata = {}, limit = CONSTANTS.CODE_INDEX_PER_LANE) {
+export function indexLaneCode(index, lane, metadata = {}, limit = CONSTANTS.CODE_INDEX_PER_LANE, codeGuard = createHandoffCodeGuard()) {
   const code = lane?.current?.code;
   if (!code) return index;
-  index.set(code, { lane, laneOrd: lane.ord, stage: lane.current.stage, revision: lane.current.revision, ...metadata });
+  const codeDigest = codeGuard.digest(code);
+  index.set(codeGuard.key(code), { lane, laneOrd: lane.ord, stage: lane.current.stage, revision: lane.current.revision, codeDigest, ...metadata });
   const own = [...index.entries()].filter(([, entry]) => entry?.laneOrd === lane.ord);
   while (own.length > limit) index.delete(own.shift()[0]);
   return index;
 }
 
-export function tombstoneCode(tombstones, code, reason, metadata = {}, limit = CONSTANTS.TOMBSTONES_PER_ENGINE) {
+export function tombstoneCode(tombstones, code, reason, metadata = {}, limit = CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard = createHandoffCodeGuard()) {
   if (!code) return tombstones;
-  tombstones.delete(code);
-  tombstones.set(code, { reason, ...metadata });
+  const codeDigest = codeGuard.digest(code);
+  const key = codeGuard.key(code);
+  tombstones.delete(key);
+  tombstones.set(key, { reason, codeDigest, ...metadata });
   while (tombstones.size > limit) tombstones.delete(tombstones.keys().next().value);
   return tombstones;
 }
 
-export function rememberIssuedCode(lane, code) {
+export function rememberIssuedCode(lane, code, codeGuard = createHandoffCodeGuard()) {
   if (!code) return lane;
-  lane.issuedCodes.add(code);
-  while (lane.issuedCodes.size > CONSTANTS.CODE_INDEX_PER_LANE) lane.issuedCodes.delete(lane.issuedCodes.values().next().value);
+  const key = codeGuard.key(code);
+  lane.issuedCodes.set(key, codeGuard.digest(code));
+  while (lane.issuedCodes.size > CONSTANTS.CODE_INDEX_PER_LANE) lane.issuedCodes.delete(lane.issuedCodes.keys().next().value);
   return lane;
 }
 
-export function isHumanAdvance(lane, handoffCode) {
-  return Boolean(lane?.current?.code
-    && typeof handoffCode === 'string'
-    && handoffCode !== lane.current.code
-    && !lane.issuedCodes?.has?.(handoffCode));
+export function isHumanAdvance(lane, handoffCode, codeGuard = createHandoffCodeGuard()) {
+  if (!lane?.current?.code || typeof handoffCode !== 'string') return false;
+  if (codeGuard.equal(handoffCode, lane.current.code)) return false;
+  const digest = codeGuard.digest(handoffCode);
+  const stored = lane.issuedCodes?.get?.(codeGuard.key(handoffCode));
+  return !codeGuard.sameDigest(digest, stored);
 }
 
 export function remainingCounts(lanes) {

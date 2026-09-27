@@ -48,9 +48,18 @@ export function frameCorrections(items, suppliedPrompt = '') {
     .slice(0, 30)
     .map(item => clipCorrectionItem(item));
   if (!validationErrors.length) return {};
-  const correctionPrompt = typeof suppliedPrompt === 'string' && suppliedPrompt.trim()
-    ? clipQuotedSpans(scrubPath(suppliedPrompt))
-    : `Fix ${validationErrors.length === 1 ? 'this item' : `these ${validationErrors.length} items`}. ${REJECTED_CAUTION}\n${validationErrors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
+  let correctionPrompt;
+  if (typeof suppliedPrompt === 'string' && suppliedPrompt.trim()) {
+    const clean = clipQuotedSpans(scrubPath(suppliedPrompt));
+    const occurrences = clean.split(REJECTED_CAUTION).length - 1;
+    if (occurrences === 1) correctionPrompt = clean;
+    else {
+      const withoutDuplicates = clean.split(REJECTED_CAUTION).join('').trim();
+      correctionPrompt = `${withoutDuplicates}${withoutDuplicates ? '\n' : ''}${REJECTED_CAUTION}`;
+    }
+  } else {
+    correctionPrompt = `Fix ${validationErrors.length === 1 ? 'this item' : `these ${validationErrors.length} items`}. ${REJECTED_CAUTION}\n${validationErrors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
+  }
   return { validationErrors, correctionPrompt };
 }
 

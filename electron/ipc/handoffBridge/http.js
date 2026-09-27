@@ -113,6 +113,16 @@ function sendMcp(res, result) {
 const publicOrigin = hostname => `https://${hostname.toLowerCase().replace(/\.$/, '')}`;
 const originHost = value => { try { return new URL(value).host.toLowerCase(); } catch { return 'invalid'; } };
 const bearerPresented = req => typeof req.headers?.authorization === 'string' && /^bearer\b/i.test(req.headers.authorization);
+function rawHeaderCount(req, name) {
+  const rawHeaders = req?.rawHeaders;
+  if (!Array.isArray(rawHeaders)) return Object.hasOwn(req?.headers || {}, name.toLowerCase()) ? 1 : 0;
+  let count = 0;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (String(rawHeaders[index]).toLowerCase() === name.toLowerCase()) count += 1;
+  }
+  return count;
+}
+const hasDuplicateAuthorization = req => rawHeaderCount(req, 'authorization') > 1;
 
 export function createPermitPool(limit, { timers = globalThis, watchdogMs = 0, onLeak = () => undefined } = {}) {
   if (!Number.isInteger(limit) || limit < 1) throw new TypeError('permit limit must be positive');
@@ -286,6 +296,15 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
     if ((browserPost || serverEnforce) && (fetchSite === 'cross-site' || fetchSite === 'same-site')) { closeEarly(req, res); sendJson(res, 403, { error: 'invalid_request', error_description: 'Cross-origin request refused.' }); return null; }
     if (!accepting()) { closeEarly(req, res); sendJson(res, 503, { error: 'temporarily_unavailable', error_description: 'The handoff bridge is unavailable.' }, { 'Retry-After': '5' }); return null; }
     if (!knownRoute) { closeEarly(req, res); notFound(res); return null; }
+    // Node exposes a coalesced `headers.authorization` value, which cannot
+    // safely represent multiple raw Authorization fields. Treat that
+    // ambiguity as an invalid presented credential before source accounting,
+    // authentication, or body admission.
+    if (hasDuplicateAuthorization(req)) {
+      closeEarly(req, res);
+      sendJson(res, 401, { error: 'invalid_token', error_description: 'A valid access token is required.' }, { 'WWW-Authenticate': challenge({ presented: true }) });
+      return null;
+    }
     const source = sourceKey(req);
     if (pathname === '/mcp') {
       // This boundary intentionally precedes bearer parsing/lookup: a caller

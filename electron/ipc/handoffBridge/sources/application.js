@@ -48,7 +48,20 @@ export function createApplicationSource({
   watchdogMs = WATCHDOG_MS,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
+  codeGuard = null,
 } = {}) {
+  let guard = null;
+  function setCodeGuard(value) {
+    if (!value || typeof value.key !== 'function' || typeof value.digest !== 'function'
+        || typeof value.sameDigest !== 'function' || typeof value.equal !== 'function') throw new TypeError('A handoff-code guard is required');
+    guard = value;
+    return true;
+  }
+  if (codeGuard) setCodeGuard(codeGuard);
+  function requireCodeGuard() {
+    if (!guard) throw new TypeError('A handoff-code guard is required');
+    return guard;
+  }
   const inFlight = {
     read: new Map(),
     status: new Map(),
@@ -95,6 +108,7 @@ export function createApplicationSource({
 
   return Object.freeze({
     kind: 'application',
+    setCodeGuard,
 
     async read(lane) {
       const key = operationKey(lane);
@@ -115,7 +129,8 @@ export function createApplicationSource({
     },
 
     async submit(lane, { code, text } = {}) {
-      const key = `${operationKey(lane)}\u0000${String(code || '')}\u0000${String(text || '')}`;
+      const handoffCodeGuard = requireCodeGuard();
+      const key = `${operationKey(lane)}\u0000${handoffCodeGuard.key(code)}\u0000${String(text || '')}`;
       // A submit must run to its app-side commit point.  It is single-flight,
       // but intentionally has no source watchdog: the engine owns its 25 s
       // response budget and leaves an accepted write running after a timeout.
@@ -135,7 +150,7 @@ export function createApplicationSource({
             kind: 'rejected',
             validationErrors: Array.isArray(result.validationErrors) ? result.validationErrors.filter(item => typeof item === 'string') : [],
             handoff,
-            rotated: handoff.code !== code,
+            rotated: !handoffCodeGuard.equal(handoff.code, code),
           };
         }
         return { kind: 'threw', shape: true };

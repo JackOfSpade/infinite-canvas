@@ -10,7 +10,7 @@ import { createAuditSink, makeAuditLine, SECURITY_AUDIT_EVENTS } from '../../ele
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { APPLICATION_FENCE_RE, DUPLICATE_RESPONSE_MIN_CHARS, MAX_RESPONSE_BYTES, classifySubmission, extractPasteEnvelopeIdentity, normalizePastedResponse, responseFingerprint, stringifySubmission, trimHandoffCode } from '../../electron/ipc/handoffBridge/preflight.js';
 import { APPLICATION_INSTRUCTIONS, REJECTED_CAUTION, RESULT_NOTES, clipCorrectionItem, frameCorrections, makeRejectedBody, makeServedBody } from '../../electron/ipc/handoffBridge/framing.js';
-import { createApplicationLane, holdLane, isHumanAdvance, makeChatKey, rehydrateApplicationLane, remainingCounts, resumeLane, tombstoneCode } from '../../electron/ipc/handoffBridge/lanes.js';
+import { createApplicationLane, createHandoffCodeGuard, holdLane, isHumanAdvance, makeChatKey, rehydrateApplicationLane, remainingCounts, resumeLane, tombstoneCode } from '../../electron/ipc/handoffBridge/lanes.js';
 import { AUDIT_LINE_EXAMPLE, ENGINE_PORT_SHAPE, SOURCE_ADAPTER_SHAPE, STATUS_SNAPSHOT_EXAMPLE, TUNNEL_PORT_SHAPE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { classifyThrow, fixedError } from '../../electron/ipc/handoffBridge/errors.js';
 import { createHandoffBridgeLog, makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
@@ -20,6 +20,7 @@ const JOB_B = '22222222-2222-4222-8222-222222222222';
 const PATH_A = '/tmp/marisol.canvas';
 const PATH_B = '/tmp/ada.canvas';
 const LINK = 'link-synthetic';
+const codeGuard = createHandoffCodeGuard();
 
 function handoff({ code = 'HANDOFF-A', jobId = JOB_A, stage = 'resume', revision = 1, prompt = 'Synthetic application prompt.' } = {}) {
   return { code, jobId, stage, revision, prompt };
@@ -226,6 +227,11 @@ const tests = [
       assert(supplied.correctionPrompt.includes(`"${firstQuoted.slice(0, 200)}…"`) && supplied.correctionPrompt.includes(`'${secondQuoted.slice(0, 200)}…'`)
         && !supplied.correctionPrompt.includes(firstQuoted) && !supplied.correctionPrompt.includes(secondQuoted),
       'supplied app correction prompts must receive the same quoted-span clip after path scrubbing');
+      assert(supplied.correctionPrompt.split(REJECTED_CAUTION).length === 2,
+        'a supplied correction prompt must carry the fixed untrusted-evidence caution exactly once');
+      const duplicateCaution = frameCorrections(['fix it'], `${REJECTED_CAUTION}\nRepair the field.\n${REJECTED_CAUTION}`);
+      assert(duplicateCaution.correctionPrompt.split(REJECTED_CAUTION).length === 2,
+        'an app-supplied caution must be de-duplicated rather than amplified');
       assert(clipCorrectionItem('x'.repeat(1600)).length === 1500, 'long correction must use exact 1500 clip');
     },
   },
@@ -250,12 +256,37 @@ const tests = [
   {
     name: 'handoff bridge: engine: lane phases codes tombstones and human advance are bounded',
     run: () => {
-      const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff() });
-      assert(lane.phase === 'awaiting' && isHumanAdvance(lane, 'HUMAN-CODE'), 'fresh human code must be recognized');
-      lane.issuedCodes.add('OLD-CODE'); assert(!isHumanAdvance(lane, 'OLD-CODE'), 'bridge-issued codes are not human advance');
+      const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff(), codeGuard });
+      assert(lane.phase === 'awaiting' && isHumanAdvance(lane, 'HUMAN-CODE', codeGuard), 'fresh human code must be recognized');
+      lane.issuedCodes.set(codeGuard.key('OLD-CODE'), codeGuard.digest('OLD-CODE')); assert(!isHumanAdvance(lane, 'OLD-CODE', codeGuard), 'bridge-issued codes are not human advance');
       holdLane(lane, 'user_hold', 1); assert(lane.phase === 'held' && lane.heldFrom === 'awaiting', 'hold must retain resumable phase');
       resumeLane(lane); assert(lane.phase === 'awaiting' && lane.reason === null, 'resume must restore phase');
-      const tombstones = new Map(); tombstoneCode(tombstones, 'HANDOFF-A', 'accepted'); assert(tombstones.get('HANDOFF-A').reason === 'accepted', 'tombstone must retain route');
+      const tombstones = new Map(); tombstoneCode(tombstones, 'HANDOFF-A', 'accepted', {}, undefined, codeGuard); assert(tombstones.get(codeGuard.key('HANDOFF-A')).reason === 'accepted', 'tombstone must retain route');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: code guard uses fixed digests for wrapped, case, and same-prefix routes',
+    run: () => {
+      const digest = codeGuard.digest('HANDOFF-ABCDEF');
+      assert(Buffer.isBuffer(digest) && digest.length === 32, 'routing identity must be a fixed SHA-256 digest');
+      assert(codeGuard.equal(' \u201c`HANDOFF-ABCDEF`\u201d ', 'HANDOFF-ABCDEF'), 'ASCII and curly edge wrappers canonicalize before comparison');
+      const multibyteAtCharacterCap = `\u201c${'\u00e9'.repeat(510)}\u201d`;
+      const oversized = `\u201c${'x'.repeat(511)}\u201d`;
+      assert(trimHandoffCode(multibyteAtCharacterCap) === '\u00e9'.repeat(510) && trimHandoffCode(oversized) === oversized && !codeGuard.equal(oversized, 'x'.repeat(511)), 'the 512-character cap normalizes multibyte input while an over-cap wrapper remains exact before validation');
+      assert(!codeGuard.equal('HANDOFF-ABCDEF', 'HANDOFF-ABCDEG') && !codeGuard.equal('HANDOFF-ABCDEF', 'handoff-abcdef'), 'same-prefix and lower-case application codes remain distinct');
+      const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff({ code: 'HANDOFF-ABCDEF' }), codeGuard });
+      const direct = lane.issuedCodes.get(codeGuard.key('HANDOFF-ABCDEF'));
+      assert(codeGuard.sameDigest(digest, direct) && !codeGuard.sameDigest(codeGuard.digest('HANDOFF-ABCDEG'), direct), 'issued-code Map entries retain digest evidence instead of raw codes');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: wrapped app code routes, while lower-case and same-prefix inputs do not',
+    run: async () => {
+      const state = await served({ sourceOverrides: { read: async () => ({ kind: 'open', handoff: handoff({ code: 'HANDOFF-ABCDEF' }) }) } });
+      const wrongCase = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: 'handoff-abcdef', response: answer({ code: 'HANDOFF-ABCDEF' }) });
+      const samePrefix = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: 'HANDOFF-ABCDEG', response: answer({ code: 'HANDOFF-ABCDEF' }) });
+      const accepted = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: ' `HANDOFF-ABCDEF` ', response: answer({ code: 'HANDOFF-ABCDEF' }) });
+      assert(wrongCase.status === 'unknown_handoff' && samePrefix.status === 'unknown_handoff' && accepted.status === 'accepted', 'only the wrapped exact application route may reach the source');
     },
   },
   {
@@ -502,6 +533,105 @@ const tests = [
     },
   },
   {
+    name: 'handoff bridge: engine: an accepted application successor cannot bypass the hard byte budget',
+    run: async () => {
+      const response = answer({ extra: { text: 'x'.repeat(12_000) } });
+      let reads = 0;
+      const state = await served({
+        sourceOverrides: {
+          read: async () => ({
+            kind: 'open',
+            handoff: handoff({
+              code: ++reads === 1 ? 'HANDOFF-A' : 'HANDOFF-APPLICATION-RESUMED',
+              revision: reads,
+              prompt: 'Synthetic resumed application prompt.',
+            }),
+          }),
+          submit: async () => ({
+            kind: 'accepted',
+            completed: false,
+            handoff: handoff({ code: 'HANDOFF-APPLICATION-RESUMED', revision: 2, prompt: 'Synthetic resumed application prompt.' }),
+          }),
+        },
+        engineOptions: { limits: { epochHardBytes: 10_000 } },
+      });
+      const accepted = await state.engine.submit({
+        session: state.session,
+        linkId: LINK,
+        handoffCode: state.result.handoffCode,
+        response,
+      });
+      assert(accepted.status === 'accepted' && accepted.next?.status === 'session_full',
+        'an accepted application commit may finish, but its inline successor must hit the hard budget fence');
+      const full = state.engine.snapshot();
+      assert(reads === 1 && full.counts.getServed === 1 && full.chat.bytesReceived >= 12_000,
+        'the fenced inline successor must not read or charge a second application prompt');
+      assert((await state.engine.get({ session: state.session, linkId: LINK })).status === 'session_full',
+        'the original full chat must not serve the successor on a later poll');
+      const resumed = await state.engine.newChat({ linkId: LINK });
+      const next = await state.engine.get({ session: resumed.sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.kind === 'application',
+        'a replacement chat must be able to resume application work with a fresh epoch budget');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an accepted push successor cannot bypass the hard byte budget',
+    run: async () => {
+      let gets = 0; let successors = 0;
+      const push = {
+        async get() {
+          gets++;
+          return {
+            status: 'served',
+            handoffCode: gets === 1 ? 'PUSH-HARD-BUDGET-A' : 'PUSH-HARD-BUDGET-RESUMED',
+            task: 'job-scoring',
+            prompt: 'Synthetic scoring prompt.',
+            promptBytes: 1,
+            remaining: { ready: 0, working: 0, needsYou: 0 },
+          };
+        },
+        async submit() { return { status: 'accepted' }; },
+        async nextAfterAccept() {
+          successors++;
+          return {
+            status: 'served',
+            handoffCode: 'PUSH-HARD-BUDGET-SUCCESSOR',
+            task: 'job-scoring',
+            prompt: 'Synthetic successor scoring prompt.',
+            promptBytes: 1,
+            remaining: { ready: 0, working: 0, needsYou: 0 },
+          };
+        },
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true },
+        holdMs: 0,
+        limits: { epochHardBytes: 100 },
+      });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.kind === 'push', 'fixture must first serve the synthetic scoring handoff');
+      const accepted = await engine.submit({
+        session: chat.sessionCode,
+        linkId: LINK,
+        handoffCode: first.handoffCode,
+        response: 'y'.repeat(128),
+      });
+      assert(accepted.status === 'accepted' && accepted.next?.status === 'session_full',
+        'an accepted push commit may finish, but its inline successor must hit the hard budget fence');
+      const full = engine.snapshot();
+      assert(gets === 1 && successors === 1 && full.counts.getServed === 1 && full.chat.bytesServed === 1 && full.chat.bytesReceived === 128,
+        'the fenced inline successor must not be charged or counted as a second served push prompt');
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_full',
+        'the original full chat must not serve the push successor on a later poll');
+      const resumed = await engine.newChat({ linkId: LINK });
+      const next = await engine.get({ session: resumed.sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === 'PUSH-HARD-BUDGET-RESUMED' && gets === 2,
+        'a replacement chat must be able to resume scoring work with a fresh epoch budget');
+    },
+  },
+  {
     name: 'handoff bridge: engine: idle pause measures human actions rather than authenticated polling',
     run: async () => {
       const state = await served({ engineOptions: { limits: { idlePauseMinutes: 1 } } }); state.clock.advance(61_000);
@@ -532,6 +662,79 @@ const tests = [
       const restoredLanes = [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 0, phase: 'unread' }]; let confirms = 0; const fake = source(); const clock = createFakeClock();
       const engine = createHandoffEngine({ source: fake.api, restoredLanes, now: clock.now, timers: clock, confirmRestart: async () => { confirms++; return true; } });
       assert((await engine.newChat({ linkId: LINK })).copied && (await engine.continueChat({ linkId: LINK })).copied && confirms === 1, 'restart confirmation must be once per launch');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: overlapping prepared chats reserve distinct ordinals and push epochs',
+    run: async () => {
+      const epochs = [];
+      const push = {
+        async get({ epoch }) {
+          epochs.push(epoch);
+          return { status: 'served', handoffCode: `PUSH-${epoch}`, task: 'job-scoring', prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } };
+        },
+        async submit() { return { status: 'unknown_handoff' }; },
+        closeEpoch() {},
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const [first, second] = await Promise.all([
+        engine.prepareChat({ linkId: LINK, kind: 'new' }),
+        engine.prepareChat({ linkId: LINK, kind: 'continue' }),
+      ]);
+      assert(first.copied && second.copied && first.chatOrdinal === 1 && second.chatOrdinal === 2,
+        'overlapping preparations must reserve unique, monotonically increasing ordinals');
+      assert(first.commit() === true, 'the first prepared capability must start epoch one');
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'served', 'epoch one must reach the push source');
+      assert(second.commit() === true, 'the newer prepared capability must rotate to epoch two');
+      assert((await engine.get({ session: second.sessionCode, linkId: LINK })).status === 'served'
+        && JSON.stringify(epochs) === JSON.stringify(['epoch-1', 'epoch-2']),
+      'separate prepared chats must never alias their push epoch id');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: stale prepared commit cannot retire or mutate a newer live push epoch',
+    run: async () => {
+      const epochs = []; const closed = [];
+      const push = {
+        async get({ epoch }) {
+          epochs.push(epoch);
+          return { status: 'served', handoffCode: 'PUSH-ADA-EXAMPLE', task: 'job-scoring', prompt: 'Synthetic Ada scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } };
+        },
+        async submit() { return { status: 'unknown_handoff' }; },
+        closeEpoch(epoch) { closed.push(epoch); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const [older, newer] = await Promise.all([engine.prepareChat({ linkId: LINK }), engine.prepareChat({ linkId: LINK })]);
+      assert(newer.commit() === true, 'the later prepared capability must be able to commit first');
+      assert((await engine.get({ session: newer.sessionCode, linkId: LINK })).status === 'served' && JSON.stringify(epochs) === JSON.stringify(['epoch-2']),
+        'the live later preparation must own epoch two');
+      assert(older.commit() === false, 'an older prepared capability must refuse an out-of-order commit');
+      const afterStale = engine.snapshot();
+      assert(afterStale.chat.ordinal === 2 && closed.every(epoch => epoch !== 'epoch-2'),
+        'a stale commit must not close or replace the live newer push epoch');
+      assert((await engine.get({ session: newer.sessionCode, linkId: LINK })).status === 'served'
+        && JSON.stringify(epochs) === JSON.stringify(['epoch-2', 'epoch-2']),
+      'the newer session remains live after the refused stale commit');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: overlapping restart preparations confirm and persist once',
+    run: async () => {
+      const confirmation = deferred(); let confirms = 0; let saves = 0;
+      const engine = createHandoffEngine({
+        source: source().api,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 0, phase: 'unread' }],
+        confirmRestart: async () => { confirms++; return confirmation.promise; },
+        store: { saveLanes: async () => { saves++; return true; } },
+      });
+      const first = engine.prepareChat({ linkId: LINK });
+      const second = engine.prepareChat({ linkId: LINK });
+      await Promise.resolve();
+      assert(confirms === 1 && saves === 0, 'overlapping preparations must share the one pending restart confirmation');
+      confirmation.resolve(true);
+      const [left, right] = await Promise.all([first, second]);
+      assert(left.copied && right.copied && confirms === 1 && saves === 1,
+        'one accepted restart confirmation must persist once before both preparations return');
     },
   },
   {
@@ -1042,6 +1245,177 @@ tests.push(
         'a stale shared-source refresh must stay hidden until the replacement performs its own refresh');
       assert(await replacement.refreshPushHubs() === true && replacement.snapshot().push.discovered.length === 1,
         'the replacement may expose only discovery it refreshed under its own generation');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: rotation discards a delayed old-chat application get before it can seed the replacement',
+    run: async () => {
+      const oldRead = deferred(); let reads = 0; let saves = 0;
+      const application = source({
+        read: async () => {
+          reads++;
+          return reads === 1
+            ? oldRead.promise
+            : { kind: 'open', handoff: handoff({ code: 'HANDOFF-ADA-EXAMPLE', prompt: 'Synthetic Ada replacement prompt.' }) };
+        },
+      });
+      const engine = createHandoffEngine({ source: application.api, holdMs: 0, store: { saveLanes: async () => { saves++; return true; } } });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const oldChat = await engine.newChat({ linkId: LINK });
+      const oldGet = engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(reads === 1, 'old chat must dispatch exactly one delayed application read');
+
+      const replacement = await engine.newChat({ linkId: LINK });
+      const baseline = engine.snapshot(); const baselineSaves = saves;
+      assert(baseline.chat.calls === 0 && baseline.chat.bytesServed === 0 && baseline.chat.bytesReceived === 0
+        && baseline.queue.jobs[0]?.phase === 'unread', 'rotation must start an untouched replacement epoch and clear the old read lane state');
+      oldRead.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-MARISOL-OLD', prompt: 'Synthetic Marisol old-chat prompt.' }) });
+      assert((await oldGet).status === 'retry', 'the old application GET must never serve after its epoch rotates');
+      const afterOld = engine.snapshot();
+      assert(afterOld.chat.calls === 0 && afterOld.chat.bytesServed === 0 && afterOld.chat.bytesReceived === 0
+        && afterOld.counts.getServed === 0 && afterOld.queue.jobs[0]?.phase === 'unread' && saves === baselineSaves,
+      'the late application read must not alter replacement calls, bytes, lane state, counters, or persistence');
+
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(fresh.status === 'served' && fresh.handoffCode === 'HANDOFF-ADA-EXAMPLE' && reads === 2,
+        'the replacement chat must re-read and serve its own synthetic Ada handoff rather than an old cache');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: rotation fences delayed old-chat push get with its original epoch id',
+    run: async () => {
+      const oldPushGet = deferred(); const getEpochs = []; const closedEpochs = [];
+      const push = {
+        async get({ epoch }) {
+          getEpochs.push(epoch);
+          return getEpochs.length === 1
+            ? oldPushGet.promise
+            : { status: 'served', handoffCode: 'PUSH-ADA-EXAMPLE', task: 'job-scoring', prompt: 'Synthetic Ada replacement scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } };
+        },
+        async submit() { return { status: 'unknown_handoff' }; },
+        closeEpoch(epoch) { closedEpochs.push(epoch); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const oldChat = await engine.newChat({ linkId: LINK });
+      const oldGet = engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(JSON.stringify(getEpochs) === JSON.stringify(['epoch-1']), 'the old push GET must receive only epoch-1');
+
+      const replacement = await engine.newChat({ linkId: LINK });
+      oldPushGet.resolve({ status: 'served', handoffCode: 'PUSH-MARISOL-OLD', task: 'job-scoring', prompt: 'Synthetic Marisol old scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } });
+      assert((await oldGet).status === 'retry', 'the late old push GET must never frame a served handoff');
+      const afterOld = engine.snapshot();
+      assert(afterOld.chat.calls === 0 && afterOld.chat.bytesServed === 0 && afterOld.chat.bytesReceived === 0 && afterOld.counts.getServed === 0
+        && closedEpochs.every(epoch => epoch === 'epoch-1'), 'a late push GET may clean up only its original epoch and cannot mutate replacement accounting');
+
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(fresh.status === 'served' && fresh.handoffCode === 'PUSH-ADA-EXAMPLE'
+        && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-2']), 'the replacement push GET must use epoch-2 and still work');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: rotation discards a delayed old-chat application submit without retaining its verdict',
+    run: async () => {
+      const oldSubmit = deferred(); let submits = 0; let saves = 0;
+      const application = source({
+        read: async () => ({ kind: 'open', handoff: handoff({ code: 'HANDOFF-EXAMPLE', prompt: 'Synthetic example application prompt.' }) }),
+        submit: async () => {
+          submits++;
+          return submits === 1 ? oldSubmit.promise : { kind: 'accepted', completed: true };
+        },
+      });
+      const engine = createHandoffEngine({ source: application.api, holdMs: 0, store: { saveLanes: async () => { saves++; return true; } } });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const oldChat = await engine.newChat({ linkId: LINK });
+      const servedOld = await engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      const stale = engine.submit({ session: oldChat.sessionCode, linkId: LINK, handoffCode: servedOld.handoffCode, response: answer({ code: servedOld.handoffCode, stage: servedOld.stage }) });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(submits === 1, 'old chat must dispatch its one delayed application submit');
+
+      const replacement = await engine.newChat({ linkId: LINK }); const baselineSaves = saves;
+      oldSubmit.resolve({ kind: 'accepted', completed: true });
+      assert((await stale).status === 'retry', 'an accepted old application submit must be reported only as retry after rotation');
+      const afterOld = engine.snapshot();
+      assert(afterOld.chat.calls === 0 && afterOld.chat.bytesServed === 0 && afterOld.chat.bytesReceived === 0
+        && afterOld.counts.submitAccepted === 0 && afterOld.queue.jobs[0]?.phase === 'awaiting' && saves === baselineSaves,
+      'the late application submit must not complete the lane, persist, or seed replacement verdict state');
+
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({ session: replacement.sessionCode, linkId: LINK, handoffCode: fresh.handoffCode, response: answer({ code: fresh.handoffCode, stage: fresh.stage }) });
+      assert(fresh.status === 'served' && accepted.status === 'accepted' && submits === 2,
+        'the replacement must re-serve and submit the same example bytes through a new source call, not an old verdict cache');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: rotation discards a delayed old-chat push submit and keeps push verdicts epoch-local',
+    run: async () => {
+      const oldPushSubmit = deferred(); const getEpochs = []; const submitEpochs = []; const closedEpochs = [];
+      const push = {
+        async get({ epoch }) {
+          getEpochs.push(epoch);
+          return { status: 'served', handoffCode: 'PUSH-EXAMPLE', task: 'job-scoring', prompt: 'Synthetic example scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } };
+        },
+        async submit({ epoch }) {
+          submitEpochs.push(epoch);
+          return submitEpochs.length === 1 ? oldPushSubmit.promise : { status: 'accepted' };
+        },
+        closeEpoch(epoch) { closedEpochs.push(epoch); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const oldChat = await engine.newChat({ linkId: LINK });
+      const servedOld = await engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      const stale = engine.submit({ session: oldChat.sessionCode, linkId: LINK, handoffCode: servedOld.handoffCode, response: 'Synthetic example scoring answer.' });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(JSON.stringify(getEpochs) === JSON.stringify(['epoch-1']) && JSON.stringify(submitEpochs) === JSON.stringify(['epoch-1']),
+        'old push get and submit must be tagged with the original epoch id');
+
+      const replacement = await engine.newChat({ linkId: LINK });
+      oldPushSubmit.resolve({ status: 'accepted' });
+      assert((await stale).status === 'retry', 'an accepted old push submit must never become an accepted replacement result');
+      const afterOld = engine.snapshot();
+      assert(afterOld.chat.calls === 0 && afterOld.chat.bytesServed === 0 && afterOld.chat.bytesReceived === 0 && afterOld.counts.submitAccepted === 0
+        && closedEpochs.every(epoch => epoch === 'epoch-1'), 'the old push verdict must not charge, cache, or close a replacement epoch');
+
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({ session: replacement.sessionCode, linkId: LINK, handoffCode: fresh.handoffCode, response: 'Synthetic example scoring answer.' });
+      assert(fresh.status === 'served' && accepted.status === 'accepted'
+        && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-2']) && JSON.stringify(submitEpochs) === JSON.stringify(['epoch-1', 'epoch-2']),
+      'the replacement must independently serve and accept through epoch-2 rather than replaying the old push verdict');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: concurrent drain retires to null and fences a delayed old push call before replacement',
+    run: async () => {
+      const delayedOld = deferred(); const getEpochs = []; const closedEpochs = [];
+      const push = {
+        async get({ epoch }) {
+          getEpochs.push(epoch);
+          if (getEpochs.length === 1) return delayedOld.promise;
+          if (getEpochs.length === 2) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+          return { status: 'served', handoffCode: 'PUSH-ADA-AFTER-DRAIN', task: 'job-scoring', prompt: 'Synthetic Ada post-drain scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } };
+        },
+        async submit() { return { status: 'unknown_handoff' }; },
+        closeEpoch(epoch) { closedEpochs.push(epoch); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const oldChat = await engine.newChat({ linkId: LINK });
+      const stale = engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      const draining = await engine.get({ session: oldChat.sessionCode, linkId: LINK });
+      assert(draining.status === 'queue_empty' && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-1'])
+        && engine.snapshot().chat.ordinal === 0, 'a concurrent empty GET must retire the old epoch to null while both old calls used epoch-1');
+
+      delayedOld.resolve({ status: 'served', handoffCode: 'PUSH-MARISOL-LATE', task: 'job-scoring', prompt: 'Synthetic Marisol late scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } });
+      assert((await stale).status === 'retry', 'a delayed call that resumes after drain-to-null must never serve');
+      const nullEpoch = engine.snapshot();
+      assert(nullEpoch.chat.ordinal === 0 && nullEpoch.chat.calls === 0 && nullEpoch.chat.bytesServed === 0 && nullEpoch.counts.getServed === 0
+        && closedEpochs.every(epoch => epoch === 'epoch-1'), 'the delayed old call must not resurrect or mutate the null epoch');
+
+      const replacement = await engine.newChat({ linkId: LINK });
+      const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(fresh.status === 'served' && fresh.handoffCode === 'PUSH-ADA-AFTER-DRAIN'
+        && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-1', 'epoch-2']), 'a fresh chat after drain must work with a new epoch id');
     },
   },
 );

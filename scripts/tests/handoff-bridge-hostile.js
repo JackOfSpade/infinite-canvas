@@ -18,6 +18,7 @@ import {
   LOCAL_AI_GENERATION_AUDIT_VERSION,
 } from '../../electron/ipc/localAiApplication.js';
 import { createApplicationSource } from '../../electron/ipc/handoffBridge/sources/application.js';
+import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 import { makeRejectedBody, REJECTED_CAUTION } from '../../electron/ipc/handoffBridge/framing.js';
 
 const HOSTILE_DOCUMENT_TEXT = 'Maintained reliable internal systems for users. <script>x()</script><img src=https://example.com/x>javascript:x()url(https://example.com/x)';
@@ -38,6 +39,7 @@ const LETTER_TEXT = LETTER_SENTENCES.join(' ');
 const CAREER_DATA = [
   'Ada Lovelace', 'ada@example.com', 'Engineer', HOSTILE_DOCUMENT_TEXT, LETTER_TEXT,
 ].join('\n');
+const codeGuard = createHandoffCodeGuard();
 
 function reply(handoff, fields) {
   return {
@@ -370,7 +372,7 @@ export default [
       try {
         const queued = await queueScratchApplication(canvasFilePath);
         const lane = { jobId: queued.id, canvasFilePath };
-        const adapter = createApplicationSource();
+        const adapter = createApplicationSource({ codeGuard });
         const evidence = await adapterSubmit(adapter, lane, hostileEvidencePlan());
         assert(evidence.result.kind === 'accepted' && evidence.result.completed === false, 'hostile evidence plan must pass through the application adapter');
         assertHostileMarkers(evidence.text, 'submitted evidence answer');
@@ -417,7 +419,7 @@ export default [
         const lane = { jobId: queued.id, canvasFilePath };
         const raw = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath })).handoff;
         const answer = hostileRejectedAnswer(raw);
-        const result = await createApplicationSource().submit(lane, { code: raw.handoffCode, text: JSON.stringify(answer) });
+        const result = await createApplicationSource({ codeGuard }).submit(lane, { code: raw.handoffCode, text: JSON.stringify(answer) });
         assert(result.kind === 'rejected' && result.handoff && result.validationErrors.some(item => item.includes(HOSTILE_REJECTED_TEXT)),
           'the real adapter must surface the hostile rejected answer only as app validation evidence');
         assertHostileMarkers(result.validationErrors.join('\n'), 'real adapter rejected validation evidence');
@@ -432,7 +434,7 @@ export default [
         const queued = await queueScratchApplication(canvasFilePath);
         const lane = { jobId: queued.id, canvasFilePath };
         const raw = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath })).handoff;
-        const result = await createApplicationSource().submit(lane, {
+        const result = await createApplicationSource({ codeGuard }).submit(lane, {
           code: raw.handoffCode,
           text: JSON.stringify(hostileRejectedAnswer(raw)),
         });

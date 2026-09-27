@@ -61,6 +61,12 @@ export function createOAuthStore({ filePath, fsImpl = fs, pathImpl = path, rando
       fsImpl.renameSync(temporary, filePath);
       temporary = undefined;
       fsImpl.chmodSync(filePath, 0o600);
+      // The file fsync makes its contents durable; this second fsync makes
+      // the atomic rename durable. Do not acknowledge an OAuth mutation when
+      // either durability boundary reports an error.
+      const directoryDescriptor = fsImpl.openSync(directory, fs.constants.O_RDONLY);
+      try { fsImpl.fsyncSync(directoryDescriptor); }
+      finally { fsImpl.closeSync(directoryDescriptor); }
       return true;
     } catch {
       try { if (descriptor !== undefined) fsImpl.closeSync(descriptor); } catch { /* best effort */ }

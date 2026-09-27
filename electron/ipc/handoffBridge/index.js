@@ -15,6 +15,7 @@ import { createHandoffBridgeLog } from './log.js';
 import { createApplicationSource } from './sources/application.js';
 import { createPushSource } from './sources/push.js';
 import { createHandoffEngine } from './engine.js';
+import { createHandoffCodeGuard } from './lanes.js';
 import { createLaneStore } from './laneStore.js';
 import { createOAuthStore } from './oauthStore.js';
 import { createOAuthServer } from './oauth.js';
@@ -191,6 +192,32 @@ export function appendClosedHandoffAudit(audit, event, fields = {}, stamp = Date
 
 function recordClosedBridgeEvent(log, code, fields = {}) {
   try { log?.record?.(code, fields); return true; } catch { return false; }
+}
+
+// Keep the listener-facing handler stable while it adds the one local
+// observation that belongs at the socket boundary.  In particular, an
+// `Expect: 100-continue` request is dispatched through `preflight`, not the
+// ordinary call path, so composition must retain that capability.
+export function wrapRequestHandlerWithEgressObservation(requestHandler, observeOwnEgress = noOp) {
+  const observed = new WeakSet();
+  const observe = req => {
+    if (req && (typeof req === 'object' || typeof req === 'function')) {
+      if (observed.has(req)) return;
+      observed.add(req);
+    }
+    try { observeOwnEgress?.({ header: req?.headers?.['x-ic-probe'], address: req?.headers?.['cf-connecting-ip'] }); } catch { /* observation is a tripwire */ }
+  };
+  const wrapped = (req, res) => {
+    observe(req);
+    return requestHandler(req, res);
+  };
+  if (typeof requestHandler?.preflight === 'function') {
+    Object.defineProperty(wrapped, 'preflight', {
+      value: (req, res) => { observe(req); return requestHandler.preflight(req, res); },
+      enumerable: false,
+    });
+  }
+  return wrapped;
 }
 
 // OAuth emits a few credential lifecycle events with internal link ids. Keep
@@ -494,9 +521,10 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   };
   const audit = deps.audit || createAuditSink({ userDataPath: userData, fsImpl: deps.fsImpl });
   const laneStore = deps.laneStore || createLaneStore({ userDataPath: userData, fsImpl: deps.fsImpl });
-  const application = deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout });
+  const codeGuard = deps.codeGuard || createHandoffCodeGuard();
+  const application = deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
   const hubKey = (canvasFilePath, nodeId) => crypto.createHash('sha256').update(`${canvasFilePath}\n${nodeId}`, 'utf8').digest('hex');
-  const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey });
+  const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey, codeGuard });
   let pairing;
   let controller;
   const oauthStore = deps.oauthStore || createOAuthStore({ filePath: path.join(userData, 'handoff-bridge', 'oauth-state.json'), fsImpl: deps.fsImpl });
@@ -540,6 +568,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     restoredLanes: laneStore.loadLanes?.(now()) || [], autoStart: config.autoStart === true,
     confirmRestart: async ords => (await controller?.confirmRestart?.(ords)) === true,
     onJobChanged: notifyOwningWindow,
+    codeGuard,
   });
   let engine = makeEngine();
   // HTTP owns source-family evaluation and its sole audit/counter event.  This
@@ -571,10 +600,8 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   // The listener is the only place that sees Cf-Connecting-IP.  It consumes
   // the one-shot HMAC observation before the OAuth route can inspect pairing.
   let supervisedTunnel = null;
-  const listener = deps.listener || createListener({ socketPath, handler: (req, res) => {
-    try { pairing?.recordOwnEgress?.({ header: req?.headers?.['x-ic-probe'], address: req?.headers?.['cf-connecting-ip'] }); } catch { /* observation is a tripwire */ }
-    return requestHandler(req, res);
-  }, fsModule: deps.fsImpl, timers, beforeRebind: async () => { await supervisedTunnel?.stop?.(); } });
+  const listenerHandler = wrapRequestHandlerWithEgressObservation(requestHandler, value => pairing?.recordOwnEgress?.(value));
+  const listener = deps.listener || createListener({ socketPath, handler: listenerHandler, fsModule: deps.fsImpl, timers, beforeRebind: async () => { await supervisedTunnel?.stop?.(); } });
   const probe = testMode
     ? options => socketPublicProbe({ ...options, socketPath, request: deps.socketRequest || http.request })
     : options => publicProbe({ ...options, request: deps.publicRequest, lookup: deps.lookup });

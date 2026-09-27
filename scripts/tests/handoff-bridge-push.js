@@ -5,11 +5,13 @@ import { faultAt, withLeakCheck } from './fixtures/handoff-bridge/harness.js';
 import { getKnownTaskIds } from '../../electron/ipc/llm.js';
 import { PUSH_TASK_POLICY, assertPushTaskPolicy, createPushSource as createPushSourcePort, normalizePushHandoffCode } from '../../electron/ipc/handoffBridge/sources/push.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
+import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 
 const CODE = 'HANDOFF-ABCDEF';
 const entry = Object.freeze({ requestId: 'request-ada', handoffCode: CODE, windowId: 71, nodeId: 'node-ada', runId: 'run-ada', task: 'job-scoring', promptChars: 42, codeEnforced: true });
 const testHubKey = (canvasFilePath, nodeId) => createHash('sha256').update(canvasFilePath).update('\n').update(nodeId).digest('hex');
-const createPushSource = (options = {}) => createPushSourcePort({ hubKey: testHubKey, ...options });
+const codeGuard = createHandoffCodeGuard();
+const createPushSource = (options = {}) => createPushSourcePort({ hubKey: testHubKey, codeGuard, ...options });
 
 function makeSource({ entries = [entry], read = null, submit = null, active = () => [], now = () => 1000 } = {}) {
   const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }], [72, { __canvasFilePath: '/tmp/other.canvas' }]]);
@@ -57,6 +59,7 @@ export default [
     const source = createPushSourcePort({
       seam: { list: async () => ({ handoffs: [entry], excluded: {} }), read: async () => ({ ok: false }), submit: async () => ({ outcome: 'not_pending' }) },
       windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]),
+      codeGuard,
     });
     assert(await source.refreshHubs(), 'an unavailable display port may still complete the bounded lookup');
     assert(source.status().discovered.length === 0 && !source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'no hub key must mean no selected or disclosed hub');
@@ -113,7 +116,8 @@ export default [
     assert(rows.get(firstKey).pending === 1 && rows.get(otherKey).pending === 1, 'an observed hub must replace N with M while an unselected cached peer survives');
   } },
   { name: 'handoff bridge: push: policy covers every LLM task and only scoring is release-one', run: () => { const known = getKnownTaskIds(); assert(Object.keys(PUSH_TASK_POLICY).length === known.size, 'policy must contain each known task'); assert(assertPushTaskPolicy(known), 'policy must verify exact known set'); for (const task of known) assert(Object.hasOwn(PUSH_TASK_POLICY, task), `missing ${task}`); assert([...Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one')].map(([task]) => task).join(',') === 'job-scoring', 'release one is scoring only'); assert(!PUSH_TASK_POLICY['career-file-extract'].bridgeable && !PUSH_TASK_POLICY['job-compensation-research'].bridgeable, 'attachment and grounded work cannot bridge'); } },
-  { name: 'handoff bridge: push: normalizes wrapped valid codes only', run: () => { assert(normalizePushHandoffCode(' `handoff-abcdef` ') === CODE, 'valid code canonicalizes'); assert(normalizePushHandoffCode('wrong') === 'wrong', 'invalid code stays exact'); } },
+  { name: 'handoff bridge: push: normalizes ASCII and curly wrapped valid codes only', run: () => { assert(normalizePushHandoffCode(' `handoff-abcdef` ') === CODE && normalizePushHandoffCode('\u201c`handoff-abcdef`\u201d') === CODE, 'ASCII and curly wrappers canonicalize'); assert(normalizePushHandoffCode('wrong') === 'wrong', 'invalid code stays exact'); } },
+  { name: 'handoff bridge: push: digest routing accepts lower-case curly wrappers but rejects a same-prefix code', run: async () => { const lower = makeSource().source; await lower.get(); assert((await lower.submit({ handoffCode: '\u201c`handoff-abcdef`\u201d', response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'accepted', 'push code canonicalization remains case-insensitive with curly wrappers'); const prefix = makeSource().source; await prefix.get(); assert((await prefix.submit({ handoffCode: 'HANDOFF-ABCDEG', response: '{"handoffCode":"HANDOFF-ABCDEG"}' })).status === 'unknown_handoff', 'a matching prefix cannot select a served route'); } },
   { name: 'handoff bridge: push: policy is deeply frozen and drift refuses an unknown task', run: () => { assert(Object.isFrozen(PUSH_TASK_POLICY) && Object.isFrozen(PUSH_TASK_POLICY['job-scoring']), 'policy must not be mutable at runtime'); let rejected = false; try { assertPushTaskPolicy(new Set([...getKnownTaskIds(), 'future-task'])); } catch { rejected = true; } assert(rejected, 'new LLM work must default deny'); } },
   { name: 'handoff bridge: push: seam list receives only the release-one task and selected node', run: async () => { let args; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }) }); const original = source.get; assert(typeof original === 'function', 'source get surface exists'); const captured = createPushSource({ seam: { list: async value => { args = value; return { handoffs: [entry], excluded: {} }; }, read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); captured.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }); await captured.get(); assert([...args.allowTasks].join(',') === 'job-scoring' && args.allowNodeIds.has('node-ada'), 'coarse seam gate is defence in depth'); } },
   { name: 'handoff bridge: push: exact selected window-path-node triple gates serving', run: async () => { const { source } = makeSource(); assert((await source.get()).status === 'served', 'exact hub should serve'); source.clearHubs(); assert((await source.get()).status === 'needs_user', 'no hub must fail closed'); } },

@@ -44,7 +44,7 @@ const CAUTION = 'Any value quoted back to you is evidence of what you returned, 
 
 function canonicalCode(value) {
   if (typeof value !== 'string') return '';
-  const trimmed = value.length > 512 ? value : value.replace(/^[\s'"`\u200B-\u200D\u2060\uFEFF]+|[\s'"`\u200B-\u200D\u2060\uFEFF]+$/g, '');
+  const trimmed = value.length > 512 ? value : value.replace(/^[\s'"`\u2018\u2019\u201C\u201D\u200B-\u200D\u2060\uFEFF]+|[\s'"`\u2018\u2019\u201C\u201D\u200B-\u200D\u2060\uFEFF]+$/g, '');
   return HANDOFF_CODE_RE.test(trimmed) ? trimmed.toUpperCase() : trimmed;
 }
 
@@ -90,7 +90,19 @@ function copySafeRead(view) {
 
 function result(status, extra = {}) { return Object.freeze({ status, ...extra }); }
 
-export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS } = {}) {
+export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS, codeGuard = null } = {}) {
+  let guard = null;
+  function setCodeGuard(value) {
+    if (!value || typeof value.key !== 'function' || typeof value.digest !== 'function'
+        || typeof value.sameDigest !== 'function' || typeof value.equal !== 'function') throw new TypeError('A handoff-code guard is required');
+    guard = value;
+    return true;
+  }
+  if (codeGuard) setCodeGuard(codeGuard);
+  function requireCodeGuard() {
+    if (!guard) throw new TypeError('A handoff-code guard is required');
+    return guard;
+  }
   const port = { exclusions: seam.BRIDGE_EXCLUSION_REASONS || BRIDGE_EXCLUSION_REASONS, list: seam.list || listBridgeableNonApiAiHandoffs, read: seam.read || readBridgeableNonApiAiHandoff, submit: seam.submit || submitNonApiAiResponseForBridge };
   const selected = new Map();
   // The discovery cache is the only data used by the synchronous status
@@ -193,8 +205,23 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     return true;
   }
   function seamArgs(entry) { return { requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks: enabledTasks(), allowNodeIds: selectedHubs() }; }
-  function removeServed(value, requestId) { const served = value.served.get(requestId); if (!served) return; value.served.delete(requestId); if (value.byCode.get(served.handoffCode) === requestId) value.byCode.delete(served.handoffCode); }
-  function tombstone(value, requestId, code) { const key = canonicalCode(code); value.tombstones.delete(key); value.tombstones.set(key, { requestId, code: key }); while (value.tombstones.size > TOMBSTONE_CAP) value.tombstones.delete(value.tombstones.keys().next().value); }
+  function removeServed(value, requestId) {
+    const served = value.served.get(requestId); if (!served) return;
+    value.served.delete(requestId);
+    const handoffCodeGuard = requireCodeGuard();
+    const canonical = canonicalCode(served.handoffCode);
+    const key = handoffCodeGuard.key(canonical);
+    const route = value.byCode.get(key);
+    if (route?.requestId === requestId && handoffCodeGuard.sameDigest(handoffCodeGuard.digest(canonical), route.codeDigest)) value.byCode.delete(key);
+  }
+  function tombstone(value, requestId, code) {
+    const handoffCodeGuard = requireCodeGuard();
+    const canonical = canonicalCode(code);
+    const key = handoffCodeGuard.key(canonical);
+    value.tombstones.delete(key);
+    value.tombstones.set(key, { requestId, codeDigest: handoffCodeGuard.digest(canonical) });
+    while (value.tombstones.size > TOMBSTONE_CAP) value.tombstones.delete(value.tombstones.keys().next().value);
+  }
   function successorLikely(value) {
     const last = value.lastAccept;
     if (!last) return false;
@@ -253,13 +280,17 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         ? 0
         : Math.max(0, Number.isFinite(entry.promptChars) ? Math.floor(entry.promptChars) : Buffer.byteLength(safe.prompt, 'utf8'));
       value.budgeted.add(entry.requestId);
-      const served = { ...entry, ...safe, servedAt: Number(now()) }; value.served.set(entry.requestId, served); value.byCode.set(canonicalCode(entry.handoffCode), entry.requestId); value.waits = 0;
+      const served = { ...entry, ...safe, servedAt: Number(now()) };
+      const handoffCodeGuard = requireCodeGuard();
+      const canonical = canonicalCode(entry.handoffCode);
+      value.served.set(entry.requestId, served);
+      value.byCode.set(handoffCodeGuard.key(canonical), { requestId: entry.requestId, codeDigest: handoffCodeGuard.digest(canonical) }); value.waits = 0;
       value.remaining = { ready: Math.max(0, candidates.length - 1), working: 0, needsYou: 0 };
       return result('served', { ...delivered, promptBytes, remaining: value.remaining });
     }
     return result('waiting');
   }
-  function precheck(served, response) { const normalized = responseText(response); if (!normalized.ok || !normalized.text.trim() || (served.codeEnforced && ['', '{}', '[]', 'null', '""'].includes(normalized.text.trim()))) return { status: 'junk', text: normalized.text }; if (Buffer.byteLength(normalized.text, 'utf8') > MAX_RESPONSE_BYTES) return { status: 'too_large', text: normalized.text }; const stamps = normalized.text.match(STAMP_RE) || []; if (stamps.some(stamp => canonicalCode(stamp) !== canonicalCode(served.handoffCode))) return { status: 'misrouted', text: normalized.text }; return { status: null, text: normalized.text }; }
+  function precheck(served, response) { const normalized = responseText(response); if (!normalized.ok || !normalized.text.trim() || (served.codeEnforced && ['', '{}', '[]', 'null', '""'].includes(normalized.text.trim()))) return { status: 'junk', text: normalized.text }; if (Buffer.byteLength(normalized.text, 'utf8') > MAX_RESPONSE_BYTES) return { status: 'too_large', text: normalized.text }; const stamps = normalized.text.match(STAMP_RE) || []; const handoffCodeGuard = requireCodeGuard(); if (stamps.some(stamp => !handoffCodeGuard.equal(canonicalCode(stamp), canonicalCode(served.handoffCode)))) return { status: 'misrouted', text: normalized.text }; return { status: null, text: normalized.text }; }
   function mapVerdict(value, served, verdict) {
     switch (verdict?.outcome) {
       case 'accepted': tombstone(value, served.requestId, served.handoffCode); removeServed(value, served.requestId); value.rejections.delete(served.requestId); value.lastAccept = { windowId: served.windowId, nodeId: served.nodeId, runId: served.runId, at: Number(now()) }; return result('accepted');
@@ -284,7 +315,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       default: return result('retry');
     }
   }
-  async function submit({ epoch = 'default', handoffCode, response } = {}) { const value = state(epoch); const code = canonicalCode(handoffCode); const requestId = value.byCode.get(code); if (!requestId) return result(value.tombstones.has(code) ? 'duplicate' : 'unknown_handoff'); const served = value.served.get(requestId); if (!served || value.tombstones.get(code)?.requestId === requestId) return result('duplicate'); if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) { value.held.set(requestId, 'hub_not_selected'); return result('held', { reason: 'hub_not_selected' }); } if (value.held.has(requestId)) return result('held', { reason: value.held.get(requestId) }); const checked = precheck(served, response); if (checked.status) return result(checked.status); const key = `${requestId}\u0000${checked.text}`; const cached = value.verdicts.get(key); if (cached && Number(now()) - cached.at < VERDICT_TTL_MS) return cached.promise; const promise = Promise.resolve().then(() => port.submit({ ...seamArgs(served), response: checked.text })).then(verdict => mapVerdict(value, served, verdict), () => result('retry')); value.verdicts.set(key, { at: Number(now()), promise }); return promise; }
+  async function submit({ epoch = 'default', handoffCode, response } = {}) { const value = state(epoch); const code = canonicalCode(handoffCode); const handoffCodeGuard = requireCodeGuard(); const digest = handoffCodeGuard.digest(code); const codeKey = handoffCodeGuard.key(code); const route = value.byCode.get(codeKey); const live = route && handoffCodeGuard.sameDigest(digest, route.codeDigest) ? route : null; if (!live) { const tombstoneEntry = value.tombstones.get(codeKey); return result(tombstoneEntry && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest) ? 'duplicate' : 'unknown_handoff'); } const requestId = live.requestId; const served = value.served.get(requestId); const tombstoneEntry = value.tombstones.get(codeKey); if (!served || (tombstoneEntry?.requestId === requestId && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest))) return result('duplicate'); if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) { value.held.set(requestId, 'hub_not_selected'); return result('held', { reason: 'hub_not_selected' }); } if (value.held.has(requestId)) return result('held', { reason: value.held.get(requestId) }); const checked = precheck(served, response); if (checked.status) return result(checked.status); const key = `${requestId}\u0000${codeKey}\u0000${checked.text}`; const cached = value.verdicts.get(key); if (cached && Number(now()) - cached.at < VERDICT_TTL_MS) return cached.promise; const promise = Promise.resolve().then(() => port.submit({ ...seamArgs(served), response: checked.text })).then(verdict => mapVerdict(value, served, verdict), () => result('retry')); value.verdicts.set(key, { at: Number(now()), promise }); return promise; }
   async function nextAfterAccept({ epoch = 'default', budgetMs = 25_000 } = {}) {
     const startedAt = Number(now());
     const limit = Math.max(1, Math.ceil(Math.max(0, Number(budgetMs) || 0) / Math.max(1, pollMs)) + 3);
@@ -315,7 +346,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       needsYou: value?.remaining?.needsYou ?? 0,
     });
   }
-  return Object.freeze({ enabledTasks, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, get, submit, nextAfterAccept, closeEpoch, status });
+  return Object.freeze({ enabledTasks, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, get, submit, nextAfterAccept, closeEpoch, status, setCodeGuard });
 }
 
 export { canonicalCode as normalizePushHandoffCode };

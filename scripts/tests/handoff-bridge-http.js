@@ -5,6 +5,7 @@ import { exchange, parseContentLength } from './fixtures/handoff-bridge/fakeHttp
 import { faultAt, withLeakCheck, withTimeout } from './fixtures/handoff-bridge/harness.js';
 import { createPermitPool, createRequestHandler, isConnectorSource, sourceKey, sourcePrefix } from '../../electron/ipc/handoffBridge/http.js';
 import { createListener } from '../../electron/ipc/handoffBridge/listener.js';
+import { wrapRequestHandlerWithEgressObservation } from '../../electron/ipc/handoffBridge/index.js';
 import { createSocketFsNet } from './fixtures/handoff-bridge/bridgeFixtures.js';
 import { methodNotAllowed, notFound, sendHtml, sendJson, sendRedirect } from '../../electron/ipc/handoffBridge/respond.js';
 import { KeyedBuckets, WireError, jsonToParams, makeBucket, mimeOf, parseForm, parseJsonObject, readBody } from '../../electron/ipc/handoffBridge/wire.js';
@@ -39,6 +40,34 @@ export default [
       await listener.start();
       await events.get('checkContinue')({}, { writeContinue: () => order.push('continue'), headersSent: false });
       assert(order.join(',') === 'auth,continue,body', 'Expect must authenticate before 100 Continue, then permit body consumption');
+      await listener.stop();
+    },
+  },
+  {
+    name: 'handoff bridge: http: composed observation wrapper preserves Expect auth rejection and closes it',
+    async run() {
+      const fixture = createSocketFsNet(); const events = new Map(); let observations = 0; let continues = 0; let destroyed = false;
+      const server = { on: (event, listener) => events.set(event, listener), once() {}, off() {}, listen: (_options, ready) => { fixture.entries.set(fixture.socketPath, { type: 'socket', uid: process.getuid?.() ?? 0, mode: 0o600 }); ready(); }, close: done => done(), closeIdleConnections() {}, closeAllConnections() {} };
+      const requestHandler = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => { throw new Error('missing'); }, mcp: async () => ({ status: 200, body: {} }) });
+      const handler = wrapRequestHandlerWithEgressObservation(requestHandler, () => { observations += 1; });
+      const listener = createListener({ socketPath: fixture.socketPath, handler, fsModule: fixture.fs, netModule: fixture.net, httpModule: { createServer: () => server } });
+      await listener.start();
+      const req = new EventEmitter(); Object.assign(req, {
+        method: 'POST', url: '/mcp', readableEnded: false,
+        headers: { host: 'bridge.example.com', 'content-type': 'application/json', 'content-length': '2', 'cf-connecting-ip': '203.0.113.10' },
+        rawHeaders: ['Host', 'bridge.example.com', 'Content-Type', 'application/json', 'Content-Length', '2', 'Cf-Connecting-Ip', '203.0.113.10'],
+        destroy() { destroyed = true; },
+      });
+      let status = 0; const responseHeaders = {};
+      const res = new EventEmitter(); Object.assign(res, {
+        headersSent: false, writeContinue() { continues += 1; },
+        setHeader(name, value) { responseHeaders[String(name).toLowerCase()] = String(value); },
+        writeHead(value, headers = {}) { status = value; this.headersSent = true; for (const [name, header] of Object.entries(headers)) responseHeaders[name.toLowerCase()] = String(header); },
+        end() { this.emit('finish'); },
+      });
+      await events.get('checkContinue')(req, res);
+      assert(status === 401 && continues === 0 && destroyed && observations === 1 && responseHeaders['www-authenticate'].includes('resource_metadata'),
+        'the composed listener wrapper must retain preflight: an unauthorized Expect request is answered and closed, not left waiting for a body');
       await listener.stop();
     },
   },
@@ -301,6 +330,46 @@ export default [
       const unreadRes = new EventEmitter(); Object.assign(unreadRes, { headersSent: false, setHeader() {}, writeHead() { this.headersSent = true; }, end() { this.emit('finish'); } });
       await handler(unreadReq, unreadRes);
       assert(unreadDestroyed, 'the fixed 401 must destroy the unread body only after its response finishes');
+    },
+  },
+  {
+    name: 'handoff bridge: http: duplicate Authorization is a pre-auth 401 and never admits a body',
+    async run() {
+      const absent = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => { throw new Error('missing'); }, mcp: async () => ({ status: 200, body: {} }) });
+      const ordinary = await exchange(absent, { path: '/mcp', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert(ordinary.status === 401 && ordinary.headers['www-authenticate'].includes('resource_metadata') && ordinary.readBytes === 0, 'an absent Authorization header remains the ordinary N1 challenge before body consumption');
+
+      let authenticated = 0; let dispatched = 0;
+      const exactlyOne = createRequestHandler({
+        hostname: 'bridge.example.com', sourcePolicy: 'off',
+        authenticate: async () => { authenticated += 1; return { linkId: 'single-header' }; },
+        mcp: async () => { dispatched += 1; return { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }; },
+      });
+      const single = await exchange(exactlyOne, { path: '/mcp', headers: { authorization: 'Bearer one', 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      assert(single.status === 200 && authenticated === 1 && dispatched === 1, 'exactly one Authorization field proceeds to normal authenticated dispatch');
+
+      let duplicateAuth = 0; let duplicateDispatch = 0; let sourcePolicyCalls = 0; let bodyDestroyed = false;
+      const duplicate = createRequestHandler({
+        hostname: 'bridge.example.com', sourcePolicy: () => { sourcePolicyCalls += 1; return 'off'; },
+        authenticate: async () => { duplicateAuth += 1; return { linkId: 'must-not-authenticate' }; },
+        mcp: async () => { duplicateDispatch += 1; return { status: 200, body: {} }; },
+      });
+      const req = new EventEmitter(); Object.assign(req, {
+        url: '/mcp', method: 'POST', complete: true, readableEnded: false,
+        headers: { host: 'bridge.example.com', authorization: 'Bearer first', 'content-type': 'application/json', 'content-length': '2' },
+        rawHeaders: ['Host', 'bridge.example.com', 'aUtHoRiZaTiOn', 'Bearer first', 'AUTHORIZATION', 'Bearer second', 'Content-Type', 'application/json', 'Content-Length', '2'],
+        destroy() { bodyDestroyed = true; },
+      });
+      const headers = {}; let status = 0;
+      const res = new EventEmitter(); Object.assign(res, {
+        headersSent: false, setHeader(name, value) { headers[String(name).toLowerCase()] = String(value); },
+        writeHead(value, values = {}) { status = value; this.headersSent = true; for (const [name, header] of Object.entries(values)) headers[name.toLowerCase()] = String(header); },
+        end() { this.emit('finish'); },
+      });
+      await duplicate(req, res);
+      assert(status === 401 && headers['www-authenticate'].includes('resource_metadata') && headers['www-authenticate'].includes('error="invalid_token"')
+        && duplicateAuth === 0 && duplicateDispatch === 0 && sourcePolicyCalls === 0 && bodyDestroyed,
+      'mixed-case duplicate raw Authorization fields must receive the fixed N1 challenge before authentication, source policy, engine, or body read');
     },
   },
   {

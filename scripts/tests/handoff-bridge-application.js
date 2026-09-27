@@ -18,6 +18,7 @@ import {
   isAdoptableStatus,
   mapApplicationStatus,
 } from '../../electron/ipc/handoffBridge/sources/application.js';
+import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 
 const lane = Object.freeze({ jobId: 'job-ada-0001', canvasFilePath: '/tmp/ada.canvas' });
 const handoff = Object.freeze({
@@ -25,6 +26,7 @@ const handoff = Object.freeze({
   draft: 'private draft', corrections: ['fix field'], correctionPrompt: 'repair', correctionsRecovered: { active: true },
   localJob: { folder: '/private/path' }, baseHashes: { private: 'hash' },
 });
+const codeGuard = createHandoffCodeGuard();
 
 function source(overrides = {}) {
   const api = {
@@ -43,11 +45,21 @@ function source(overrides = {}) {
     // Keep the watchdog timer referenced in this standalone Node group. The
     // app's event loop stays alive in production, where the timer may unref.
     setTimeoutImpl: (fn, ms) => { setTimeout(fn, ms); return 0; },
+    codeGuard,
     ...(overrides.options || {}),
   });
 }
 
 export default [
+  {
+    name: 'handoff bridge: application: injected guard makes rotated-code detection timing-safe and wrapper-aware',
+    run: async () => {
+      const wrapped = source({ api: { submitLocalApplicationHandoff: async () => ({ accepted: false, handoff }) } });
+      const same = await wrapped.submit(lane, { code: ' `BRIDGE-CODE` ', text: '{}' });
+      const lower = await wrapped.submit(lane, { code: 'bridge-code', text: '{}' });
+      assert(same.rotated === false && lower.rotated === true, 'only canonical edge wrappers may preserve an application code');
+    },
+  },
   {
     name: 'handoff bridge: application: Ada fixture and the four frozen adapter exports are available',
     run: () => {

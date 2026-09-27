@@ -2,9 +2,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { CONSTANTS } from './constants.js';
 import {
   createApplicationLane,
+  createHandoffCodeGuard,
   holdLane,
   indexLaneCode,
   isHumanAdvance,
+  isHandoffCodeGuard,
   makeChatKey,
   normalizeCurrentHandoff,
   rehydrateApplicationLane,
@@ -54,8 +56,8 @@ function sha256(value) {
   return createHash('sha256').update(value).digest();
 }
 
-function verdictKey(code, text) {
-  return createHash('sha256').update(code).update('\0').update(text).digest('hex');
+function verdictKey(codeKey, text) {
+  return createHash('sha256').update(codeKey).update('\0').update(text).digest('hex');
 }
 
 function epochHash(linkId, key) {
@@ -158,12 +160,16 @@ export function createHandoffEngine({
   submitBudgetMs = CONSTANTS.SUBMIT_RESPONSE_BUDGET_MS,
   restoredLanes = [],
   autoStart = false,
+  codeGuard: injectedCodeGuard = null,
 } = {}) {
+  const codeGuard = isHandoffCodeGuard(injectedCodeGuard) ? injectedCodeGuard : createHandoffCodeGuard();
   const application = sources?.application ?? source;
   const push = sources?.push ?? null;
   if (!application || typeof application.read !== 'function' || typeof application.status !== 'function'
       || typeof application.submit !== 'function') throw new TypeError('An application source is required');
   if (push && (typeof push.get !== 'function' || typeof push.submit !== 'function')) throw new TypeError('A push source must implement get and submit');
+  application.setCodeGuard?.(codeGuard);
+  push?.setCodeGuard?.(codeGuard);
   const pushOwner = push && (typeof push === 'object' || typeof push === 'function') ? Object.freeze({}) : null;
   let pushDiscoveryCurrent = true;
   if (pushOwner) {
@@ -193,6 +199,7 @@ export function createHandoffEngine({
   const semaphore = makeSemaphore(CONSTANTS.SUBMIT_CONCURRENCY);
   let epoch = null;
   let epochOrdinal = 0;
+  let reservedEpochOrdinal = 0;
   let laneOrdinal = 0;
   let paused = false;
   let pauseCause = null;
@@ -202,6 +209,7 @@ export function createHandoffEngine({
   let lastIdleNoticeAt = 0;
   let fault = null;
   let lastGetAt = null;
+  let restartConfirmation = null;
   // Source operations cannot be cancelled once handed to the application or
   // push seam.  A generation fence nevertheless makes their *results*
   // disposable: Disable/close and a power resume must not let a delayed
@@ -232,6 +240,15 @@ export function createHandoffEngine({
     return !closed && generation === sourceGeneration;
   }
 
+  // A source-generation fence protects Disable, power resume and scope
+  // changes.  An epoch fence is separate: New chat/Continue deliberately keep
+  // the same sources and lanes, but an already-authenticated call from the
+  // retired chat must not be allowed to consume or frame work for its
+  // replacement.
+  function epochCurrent(expected, generation = sourceGeneration) {
+    return sourceCurrent(generation) && epoch === expected;
+  }
+
   function invalidateSourceWork() {
     sourceGeneration += 1;
     verdicts.clear();
@@ -241,11 +258,15 @@ export function createHandoffEngine({
     // could erase the replacement's just-refreshed rows.
     pushDiscoveryCurrent = false;
     for (const lane of lanes) {
-      lane.snapshot = null;
       lane.inFlight.read = null;
       lane.inFlight.status = null;
       lane.inFlight.submit = null;
-      if (lane.phase === 'awaiting') lane.needsRefresh = true;
+      if (lane.phase === 'awaiting') {
+        lane.snapshot = null;
+        lane.needsRefresh = true;
+      } else if (lane.phase === 'unread' || lane.phase === 'host') {
+        lane.snapshot = null;
+      }
     }
   }
 
@@ -346,6 +367,10 @@ export function createHandoffEngine({
     auditEvent('epoch_closed', { reason });
     log('epoch_closed', { cause: LOG_EPOCH_CAUSES.has(reason) ? reason : 'other' });
     epoch = null;
+    // App/seam calls are not cancellable once started.  Their source-global
+    // commit may still settle, but its result must be ignored and every new
+    // chat must re-read rather than inheriting an old call's cache or prompt.
+    invalidateSourceWork();
     wake();
   }
 
@@ -406,9 +431,10 @@ export function createHandoffEngine({
     const current = normalizeCurrentHandoff(handoff, safeNow(now));
     if (!current) return false;
     const previous = lane.current;
-    if (previous?.code && previous.code !== current.code && codeIndex.has(previous.code)) {
-      tombstoneCode(tombstones, previous.code, 'rotated', { laneOrd: lane.ord, at: safeNow(now) });
-      codeIndex.delete(previous.code);
+    const previousKey = codeGuard.key(previous?.code);
+    if (previous?.code && !codeGuard.equal(previous.code, current.code) && codeIndex.has(previousKey)) {
+      tombstoneCode(tombstones, previous.code, 'rotated', { laneOrd: lane.ord, at: safeNow(now) }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+      codeIndex.delete(previousKey);
     }
     lane.current = current;
     lane.needsRefresh = false;
@@ -417,8 +443,8 @@ export function createHandoffEngine({
     lane.heldFrom = null;
     lane.hostSince = null;
     lane.snapshot = { at: safeNow(now), kind: 'open' };
-    rememberIssuedCode(lane, current.code);
-    indexLaneCode(codeIndex, lane, { epochN: epoch?.n ?? null, servedAt: null });
+    rememberIssuedCode(lane, current.code, codeGuard);
+    indexLaneCode(codeIndex, lane, { epochN: epoch?.n ?? null, servedAt: null }, CONSTANTS.CODE_INDEX_PER_LANE, codeGuard);
     return true;
   }
 
@@ -429,7 +455,7 @@ export function createHandoffEngine({
     if (result.kind === 'open') {
       const code = result.handoff?.code ?? result.handoff?.handoffCode;
       const sameRecoveryStage = typeof recoveryStage === 'string' && result.handoff?.stage === recoveryStage;
-      if (lane.phase === 'awaiting' && isHumanAdvance(lane, code) && !sameRecoveryStage) {
+      if (lane.phase === 'awaiting' && isHumanAdvance(lane, code, codeGuard) && !sameRecoveryStage) {
         holdLane(lane, 'human_advance', stamp);
         await persistLanes(generation);
         if (!sourceCurrent(generation)) return { kind: 'retry' };
@@ -586,11 +612,14 @@ export function createHandoffEngine({
     };
   }
 
-  function framePushGet(raw, generation = sourceGeneration) {
-    if (!scope.scoring || !sourceCurrent(generation)) return makeResultBody('retry');
+  function framePushGet(raw, generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     const remaining = combinedRemaining(decision.remaining);
     if (decision.status === 'served') {
+      if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
+        return makeResultBody('session_full', { remaining });
+      }
       const body = {
         status: 'served',
         handoffCode: typeof decision.handoffCode === 'string' ? decision.handoffCode : '',
@@ -613,10 +642,10 @@ export function createHandoffEngine({
       // Do not charge a ChatGPT retry again: re-serving is intentionally
       // idempotent and can happen several times while a run is settling.
       const promptBytes = Number(decision.promptBytes);
-      epoch.bytesServed += Number.isFinite(promptBytes) && promptBytes >= 0
+      expectedEpoch.bytesServed += Number.isFinite(promptBytes) && promptBytes >= 0
         ? Math.floor(promptBytes)
         : Buffer.byteLength(JSON.stringify(body), 'utf8');
-      epoch.lastGetAt = stamp;
+      expectedEpoch.lastGetAt = stamp;
       counts.getServed++;
       auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: 'push' });
       return body;
@@ -627,17 +656,24 @@ export function createHandoffEngine({
     return makeResultBody('retry');
   }
 
-  async function readPush(generation = sourceGeneration) {
-    if (!scope.scoring || !push || !epoch || !sourceCurrent(generation)) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+  async function readPush(generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!scope.scoring || !push) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+    if (!expectedEpoch || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
+    const expectedEpochId = pushEpochId(expectedEpoch);
     try {
       // Match the application-call fence: this yield creates a final,
       // observable generation boundary before entering an external source.
       // A synchronous Disable/resume/scope downgrade therefore cannot launch
       // a new push poll from an already obsolete GET continuation.
       await Promise.resolve();
-      if (!scope.scoring || !sourceCurrent(generation)) return { status: 'retry' };
-      const result = await push.get({ epoch: pushEpochId() });
-      return sourceCurrent(generation) ? result : { status: 'retry' };
+      if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
+      const result = await push.get({ epoch: expectedEpochId });
+      if (epochCurrent(expectedEpoch, generation)) return result;
+      // `push.get` owns per-epoch bookkeeping.  It can finish after Close or
+      // rotation, so make the old id disposable even if its late completion
+      // recreated source-local state.
+      try { push.closeEpoch?.(expectedEpochId); } catch { /* stale state is best-effort */ }
+      return { status: 'retry' };
     }
     catch { return { status: 'retry' }; }
   }
@@ -670,21 +706,25 @@ export function createHandoffEngine({
     return null;
   }
 
-  function serveLane(lane, generation = sourceGeneration) {
-    if (!scope.applications || !sourceCurrent(generation)) return makeResultBody('retry');
-    const marker = epoch.servedPrompt.get(lane.ord);
-    const servedBefore = marker?.stage === lane.current.stage && marker?.code === lane.current.code;
+  function serveLane(lane, generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!scope.applications || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+    if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
+      return makeResultBody('session_full', { remaining: combinedRemaining() });
+    }
+    const marker = expectedEpoch.servedPrompt.get(lane.ord);
+    const servedBefore = marker?.stage === lane.current.stage
+      && codeGuard.sameDigest(marker?.codeDigest, codeGuard.digest(lane.current.code));
     lane.current.attempt = (lane.counters.attemptByStage[`${lane.current.stage}@${lane.current.revision}`] ?? 0) + 1;
     lane.counters.attemptByStage[`${lane.current.stage}@${lane.current.revision}`] = lane.current.attempt;
     const body = makeServedBody({ lane, remaining: remainingCounts(lanes), servedBefore });
     const stamp = safeNow(now);
     lane.servedAt = stamp;
     lane.serves++;
-    epoch.servedPrompt.set(lane.ord, { stage: lane.current.stage, code: lane.current.code });
-    epoch.assignedLaneOrds.add(lane.ord);
-    epoch.focusLaneOrd = lane.ord;
-    epoch.lastGetAt = stamp;
-    epoch.bytesServed += Buffer.byteLength(JSON.stringify(body), 'utf8');
+    expectedEpoch.servedPrompt.set(lane.ord, { stage: lane.current.stage, codeDigest: codeGuard.digest(lane.current.code) });
+    expectedEpoch.assignedLaneOrds.add(lane.ord);
+    expectedEpoch.focusLaneOrd = lane.ord;
+    expectedEpoch.lastGetAt = stamp;
+    expectedEpoch.bytesServed += Buffer.byteLength(JSON.stringify(body), 'utf8');
     counts.getServed++;
     auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: lane.current.stage });
     const idleNoticeMs = CONSTANTS.SERVE_AFTER_IDLE_NOTICE_HOURS * 3_600_000;
@@ -712,12 +752,12 @@ export function createHandoffEngine({
     for (const lane of expired) {
       clearLaneHint(lane);
     }
-    for (const [code, entry] of codeIndex) if (removed.has(entry?.lane)) codeIndex.delete(code);
+    for (const [codeKey, entry] of codeIndex) if (removed.has(entry?.lane)) codeIndex.delete(codeKey);
     const saved = await persistLanes(generation);
     if (!saved && sourceCurrent(generation)) {
       lanes.splice(0, lanes.length, ...priorLanes);
       codeIndex.clear();
-      for (const [code, entry] of priorCodes) codeIndex.set(code, entry);
+      for (const [codeKey, entry] of priorCodes) codeIndex.set(codeKey, entry);
       return false;
     }
     return saved;
@@ -738,41 +778,42 @@ export function createHandoffEngine({
     }
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
     if (args.signal?.aborted) return makeResultBody('retry');
+    const expectedEpoch = epoch;
     const callAt = safeNow(now);
-    epoch.calls += 1;
-    epoch.firstCallAt ??= callAt;
-    epoch.lastCallAt = callAt;
-    epoch.lastCallKind = 'get';
-    if (epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes) return makeResultBody('session_full');
+    expectedEpoch.calls += 1;
+    expectedEpoch.firstCallAt ??= callAt;
+    expectedEpoch.lastCallAt = callAt;
+    expectedEpoch.lastCallKind = 'get';
+    if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) return makeResultBody('session_full');
     const stamp = safeNow(now);
-    if (lastGetAt != null && stamp - lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) epoch.consecutiveWaits = 0;
+    if (lastGetAt != null && stamp - lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) expectedEpoch.consecutiveWaits = 0;
     lastGetAt = stamp;
     const generation = sourceGeneration;
-    const resumedDuringGet = () => !sourceCurrent(generation);
+    const resumedDuringGet = () => !epochCurrent(expectedEpoch, generation);
 
     if (scope.applications && lanes.some(item => item.needsRefresh === true)) {
       const refreshed = await refreshOneLane(generation);
       if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     }
     let lane = scope.applications ? chooseApplicationContinuation() : null;
-    if (lane) return serveLane(lane, generation);
+    if (lane) return serveLane(lane, generation, expectedEpoch);
 
     // Scoring handoffs are preferred only at application job boundaries. A
     // focused, outstanding, or correction application lane has already won.
     let pushDecision = scope.scoring
-      ? await readPush(generation)
+      ? await readPush(generation, expectedEpoch)
       : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
     if (resumedDuringGet()) return makeResultBody('retry');
-    if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation);
+    if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
 
     // A lazy read can reveal a correction or a newly-open continuation after
     // the push poll; give it another chance before starting fresh work.
     const refreshed = scope.applications ? await refreshOneLane(generation) : null;
     if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     lane = scope.applications ? chooseApplicationContinuation() : null;
-    if (lane) return serveLane(lane, generation);
+    if (lane) return serveLane(lane, generation, expectedEpoch);
     lane = scope.applications ? chooseFreshApplication() : null;
-    if (lane) return serveLane(lane, generation);
+    if (lane) return serveLane(lane, generation, expectedEpoch);
 
     const pushWorking = scope.scoring && pushDecision?.status === 'waiting';
     const pushNeedsUser = scope.scoring && pushDecision?.status === 'needs_user';
@@ -784,17 +825,17 @@ export function createHandoffEngine({
       const refreshedAfterWait = scope.applications ? await refreshOneLane(generation) : null;
       if (resumedDuringGet() || refreshedAfterWait?.kind === 'retry') return makeResultBody('retry');
       lane = scope.applications ? chooseApplicationContinuation() : null;
-      if (lane) return serveLane(lane, generation);
+      if (lane) return serveLane(lane, generation, expectedEpoch);
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
       // fresh application lane.
       pushDecision = scope.scoring
-        ? await readPush(generation)
+        ? await readPush(generation, expectedEpoch)
         : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
       if (resumedDuringGet()) return makeResultBody('retry');
-      if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation);
+      if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
       lane = scope.applications ? chooseFreshApplication() : null;
-      if (lane) return serveLane(lane, generation);
+      if (lane) return serveLane(lane, generation, expectedEpoch);
       const stillWorking = (scope.scoring && pushDecision?.status === 'waiting')
         || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
       if (!stillWorking) {
@@ -805,22 +846,22 @@ export function createHandoffEngine({
         if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
           return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if (scope.scoring && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation);
+        if (scope.scoring && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation, expectedEpoch);
         if (pushDecision?.status === 'retry') return makeResultBody('retry');
         counts.getEmpty++;
         const drained = scope.scoring
-          ? framePushGet(pushDecision, generation)
+          ? framePushGet(pushDecision, generation, expectedEpoch)
           : makeResultBody('queue_empty', { remaining: combinedRemaining() });
         if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
         return drained;
       }
-      epoch.consecutiveWaits++;
-      if (epoch.consecutiveWaits >= CONSTANTS.MAX_CONSECUTIVE_WAITS) {
+      expectedEpoch.consecutiveWaits++;
+      if (expectedEpoch.consecutiveWaits >= CONSTANTS.MAX_CONSECUTIVE_WAITS) {
         counts.getPaused++;
         return makeResultBody('paused', { reason: 'waiting_limit', remaining: combinedRemaining(pushDecision?.remaining) });
       }
       counts.getWaiting++;
-      return makeResultBody('waiting', { pollCount: epoch.consecutiveWaits, retryAfterSeconds: 5, remaining: combinedRemaining(pushDecision?.remaining) });
+      return makeResultBody('waiting', { pollCount: expectedEpoch.consecutiveWaits, retryAfterSeconds: 5, remaining: combinedRemaining(pushDecision?.remaining) });
     }
 
     if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
@@ -830,19 +871,20 @@ export function createHandoffEngine({
     if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
       return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (pushNeedsUser) return framePushGet(pushDecision, generation);
+    if (pushNeedsUser) return framePushGet(pushDecision, generation, expectedEpoch);
     if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
     const result = scope.scoring
-      ? framePushGet(pushDecision, generation)
+      ? framePushGet(pushDecision, generation, expectedEpoch)
       : makeResultBody('queue_empty', { remaining: combinedRemaining() });
     if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
     return result;
   }
 
   function tombstoneResult(code) {
-    const tombstone = tombstones.get(code);
-    if (!tombstone) return makeResultBody('unknown_handoff');
+    const digest = codeGuard.digest(code);
+    const tombstone = tombstones.get(codeGuard.key(code));
+    if (!tombstone || !codeGuard.sameDigest(digest, tombstone.codeDigest)) return makeResultBody('unknown_handoff');
     if (tombstone.reason === 'accepted') {
       counts.submitDuplicate++;
       return makeResultBody('duplicate');
@@ -860,10 +902,10 @@ export function createHandoffEngine({
     return true;
   }
 
-  async function callApplicationSubmit(lane, code, text, generation = sourceGeneration) {
-    if (!sourceCurrent(generation)) return { kind: 'retry' };
+  async function callApplicationSubmit(lane, code, text, generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!epochCurrent(expectedEpoch, generation)) return { kind: 'retry' };
     const skipped = Symbol('stale-submit');
-    const task = Promise.resolve().then(() => sourceCurrent(generation)
+    const task = Promise.resolve().then(() => epochCurrent(expectedEpoch, generation)
       ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }, { code, text })
       : skipped);
     lane.inFlight.submit = task;
@@ -874,7 +916,7 @@ export function createHandoffEngine({
         CONSTANTS.SUBMIT_STUCK_MS,
         timeout,
       );
-      if (!sourceCurrent(generation)) return { kind: 'retry' };
+      if (!epochCurrent(expectedEpoch, generation)) return { kind: 'retry' };
       if (settled.value === skipped) return { kind: 'retry' };
       if (settled === timeout) return { kind: 'submit_stuck' };
       if (settled.error) {
@@ -886,22 +928,22 @@ export function createHandoffEngine({
       }
       return normalizeSubmitResult(settled.value);
     } finally {
-      if (sourceCurrent(generation) && lane.inFlight.submit === task) lane.inFlight.submit = null;
+      if (epochCurrent(expectedEpoch, generation) && lane.inFlight.submit === task) lane.inFlight.submit = null;
     }
   }
 
-  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration) {
-    if (!sourceCurrent(generation)) return makeResultBody('retry');
+  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const stamp = safeNow(now);
     const currentCode = lane.current?.code;
     if (result.kind === 'submit_stuck') {
       await persistCap(lane, 'submit_stuck', generation);
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       return makeResultBody('needs_user', { reason: 'submit_stuck' });
     }
     if (result.kind === 'accepted') {
-      tombstoneCode(tombstones, currentCode, 'accepted', { laneOrd: lane.ord, at: stamp });
-      codeIndex.delete(currentCode);
+      tombstoneCode(tombstones, currentCode, 'accepted', { laneOrd: lane.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+      codeIndex.delete(codeGuard.key(currentCode));
       const fingerprint = responseFingerprint(text);
       if (fingerprint) {
         lane.acceptedFingerprints.add(fingerprint);
@@ -919,27 +961,27 @@ export function createHandoffEngine({
         lane.current = null;
         notifyJobChanged(lane, generation);
         await persistLanes(generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         wake();
         return makeResultBody('accepted', { jobComplete: true, next: null });
       }
       const priorStage = lane.current?.stage;
       if (!adoptCurrent(lane, result.handoff)) {
         await persistCap(lane, 'write_failed', generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'write_failed' });
       }
       notifyJobChanged(lane, generation);
       if (priorStage === 'review' && lane.current.stage === 'review') lane.counters.revisedRounds++;
       if (lane.counters.revisedRounds >= CONSTANTS.APPLICATION_MAX_REVISED_ROUNDS) {
         await persistCap(lane, 'review_round_cap', generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('held', { reason: 'review_round_cap' });
       }
       await persistLanes(generation);
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       wake();
-      return makeResultBody('accepted', { jobComplete: false, next: serveLane(lane, generation) });
+      return makeResultBody('accepted', { jobComplete: false, next: serveLane(lane, generation, expectedEpoch) });
     }
 
     if (result.kind === 'rejected') {
@@ -949,13 +991,13 @@ export function createHandoffEngine({
       lane.counters.errStreak = 0;
       const returned = normalizeCurrentHandoff(result.handoff, stamp);
       if (returned) {
-        if (returned.code !== currentCode) {
-          tombstoneCode(tombstones, currentCode, 'rotated', { laneOrd: lane.ord, at: stamp });
-          codeIndex.delete(currentCode);
+        if (!codeGuard.equal(returned.code, currentCode)) {
+          tombstoneCode(tombstones, currentCode, 'rotated', { laneOrd: lane.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+          codeIndex.delete(codeGuard.key(currentCode));
         }
         lane.current = returned;
-        rememberIssuedCode(lane, returned.code);
-        indexLaneCode(codeIndex, lane, { epochN: epoch?.n ?? null, servedAt: null });
+        rememberIssuedCode(lane, returned.code, codeGuard);
+        indexLaneCode(codeIndex, lane, { epochN: expectedEpoch.n, servedAt: null }, CONSTANTS.CODE_INDEX_PER_LANE, codeGuard);
       }
       const errors = result.validationErrors?.length ? result.validationErrors : lane.current?.corrections;
       if (lane.current) {
@@ -966,11 +1008,11 @@ export function createHandoffEngine({
       auditEvent('rejected', { tool: 'submit_handoff', outcome: 'rejected', stage: lane.current?.stage ?? 'unknown' });
       if (lane.counters.rejections >= CONSTANTS.APPLICATION_MAX_REJECTIONS) {
         await persistCap(lane, 'rejection_cap', generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('held', { reason: 'rejection_cap' });
       }
       await persistLanes(generation);
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       wake();
       return makeRejectedBody({
         handoffCode: lane.current?.code ?? currentCode,
@@ -983,61 +1025,61 @@ export function createHandoffEngine({
     if (result.kind === 'threw') {
       if (result.code === 'LOCAL_AI_JOB_INTEGRITY') {
         await persistCap(lane, 'job_broken', generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'job_broken', note: 'Infinite Canvas found an integrity problem in this application bundle.' });
       }
       if (retryCount < 2) {
         const originalStage = result.stage ?? lane.current?.stage;
         const reread = await readLane(lane, { recoveryStage: originalStage, generation });
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         if (reread?.kind === 'open' && lane.current) {
           const freshStage = reread.handoff?.stage ?? lane.current.stage;
           if (originalStage && freshStage !== originalStage) {
             return makeResultBody('superseded', { note: supersededStageNote(originalStage, freshStage) });
           }
-          const retried = await callApplicationSubmit(lane, lane.current.code, text, generation);
-          return mapSubmitResult(lane, text, retried, retryCount + 1, generation);
+          const retried = await callApplicationSubmit(lane, lane.current.code, text, generation, expectedEpoch);
+          return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch);
         }
         if (lane.phase === 'host') return makeResultBody('superseded');
       }
       lane.counters.errStreak++;
       if (lane.counters.errStreak >= CONSTANTS.APPLICATION_ERROR_STREAK) {
         await persistCap(lane, 'write_failed', generation);
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'write_failed' });
       }
       await persistLanes(generation);
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       return makeResultBody('retry', { inFlight: false });
     }
     return makeResultBody('retry');
   }
 
-  async function runSubmit(lane, text, generation = sourceGeneration) {
+  async function runSubmit(lane, text, generation = sourceGeneration, expectedEpoch = epoch) {
     await semaphore.acquire();
     try {
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       const code = lane.current.code;
-      const key = verdictKey(code, text);
+      const key = verdictKey(codeGuard.key(code), text);
       const retained = lane.retained;
-      if (retained?.code === code && retained.sha256 !== key) {
-        const recovered = await callApplicationSubmit(lane, retained.code, retained.text, generation);
+      if (codeGuard.sameDigest(retained?.codeDigest, codeGuard.digest(code)) && retained.sha256 !== key) {
+        const recovered = await callApplicationSubmit(lane, code, retained.text, generation, expectedEpoch);
         if (recovered.kind === 'accepted' || recovered.kind === 'submit_stuck') {
-          return mapSubmitResult(lane, retained.text, recovered, 2, generation);
+          return mapSubmitResult(lane, retained.text, recovered, 2, generation, expectedEpoch);
         }
       }
       lane.submittedAt = safeNow(now);
-      lane.retained = { code, text, sha256: key, at: lane.submittedAt };
-      const result = await callApplicationSubmit(lane, code, text, generation);
-      return await mapSubmitResult(lane, text, result, 0, generation);
+      lane.retained = { codeDigest: codeGuard.digest(code), text, sha256: key, at: lane.submittedAt };
+      const result = await callApplicationSubmit(lane, code, text, generation, expectedEpoch);
+      return await mapSubmitResult(lane, text, result, 0, generation, expectedEpoch);
     } finally {
       semaphore.release();
-      wake();
+      if (epochCurrent(expectedEpoch, generation)) wake();
     }
   }
 
-  async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration } = {}) {
-    if (!scope.scoring || !sourceCurrent(generation)) return makeResultBody('retry');
+  async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration, expectedEpoch = epoch } = {}) {
+    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     if (decision.status === 'rejected') {
       const body = {
@@ -1058,15 +1100,18 @@ export function createHandoffEngine({
       if (successorBudgetMs > 0 && typeof push?.nextAfterAccept === 'function') {
         let successor;
         try {
-          if (!sourceCurrent(generation)) return makeResultBody('retry');
+          if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
           successor = await raceWithBudget(
-            push.nextAfterAccept({ epoch: pushEpochId(), budgetMs: successorBudgetMs }),
+            push.nextAfterAccept({ epoch: pushEpochId(expectedEpoch), budgetMs: successorBudgetMs }),
             successorBudgetMs,
             { status: 'waiting' },
           );
         } catch { successor = { status: 'waiting' }; }
-        if (!sourceCurrent(generation)) return makeResultBody('retry');
-        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation);
+        if (!epochCurrent(expectedEpoch, generation)) {
+          try { push?.closeEpoch?.(pushEpochId(expectedEpoch)); } catch { /* stale state is best-effort */ }
+          return makeResultBody('retry');
+        }
+        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation, expectedEpoch);
       }
       return { status: 'accepted', jobComplete: false, next };
     }
@@ -1091,25 +1136,25 @@ export function createHandoffEngine({
     return makeResultBody('retry', { inFlight: decision.status === 'retry' });
   }
 
-  function runPushSubmit(code, text, generation = sourceGeneration) {
-    if (!scope.scoring || !sourceCurrent(generation)) return null;
-    const epochId = pushEpochId();
-    const key = verdictKey(`push\n${epochId ?? ''}\n${code}`, text);
+  function runPushSubmit(code, text, generation = sourceGeneration, expectedEpoch = epoch) {
+    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return null;
+    const epochId = pushEpochId(expectedEpoch);
+    const key = verdictKey(`push\n${epochId ?? ''}\n${codeGuard.key(code)}`, text);
     const cached = pushVerdicts.get(key);
     if (cached && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) return cached;
     let rawPromise;
     rawPromise = Promise.resolve()
       .then(() => semaphore.acquire())
-      .then(() => sourceCurrent(generation)
+      .then(() => epochCurrent(expectedEpoch, generation)
         ? push.submit({ epoch: epochId, handoffCode: code, response: text })
         : { status: 'retry' })
       .catch(() => ({ status: 'retry' }))
       .finally(() => semaphore.release());
-    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation };
+    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation, expectedEpoch };
     pushVerdicts.set(key, record);
     rawPromise.finally(() => {
       const current = pushVerdicts.get(key);
-      if (sourceCurrent(generation) && current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
+      if (epochCurrent(expectedEpoch, generation) && current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
     });
     return record;
   }
@@ -1119,11 +1164,12 @@ export function createHandoffEngine({
     if (blocked) return blocked;
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
     const generation = sourceGeneration;
+    const expectedEpoch = epoch;
     const callAt = safeNow(now);
-    epoch.calls += 1;
-    epoch.firstCallAt ??= callAt;
-    epoch.lastCallAt = callAt;
-    epoch.lastCallKind = 'submit';
+    expectedEpoch.calls += 1;
+    expectedEpoch.firstCallAt ??= callAt;
+    expectedEpoch.lastCallAt = callAt;
+    expectedEpoch.lastCallKind = 'submit';
     const normalized = stringifySubmission(args.response);
     if (!normalized.ok) {
       counts.submitJunk++;
@@ -1135,19 +1181,19 @@ export function createHandoffEngine({
       counts.submitTooLarge++;
       return makeResultBody('too_large');
     }
-    epoch.bytesReceived += bytes;
-    epoch.lastSubmitAt = safeNow(now);
+    expectedEpoch.bytesReceived += bytes;
+    expectedEpoch.lastSubmitAt = safeNow(now);
     const code = trimHandoffCode(args.handoffCode);
     // Push owns its served-code/tombstone namespace. It has to be consulted
     // before the application unknown-code path so an accepted scoring retry is
     // never reported as an application unknown handoff.
     if (push && scope.scoring) {
       const pushStartedAt = safeNow(now);
-      const pushRecord = runPushSubmit(code, text, generation);
+      const pushRecord = runPushSubmit(code, text, generation, expectedEpoch);
       if (!pushRecord) return makeResultBody('retry');
       const pushTimeout = Symbol('push-submit-timeout');
       const pushDecision = await raceWithBudget(pushRecord.rawPromise, submitBudgetMs, pushTimeout);
-      if (!sourceCurrent(generation)) return makeResultBody('retry');
+      if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       if (pushDecision === pushTimeout) return makeResultBody('retry', { inFlight: true });
       if (pushDecision?.status !== 'unknown_handoff') {
         const elapsed = Math.max(0, safeNow(now) - pushStartedAt);
@@ -1155,6 +1201,7 @@ export function createHandoffEngine({
           pushRecord.framedPromise = Promise.resolve(pushDecision).then(decision => framePushSubmit(decision, {
             successorBudgetMs: Math.max(0, submitBudgetMs - elapsed),
             generation,
+            expectedEpoch,
           }));
         }
         return raceWithBudget(
@@ -1164,8 +1211,9 @@ export function createHandoffEngine({
         );
       }
     }
-    const entry = codeIndex.get(code);
-    if (!entry?.lane) return tombstoneResult(code);
+    const codeDigest = codeGuard.digest(code);
+    const entry = codeIndex.get(codeGuard.key(code));
+    if (!entry?.lane || !codeGuard.sameDigest(codeDigest, entry.codeDigest)) return tombstoneResult(code);
     // A scope downgrade never lets a previously served application answer
     // reach the adapter.  Keep the release durable for a later, confirmed
     // re-enable, but deny this in-flight handoff without touching its state.
@@ -1176,14 +1224,14 @@ export function createHandoffEngine({
     if (lane.phase === 'host') { counts.submitSuperseded++; return makeResultBody('superseded'); }
     if (lane.phase === 'gone' || !lane.current) return makeResultBody('unknown_handoff');
 
-    const classification = classifySubmission({ response: text, lane, lanes });
+    const classification = classifySubmission({ response: text, lane, lanes, codeGuard });
     if (classification !== 'pass') {
       if (classification === 'junk') {
         counts.submitJunk++;
         lane.counters.junkStreak++;
         if (lane.counters.junkStreak >= CONSTANTS.APPLICATION_MAX_JUNK_STREAK) {
           await persistCap(lane, 'junk_cap', generation);
-          if (!sourceCurrent(generation)) return makeResultBody('retry');
+          if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         }
       } else if (classification === 'misrouted') counts.submitMisrouted++;
       else counts.submitSuperseded++;
@@ -1193,28 +1241,32 @@ export function createHandoffEngine({
         : {});
     }
 
-    const key = verdictKey(code, text);
+    const key = verdictKey(codeGuard.key(code), text);
     const cached = verdicts.get(key);
-    if (cached && cached.epochN === epoch.n && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) {
+    if (cached && cached.epochN === expectedEpoch.n && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) {
       if (cached.verdict) return cached.verdict;
-      return raceWithBudget(cached.promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
+      const attached = await raceWithBudget(cached.promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
+      return epochCurrent(expectedEpoch, generation) ? attached : makeResultBody('retry');
     }
-    const promise = runSubmit(lane, text, generation);
-    const record = { at: safeNow(now), epochN: epoch.n, promise, verdict: null };
+    const promise = runSubmit(lane, text, generation, expectedEpoch);
+    const record = { at: safeNow(now), epochN: expectedEpoch.n, promise, verdict: null };
     verdicts.set(key, record);
     promise.then(verdict => {
-      if (!sourceCurrent(generation)) return;
+      if (!epochCurrent(expectedEpoch, generation)) return;
       record.verdict = verdict; record.promise = null;
-    }, () => { if (sourceCurrent(generation)) verdicts.delete(key); });
+    }, () => { if (epochCurrent(expectedEpoch, generation)) verdicts.delete(key); });
     for (const [cacheKey, value] of verdicts) if (safeNow(now) - value.at > CONSTANTS.VERDICT_CACHE_MS) verdicts.delete(cacheKey);
-    return raceWithBudget(promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
+    const settled = await raceWithBudget(promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
+    return epochCurrent(expectedEpoch, generation) ? settled : makeResultBody('retry');
   }
 
-  async function confirmRestartIfNeeded() {
+  async function performRestartConfirmation() {
     if (restartConfirmed) return true;
+    const generation = sourceGeneration;
+    if (!sourceCurrent(generation)) return false;
     let accepted = false;
     try { accepted = await confirmRestart(lanes.map(lane => lane.ord)); } catch { accepted = false; }
-    if (!accepted) return false;
+    if (!accepted || !sourceCurrent(generation)) return false;
     const priorHumanActionAt = lastHumanActionAt;
     const prior = lanes.map(lane => ({
       lane,
@@ -1232,7 +1284,7 @@ export function createHandoffEngine({
       lane.snapshot = null;
     }
     humanAction();
-    if (!await persistLanes()) {
+    if (!await persistLanes(generation)) {
       restartConfirmed = false;
       lastHumanActionAt = priorHumanActionAt;
       for (const state of prior) {
@@ -1246,12 +1298,29 @@ export function createHandoffEngine({
     return true;
   }
 
+  function confirmRestartIfNeeded() {
+    if (restartConfirmed) return Promise.resolve(true);
+    if (restartConfirmation) return restartConfirmation;
+    const pending = performRestartConfirmation();
+    restartConfirmation = pending;
+    const clear = () => {
+      if (restartConfirmation === pending) restartConfirmation = null;
+    };
+    pending.then(clear, clear);
+    return pending;
+  }
+
   async function prepareChat({ linkId, kind = 'new' } = {}) {
     if (typeof linkId !== 'string' || !linkId) return { copied: false, status: 'unlinked' };
     if (!await confirmRestartIfNeeded()) return { copied: false, status: 'paused', reason: 'restart' };
     const sessionCode = makeChatKey(random);
+    // Preparation and clipboard confirmation are deliberately split. Reserve
+    // a unique ordinal before returning the one-shot commit capability so two
+    // overlapping native sheets can never share a push epoch id. Gaps from an
+    // abandoned preparation are harmless because ordinals are process-local.
+    const preparedOrdinal = ++reservedEpochOrdinal;
     const prepared = {
-      n: epochOrdinal + 1,
+      n: preparedOrdinal,
       keyHash: epochHash(linkId, sessionCode),
       mintedAt: safeNow(now),
       bytesServed: 0,
@@ -1275,6 +1344,10 @@ export function createHandoffEngine({
       commit() {
         if (committed) return false;
         committed = true;
+        // A later preparation may be copied and committed first. Refuse the
+        // older capability instead of rotating the live chat backwards onto
+        // an already-used ordinal (and therefore an aliased push namespace).
+        if (prepared.n <= epochOrdinal) return false;
         retireEpoch(kind === 'continue' ? 'continued' : 'rotated');
         epochOrdinal = prepared.n;
         epoch = prepared;
@@ -1342,6 +1415,7 @@ export function createHandoffEngine({
         jobId: item.jobId,
         canvasFilePath: item.canvasFilePath,
         releasedAt: safeNow(now),
+        codeGuard,
       }));
     }
     if (!await persistLanes(generation)) {
@@ -1367,15 +1441,15 @@ export function createHandoffEngine({
     if (index < 0) return { ok: false, code: 'not_found' };
     const [lane] = lanes.splice(index, 1);
     const removedCodes = [];
-    for (const [code, entry] of codeIndex) {
+    for (const [codeKey, entry] of codeIndex) {
       if (entry.lane !== lane) continue;
-      removedCodes.push([code, entry]);
-      codeIndex.delete(code);
+      removedCodes.push([codeKey, entry]);
+      codeIndex.delete(codeKey);
     }
     if (!await persistLanes(generation)) {
       if (sourceCurrent(generation)) {
         lanes.splice(index, 0, lane);
-        for (const [code, entry] of removedCodes) codeIndex.set(code, entry);
+        for (const [codeKey, entry] of removedCodes) codeIndex.set(codeKey, entry);
         return { ok: false, code: 'persist_failed' };
       }
       return { ok: false, code: 'not_ready' };
