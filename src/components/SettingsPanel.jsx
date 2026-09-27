@@ -14,6 +14,8 @@ import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
 import { updateModalCount, useModalStackCount } from './modalStack';
 import { ConfirmDialog } from './ConfirmDialog';
+import { HandoffBridgeGuard } from './HandoffBridgeBoundary';
+import { HandoffBridgeSetup } from './HandoffBridgeSetup';
 
 const SPEED_OPTIONS = [
   { key: 'snappy',   label: 'Snappy',   desc: `${ANIMATION_DURATIONS.snappy}ms`,   icon: Zap,      color: 'text-amber-400' },
@@ -624,6 +626,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               onChangeWatchUrls={updateMarketplaceWatchUrls}
             />
           </div>
+
+          <HandoffBridgeGuard label="settings">
+            <HandoffBridgeSetup />
+          </HandoffBridgeGuard>
 
           <div className="w-full h-px bg-white/[0.06]" />
 

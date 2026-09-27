@@ -10,6 +10,9 @@ import './index.css';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NonApiAiDialog } from './components/NonApiAiDialog';
+import { HandoffBridgeGuard } from './components/HandoffBridgeBoundary';
+import { HandoffBridgePanel } from './components/HandoffBridgePanel';
+import { HandoffBridgeSetupDialog } from './components/HandoffBridgeSetupDialog';
 
 export default function App() {
   return (
@@ -32,6 +35,14 @@ export default function App() {
           gives the user an explicit cancel route instead of orphaning a main
           process promise behind the fallback screen. */}
       <NonApiAiDialog />
+      <HandoffBridgeGuard label="panel">
+        <HandoffBridgePanel />
+      </HandoffBridgeGuard>
+      {/* Kept independent from the panel boundary: Settings can still open
+          setup if a popover-only render fault was isolated. */}
+      <HandoffBridgeGuard label="setup">
+        <HandoffBridgeSetupDialog />
+      </HandoffBridgeGuard>
     </>
   );
 }
