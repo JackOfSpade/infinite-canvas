@@ -205,3 +205,28 @@ Adversarial review closed an enable attempt that could proceed despite an unavai
 | G9 | Green. All frozen files, `package-lock.json` and the B0-only `package.json` remained byte-untouched. |
 
 Nothing was pushed.
+
+## B8 — hardening, conformance and operating runbook (2026-09-27)
+
+Completed on local `main` through code/gate commit `8e8a8bd` (`fix: retain Electron smoke lifecycle pin`). The stage adds the real SDK 1.30.1 conformance package and all eight suites, completes the privacy/source sweeps and hostile-answer import tests, extends the operating runbook and design documents, wires hostname redaction into generated reports, and closes the final cross-stage security findings. The main B8 commits are `c25ff2c` (runbook), `ecbe2f8` (hostile-answer coverage), `47061a5` (timing-safe credential lookup), `c8171f5` (security-race remediation), `07c9b9b` (privacy/source scans), `0d9f6cc` (conformance harness), `2846d47` (production-paced soak), `69d480e` (smoke teardown verification), and `8e8a8bd` (the frozen smoke lifecycle pin). Commit `6a9565b` contains B8.4's hostname-redaction work alongside the B7 publisher correction.
+
+The security pass closed duplicate-authorization preflight bypasses, OAuth-directory durability, timing-safe handoff lookup, delayed-call epoch/source races, concurrent epoch reservation, restart-confirmation duplication, successor byte-budget bypass, and terminal-snapshot pruning. The conformance and test-quality pass added raw HTTP byte goldens, complete DNS egress guards, authenticated traffic during the 10,000-input abuse flood, a live ten-minute soak paced below the production bucket, and OS-verified Electron teardown that cannot signal an unrelated process or process group. Multiple independent final reviews found no open code-level security or cleanup issue.
+
+The wire goldens under `scripts/tests/fixtures/handoff-bridge/` are the deferred B0.6 capture output required by B8.1 and were written only through the closed capture allow-list. The production fixes outside the ordinary B8 artifact paths are isolated in `c8171f5` as the B8.5 security-remediation commit. Commits `69d480e` and `8e8a8bd` make the final B8.5 teardown correction and required source pin in B7.5-owned `scripts/electron-smoke.js` and `scripts/electron-bridge-smoke.js`. These reviewed cases are intentional gate-remediation extensions of the task file lists, not stray stage edits.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The merged paths match the task allow-lists plus the documented capture and gate-remediation extensions above; `git check-ignore -v` produced no result for any added path; the scoped ignored-file check was empty; no committed tunnel credential, whitespace error, or unstaged path remains. |
+| G1 | Green at `8e8a8bd`. `npm run test:unit`: 2241 passed, 0 failed, 66 groups, 23.3 s. The exact required filtered comparison with `~/ic-baseline-units.txt` printed nothing. |
+| G2 | Green. `npm test` passed all 2241 unit tests and every resume-PDF suite. |
+| G3 | Green. `npm run lint` passed after the final smoke lifecycle correction. |
+| G4 | Green. `npm run build:compile` passed with only the existing Vite chunk-size warnings. |
+| G5/G6 | Green at `8e8a8bd`. `npm run test:e2e` printed `Electron smoke test passed`; `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. A fresh host process-table audit found no Electron test, fake-cloudflared, conformance, or temporary-userData process afterward. |
+| G7 | Green at `8e8a8bde90f636f65c707d25d4e5b7389ba9b7b4` under CI's Node 22.23.2/npm 10.9.8. The recorded `act` command completed lint, all 2241 unit tests, resume-PDF tests and compile in about 47 s; only the CI workflow ran. |
+| G8 | Green. `npm run test:tunnel` passed all five fake-child/watchdog/reaper cases. The mandatory real-socket/SDK `--suite=all` run passed wire (89 ms), OAuth (11 ms), drain (106 ms), push (under 1 ms), abuse (1830 ms), soak (600002 ms), tunnel (4700 ms), and orphan (5697 ms), including the 10,000-input flood, stall/heap/handle budgets and ten-minute soak. The full conformance run was made at `2846d47`; later commits changed only Electron-smoke teardown and its required source literal, leaving conformance and product bridge code unchanged. |
+| G9 | Green. Every frozen file and root `package-lock.json` is byte-untouched from `b7d1592`; `package.json` differs by exactly the three B0 scripts. `electron/ipc/nonApiAi.js` remains `4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`. |
+| G10 | Green. Independent reviews of the B1, B2, B3, B6 and B8 security boundaries, hostile-answer path, conformance quality and teardown logic have no open finding. |
+
+The two temporary CI clones, parked nested dependencies and every test child were removed after the final runs. The checkout has one worktree and one branch, `main`. Nothing was pushed.
+
+B0 through B8 are complete. Work stops here by design: B9 through B11 require Jack's packaged-app observations, real Cloudflare route and DNS controls, ChatGPT staging/production plugins, pairing code and synthetic-only manual runs. No real career data crossed the bridge.
