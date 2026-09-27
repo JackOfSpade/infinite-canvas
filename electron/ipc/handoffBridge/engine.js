@@ -38,6 +38,10 @@ const STATUS_REASONS = new Set([
   'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
+// Composition reuses the push source when it replaces a terminal engine after
+// Disable. Keep discovery visibility owned by the current engine instance so
+// a late old refresh cannot leak its cache into the next lifecycle's status.
+const PUSH_DISCOVERY_OWNERS = new WeakMap();
 
 function statusStage(value) { return STATUS_STAGES.has(value) ? value : null; }
 function statusPhase(value) { return STATUS_PHASES.has(value) ? value : 'unread'; }
@@ -126,6 +130,13 @@ function normalizeLimits(value = {}) {
   };
 }
 
+function normalizeScope(value = {}) {
+  // Standalone engine users predate the persisted scope preference and retain
+  // the complete source surface by default. Composition always synchronizes
+  // the explicit config (whose scoring default is false) before serving.
+  return Object.freeze({ applications: value?.applications !== false, scoring: value?.scoring !== false });
+}
+
 export function createHandoffEngine({
   source,
   sources,
@@ -136,6 +147,7 @@ export function createHandoffEngine({
   random = randomBytes,
   timers = globalThis,
   limits: initialLimits,
+  scope: initialScope,
   confirmRestart = async () => true,
   onJobChanged = () => undefined,
   onServeAfterIdle = () => undefined,
@@ -150,8 +162,22 @@ export function createHandoffEngine({
   if (!application || typeof application.read !== 'function' || typeof application.status !== 'function'
       || typeof application.submit !== 'function') throw new TypeError('An application source is required');
   if (push && (typeof push.get !== 'function' || typeof push.submit !== 'function')) throw new TypeError('A push source must implement get and submit');
+  const pushOwner = push && (typeof push === 'object' || typeof push === 'function') ? Object.freeze({}) : null;
+  let pushDiscoveryCurrent = true;
+  if (pushOwner) {
+    // A brand-new source may expose its already-built safe discovery cache.
+    // A source inherited from a closed engine must refresh in this lifecycle
+    // before its cached rows can be projected again.
+    pushDiscoveryCurrent = !PUSH_DISCOVERY_OWNERS.has(push);
+    PUSH_DISCOVERY_OWNERS.set(push, pushOwner);
+  }
+  const ownsPushDiscovery = () => !pushOwner || PUSH_DISCOVERY_OWNERS.get(push) === pushOwner;
 
   let limits = normalizeLimits(initialLimits);
+  // Scope is an engine-owned serving fence, rather than a UI-only release
+  // preference.  It is checked immediately before every source call so an
+  // already-released lane or selected hub cannot survive a scope downgrade.
+  let scope = normalizeScope(initialScope);
   const lanes = [];
   const codeIndex = new Map();
   const tombstones = new Map();
@@ -174,9 +200,12 @@ export function createHandoffEngine({
   let lastIdleNoticeAt = 0;
   let fault = null;
   let lastGetAt = null;
-  // A power resume fences work that began before sleep.  The marker is
-  // composition-private: status and the renderer never learn power details.
-  let powerResumeGeneration = 0;
+  // Source operations cannot be cancelled once handed to the application or
+  // push seam.  A generation fence nevertheless makes their *results*
+  // disposable: Disable/close and a power resume must not let a delayed
+  // result alter lanes, write persistence, notify a renderer, or populate a
+  // verdict cache in the next lifecycle.
+  let sourceGeneration = 0;
   const counts = {
     getServed: 0, getWaiting: 0, getEmpty: 0, getPaused: 0, getUnauthorized: 0,
     submitAccepted: 0, submitRejected: 0, submitDuplicate: 0, submitJunk: 0,
@@ -197,18 +226,42 @@ export function createHandoffEngine({
     } catch { /* audit failures are surfaced separately by its owner */ }
   }
 
-  function notifyJobChanged(lane) {
-    if (!lane || !JOB_ID_RE.test(lane.jobId) || !isAbsoluteCanvasPath(lane.canvasFilePath)) return;
+  function sourceCurrent(generation = sourceGeneration) {
+    return !closed && generation === sourceGeneration;
+  }
+
+  function invalidateSourceWork() {
+    sourceGeneration += 1;
+    verdicts.clear();
+    pushVerdicts.clear();
+    // This hides (rather than destructively clearing) source-owned discovery.
+    // The source can be shared with a replacement engine, so clearing it here
+    // could erase the replacement's just-refreshed rows.
+    pushDiscoveryCurrent = false;
+    for (const lane of lanes) {
+      lane.snapshot = null;
+      lane.inFlight.read = null;
+      lane.inFlight.status = null;
+      lane.inFlight.submit = null;
+      if (lane.phase === 'awaiting') lane.needsRefresh = true;
+    }
+  }
+
+  function notifyJobChanged(lane, generation = sourceGeneration) {
+    if (!sourceCurrent(generation) || !lane || !JOB_ID_RE.test(lane.jobId) || !isAbsoluteCanvasPath(lane.canvasFilePath)) return;
     try { onJobChanged({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }); } catch { /* renderer notification is advisory */ }
   }
 
-  async function persistLanes() {
+  async function persistLanes(generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return false;
     if (!store?.saveLanes) return true;
     try {
       const result = await store.saveLanes(lanes);
+      if (!sourceCurrent(generation)) return false;
       if (result === false) throw Object.assign(new Error('lane persistence failed'), { code: 'persist_failed' });
       return true;
     } catch {
+      if (!sourceCurrent(generation)) return false;
       fault = 'persist_failed';
       log('persist_failed', { kind: 'lanes' });
       return false;
@@ -227,6 +280,13 @@ export function createHandoffEngine({
 
   function clearTimer(timer) {
     if (timer !== undefined && timer !== null) timers.clearTimeout?.(timer);
+  }
+
+  function clearLaneHint(lane) {
+    if (!lane || !Number.isInteger(lane.ord)) return;
+    clearTimer(hintTimers.get(lane.ord));
+    hintTimers.delete(lane.ord);
+    lastHintAt.delete(lane.ord);
   }
 
   function delay(ms) {
@@ -251,15 +311,23 @@ export function createHandoffEngine({
     } finally { timer.clear(); }
   }
 
-  async function waitForWake(ms) {
-    if (!(ms > 0)) return;
+  async function waitForWake(ms, signal = null) {
+    if (signal?.aborted) return 'aborted';
+    if (!(ms > 0)) return 'timer';
     let release;
+    let aborted = false;
     const wakePromise = new Promise(resolve => { release = resolve; waiters.add(resolve); });
     const timer = delay(ms);
-    try { await Promise.race([wakePromise, timer.promise]); }
+    const abort = () => { aborted = true; release(); };
+    try {
+      signal?.addEventListener?.('abort', abort, { once: true });
+      await Promise.race([wakePromise, timer.promise]);
+      return aborted || signal?.aborted ? 'aborted' : 'woke';
+    }
     finally {
       waiters.delete(release);
       timer.clear();
+      try { signal?.removeEventListener?.('abort', abort); } catch { /* optional AbortSignal */ }
     }
   }
 
@@ -345,7 +413,8 @@ export function createHandoffEngine({
     return true;
   }
 
-  async function applyReadResult(lane, raw, { fromStatus = false, recoveryStage = null } = {}) {
+  async function applyReadResult(lane, raw, { fromStatus = false, recoveryStage = null, generation = sourceGeneration } = {}) {
+    if (!sourceCurrent(generation)) return { kind: 'retry' };
     const result = normalizeSourceResult(raw);
     const stamp = safeNow(now);
     if (result.kind === 'open') {
@@ -353,7 +422,8 @@ export function createHandoffEngine({
       const sameRecoveryStage = typeof recoveryStage === 'string' && result.handoff?.stage === recoveryStage;
       if (lane.phase === 'awaiting' && isHumanAdvance(lane, code) && !sameRecoveryStage) {
         holdLane(lane, 'human_advance', stamp);
-        await persistLanes();
+        await persistLanes(generation);
+        if (!sourceCurrent(generation)) return { kind: 'retry' };
         return result;
       }
       adoptCurrent(lane, result.handoff);
@@ -368,26 +438,34 @@ export function createHandoffEngine({
       lane.phase = 'done';
       lane.reason = null;
       lane.snapshot = { at: stamp, kind: 'done' };
-      await persistLanes();
+      clearLaneHint(lane);
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return { kind: 'retry' };
     } else if (result.kind === 'gone') {
       lane.phase = 'gone';
       lane.reason = null;
       lane.snapshot = { at: stamp, kind: 'gone' };
-      await persistLanes();
+      clearLaneHint(lane);
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return { kind: 'retry' };
     } else if (result.kind === 'threw') {
       if (result.code === 'LOCAL_AI_JOB_INTEGRITY') holdLane(lane, 'job_broken', stamp);
-      else if (result.code === 'ENOENT' && !fromStatus) return statusLane(lane, { readAfterAwaiting: false });
+      else if (result.code === 'ENOENT' && !fromStatus) return statusLane(lane, { readAfterAwaiting: false, generation });
       else if (result.code === 'ENOENT') holdLane(lane, 'canvas_unavailable', stamp);
       else if (++lane.counters.errStreak >= CONSTANTS.APPLICATION_ERROR_STREAK) holdLane(lane, 'read_failed', stamp);
       lane.snapshot = { at: stamp, kind: 'threw', code: result.code ?? 'internal_error' };
-      if (['held', 'needs_user'].includes(lane.phase)) await persistLanes();
+      if (['held', 'needs_user'].includes(lane.phase)) {
+        await persistLanes(generation);
+        if (!sourceCurrent(generation)) return { kind: 'retry' };
+      }
     }
     return result;
   }
 
-  async function raceLaneCall(lane, slot, promise) {
+  async function raceLaneCall(lane, slot, promise, generation = sourceGeneration) {
     const timedOut = Symbol('lane-call-timeout');
     const result = await raceWithBudget(promise, readWatchdogMs, timedOut);
+    if (!sourceCurrent(generation)) return { kind: 'retry' };
     if (result !== timedOut) return result;
     if (lane.inFlight[slot] === promise) lane.inFlight[slot] = null;
     lane.snapshot = { at: safeNow(now), kind: 'busy' };
@@ -395,64 +473,72 @@ export function createHandoffEngine({
     return { kind: 'busy' };
   }
 
-  function startLaneCall(lane, slot, call, apply) {
+  function startLaneCall(lane, slot, call, apply, generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return Promise.resolve({ kind: 'retry' });
     if (lane.inFlight[slot]) return lane.inFlight[slot];
     let promise;
     promise = Promise.resolve()
-      .then(call)
-      .then(apply)
-      .catch(error => apply({ kind: 'threw', code: typeof error?.code === 'string' ? error.code : 'internal_error' }))
+      .then(() => sourceCurrent(generation) ? call() : { kind: 'retry' })
+      .then(result => sourceCurrent(generation) ? apply(result) : { kind: 'retry' })
+      .catch(error => sourceCurrent(generation)
+        ? apply({ kind: 'threw', code: typeof error?.code === 'string' ? error.code : 'internal_error' })
+        : { kind: 'retry' })
       .finally(() => {
-        if (lane.inFlight[slot] === promise) lane.inFlight[slot] = null;
+        if (sourceCurrent(generation) && lane.inFlight[slot] === promise) lane.inFlight[slot] = null;
       });
     lane.inFlight[slot] = promise;
     return promise;
   }
 
-  async function readLane(lane, { recoveryStage = null } = {}) {
-    const resumeGeneration = powerResumeGeneration;
+  async function readLane(lane, { recoveryStage = null, generation = sourceGeneration } = {}) {
+    if (!scope.applications || !sourceCurrent(generation)) return { kind: 'retry' };
     const promise = startLaneCall(
       lane,
       'read',
       () => application.read({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
-      result => resumeGeneration === powerResumeGeneration
-        ? applyReadResult(lane, result, { recoveryStage })
+      result => sourceCurrent(generation)
+        ? applyReadResult(lane, result, { recoveryStage, generation })
         : { kind: 'retry' },
+      generation,
     );
-    return raceLaneCall(lane, 'read', promise);
+    return raceLaneCall(lane, 'read', promise, generation);
   }
 
-  async function applyStatusResult(lane, raw, { readAfterAwaiting = true } = {}) {
+  async function applyStatusResult(lane, raw, { readAfterAwaiting = true, generation = sourceGeneration } = {}) {
+    if (!sourceCurrent(generation)) return { kind: 'retry' };
     const result = normalizeSourceResult(raw);
     if (result.kind === 'open' || result.kind === 'host' || result.kind === 'done' || result.kind === 'gone' || result.kind === 'threw') {
-      await applyReadResult(lane, result, { fromStatus: true });
-      if (result.read === true) return readLane(lane);
+      await applyReadResult(lane, result, { fromStatus: true, generation });
+      if (!sourceCurrent(generation)) return { kind: 'retry' };
+      if (result.read === true) return readLane(lane, { generation });
       return result;
     }
     if (result.kind === 'awaiting') {
       lane.phase = 'unread';
       lane.snapshot = null;
-      return readAfterAwaiting ? readLane(lane) : result;
+      return readAfterAwaiting ? readLane(lane, { generation }) : result;
     }
     if (result.kind === 'needs_user') {
       holdLane(lane, result.reason || 'read_failed', safeNow(now));
-      await persistLanes();
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return { kind: 'retry' };
       return result;
     }
     return result;
   }
 
-  async function statusLane(lane, { readAfterAwaiting = true } = {}) {
-    const resumeGeneration = powerResumeGeneration;
+  async function statusLane(lane, { readAfterAwaiting = true, generation = sourceGeneration } = {}) {
+    if (!scope.applications || !sourceCurrent(generation)) return { kind: 'retry' };
     const promise = startLaneCall(
       lane,
       'status',
       () => application.status({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
-      result => resumeGeneration === powerResumeGeneration
-        ? applyStatusResult(lane, result, { readAfterAwaiting })
+      result => sourceCurrent(generation)
+        ? applyStatusResult(lane, result, { readAfterAwaiting, generation })
         : { kind: 'retry' },
+      generation,
     );
-    return raceLaneCall(lane, 'status', promise);
+    return raceLaneCall(lane, 'status', promise, generation);
   }
 
   function canAssign(lane) {
@@ -491,7 +577,8 @@ export function createHandoffEngine({
     };
   }
 
-  function framePushGet(raw) {
+  function framePushGet(raw, generation = sourceGeneration) {
+    if (!scope.scoring || !sourceCurrent(generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     const remaining = combinedRemaining(decision.remaining);
     if (decision.status === 'served') {
@@ -531,22 +618,32 @@ export function createHandoffEngine({
     return makeResultBody('retry');
   }
 
-  async function readPush() {
-    if (!push || !epoch) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
-    try { return await push.get({ epoch: pushEpochId() }); }
+  async function readPush(generation = sourceGeneration) {
+    if (!scope.scoring || !push || !epoch || !sourceCurrent(generation)) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+    try {
+      // Match the application-call fence: this yield creates a final,
+      // observable generation boundary before entering an external source.
+      // A synchronous Disable/resume/scope downgrade therefore cannot launch
+      // a new push poll from an already obsolete GET continuation.
+      await Promise.resolve();
+      if (!scope.scoring || !sourceCurrent(generation)) return { status: 'retry' };
+      const result = await push.get({ epoch: pushEpochId() });
+      return sourceCurrent(generation) ? result : { status: 'retry' };
+    }
     catch { return { status: 'retry' }; }
   }
 
-  async function refreshOneLane() {
+  async function refreshOneLane(generation = sourceGeneration) {
+    if (!scope.applications || !sourceCurrent(generation)) return { kind: 'retry' };
     const invalidated = [...lanes]
       .filter(lane => lane.phase === 'awaiting' && lane.needsRefresh === true)
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0];
     if (invalidated) {
       invalidated.needsRefresh = false;
-      return readLane(invalidated);
+      return readLane(invalidated, { generation });
     }
     const unread = [...lanes].filter(lane => lane.phase === 'unread').sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0];
-    if (unread) return readLane(unread);
+    if (unread) return readLane(unread, { generation });
     const stamp = safeNow(now);
     const host = [...lanes]
       .filter(lane => lane.phase === 'host'
@@ -555,15 +652,17 @@ export function createHandoffEngine({
     if (host) {
       if (host.hostSince && stamp - host.hostSince >= CONSTANTS.HOST_SILENT_MS) {
         holdLane(host, 'host_silent', stamp);
-        await persistLanes();
+        await persistLanes(generation);
+        if (!sourceCurrent(generation)) return { kind: 'retry' };
         return { kind: 'needs_user' };
       }
-      return statusLane(host);
+      return statusLane(host, { generation });
     }
     return null;
   }
 
-  function serveLane(lane) {
+  function serveLane(lane, generation = sourceGeneration) {
+    if (!scope.applications || !sourceCurrent(generation)) return makeResultBody('retry');
     const marker = epoch.servedPrompt.get(lane.ord);
     const servedBefore = marker?.stage === lane.current.stage && marker?.code === lane.current.code;
     lane.current.attempt = (lane.counters.attemptByStage[`${lane.current.stage}@${lane.current.revision}`] ?? 0) + 1;
@@ -591,6 +690,37 @@ export function createHandoffEngine({
     return lanes.length === 0 || lanes.every(lane => ['done', 'gone'].includes(lane.phase));
   }
 
+  async function pruneTerminalLanes(stamp = safeNow(now), generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return false;
+    const cutoff = stamp - 60 * 60_000;
+    const expired = lanes.filter(lane => ['done', 'gone'].includes(lane.phase)
+      && Number.isFinite(lane.snapshot?.at) && lane.snapshot.at <= cutoff);
+    if (expired.length === 0) return false;
+    const removed = new Set(expired);
+    const priorLanes = lanes.slice();
+    const priorCodes = [...codeIndex.entries()];
+    lanes.splice(0, lanes.length, ...lanes.filter(lane => !removed.has(lane)));
+    for (const lane of expired) {
+      clearLaneHint(lane);
+    }
+    for (const [code, entry] of codeIndex) if (removed.has(entry?.lane)) codeIndex.delete(code);
+    const saved = await persistLanes(generation);
+    if (!saved && sourceCurrent(generation)) {
+      lanes.splice(0, lanes.length, ...priorLanes);
+      codeIndex.clear();
+      for (const [code, entry] of priorCodes) codeIndex.set(code, entry);
+      return false;
+    }
+    return saved;
+  }
+
+  async function tick(stamp = safeNow(now)) {
+    if (closed) return false;
+    checkIdlePause();
+    await pruneTerminalLanes(Number.isFinite(stamp) ? stamp : safeNow(now));
+    return !closed;
+  }
+
   async function get(args = {}) {
     const blocked = gate(args);
     if (blocked) {
@@ -598,6 +728,7 @@ export function createHandoffEngine({
       return blocked;
     }
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
+    if (args.signal?.aborted) return makeResultBody('retry');
     const callAt = safeNow(now);
     epoch.calls += 1;
     epoch.firstCallAt ??= callAt;
@@ -607,63 +738,70 @@ export function createHandoffEngine({
     const stamp = safeNow(now);
     if (lastGetAt != null && stamp - lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) epoch.consecutiveWaits = 0;
     lastGetAt = stamp;
-    const resumeGeneration = powerResumeGeneration;
-    const resumedDuringGet = () => resumeGeneration !== powerResumeGeneration;
+    const generation = sourceGeneration;
+    const resumedDuringGet = () => !sourceCurrent(generation);
 
-    if (lanes.some(item => item.needsRefresh === true)) {
-      const refreshed = await refreshOneLane();
+    if (scope.applications && lanes.some(item => item.needsRefresh === true)) {
+      const refreshed = await refreshOneLane(generation);
       if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     }
-    let lane = chooseApplicationContinuation();
-    if (lane) return serveLane(lane);
+    let lane = scope.applications ? chooseApplicationContinuation() : null;
+    if (lane) return serveLane(lane, generation);
 
     // Scoring handoffs are preferred only at application job boundaries. A
     // focused, outstanding, or correction application lane has already won.
-    let pushDecision = await readPush();
+    let pushDecision = scope.scoring
+      ? await readPush(generation)
+      : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
     if (resumedDuringGet()) return makeResultBody('retry');
-    if (pushDecision?.status === 'served') return framePushGet(pushDecision);
+    if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation);
 
     // A lazy read can reveal a correction or a newly-open continuation after
     // the push poll; give it another chance before starting fresh work.
-    const refreshed = await refreshOneLane();
+    const refreshed = scope.applications ? await refreshOneLane(generation) : null;
     if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
-    lane = chooseApplicationContinuation();
-    if (lane) return serveLane(lane);
-    lane = chooseFreshApplication();
-    if (lane) return serveLane(lane);
+    lane = scope.applications ? chooseApplicationContinuation() : null;
+    if (lane) return serveLane(lane, generation);
+    lane = scope.applications ? chooseFreshApplication() : null;
+    if (lane) return serveLane(lane, generation);
 
-    const pushWorking = pushDecision?.status === 'waiting';
-    const pushNeedsUser = pushDecision?.status === 'needs_user';
-    const working = pushWorking || lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+    const pushWorking = scope.scoring && pushDecision?.status === 'waiting';
+    const pushNeedsUser = scope.scoring && pushDecision?.status === 'needs_user';
+    const working = pushWorking || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
     if (working) {
-      await waitForWake(holdMs);
+      const wakeReason = await waitForWake(holdMs, args.signal);
+      if (wakeReason === 'aborted' || args.signal?.aborted) return makeResultBody('retry');
       if (resumedDuringGet()) return makeResultBody('retry');
-      const refreshedAfterWait = await refreshOneLane();
+      const refreshedAfterWait = scope.applications ? await refreshOneLane(generation) : null;
       if (resumedDuringGet() || refreshedAfterWait?.kind === 'retry') return makeResultBody('retry');
-      lane = chooseApplicationContinuation();
-      if (lane) return serveLane(lane);
+      lane = scope.applications ? chooseApplicationContinuation() : null;
+      if (lane) return serveLane(lane, generation);
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
       // fresh application lane.
-      pushDecision = await readPush();
+      pushDecision = scope.scoring
+        ? await readPush(generation)
+        : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
       if (resumedDuringGet()) return makeResultBody('retry');
-      if (pushDecision?.status === 'served') return framePushGet(pushDecision);
-      lane = chooseFreshApplication();
-      if (lane) return serveLane(lane);
-      const stillWorking = pushDecision?.status === 'waiting'
-        || lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+      if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation);
+      lane = scope.applications ? chooseFreshApplication() : null;
+      if (lane) return serveLane(lane, generation);
+      const stillWorking = (scope.scoring && pushDecision?.status === 'waiting')
+        || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
       if (!stillWorking) {
-        if (lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
+        if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
           counts.getPaused++;
           return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if (lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
+        if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
           return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if (pushDecision?.status === 'needs_user') return framePushGet(pushDecision);
+        if (scope.scoring && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation);
         if (pushDecision?.status === 'retry') return makeResultBody('retry');
         counts.getEmpty++;
-        const drained = framePushGet(pushDecision);
+        const drained = scope.scoring
+          ? framePushGet(pushDecision, generation)
+          : makeResultBody('queue_empty', { remaining: combinedRemaining() });
         if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
         return drained;
       }
@@ -676,17 +814,19 @@ export function createHandoffEngine({
       return makeResultBody('waiting', { pollCount: epoch.consecutiveWaits, retryAfterSeconds: 5, remaining: combinedRemaining(pushDecision?.remaining) });
     }
 
-    if (lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
+    if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
       counts.getPaused++;
       return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
+    if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
       return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (pushNeedsUser) return framePushGet(pushDecision);
+    if (pushNeedsUser) return framePushGet(pushDecision, generation);
     if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
-    const result = framePushGet(pushDecision);
+    const result = scope.scoring
+      ? framePushGet(pushDecision, generation)
+      : makeResultBody('queue_empty', { remaining: combinedRemaining() });
     if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
     return result;
   }
@@ -702,17 +842,21 @@ export function createHandoffEngine({
     return makeResultBody('superseded');
   }
 
-  async function persistCap(lane, reason) {
+  async function persistCap(lane, reason, generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return false;
     holdLane(lane, reason, safeNow(now));
-    await persistLanes();
+    await persistLanes(generation);
+    if (!sourceCurrent(generation)) return false;
     wake();
+    return true;
   }
 
-  async function callApplicationSubmit(lane, code, text) {
-    const task = Promise.resolve().then(() => application.submit({
-      jobId: lane.jobId,
-      canvasFilePath: lane.canvasFilePath,
-    }, { code, text }));
+  async function callApplicationSubmit(lane, code, text, generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return { kind: 'retry' };
+    const skipped = Symbol('stale-submit');
+    const task = Promise.resolve().then(() => sourceCurrent(generation)
+      ? application.submit({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }, { code, text })
+      : skipped);
     lane.inFlight.submit = task;
     const timeout = Symbol('submit-stuck');
     try {
@@ -721,6 +865,8 @@ export function createHandoffEngine({
         CONSTANTS.SUBMIT_STUCK_MS,
         timeout,
       );
+      if (!sourceCurrent(generation)) return { kind: 'retry' };
+      if (settled.value === skipped) return { kind: 'retry' };
       if (settled === timeout) return { kind: 'submit_stuck' };
       if (settled.error) {
         return {
@@ -731,15 +877,17 @@ export function createHandoffEngine({
       }
       return normalizeSubmitResult(settled.value);
     } finally {
-      if (lane.inFlight.submit === task) lane.inFlight.submit = null;
+      if (sourceCurrent(generation) && lane.inFlight.submit === task) lane.inFlight.submit = null;
     }
   }
 
-  async function mapSubmitResult(lane, text, result, retryCount = 0) {
+  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration) {
+    if (!sourceCurrent(generation)) return makeResultBody('retry');
     const stamp = safeNow(now);
     const currentCode = lane.current?.code;
     if (result.kind === 'submit_stuck') {
-      await persistCap(lane, 'submit_stuck');
+      await persistCap(lane, 'submit_stuck', generation);
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       return makeResultBody('needs_user', { reason: 'submit_stuck' });
     }
     if (result.kind === 'accepted') {
@@ -760,25 +908,29 @@ export function createHandoffEngine({
         lane.phase = 'host';
         lane.hostSince = stamp;
         lane.current = null;
-        notifyJobChanged(lane);
-        await persistLanes();
+        notifyJobChanged(lane, generation);
+        await persistLanes(generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         wake();
         return makeResultBody('accepted', { jobComplete: true, next: null });
       }
       const priorStage = lane.current?.stage;
       if (!adoptCurrent(lane, result.handoff)) {
-        await persistCap(lane, 'write_failed');
+        await persistCap(lane, 'write_failed', generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'write_failed' });
       }
-      notifyJobChanged(lane);
+      notifyJobChanged(lane, generation);
       if (priorStage === 'review' && lane.current.stage === 'review') lane.counters.revisedRounds++;
       if (lane.counters.revisedRounds >= CONSTANTS.APPLICATION_MAX_REVISED_ROUNDS) {
-        await persistCap(lane, 'review_round_cap');
+        await persistCap(lane, 'review_round_cap', generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         return makeResultBody('held', { reason: 'review_round_cap' });
       }
-      await persistLanes();
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       wake();
-      return makeResultBody('accepted', { jobComplete: false, next: serveLane(lane) });
+      return makeResultBody('accepted', { jobComplete: false, next: serveLane(lane, generation) });
     }
 
     if (result.kind === 'rejected') {
@@ -804,10 +956,12 @@ export function createHandoffEngine({
       counts.submitRejected++;
       auditEvent('rejected', { tool: 'submit_handoff', outcome: 'rejected', stage: lane.current?.stage ?? 'unknown' });
       if (lane.counters.rejections >= CONSTANTS.APPLICATION_MAX_REJECTIONS) {
-        await persistCap(lane, 'rejection_cap');
+        await persistCap(lane, 'rejection_cap', generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         return makeResultBody('held', { reason: 'rejection_cap' });
       }
-      await persistLanes();
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       wake();
       return makeRejectedBody({
         handoffCode: lane.current?.code ?? currentCode,
@@ -819,56 +973,62 @@ export function createHandoffEngine({
 
     if (result.kind === 'threw') {
       if (result.code === 'LOCAL_AI_JOB_INTEGRITY') {
-        await persistCap(lane, 'job_broken');
+        await persistCap(lane, 'job_broken', generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'job_broken', note: 'Infinite Canvas found an integrity problem in this application bundle.' });
       }
       if (retryCount < 2) {
         const originalStage = result.stage ?? lane.current?.stage;
-        const reread = await readLane(lane, { recoveryStage: originalStage });
+        const reread = await readLane(lane, { recoveryStage: originalStage, generation });
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         if (reread?.kind === 'open' && lane.current) {
           const freshStage = reread.handoff?.stage ?? lane.current.stage;
           if (originalStage && freshStage !== originalStage) {
             return makeResultBody('superseded', { note: supersededStageNote(originalStage, freshStage) });
           }
-          const retried = await callApplicationSubmit(lane, lane.current.code, text);
-          return mapSubmitResult(lane, text, retried, retryCount + 1);
+          const retried = await callApplicationSubmit(lane, lane.current.code, text, generation);
+          return mapSubmitResult(lane, text, retried, retryCount + 1, generation);
         }
         if (lane.phase === 'host') return makeResultBody('superseded');
       }
       lane.counters.errStreak++;
       if (lane.counters.errStreak >= CONSTANTS.APPLICATION_ERROR_STREAK) {
-        await persistCap(lane, 'write_failed');
+        await persistCap(lane, 'write_failed', generation);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
         return makeResultBody('needs_user', { reason: 'write_failed' });
       }
-      await persistLanes();
+      await persistLanes(generation);
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       return makeResultBody('retry', { inFlight: false });
     }
     return makeResultBody('retry');
   }
 
-  async function runSubmit(lane, text) {
+  async function runSubmit(lane, text, generation = sourceGeneration) {
     await semaphore.acquire();
     try {
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       const code = lane.current.code;
       const key = verdictKey(code, text);
       const retained = lane.retained;
       if (retained?.code === code && retained.sha256 !== key) {
-        const recovered = await callApplicationSubmit(lane, retained.code, retained.text);
+        const recovered = await callApplicationSubmit(lane, retained.code, retained.text, generation);
         if (recovered.kind === 'accepted' || recovered.kind === 'submit_stuck') {
-          return mapSubmitResult(lane, retained.text, recovered, 2);
+          return mapSubmitResult(lane, retained.text, recovered, 2, generation);
         }
       }
       lane.submittedAt = safeNow(now);
       lane.retained = { code, text, sha256: key, at: lane.submittedAt };
-      const result = await callApplicationSubmit(lane, code, text);
-      return await mapSubmitResult(lane, text, result);
+      const result = await callApplicationSubmit(lane, code, text, generation);
+      return await mapSubmitResult(lane, text, result, 0, generation);
     } finally {
       semaphore.release();
       wake();
     }
   }
 
-  async function framePushSubmit(raw, { successorBudgetMs = 0 } = {}) {
+  async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration } = {}) {
+    if (!scope.scoring || !sourceCurrent(generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     if (decision.status === 'rejected') {
       const body = {
@@ -889,13 +1049,15 @@ export function createHandoffEngine({
       if (successorBudgetMs > 0 && typeof push?.nextAfterAccept === 'function') {
         let successor;
         try {
+          if (!sourceCurrent(generation)) return makeResultBody('retry');
           successor = await raceWithBudget(
             push.nextAfterAccept({ epoch: pushEpochId(), budgetMs: successorBudgetMs }),
             successorBudgetMs,
             { status: 'waiting' },
           );
         } catch { successor = { status: 'waiting' }; }
-        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor);
+        if (!sourceCurrent(generation)) return makeResultBody('retry');
+        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation);
       }
       return { status: 'accepted', jobComplete: false, next };
     }
@@ -920,7 +1082,8 @@ export function createHandoffEngine({
     return makeResultBody('retry', { inFlight: decision.status === 'retry' });
   }
 
-  function runPushSubmit(code, text) {
+  function runPushSubmit(code, text, generation = sourceGeneration) {
+    if (!scope.scoring || !sourceCurrent(generation)) return null;
     const epochId = pushEpochId();
     const key = verdictKey(`push\n${epochId ?? ''}\n${code}`, text);
     const cached = pushVerdicts.get(key);
@@ -928,14 +1091,16 @@ export function createHandoffEngine({
     let rawPromise;
     rawPromise = Promise.resolve()
       .then(() => semaphore.acquire())
-      .then(() => push.submit({ epoch: epochId, handoffCode: code, response: text }))
+      .then(() => sourceCurrent(generation)
+        ? push.submit({ epoch: epochId, handoffCode: code, response: text })
+        : { status: 'retry' })
       .catch(() => ({ status: 'retry' }))
       .finally(() => semaphore.release());
-    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId };
+    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation };
     pushVerdicts.set(key, record);
     rawPromise.finally(() => {
       const current = pushVerdicts.get(key);
-      if (current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
+      if (sourceCurrent(generation) && current === record && safeNow(now) - current.at > CONSTANTS.VERDICT_CACHE_MS) pushVerdicts.delete(key);
     });
     return record;
   }
@@ -944,6 +1109,7 @@ export function createHandoffEngine({
     const blocked = gate(args);
     if (blocked) return blocked;
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
+    const generation = sourceGeneration;
     const callAt = safeNow(now);
     epoch.calls += 1;
     epoch.firstCallAt ??= callAt;
@@ -966,17 +1132,20 @@ export function createHandoffEngine({
     // Push owns its served-code/tombstone namespace. It has to be consulted
     // before the application unknown-code path so an accepted scoring retry is
     // never reported as an application unknown handoff.
-    if (push) {
+    if (push && scope.scoring) {
       const pushStartedAt = safeNow(now);
-      const pushRecord = runPushSubmit(code, text);
+      const pushRecord = runPushSubmit(code, text, generation);
+      if (!pushRecord) return makeResultBody('retry');
       const pushTimeout = Symbol('push-submit-timeout');
       const pushDecision = await raceWithBudget(pushRecord.rawPromise, submitBudgetMs, pushTimeout);
+      if (!sourceCurrent(generation)) return makeResultBody('retry');
       if (pushDecision === pushTimeout) return makeResultBody('retry', { inFlight: true });
       if (pushDecision?.status !== 'unknown_handoff') {
         const elapsed = Math.max(0, safeNow(now) - pushStartedAt);
         if (!pushRecord.framedPromise) {
           pushRecord.framedPromise = Promise.resolve(pushDecision).then(decision => framePushSubmit(decision, {
             successorBudgetMs: Math.max(0, submitBudgetMs - elapsed),
+            generation,
           }));
         }
         return raceWithBudget(
@@ -988,6 +1157,10 @@ export function createHandoffEngine({
     }
     const entry = codeIndex.get(code);
     if (!entry?.lane) return tombstoneResult(code);
+    // A scope downgrade never lets a previously served application answer
+    // reach the adapter.  Keep the release durable for a later, confirmed
+    // re-enable, but deny this in-flight handoff without touching its state.
+    if (!scope.applications) return makeResultBody('held', { reason: 'scope_disabled' });
     const lane = entry.lane;
     if (lane.phase === 'held') { counts.submitHeld++; return makeResultBody('held', { reason: lane.reason }); }
     if (lane.phase === 'needs_user') return makeResultBody('needs_user', { reason: lane.reason });
@@ -999,7 +1172,10 @@ export function createHandoffEngine({
       if (classification === 'junk') {
         counts.submitJunk++;
         lane.counters.junkStreak++;
-        if (lane.counters.junkStreak >= CONSTANTS.APPLICATION_MAX_JUNK_STREAK) await persistCap(lane, 'junk_cap');
+        if (lane.counters.junkStreak >= CONSTANTS.APPLICATION_MAX_JUNK_STREAK) {
+          await persistCap(lane, 'junk_cap', generation);
+          if (!sourceCurrent(generation)) return makeResultBody('retry');
+        }
       } else if (classification === 'misrouted') counts.submitMisrouted++;
       else counts.submitSuperseded++;
       const gotStage = extractPasteEnvelopeIdentity(text).stage;
@@ -1014,10 +1190,13 @@ export function createHandoffEngine({
       if (cached.verdict) return cached.verdict;
       return raceWithBudget(cached.promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
     }
-    const promise = runSubmit(lane, text);
+    const promise = runSubmit(lane, text, generation);
     const record = { at: safeNow(now), epochN: epoch.n, promise, verdict: null };
     verdicts.set(key, record);
-    promise.then(verdict => { record.verdict = verdict; record.promise = null; }, () => { verdicts.delete(key); });
+    promise.then(verdict => {
+      if (!sourceCurrent(generation)) return;
+      record.verdict = verdict; record.promise = null;
+    }, () => { if (sourceCurrent(generation)) verdicts.delete(key); });
     for (const [cacheKey, value] of verdicts) if (safeNow(now) - value.at > CONSTANTS.VERDICT_CACHE_MS) verdicts.delete(cacheKey);
     return raceWithBudget(promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
   }
@@ -1118,6 +1297,9 @@ export function createHandoffEngine({
   }
 
   async function release({ jobs = [] } = {}) {
+    const generation = sourceGeneration;
+    if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
+    if (!scope.applications) return { ok: false, code: 'disabled' };
     if (!Array.isArray(jobs) || jobs.length === 0) return { ok: false, code: 'invalid_arguments' };
     const unique = new Map();
     for (const item of jobs) {
@@ -1139,6 +1321,7 @@ export function createHandoffEngine({
         if (existing.canvasFilePath !== item.canvasFilePath && typeof application.adoptCanvasPath === 'function') {
           try {
             const adopted = await application.adoptCanvasPath(existing.jobId, item.canvasFilePath, existing.canvasFilePath);
+            if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
             if (adopted?.adopted === true) existing.canvasFilePath = item.canvasFilePath;
           } catch { /* keep the trusted old path */ }
         }
@@ -1151,12 +1334,15 @@ export function createHandoffEngine({
         releasedAt: safeNow(now),
       }));
     }
-    if (!await persistLanes()) {
-      lanes.splice(0, lanes.length, ...beforeLanes);
-      for (const [lane, canvasFilePath] of beforePaths) lane.canvasFilePath = canvasFilePath;
-      laneOrdinal = beforeLaneOrdinal;
+    if (!await persistLanes(generation)) {
+      if (sourceCurrent(generation)) {
+        lanes.splice(0, lanes.length, ...beforeLanes);
+        for (const [lane, canvasFilePath] of beforePaths) lane.canvasFilePath = canvasFilePath;
+        laneOrdinal = beforeLaneOrdinal;
+      }
       return { ok: false, code: 'persist_failed' };
     }
+    if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     humanAction();
     auditEvent('release', { count: unique.size });
     wake();
@@ -1164,6 +1350,8 @@ export function createHandoffEngine({
   }
 
   async function unrelease(jobId) {
+    const generation = sourceGeneration;
+    if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     const index = lanes.findIndex(lane => lane.jobId === jobId);
     if (index < 0) return { ok: false, code: 'not_found' };
     const [lane] = lanes.splice(index, 1);
@@ -1173,11 +1361,15 @@ export function createHandoffEngine({
       removedCodes.push([code, entry]);
       codeIndex.delete(code);
     }
-    if (!await persistLanes()) {
-      lanes.splice(index, 0, lane);
-      for (const [code, entry] of removedCodes) codeIndex.set(code, entry);
-      return { ok: false, code: 'persist_failed' };
+    if (!await persistLanes(generation)) {
+      if (sourceCurrent(generation)) {
+        lanes.splice(index, 0, lane);
+        for (const [code, entry] of removedCodes) codeIndex.set(code, entry);
+        return { ok: false, code: 'persist_failed' };
+      }
+      return { ok: false, code: 'not_ready' };
     }
+    if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     humanAction();
     auditEvent('unrelease');
     wake();
@@ -1241,11 +1433,17 @@ export function createHandoffEngine({
   }
 
   function hint({ jobId } = {}) {
+    const generation = sourceGeneration;
+    if (!sourceCurrent(generation)) return false;
     const lane = lanes.find(item => item.jobId === jobId);
     if (!lane || ['done', 'gone'].includes(lane.phase)) return false;
     const stamp = safeNow(now);
     const last = lastHintAt.get(lane.ord) ?? -Infinity;
     const invalidate = () => {
+      if (!sourceCurrent(generation) || !lanes.includes(lane) || ['done', 'gone'].includes(lane.phase)) {
+        clearLaneHint(lane);
+        return;
+      }
       lastHintAt.set(lane.ord, safeNow(now));
       hintTimers.delete(lane.ord);
       lane.snapshot = null;
@@ -1291,7 +1489,7 @@ export function createHandoffEngine({
     const safeSelectedHubs = Array.isArray(pushState.selectedHubs)
       ? pushState.selectedHubs.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)).slice(0, 50)
       : [];
-    const pushDiscovered = Array.isArray(pushState.discovered) ? pushState.discovered : [];
+    const pushDiscovered = pushDiscoveryCurrent && ownsPushDiscovery() && Array.isArray(pushState.discovered) ? pushState.discovered : [];
     const pushTasks = new Map();
     const safeDiscoveredHubs = [];
     let discoveredPending = 0;
@@ -1406,11 +1604,11 @@ export function createHandoffEngine({
   }
 
   function onPowerResume() {
-    powerResumeGeneration += 1;
-    for (const lane of lanes) {
-      lane.snapshot = null;
-      if (lane.phase === 'awaiting') lane.needsRefresh = true;
-    }
+    if (closed) return false;
+    invalidateSourceWork();
+    // Discard every pre-sleep result/cache before fresh status reads begin.
+    // The external application call may still finish, but its completion can
+    // no longer alter this epoch.
     wake();
     return true;
   }
@@ -1420,20 +1618,65 @@ export function createHandoffEngine({
     return { ...limits };
   }
 
+  function setScope(next) {
+    const updated = normalizeScope(next);
+    if (updated.applications === scope.applications && updated.scoring === scope.scoring) return { ...scope };
+    scope = updated;
+    // Scope changes are an exposure boundary just like sleep/Disable. Discard
+    // every pre-change result before it can populate a cache or frame a push
+    // successor under the newly lowered scope.
+    invalidateSourceWork();
+    if (!scope.scoring) {
+      try { push?.closeEpoch?.(pushEpochId()); } catch { /* selected hubs remain process-local */ }
+    }
+    wake();
+    return { ...scope };
+  }
+
   function selectPushHub(value) {
+    if (!scope.scoring) return false;
     try { return push?.selectHub?.(value) === true; } catch { return false; }
   }
 
-  function selectPushHubKey(value) {
-    try { return push?.selectHubKey?.(value) === true; } catch { return false; }
+  async function selectPushHubKey(value) {
+    const generation = sourceGeneration;
+    if (!scope.scoring || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
+    try {
+      // The production source is synchronous today, but keep this boundary
+      // safe for a delayed seam implementation too. A selection that finishes
+      // after Disable/close must be undone on the old source rather than
+      // silently recreating exposure after clearPushHubs().
+      const selected = await Promise.resolve(push?.selectHubKey?.(value));
+      if (!sourceCurrent(generation) || !ownsPushDiscovery()) {
+        try { await Promise.resolve(push?.unselectHubKey?.(value)); } catch { /* close remains fail-closed */ }
+        return false;
+      }
+      return selected === true;
+    } catch { return false; }
   }
 
-  function unselectPushHubKey(value) {
-    try { return push?.unselectHubKey?.(value) === true; } catch { return false; }
+  async function unselectPushHubKey(value) {
+    try { return await Promise.resolve(push?.unselectHubKey?.(value)) === true; } catch { return false; }
   }
 
   async function refreshPushHubs() {
-    try { return await push?.refreshHubs?.() === true; } catch { return false; }
+    const generation = sourceGeneration;
+    if (!scope.scoring || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
+    try {
+      const refreshed = await push?.refreshHubs?.();
+      if (!sourceCurrent(generation) || !ownsPushDiscovery()) {
+        // Do not clear the shared push source: a replacement engine may have
+        // refreshed it since this old call began. Its stale rows remain
+        // invisible through this instance's ownership/freshness fence.
+        if (ownsPushDiscovery()) pushDiscoveryCurrent = false;
+        return false;
+      }
+      pushDiscoveryCurrent = refreshed === true;
+      return refreshed === true;
+    } catch {
+      if (!sourceCurrent(generation) || !ownsPushDiscovery()) pushDiscoveryCurrent = false;
+      return false;
+    }
   }
 
   function clearPushHubs(value) {
@@ -1445,9 +1688,19 @@ export function createHandoffEngine({
   }
 
   async function close() {
+    sourceGeneration += 1;
     closed = true;
+    pushDiscoveryCurrent = false;
+    verdicts.clear();
+    pushVerdicts.clear();
     retireEpoch('closed');
     clearPushHubs();
+    for (const lane of lanes) {
+      lane.inFlight.read = null;
+      lane.inFlight.status = null;
+      lane.inFlight.submit = null;
+      lane.retained = null;
+    }
     for (const timer of hintTimers.values()) clearTimer(timer);
     hintTimers.clear();
     semaphore.close();
@@ -1459,6 +1712,7 @@ export function createHandoffEngine({
   return Object.freeze({
     get,
     submit,
+    tick,
     release,
     unrelease,
     hold,
@@ -1476,6 +1730,7 @@ export function createHandoffEngine({
     powerState,
     onPowerResume,
     setLimits,
+    setScope,
     selectPushHub,
     selectPushHubKey,
     unselectPushHubKey,

@@ -821,6 +821,188 @@ tests.push(
       } finally { fs.rmSync(directory, { recursive: true, force: true }); }
     },
   },
+  {
+    name: 'handoff bridge: engine: close fences delayed application read status and submit results',
+    run: async () => {
+      // Read: a completion after Close cannot adopt a handoff, persist, or
+      // notify a renderer.
+      const readPending = deferred(); let readCalls = 0; let readSaves = 0; let readNotices = 0;
+      const readState = await started({
+        sourceOverrides: { read: async () => { readCalls++; return readPending.promise; } },
+        engineOptions: { store: { saveLanes: async () => { readSaves++; return true; } }, onJobChanged: () => { readNotices++; } },
+      });
+      const readBaseline = readSaves;
+      const delayedRead = readState.engine.get({ session: readState.session, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(readCalls === 1, 'fixture must dispatch one read before Close');
+      await readState.engine.close(); readPending.resolve({ kind: 'open', handoff: handoff() });
+      await delayedRead; await Promise.resolve();
+      assert(readState.engine.snapshot().queue.jobs[0].phase === 'unread' && readSaves === readBaseline && readNotices === 0 && readState.engine.snapshot().counts.getServed === 0,
+        'a stale read must not mutate a lane, persist, notify, or serve');
+
+      // Status: the same fence applies after an already-hosted lane polls.
+      const statusPending = deferred(); let statusSaves = 0; let statusNotices = 0; let statusCalls = 0;
+      const clock = createFakeClock(); const statusSource = source({
+        read: async () => ({ kind: 'host' }),
+        status: async () => { statusCalls++; return statusPending.promise; },
+      });
+      const statusEngine = createHandoffEngine({ source: statusSource.api, now: clock.now, timers: clock, holdMs: 0,
+        store: { saveLanes: async () => { statusSaves++; return true; } }, onJobChanged: () => { statusNotices++; } });
+      await statusEngine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); const statusChat = await statusEngine.newChat({ linkId: LINK });
+      await statusEngine.get({ session: statusChat.sessionCode, linkId: LINK });
+      const statusBaseline = statusSaves; clock.advance(CONSTANTS.HOST_POLL_MS);
+      const delayedStatus = statusEngine.get({ session: statusChat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(statusCalls === 1, 'fixture must dispatch one status poll before Close');
+      await statusEngine.close(); statusPending.resolve({ kind: 'done' });
+      await delayedStatus; await Promise.resolve();
+      assert(statusEngine.snapshot().queue.jobs[0].phase === 'host' && statusSaves === statusBaseline && statusNotices === 0,
+        'a stale status result must not complete or persist a host lane');
+
+      // Submit: result framing and its verdict cache are also fenced.
+      const submitPending = deferred(); let submitSaves = 0; let submitNotices = 0;
+      const submitState = await served({
+        sourceOverrides: { submit: async () => submitPending.promise },
+        engineOptions: { store: { saveLanes: async () => { submitSaves++; return true; } }, onJobChanged: () => { submitNotices++; } },
+      });
+      const submitBaseline = submitSaves;
+      const delayedSubmit = submitState.engine.submit({ session: submitState.session, linkId: LINK, handoffCode: submitState.result.handoffCode, response: answer({ code: submitState.result.handoffCode, stage: submitState.result.stage }) });
+      await new Promise(resolve => setImmediate(resolve));
+      await submitState.engine.close(); submitPending.resolve({ kind: 'accepted', completed: true });
+      await delayedSubmit; await Promise.resolve();
+      assert(submitState.engine.snapshot().counts.submitAccepted === 0 && submitSaves === submitBaseline && submitNotices === 0,
+        'a stale submit result must not cache a verdict, persist, or notify');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: close before a queued push acquire never invokes the source',
+    run: async () => {
+      let pushSubmits = 0;
+      const push = {
+        async get() { return { status: 'served', handoffCode: 'PUSH-A', task: 'job-scoring', prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { pushSubmits++; return { status: 'accepted' }; },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, holdMs: 0 });
+      const chat = await engine.newChat({ linkId: LINK }); const servedPush = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(servedPush.status === 'served' && servedPush.kind === 'push', 'fixture must receive a scoring handoff');
+      const pending = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: servedPush.handoffCode, response: 'Synthetic scoring answer.' });
+      await engine.close(); await pending; await Promise.resolve();
+      assert(pushSubmits === 0 && engine.snapshot().counts.submitAccepted === 0, 'Close during semaphore acquisition must stop the queued push source call and result framing');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an aborted held GET releases its waiter without changing submit behavior',
+    run: async () => {
+      const clock = createFakeClock(); let polls = 0;
+      const push = {
+        async get() { polls++; return { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true }, now: clock.now, timers: clock, holdMs: 30_000 });
+      const chat = await engine.newChat({ linkId: LINK }); const abort = new AbortController();
+      const pending = engine.get({ session: chat.sessionCode, linkId: LINK, signal: abort.signal });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(engine.debugState().waiters === 1 && polls === 1, 'held GET must retain exactly one wake waiter');
+      abort.abort(); const result = await pending;
+      assert(result.status === 'retry' && engine.debugState().waiters === 0 && clock.pendingCount() === 0 && polls === 1,
+        'aborted GET must return promptly, remove timer/listener state, and launch no follow-up source poll');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: scope changes fence each source family independently',
+    run: async () => {
+      const app = source(); let pushGets = 0; let pushSubmits = 0;
+      const push = {
+        async get() { pushGets++; return { status: 'served', handoffCode: 'PUSH-SCOPE', task: 'job-scoring', prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { pushSubmits++; return { status: 'unknown_handoff' }; },
+      };
+      const engine = createHandoffEngine({ sources: { application: app.api, push }, scope: { applications: true, scoring: true }, holdMs: 0 });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'fixture must release an application lane before lowering scope');
+      const chat = await engine.newChat({ linkId: LINK });
+      engine.setScope({ applications: false, scoring: true });
+      const pushed = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(pushed.kind === 'push' && app.calls.read === 0 && pushGets === 1, 'applications-off must leave released lanes inert while scoring remains live');
+      const frozenPushGets = pushGets;
+      engine.setScope({ applications: true, scoring: false });
+      const applied = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(applied.kind === 'application' && app.calls.read === 1 && pushGets === frozenPushGets, 'scoring-off must stop scoring polls while application serving resumes');
+      engine.setScope({ applications: false, scoring: false });
+      const denied = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: applied.handoffCode, response: answer({ code: applied.handoffCode, stage: applied.stage }) });
+      assert(denied.status === 'held' && denied.reason === 'scope_disabled' && app.calls.submit === 0 && pushSubmits === 0,
+        'a later scope downgrade must block outstanding application answers without either adapter call');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: terminal evidence is pruned after one hour and persisted once',
+    run: async () => {
+      const clock = createFakeClock(); let saves = 0;
+      const engine = createHandoffEngine({ source: source({ read: async () => ({ kind: 'done' }) }).api, now: clock.now, timers: clock, holdMs: 0,
+        store: { saveLanes: async () => { saves++; return true; } } });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); const chat = await engine.newChat({ linkId: LINK });
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(engine.snapshot().queue.jobs[0].phase === 'done', 'fixture must retain terminal evidence before pruning');
+      const before = saves; clock.advance(60 * 60_000); await engine.tick(clock.now());
+      assert(engine.snapshot().queue.jobs.length === 0 && saves === before + 1, 'one-hour terminal evidence prune must bound memory and durable lanes');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a queued hint cannot revive terminal evidence or block its prune',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source({ read: async () => ({ kind: 'done' }) }).api, now: clock.now, timers: clock, holdMs: 0 });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); const chat = await engine.newChat({ linkId: LINK });
+      assert(engine.hint({ jobId: JOB_A }) && engine.hint({ jobId: JOB_A }) && clock.pendingCount() === 1, 'second hint must queue one deferred invalidation');
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(engine.snapshot().queue.jobs[0].phase === 'done' && clock.pendingCount() === 0, 'terminal transition must clear the queued hint timer');
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS); clock.advance(60 * 60_000); await engine.tick(clock.now());
+      assert(engine.snapshot().queue.jobs.length === 0, 'a stale hint callback must not set needsRefresh and prevent terminal pruning');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: Close rolls back a delayed push-hub selection',
+    run: async () => {
+      const selection = deferred(); const selected = new Set(); const key = 'a'.repeat(64);
+      const push = {
+        async get() { return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+        async selectHubKey(value) { await selection.promise; selected.add(value); return true; },
+        async unselectHubKey(value) { selected.delete(value); return true; },
+        clearHubs() { selected.clear(); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true } });
+      const selecting = engine.selectPushHubKey(key); await Promise.resolve();
+      await engine.close(); selection.resolve();
+      assert(await selecting === false && selected.size === 0,
+        'a source selection completing after Close must be removed rather than repopulating closed push state');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: delayed old hub refresh cannot populate a replacement engine discovery cache',
+    run: async () => {
+      const refreshGate = deferred(); const key = 'b'.repeat(64); const discovered = []; let refreshes = 0;
+      const push = {
+        async get() { return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+        async refreshHubs() {
+          refreshes += 1;
+          if (refreshes === 1) await refreshGate.promise;
+          discovered.splice(0, discovered.length, { key, pending: 1, tasks: [{ task: 'job-scoring', pending: 1 }], excluded: {} });
+          return true;
+        },
+        clearHubs() {},
+        status() { return { discovered, selectedHubs: [], served: 0, held: 0, working: 0, needsYou: 0 }; },
+      };
+      const oldEngine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true } });
+      const staleRefresh = oldEngine.refreshPushHubs(); await Promise.resolve();
+      await oldEngine.close();
+      const replacement = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true } });
+      refreshGate.resolve();
+      assert(await staleRefresh === false && replacement.snapshot().push.discovered.length === 0,
+        'a stale shared-source refresh must stay hidden until the replacement performs its own refresh');
+      assert(await replacement.refreshPushHubs() === true && replacement.snapshot().push.discovered.length === 1,
+        'the replacement may expose only discovery it refreshed under its own generation');
+    },
+  },
 );
 
 export default tests;
