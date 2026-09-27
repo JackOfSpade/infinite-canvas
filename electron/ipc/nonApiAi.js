@@ -2361,6 +2361,103 @@ export function validateNonApiAiSubmission({
   return value;
 }
 
+/**
+ * The one accept/reject body for a pasted or bridged response. The IPC handler
+ * below and the in-process bridge (submitNonApiAiResponseForBridge) both call
+ * it, so validation, the durable commit, progress, lifecycle receipts, the
+ * settled event and the reissue on rejection can never diverge between the two.
+ * Callers must check the record and its settling flag synchronously first, with
+ * no await before this call: the check-then-set on `settling` is the only thing
+ * that keeps two simultaneous submissions from both committing.
+ */
+async function acceptNonApiAiResponse(record, args) {
+  let phase = 'validate';
+  try {
+    const value = validateNonApiAiSubmission({
+      response: args.response,
+      responseSchema: record.responseSchema,
+      responseValidator: record.responseValidator,
+      task: record.task,
+      expectedHandoffCode: record.handoffCode,
+      requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+    });
+    // A legacy step restored before handoff-code enforcement existed has no
+    // code in the paste for the check above to compare against, so this is
+    // the remaining guard against the same pasted answer being accepted
+    // into two different steps (see acceptedResponseFingerprints near the
+    // top of this file). Must run before any durable write or resolution
+    // below — a rejection here must leave this request exactly as pending
+    // as a code-mismatch rejection does.
+    claimAcceptedResponseFingerprint(record, args.response);
+    record.validationError = null;
+    record.validationCode = null;
+    record.settling = true;
+    phase = 'commit';
+    await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
+    phase = 'committed';
+    // The durable write yields. Cancellation or Back may settle this record
+    // in that interval, in which case its response must not mutate display
+    // progress or revive the already-rejected workflow promise.
+    if (!isActiveSettlingRecord(record)) {
+      return { accepted: false, validationErrors: ['This Non-API AI request was cancelled before the submission finished saving.'], reason: 'cancelled_during_save' };
+    }
+    // The durable write is the commit point. Selecting, copying, retrying,
+    // replaying, or failing validation never reaches this increment.
+    const progressScope = acceptProgressRecord(record, value);
+    const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
+    const responseHash = responseReceiptHash(args.response);
+    updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
+    publishProgressScope(progressScope, record);
+    // Teach this process's sizer what the response actually cost. This update
+    // is deliberately non-durable and must never fail an accepted answer.
+    let measuredUnits = record.matchCount ?? record.itemCount;
+    if (record.measureResponseUnits) {
+      try {
+        const actual = record.measureResponseUnits(value);
+        // `>= 0`, not `> 0`: a schema-valid response really can contain zero
+        // units, and falling back to the full intended count there would
+        // charge a near-empty response against a large denominator — the
+        // artificially-cheap sample this measurement exists to prevent.
+        // recordHandoffOutputSample drops a zero-unit sample outright.
+        if (Number.isFinite(actual) && actual >= 0) measuredUnits = actual;
+      } catch { /* a measurement must never fail an accepted answer */ }
+    }
+    void recordHandoffOutputSample({
+      task: record.task,
+      units: measuredUnits,
+      responseChars: acceptedChars,
+      planItemCount: record.planItemCount,
+    }).catch(() => {});
+    settle(record, { accepted: true });
+    record.resolve(value);
+    return { accepted: true, reason: 'accepted' };
+  } catch (error) {
+    // An abort/step-back can race a failed durable write too. Its owner has
+    // already settled the promise, so never turn that terminal state into a
+    // retry prompt or overwrite its lifecycle receipt.
+    if (record.signal?.aborted || pendingRequests.get(record.requestId) !== record) {
+      return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'], reason: 'not_pending' };
+    }
+    record.settling = false;
+    const message = error?.message || 'The pasted response could not be accepted.';
+    const validationCode = nonApiAiLogErrorCode(error);
+    const validationDiagnostic = defaultSafeValidationDiagnostic(error, validationCode);
+    const responseReceipt = safeResponseReceipt(args.response);
+    record.validationError = message;
+    record.validationCode = validationCode;
+    record.validationDiagnostic = validationDiagnostic;
+    updateHandoffLifecycle(record, {
+      rejected: true,
+      code: validationCode,
+      validationDiagnostic,
+      ...responseReceipt,
+    });
+    logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    sendRequest(record, 'reissue');
+    return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
+  }
+}
+
 export function registerNonApiAiHandlers() {
   // Electron rejects a second `handle` registration for the same channel.
   // Main currently calls this once, but removing the old handlers makes a
@@ -2390,88 +2487,8 @@ export function registerNonApiAiHandlers() {
     if (event.sender !== record.sender) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
     if (record.settling) return { accepted: false, validationErrors: ['This response is already being submitted.'] };
 
-    try {
-      const value = validateNonApiAiSubmission({
-        response: args.response,
-        responseSchema: record.responseSchema,
-        responseValidator: record.responseValidator,
-        task: record.task,
-        expectedHandoffCode: record.handoffCode,
-        requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
-      });
-      // A legacy step restored before handoff-code enforcement existed has no
-      // code in the paste for the check above to compare against, so this is
-      // the remaining guard against the same pasted answer being accepted
-      // into two different steps (see acceptedResponseFingerprints near the
-      // top of this file). Must run before any durable write or resolution
-      // below — a rejection here must leave this request exactly as pending
-      // as a code-mismatch rejection does.
-      claimAcceptedResponseFingerprint(record, args.response);
-      record.validationError = null;
-      record.validationCode = null;
-      record.settling = true;
-      await updateDurableStep(record, { status: 'accepted', response: args.response, draft: '' });
-      // The durable write yields. Cancellation or Back may settle this record
-      // in that interval, in which case its response must not mutate display
-      // progress or revive the already-rejected workflow promise.
-      if (!isActiveSettlingRecord(record)) {
-        return { accepted: false, validationErrors: ['This Non-API AI request was cancelled before the submission finished saving.'] };
-      }
-      // The durable write is the commit point. Selecting, copying, retrying,
-      // replaying, or failing validation never reaches this increment.
-      const progressScope = acceptProgressRecord(record, value);
-      const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
-      const responseHash = responseReceiptHash(args.response);
-      updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
-      publishProgressScope(progressScope, record);
-      // Teach this process's sizer what the response actually cost. This update
-      // is deliberately non-durable and must never fail an accepted answer.
-      let measuredUnits = record.matchCount ?? record.itemCount;
-      if (record.measureResponseUnits) {
-        try {
-          const actual = record.measureResponseUnits(value);
-          // `>= 0`, not `> 0`: a schema-valid response really can contain zero
-          // units, and falling back to the full intended count there would
-          // charge a near-empty response against a large denominator — the
-          // artificially-cheap sample this measurement exists to prevent.
-          // recordHandoffOutputSample drops a zero-unit sample outright.
-          if (Number.isFinite(actual) && actual >= 0) measuredUnits = actual;
-        } catch { /* a measurement must never fail an accepted answer */ }
-      }
-      void recordHandoffOutputSample({
-        task: record.task,
-        units: measuredUnits,
-        responseChars: acceptedChars,
-        planItemCount: record.planItemCount,
-      }).catch(() => {});
-      settle(record, { accepted: true });
-      record.resolve(value);
-      return { accepted: true };
-    } catch (error) {
-      // An abort/step-back can race a failed durable write too. Its owner has
-      // already settled the promise, so never turn that terminal state into a
-      // retry prompt or overwrite its lifecycle receipt.
-      if (record.signal?.aborted || pendingRequests.get(record.requestId) !== record) {
-        return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
-      }
-      record.settling = false;
-      const message = error?.message || 'The pasted response could not be accepted.';
-      const validationCode = nonApiAiLogErrorCode(error);
-      const validationDiagnostic = defaultSafeValidationDiagnostic(error, validationCode);
-      const responseReceipt = safeResponseReceipt(args.response);
-      record.validationError = message;
-      record.validationCode = validationCode;
-      record.validationDiagnostic = validationDiagnostic;
-      updateHandoffLifecycle(record, {
-        rejected: true,
-        code: validationCode,
-        validationDiagnostic,
-        ...responseReceipt,
-      });
-      logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
-      sendRequest(record, 'reissue');
-      return { accepted: false, validationErrors: [message] };
-    }
+    const { reason: _reason, ...result } = await acceptNonApiAiResponse(record, args);
+    return result;
   });
 
   ipcMain.handle('step-back-non-api-ai-request', async (event, args = {}) => {
