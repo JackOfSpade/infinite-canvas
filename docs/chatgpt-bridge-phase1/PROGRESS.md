@@ -244,3 +244,21 @@ The packaged UI report exposed unstyled bridge controls and narrow-window overfl
 | Adversarial review | Green after closing the last finding: First chat can no longer be reached while a previously linked tunnel is unreachable. |
 
 The real-network, pairing, Cloudflare/DNS and production-plugin observations remain Jack-only B9–B11 work. No bridge was enabled in the user app and no real career data crossed it during this remediation.
+
+### B9 checkbox status remediation (2026-09-27)
+
+The packaged bug report showed that bridge preferences were durably saved while their controlled Settings checkboxes stayed stale. The fix is commit `d41dce3` (`fix: refresh ChatGPT bridge settings`). The off-state bootstrap and each live controller previously started their status sequence at zero, so an off-state save could publish another sequence-zero snapshot that the renderer correctly rejected as equal/stale. The IPC bridge now owns one monotonic public sequence across off-state saves, attach/detach and runtime replacement, while retaining the controller's source ordering and stable identity for unchanged reads.
+
+The remediation also sends scope changes as independent partial patches, prevents a delayed old-controller callback or cross-userData re-registration from restoring prior state, and detects port-derived status changes such as tunnel reachability even when the controller source sequence has not advanced. The mounted regression exercises the master switch and all five Settings preferences, including rapid Applications/Scoring changes and a failed non-optimistic save. The optional D10 bug-report telemetry/lens remains unimplemented and off.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. Exactly four reviewed bridge/UI/test files changed in the code commit; no added or ignored path, whitespace/invisible-character finding, frozen-file change, package change or D10 report change. |
+| G1 | Green. `npm run test:unit` passed 2246 tests with 0 failed; the exact filtered comparison with `~/ic-baseline-units.txt` printed nothing. |
+| G2 | Green. `npm test` passed all 2246 unit tests and every résumé-PDF suite. |
+| G3/G4 | Green. `npm run lint` and `npm run build:compile` passed with only the existing Vite chunk-size warnings. |
+| G5/G6 | Green. The final `npm run test:e2e` printed `Electron smoke test passed`; the final `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. The first enabled-smoke attempt exposed the same-source-sequence tunnel-reachability cache edge; it was fixed, regression-tested and rerun green before commit. |
+| G7 | Green at `d41dce3aa81078f81070161abdf36a548027e4df` under Node 22.23.2/npm 10.9.8. The recorded `act` command completed lint, 2246 unit tests, résumé-PDF tests and compile; its temporary full clone was removed. |
+| G10 | Green after independent sequence/lifecycle, privacy/spec, UI/accessibility, test-quality and final integrated reviews. No open finding remains. |
+
+Nothing was pushed. The remaining B9–B11 real-network and ChatGPT steps still require Jack.
