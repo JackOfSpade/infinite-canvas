@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assert } from './testHelpers.js';
+import { CREDENTIAL_LOG_CODES, LOG_FIELDS_BY_CODE, makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
 
 const bridgeRoot = new URL('../../electron/ipc/handoffBridge/', import.meta.url);
 const PRE_AUTH_FILES = new Set([
@@ -57,7 +58,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'laneStore.js': { allow: ['node:fs', 'node:path', 'node:crypto'] },
   'engine.js': { allow: sibling('node:crypto') },
   'lanes.js': { allow: sibling('node:crypto') },
-  'preflight.js': { allow: sibling('node:crypto', '../../../src/utils/pasteIdentityGuard.js') },
+  'preflight.js': { allow: sibling('node:crypto', './lanes.js', '../../../src/utils/pasteIdentityGuard.js') },
   'framing.js': { allow: sibling('node:crypto', '../../../src/utils/pasteIdentityGuard.js', '../../../src/utils/handoffBridgeConfig.js') },
   'errors.js': { allow: sibling('node:crypto') },
   'audit.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../logger.js'] },
@@ -157,14 +158,82 @@ function functionRanges(source, acceptedNames) {
   return ranges;
 }
 
+const LOG_CALL = /\b(?:logger|bridgeLog|log|audit)\s*(?:\?\.|\.)\s*(?:record|info|warn|error|debug|append|write)\s*(?:(?:\?\.|\.)\s*)?\(/g;
+const LOG_HELPER_CALL = /\b(?:recordClosedBridgeEvent|emitCredentialLog)\s*\(/g;
+const UNSAFE_LOG_VALUE = /\bconsole\s*(?:\?\.|\.)|(?:\?\.|\.)\s*(?:message|stack)\b|\b(?:req|request)\s*(?:\?\.|\.)\s*url\b/;
+
+function unsafeLogArguments(source) {
+  const failures = [];
+  for (const call of [LOG_CALL, LOG_HELPER_CALL]) {
+    for (const match of source.matchAll(call)) {
+      const openAt = match.index + match[0].lastIndexOf('(');
+      const closeAt = findClosing(source, openAt);
+      const argumentsText = closeAt < 0 ? source.slice(openAt + 1) : source.slice(openAt + 1, closeAt);
+      if (UNSAFE_LOG_VALUE.test(argumentsText)) failures.push(argumentsText);
+    }
+  }
+  return failures;
+}
+
 function hasUnsafeLogArguments(source) {
-  const call = /\b(?:logger\.[A-Za-z_$][\w$]*|(?:log|audit|emit)[A-Za-z_$][\w$]*)\s*\(/g;
-  for (const match of source.matchAll(call)) {
+  return unsafeLogArguments(source).length > 0;
+}
+
+function namedFunctionSource(source, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`\\b(?:function\\s+${escaped}\\s*\\([^)]*\\)|(?:const|let)\\s+${escaped}\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>)\\s*\\{`, 'g');
+  const match = pattern.exec(source);
+  if (!match) return '';
+  const openAt = match.index + match[0].lastIndexOf('{');
+  const closeAt = findClosing(source, openAt, '{', '}');
+  return closeAt < 0 ? '' : source.slice(openAt, closeAt + 1);
+}
+
+const DIALOG_DETAIL_KEYS = new Set([
+  'at', 'canvasFilePath', 'count', 'hostname', 'idlePauseMinutes', 'items', 'long',
+  'minutes', 'path', 'reason', 'releasedCount', 'sha256', 'signature', 'size',
+  'sourcePath', 'version',
+]);
+
+function dialogSpecViolations(source) {
+  const body = namedFunctionSource(source, 'ask');
+  if (!body) return ['missing ask dialog builder'];
+  const keys = [];
+  for (const match of body.matchAll(/\bdetails\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)) keys.push(match[1]);
+  for (const match of body.matchAll(/\bdetails\s*\[\s*['"]([^'"]+)['"]\s*\]/g)) keys.push(match[1]);
+  if (/\.\.\.\s*details\b/.test(body)) keys.push('spread');
+  return [...new Set(keys.filter(key => !DIALOG_DETAIL_KEYS.has(key)))];
+}
+
+function webContentsSendLabelViolations(source) {
+  const failures = [];
+  for (const match of source.matchAll(/\bwebContents\s*(?:\?\.|\.)\s*send\s*(?:(?:\?\.|\.)\s*)?\(/g)) {
     const openAt = match.index + match[0].lastIndexOf('(');
     const closeAt = findClosing(source, openAt);
-    if (closeAt >= 0 && /\.(?:message|stack)\b|\breq\s*\.\s*url\b/.test(source.slice(openAt, closeAt + 1))) return true;
+    const argumentsText = closeAt < 0 ? source.slice(openAt + 1) : source.slice(openAt + 1, closeAt);
+    if (/\blabel\s*:|\[['"]label['"]\]/.test(argumentsText)) failures.push('webContents.send carries label');
   }
-  return false;
+  return failures;
+}
+
+function ipcLabelViolations(source) {
+  const failures = [];
+  for (const name of ['validJob', 'validPatch', 'publish']) {
+    const body = namedFunctionSource(source, name);
+    if (!body) { failures.push(`missing ${name} validator`); continue; }
+    if (/\blabel\b/.test(body)) failures.push(`${name} carries label`);
+  }
+  return [...failures, ...webContentsSendLabelViolations(source)];
+}
+
+function secretComparisonViolations(source) {
+  const identifier = '[A-Za-z_$][\\w$]*(?:Token|Secret|Verifier|Challenge|Session|Key|Mac|Digest|Hash)';
+  const direct = new RegExp(`\\b${identifier}\\s*(?:===|!==|==|!=)|(?:===|!==|==|!=)\\s*\\b${identifier}`, 'g');
+  // Type checks are not equality checks of a secret. Remove them before the
+  // deliberately conservative identifier scan, so a persisted `metadataHash`
+  // shape validation cannot mask a future raw-token comparison.
+  const withoutTypeChecks = source.replace(/\btypeof\s+[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*(?:===|!==|==|!=)\s*(?:['"][^'"]*['"]|undefined|null)/g, '');
+  return [...withoutTypeChecks.matchAll(direct)].map(match => match[0]);
 }
 
 function scanParsedMerges(source, file, errors) {
@@ -397,6 +466,94 @@ export default [
         && index.includes('delete globalThis.__icHandoffBridgeTest')
         && index.includes('removePairingTestHook(current)'), 'the pairing hook is test-mode-only and removed when a candidate is hard-stopped/detached');
       assert(SOURCE_SCAN_ROWS['tunnel/supervisor.js'].allow.includes('./redact.js') && supervisor.includes("from './redact.js'"), 'the reviewed bounded/redacted tunnel log relay must be allow-listed');
+    },
+  },
+  {
+    name: 'handoff bridge: source-scan: B8 privacy guards reject free-text logs, raw secret compares, label IPC, and renderer dialog fields',
+    run: () => {
+      const root = fileURLToPath(bridgeRoot);
+      const files = listJavaScriptFiles(root);
+      const read = file => stripComments(fs.readFileSync(path.join(root, file), 'utf8'));
+      const expectedCodes = [
+        'listener_started', 'listener_stopped', 'listener_error', 'link_created', 'link_replaced',
+        'link_revoked', 'refresh_reuse', 'code_reuse', 'pause', 'resume', 'pairing_opened',
+        'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
+        'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed',
+        'epoch_closed', 'release', 'unrelease', 'new_chat', 'continue', 'source_mismatch',
+      ];
+      assert(JSON.stringify(CREDENTIAL_LOG_CODES) === JSON.stringify(expectedCodes), 'the logger code surface is the frozen credential/control enum');
+      assert(JSON.stringify(Object.keys(LOG_FIELDS_BY_CODE)) === JSON.stringify(expectedCodes), 'each logger code has a closed field allow-list');
+      assert(makeLogRecord('listener_started', { state: 'live' }).code === 'listener_started', 'a listed logger event remains a positive control');
+      let rejectedUnknownCode = false;
+      try { makeLogRecord('anonymous_summary', { route: 'mcp' }); } catch { rejectedUnknownCode = true; }
+      assert(rejectedUnknownCode, 'an anonymous-event logger code must be rejected rather than silently admitted');
+
+      const directLoggerOwners = files.filter(file => /\blogger\s*(?:\?\.|\.)\s*(?:record|info)\s*(?:(?:\?\.|\.)\s*)?\(/.test(read(file)));
+      assert(JSON.stringify(directLoggerOwners) === JSON.stringify(['engine.js', 'log.js']), 'only the engine log port and log.js may invoke a logger directly');
+      assert(read('index.js').includes('logger: bridgeLog'), 'production must inject the validating bridge log into the engine rather than a raw app logger');
+      for (const file of files) assert(unsafeLogArguments(read(file)).length === 0, `${file} must not pass console, message, stack, or request URL text to a log sink`);
+      assert(unsafeLogArguments('logger?.info?.(console.error(error?.message), request.url, error.stack);').length === 1, 'the free-text logger scan must reject console/message/stack/request-url positive controls');
+
+      const oauth = read('oauth.js'); const engine = read('engine.js'); const probe = read('egressProbe.js');
+      for (const [source, name] of [[oauth, 'sameSecret'], [oauth, 'hexEqual'], [oauth, 'authenticate'], [engine, 'sameDigest'], [probe, 'verify']]) {
+        assert(namedFunctionSource(source, name).includes('timingSafeEqual'), `${name} must use timingSafeEqual on its secret comparison path`);
+      }
+      for (const [source, file] of [[oauth, 'oauth.js'], [engine, 'engine.js'], [probe, 'egressProbe.js']]) {
+        assert(secretComparisonViolations(source).length === 0, `${file} must not directly compare a token, secret, verifier, challenge, session, key, MAC, digest, or hash`);
+      }
+      assert(secretComparisonViolations('if (providedToken === storedToken || pairingSecret !== expectedSecret) return false;').length === 2, 'the secret-comparison sweep must reject raw comparison positive controls');
+
+      const fixedDigestLookup = namedFunctionSource(oauth, 'fixedDigestLookup');
+      assert(fixedDigestLookup.includes('for (const candidate of records.values())')
+        && fixedDigestLookup.includes('hexEqual(digest, candidate.hash)')
+        && !fixedDigestLookup.includes('.get('), 'caller-derived OAuth digests must use a full fixed-digest timing-safe scan');
+      const codeGrant = namedFunctionSource(oauth, 'codeGrant');
+      const refreshGrant = namedFunctionSource(oauth, 'refreshGrant');
+      const revokeRoute = namedFunctionSource(oauth, 'revokeRoute');
+      assert(codeGrant.includes('fixedDigestLookup(codes, shaHex(raw))')
+        && refreshGrant.includes('fixedDigestLookup(refreshTokens, shaHex(raw))')
+        && revokeRoute.includes('fixedDigestLookup(refreshTokens, digest)')
+        && revokeRoute.includes('fixedDigestLookup(accessTokens, digest)'), 'code, refresh, and revoke input digests must not select hash-map buckets directly');
+      assert(refreshGrant.includes('hexEqual(record.successor, successorDigest)')
+        && refreshGrant.includes('fixedDigestLookup(refreshTokens, successorDigest)'), 'refresh grace must compare and resolve the successor digest through safe digest helpers');
+      assert(!/\b(?:codes|refreshTokens|accessTokens)\s*\.\s*(?:get|has)\s*\(\s*(?:shaHex\(|digest\b)/.test(oauth),
+        'OAuth token maps must not directly look up caller-derived digests');
+
+      const verify = namedFunctionSource(probe, 'verify');
+      const hmacAt = verify.indexOf('const expected = sign(value);');
+      const comparisonAt = verify.indexOf('timingSafeEqual');
+      const nonceLookupAt = verify.indexOf('active.get(value)');
+      assert(verify.includes('PROBE_NONCE_RE.test(value)') && verify.includes('PROBE_MAC_RE.test(mac)')
+        && hmacAt >= 0 && comparisonAt > hmacAt && nonceLookupAt > comparisonAt
+        && !/\bactive\s*\.\s*(?:get|has)\s*\(\s*value\s*\)/.test(verify.slice(0, comparisonAt)),
+      'a bounded syntactically valid probe MAC must be computed and timing-compared before nonce lookup');
+
+      const epochAuth = namedFunctionSource(engine, 'authenticate');
+      assert(epochAuth.includes('sameDigest(digest, epoch.keyHash)')
+        && epochAuth.includes('sameDigest(digest, retired.hash)')
+        && !epochAuth.includes('epoch.linkId') && !epochAuth.includes('retired.linkId')
+        && !engine.includes('linkId: epoch.linkId'), 'the epoch digest must be the sole link-binding comparison for live and retired chats');
+
+      const lanes = read('lanes.js'); const application = read('sources/application.js'); const push = read('sources/push.js'); const index = read('index.js');
+      const guard = namedFunctionSource(lanes, 'createHandoffCodeGuard');
+      assert(guard.includes("createHash('sha256')") && guard.includes('length === 32') && guard.includes('timingSafeEqual'),
+        'lanes must own fixed SHA-256 handoff-code identity and its timing-safe equality');
+      for (const source of [engine, application, push]) assert(!/\b(?:previous|returned|marker|retained|handoff|served|current)\??\.code\s*(?:===|!==)/.test(source),
+        'application and push handoff codes must not use direct raw equality');
+      for (const source of [engine, push, lanes]) assert(!/\b(?:codeIndex|tombstones|byCode|issuedCodes)\s*\.\s*(?:get|set|has|delete)\s*\(\s*(?:code\b|currentCode\b|handoffCode\b|canonicalCode\s*\()/.test(source),
+        'caller-derived handoff codes must not be raw Map keys');
+      assert(engine.includes('codeGuard.sameDigest(codeDigest, entry.codeDigest)')
+        && push.includes('handoffCodeGuard.sameDigest(digest, route.codeDigest)')
+        && push.includes('tombstoneEntry && handoffCodeGuard.sameDigest(digest, tombstoneEntry.codeDigest)'),
+      'every digest-key hit must re-verify its stored fixed digest');
+      assert(index.includes("runtimePort('engine', ['hold', 'resume', 'hint'])"), 'runtime engine exposure must retain the hint port');
+
+      const ui = read('ui.js'); const dialogs = read('uiDialogs.js');
+      assert(ipcLabelViolations(ui).length === 0, 'IPC job/config validators and bridge sends must not carry a label key');
+      for (const file of files) assert(webContentsSendLabelViolations(read(file)).length === 0, `${file} must not send a label key to a renderer`);
+      assert(ipcLabelViolations("function validJob(value) { return value.label === 'x'; } function validPatch(value) { return value; } function publish() {} target.webContents.send('x', { label: 'x' });").length >= 2, 'the IPC label scan must reject both a validator field and a renderer payload positive control');
+      assert(dialogSpecViolations(dialogs).length === 0, 'native dialog specs may use only the reviewed main-owned details fields');
+      assert(dialogSpecViolations("function ask() { return dialog.showMessageBox(parent, { message: details.label }); }").includes('label'), 'the native-dialog scan must reject a renderer-controlled details field');
     },
   },
 ];

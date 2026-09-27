@@ -11,6 +11,11 @@ import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiD
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
 import { composeHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import {
+  redactReportUrl,
+  redactReportUrlsInText,
+  setReportRedactedHosts,
+} from '../../electron/ipc/bugReport/helpers.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -349,6 +354,118 @@ export default [{
       ui?.dispose();
       await graph?.controller?.disable?.();
       graph?.power?.dispose?.(); graph?.tray?.destroy?.();
+    }
+  },
+}, {
+  name: 'handoff bridge: privacy: B8 report-host redaction follows persisted config through save, lifecycle, and forget',
+  async run() {
+    // Use an isolated bridge module instance: this test deliberately exercises
+    // module-owned lifecycle state, while the report helper remains the real
+    // process-wide bug-report sink.
+    const bridge = await import(new URL(`../../electron/ipc/handoffBridge/index.js?b8-redaction-lifecycle=${process.pid}-${Date.now()}`, import.meta.url).href);
+    const originalUserData = '/tmp/b8-redaction-original';
+    const unreadableUserData = '/tmp/b8-redaction-unreadable';
+    const originalHostname = 'b-0123456789abcdef0123.example.com';
+    const replacementHostname = 'b-fedcba98765432100123.example.com';
+    let persisted = { state: 'ok', config: { hostname: originalHostname } };
+    const setup = { binaryPath: '/tmp/b8-redaction/bin/cloudflared', binaryTrusted: true, credentialsPath: '/tmp/b8-redaction/credentials/tunnel.json' };
+    const readConfig = userData => userData === unreadableUserData ? { state: 'unreadable' } : persisted;
+    const reportFor = hostname => redactReportUrl(`https://${hostname}/mcp?access=ignored`);
+    const assertRedacted = hostname => assert(reportFor(hostname) === 'https://<bridge-host>/mcp', `${hostname} must be redacted`);
+    const assertVisible = hostname => assert(reportFor(hostname) === `https://${hostname}/mcp`, `${hostname} must not remain redacted`);
+    const canvas = { isDestroyed: () => false, webContents: { id: 804, __isCanvasRenderer: true, send() {} } };
+    const ipc = fakeIpc();
+    ipc.__getInvokeHandler = channel => ipc.handlers.get(channel);
+    const lifecycleDeps = {
+      env: {}, isPackaged: true, enabled: true, userData: originalUserData, tunnelState: setup, readConfig,
+      compose: () => ({
+        controller: {
+          snapshot: () => ({ enabled: true, serving: 'live', config: { hostname: persisted.config.hostname, scope: { applications: true, scoring: false } }, limits: {}, prefs: {}, autoRelease: false, setup: { tunnelReachable: true } }),
+          subscribe: () => () => undefined,
+          disable: async () => ({ success: true }),
+          forget: async () => ({ success: true }),
+        },
+        listener: {}, tunnel: {}, power: {}, tray: {},
+      }),
+    };
+    try {
+      await bridge.startHandoffBridge({ deps: lifecycleDeps });
+      assertRedacted(originalHostname);
+
+      assert(bridge.registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+        ...lifecycleDeps, getCanvasWindows: () => [canvas], dialogs: { ask: async () => ({ ok: true }) },
+        writeConfig: async (_userData, patch) => {
+          persisted = { state: 'ok', config: { ...persisted.config, ...patch } };
+          return { ok: true, config: persisted.config };
+        },
+        forgetConfig: async () => true,
+      } }), 'the isolated lifecycle must register its fake IPC ports');
+      const event = { sender: canvas.webContents };
+      const saved = await ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)(event, { patch: { hostname: replacementHostname } });
+      assert(saved.success, 'an acknowledged hostname save must succeed');
+      assertRedacted(replacementHostname);
+      assertVisible(originalHostname);
+
+      const disabled = await ipc.handlers.get(IPC_CHANNELS.SET_ENABLED)(event, { enabled: false });
+      assert(disabled.success, 'Disable must acknowledge the detached lifecycle');
+      assertRedacted(replacementHostname);
+
+      const unreadable = await bridge.startHandoffBridge({ deps: { ...lifecycleDeps, userData: unreadableUserData } });
+      assert(unreadable.code === 'state_unreadable', 'the unreadable user-data root must fail closed');
+      assertVisible(replacementHostname);
+
+      await bridge.startHandoffBridge({ deps: lifecycleDeps });
+      assertRedacted(replacementHostname);
+
+      const forgotten = await ipc.handlers.get(IPC_CHANNELS.FORGET_SETUP)(event);
+      assert(forgotten.success, 'Forget must acknowledge its durable wipe');
+      assertVisible(replacementHostname);
+
+      ipc.handlers.clear();
+      assert(bridge.registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { ...lifecycleDeps, getCanvasWindows: () => [canvas], dialogs: { ask: async () => ({ ok: true }) }, forgetConfig: async () => true } }), 'cleared fake IPC handlers must permit same-userData registration');
+      await ipc.handlers.get(IPC_CHANNELS.GET_STATUS)(event);
+      assertVisible(replacementHostname);
+    } finally {
+      setReportRedactedHosts([]);
+      await bridge.stopHandoffBridge();
+    }
+  },
+}, {
+  name: 'handoff bridge: privacy: configured bridge hostnames are redacted from a generated report without changing look-alikes',
+  run: () => {
+    const hostname = 'b-0123456789abcdef0123.lullascape.com';
+    const report = [
+      `Origin: https://${hostname}/mcp?access=${sentinel('report-token')}#fragment`,
+      `Mentioned again: ${hostname}.`,
+      `A longer hostname is not the bridge: api.${hostname}.`,
+      `An identifier is not the bridge: x${hostname}.`,
+    ].join('\n');
+    try {
+      setReportRedactedHosts([hostname]);
+      const url = redactReportUrl(`https://${hostname}/mcp?access=${sentinel('report-url-token')}`);
+      const redacted = redactReportUrlsInText(report);
+      const exactHost = new RegExp(`(^|[^a-z0-9_.-])${hostname.replace(/\./g, '\\.')}(?=$|[^a-z0-9_.-])`, 'i');
+      assert(url === 'https://<bridge-host>/mcp', 'configured bridge URL origin must be replaced before query data is reported');
+      assert(redacted.includes('<bridge-host>') && !exactHost.test(redacted), 'a generated report must contain the bridge placeholder and never the configured hostname');
+      assert(redacted.includes(`api.${hostname}`) && redacted.includes(`x${hostname}`), 'hostname redaction must not erase a longer hostname or an identifier that only contains it');
+    } finally {
+      setReportRedactedHosts([]);
+    }
+  },
+}, {
+  name: 'handoff bridge: privacy: bug-report URL helpers remain byte-identical before bridge redaction is configured',
+  run: () => {
+    // These are captured outputs from the pre-bridge helper implementation,
+    // not values recomputed from the functions under test.  A future default
+    // redaction therefore cannot silently redefine this compatibility check.
+    const url = 'https://example.com/path/to/report?access=ignored#ignored';
+    const prose = 'See https://example.com/path/to/report?access=ignored#ignored, then https://other.example.com/next?x=1.';
+    try {
+      setReportRedactedHosts([]);
+      assert(redactReportUrl(url) === 'https://example.com/path/to/report', 'unset hostname redaction must preserve the historical URL helper bytes');
+      assert(redactReportUrlsInText(prose) === 'See https://example.com/path/to/report, then https://other.example.com/next.', 'unset hostname redaction must preserve the historical prose helper bytes');
+    } finally {
+      setReportRedactedHosts([]);
     }
   },
 }, {
