@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { configPathFor, emptyConfig, readConfig, writeConfig } from '../../electron/ipc/handoffBridge/store.js';
+import { configPathFor, emptyConfig, forgetConfig, readConfig, writeConfig } from '../../electron/ipc/handoffBridge/store.js';
 
 function withStore(run) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-handoff-store-'));
@@ -227,6 +227,96 @@ export default [
       const config = persisted(userData);
       assert(first.ok && second.ok && config.autoStart && config.autoRelease,
         'serialized writes must preserve both patches');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: forget removes only durable config and preserves siblings',
+    run: () => withStore(async userData => {
+      const saved = await save(userData, { hostname: 'bridge.example.com', autoStart: true });
+      assert(saved.ok, 'setup config must exist before Forget');
+      const configPath = configPathFor(userData);
+      const lanePath = path.join(path.dirname(configPath), 'lanes.json');
+      const tunnelPath = path.join(userData, 'handoff-bridge', 'tunnel', 'tunnel.json');
+      fs.writeFileSync(lanePath, '{"lanes":[]}', { mode: 0o600 });
+      fs.mkdirSync(path.dirname(tunnelPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(tunnelPath, '{"approved":true}', { mode: 0o600 });
+
+      let directorySyncs = 0;
+      const fsImpl = new Proxy(fs, {
+        get(target, property) {
+          if (property === 'fsyncSync') return fd => {
+            directorySyncs++;
+            return target.fsyncSync(fd);
+          };
+          return target[property];
+        },
+      });
+      const forgotten = await forgetConfig(userData, { fsImpl });
+      assert(forgotten === true && !fs.existsSync(configPath), 'Forget must remove config.json after durable success');
+      assert(directorySyncs === 1, 'Forget must fsync its parent directory after unlink');
+      assert(fs.readFileSync(lanePath, 'utf8') === '{"lanes":[]}', 'Forget must not remove lanes');
+      assert(fs.readFileSync(tunnelPath, 'utf8') === '{"approved":true}', 'Forget must not remove tunnel state');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: forget is idempotent and does not create a config directory',
+    run: () => withStore(async userData => {
+      const configDirectory = path.dirname(configPathFor(userData));
+      const first = await forgetConfig(userData);
+      const second = await forgetConfig(userData);
+      assert(first === true && second === true, 'missing config must make Forget a successful no-op');
+      assert(!fs.existsSync(configDirectory), 'Forget of missing config must not create its directory');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: forget refuses a symlink or non-regular config target',
+    run: () => withStore(async userData => {
+      const configPath = configPathFor(userData);
+      const targetPath = path.join(userData, 'unrelated.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(targetPath, 'keep me', { mode: 0o600 });
+      fs.symlinkSync(targetPath, configPath);
+
+      const forgotten = await forgetConfig(userData);
+      assert(forgotten === false, 'Forget must reject a symlink config target');
+      assert(fs.lstatSync(configPath).isSymbolicLink(), 'unsafe config target must remain untouched');
+      assert(fs.readFileSync(targetPath, 'utf8') === 'keep me', 'Forget must not follow a symlink');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: forget reports unlink and parent fsync failures',
+    run: () => withStore(async userData => {
+      const configPath = configPathFor(userData);
+      await save(userData, { autoStart: true });
+      const unlinkFailure = new Proxy(fs, {
+        get(target, property) {
+          if (property === 'unlinkSync') return () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+          return target[property];
+        },
+      });
+      assert(await forgetConfig(userData, { fsImpl: unlinkFailure }) === false,
+        'Forget must report unlink failure');
+      assert(fs.existsSync(configPath), 'unlink failure must leave config in place');
+
+      const fsyncFailure = new Proxy(fs, {
+        get(target, property) {
+          if (property === 'fsyncSync') return () => { throw Object.assign(new Error('sync failed'), { code: 'EIO' }); };
+          return target[property];
+        },
+      });
+      assert(await forgetConfig(userData, { fsImpl: fsyncFailure }) === false,
+        'Forget must report a parent directory fsync failure');
+      assert(!fs.existsSync(configPath), 'failed directory fsync must not claim the deletion was durable');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: forget waits behind a queued save',
+    run: () => withStore(async userData => {
+      const pendingSave = save(userData, { autoStart: true });
+      const pendingForget = forgetConfig(userData);
+      const [saved, forgotten] = await Promise.all([pendingSave, pendingForget]);
+      assert(saved.ok && forgotten === true, 'queued save and Forget must both complete');
+      assert(readConfig(userData).state === 'missing', 'Forget after a queued save must leave config absent');
     }),
   },
 ];

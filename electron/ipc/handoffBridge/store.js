@@ -23,7 +23,9 @@ const PERSISTED_CONFIG_FIELDS = new Set(['v', ...CONFIG_FIELDS]);
 const PATCH_FIELDS = new Set([...CONFIG_FIELDS, 'confirmBreak']);
 const SCOPE_FIELDS = new Set(['applications', 'scoring']);
 const PREFS_FIELDS = new Set(['sourcePolicy', 'pairingNetworkCheck']);
-const writeQueues = new Map();
+// Config mutations share one queue per file. Forget must run behind an already
+// accepted save, otherwise a delayed save could recreate setup after Forget.
+const configQueues = new Map();
 
 function freezeConfig(config) {
   Object.freeze(config.scope);
@@ -262,6 +264,48 @@ function atomicWriteConfig(filePath, config, { fsImpl, randomBytes }) {
   }
 }
 
+function enqueueConfigMutation(filePath, operation) {
+  const previous = configQueues.get(filePath) || Promise.resolve();
+  const mutation = previous.catch(() => undefined).then(operation);
+  const settled = mutation.finally(() => {
+    if (configQueues.get(filePath) === settled) configQueues.delete(filePath);
+  });
+  configQueues.set(filePath, settled);
+  return settled;
+}
+
+function fsyncConfigDirectory(filePath, fsImpl) {
+  // Small injected filesystem fakes need not model directory descriptors. A
+  // real implementation that exposes both calls must make the unlink durable.
+  if (typeof fsImpl.openSync !== 'function' || typeof fsImpl.fsyncSync !== 'function') return;
+  const directoryFd = fsImpl.openSync(path.dirname(filePath), fs.constants.O_RDONLY);
+  try {
+    fsImpl.fsyncSync(directoryFd);
+  } finally {
+    if (typeof fsImpl.closeSync === 'function') fsImpl.closeSync(directoryFd);
+  }
+}
+
+function forgetConfigFile(filePath, fsImpl) {
+  try {
+    // lstat, rather than stat, makes a symlink an explicit refusal. Do not
+    // attempt an unlink if the target is anything other than a regular file.
+    if (typeof fsImpl.lstatSync !== 'function' || typeof fsImpl.unlinkSync !== 'function') return false;
+    let stat;
+    try {
+      stat = fsImpl.lstatSync(filePath);
+    } catch (error) {
+      return error?.code === 'ENOENT';
+    }
+    if (stat.isSymbolicLink?.() || typeof stat.isFile !== 'function' || !stat.isFile()) return false;
+    fsImpl.unlinkSync(filePath);
+    fsyncConfigDirectory(filePath, fsImpl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Reading is deliberately tolerant: a corrupted or unknown version does not
 // get rewritten merely because the app launched.
 export function readConfig(userDataPath, { fsImpl = fs } = {}) {
@@ -291,8 +335,7 @@ export function writeConfig(userDataPath, patch, {
   randomBytes = crypto.randomBytes,
 } = {}) {
   const filePath = configPathFor(userDataPath);
-  const previous = writeQueues.get(filePath) || Promise.resolve();
-  const write = previous.catch(() => undefined).then(async () => {
+  return enqueueConfigMutation(filePath, async () => {
     const loaded = readConfig(userDataPath, { fsImpl });
     if (loaded.state === 'unreadable') return { ok: false, code: 'STATE_UNREADABLE' };
     const merged = mergePatch(loaded.config, patch);
@@ -316,9 +359,18 @@ export function writeConfig(userDataPath, patch, {
       return { ok: false, code: 'STATE_UNREADABLE' };
     }
   });
-  const settled = write.finally(() => {
-    if (writeQueues.get(filePath) === settled) writeQueues.delete(filePath);
-  });
-  writeQueues.set(filePath, settled);
-  return settled;
+}
+
+/**
+ * Remove only the user-approved setup config. This intentionally does not
+ * touch tunnel state, OAuth state, ledgers, lanes, or the containing directory.
+ */
+export function forgetConfig(userDataPath, { fsImpl = fs } = {}) {
+  let filePath;
+  try {
+    filePath = configPathFor(userDataPath);
+  } catch {
+    return Promise.resolve(false);
+  }
+  return enqueueConfigMutation(filePath, () => forgetConfigFile(filePath, fsImpl));
 }
