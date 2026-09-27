@@ -90,3 +90,22 @@ Adversarial review covered body-read ordering, Host/Origin/fetch-metadata policy
 | G8 | The B8 conformance runner does not exist yet; the complete in-process wire table passed as the plan's stated equivalent. |
 | G9 | Green. Frozen files and `package-lock.json` were untouched. |
 | G10 | Green after adversarial transport/listener review; no untrusted free text reaches a log or error response. |
+
+## B2 — OAuth authorization server (2026-09-27)
+
+Implemented and merged directly on local `main` in commit `031408f` (`feat: add hardened ChatGPT bridge OAuth server`). The reviewed lab server is split across the import-restricted core, page renderer, guarded metadata/JWKS fetcher, synchronous hash-only store and RS256 client-assertion verifier. Production has no DCR or static-secret client, uses one armed pairing window and one active grant, and enforces the 3-day idle / 14-day absolute refresh lifetimes.
+
+The registered suite preserves the original lab step names and order while explicitly marking the Phase 1 changes, then adds the hardening and `private_key_jwt` battery. Adversarial review covered assertion-before-token-lookup ordering, algorithm confusion, DNS/redirect/body guards, refresh reuse, persistence failure, pairing exhaustion, fixed errors and sentinel leakage.
+
+| Gate | Result |
+|---|---|
+| G0 | Green. The diff is exactly the five B2 modules and `handoff-bridge-oauth.js`; no ignored or out-of-allow-list path. |
+| G1 | Green, 0 failed. The OAuth group and required baseline comparison passed. |
+| G2 | Green. `npm test` passed. |
+| G3 | Green. `npm run lint` and the final targeted ESLint run passed. |
+| G4 | Green. `npm run build:compile` passed. |
+| G7 | Green under CI's Node 22 through the `act` command recorded above. |
+| G9 | Green. Frozen files and `package-lock.json` were untouched. |
+| G10 | Green after review of `oauth.js`, `oauthPages.js`, `cimd.js`, `oauthStore.js` and `clientAuth.js`; no credential or remote error text crosses the boundary. |
+
+The unchanged lab rows passed the local oracle comparison; rows intentionally changed by the Phase 1 decisions were excluded exactly as specified.
