@@ -119,8 +119,8 @@ export default [{
         assert(isSyntheticPhone(phone), `${path.basename(file)} contains a non-synthetic phone`);
       }
       const relative = path.relative(repoRoot, file);
-      const checked = spawnSync('git', ['check-ignore', '-q', '--', relative], { cwd: repoRoot, encoding: 'utf8' });
-      assert(checked.status === 1, `${relative} is ignored and would disappear from CI`);
+      const checked = spawnSync('git', ['ls-files', '--error-unmatch', '--', relative], { cwd: repoRoot, encoding: 'utf8' });
+      assert(checked.status === 0, 'A handoff bridge fixture is not tracked and would disappear from CI.');
     }
   },
 }, {
