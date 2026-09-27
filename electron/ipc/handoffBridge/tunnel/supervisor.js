@@ -8,6 +8,7 @@ import { reapOrphans, signalGroup } from './reap.js';
 import { chooseMetricsPort, probeReady, publicProbe } from './probe.js';
 import { classifyExit } from './classify.js';
 import { createLogRing, createRotatingLog } from './logRing.js';
+import { redactLine } from './redact.js';
 
 const PERMANENT = new Set(['flag-rejected', 'credentials-invalid', 'tunnel-auth-rejected', 'hostname-not-public', 'binary-changed', 'binary-untrusted']);
 function safeUnlink(fsImpl, target) { try { fsImpl?.unlinkSync?.(target); } catch { /* a stale intent is harmless */ } }
@@ -28,6 +29,19 @@ export function createTunnelSupervisor(options = {}) {
   const notices = new Set();
 
   const status = () => Object.freeze({ state, metricsPort, restarts: crashTimes.length, lastExit, notices: Object.freeze([...notices]) });
+  // This is a diagnostic view, not a file reader.  The ring is populated
+  // before the supervisor exposes it, and a second redaction pass means an
+  // injected/spawn implementation cannot make a raw line observable later.
+  const getLog = ({ limit = 100 } = {}) => {
+    const count = Number.isInteger(limit) ? Math.max(0, Math.min(limit, 100)) : 100;
+    let lines = [];
+    try { lines = log.values?.() || []; } catch { return Object.freeze([]); }
+    return Object.freeze(lines.slice(-count).map(line => redactLine(line, {
+      home: options.HOME,
+      userData: options.userData,
+      hostname: options.hostname,
+    })).map(line => String(line).slice(0, 1024)));
+  };
   const result = (ok, code = null, extra = {}) => Object.freeze({ ok, ...(code ? { code } : {}), ...extra, status: status() });
   const audit = (event, detail = {}) => { try { options.audit?.({ event, ...detail }); } catch { /* audit must not destabilize the tunnel */ } };
   const alarm = code => { try { options.alarm?.(code); } catch { /* best effort */ } };
@@ -269,5 +283,5 @@ export function createTunnelSupervisor(options = {}) {
     if (now() - lastManualRestartAt < 5000) return Promise.resolve(result(false, 'busy'));
     lastManualRestartAt = now(); generation++; clearAllTimers(); return enqueue(async () => { const stopped = await stopInternal('restart'); return stopped.ok ? startInternal() : stopped; });
   };
-  return Object.freeze({ start, stop, pause, resume, restart, dispose: stop, status, probe: () => enqueue(async () => { const token = generation; await runReadyProbe(token); await runPublicProbe(token); return { status: status() }; }) });
+  return Object.freeze({ start, stop, pause, resume, restart, dispose: stop, status, getLog, probe: () => enqueue(async () => { const token = generation; await runReadyProbe(token); await runPublicProbe(token); return { status: status() }; }) });
 }
