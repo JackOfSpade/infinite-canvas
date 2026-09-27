@@ -4,6 +4,7 @@ import path from 'node:path';
 import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
+import { createHandoffBridgePower } from '../../electron/ipc/handoffBridge/power.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
 import { createAuditSink, makeAuditLine, SECURITY_AUDIT_EVENTS } from '../../electron/ipc/handoffBridge/audit.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
@@ -233,7 +234,31 @@ const tests = [
       const { engine, session } = await started();
       assert((await engine.get({ session: 'wrong', linkId: LINK })).status === 'unauthorized', 'live wrong key must be uniform unauthorized');
       assert((await engine.get({ session, linkId: 'other-link' })).status === 'unauthorized', 'same key under another link must fail');
-      assert(engine.snapshot().chat.state === 'active' && !JSON.stringify(engine.snapshot()).includes(session), 'snapshot must not contain chat key');
+      assert(engine.snapshot().chat.state === 'awaiting-first-call' && !JSON.stringify(engine.snapshot()).includes(session), 'snapshot must not contain chat key');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: status snapshot projects only the closed queue and chat vocabulary',
+    run: async () => {
+      const state = await served();
+      const snapshot = state.engine.snapshot();
+      const job = snapshot.queue.jobs[0];
+      assert(job.jobId === JOB_A && job.phase === 'awaiting' && job.stage === 'resume' && job.servedToChat === 1 && Number.isSafeInteger(job.changedAt), 'controller status needs safe canonical lane facts');
+      assert(snapshot.chat.state === 'working' && snapshot.chat.calls === 1 && snapshot.chat.outstanding?.stage === 'resume' && snapshot.chat.outstanding?.kind === 'application', 'chat status must expose only closed observability fields');
+      const text = JSON.stringify(snapshot);
+      assert(!text.includes(state.session) && !text.includes(PATH_A) && !text.includes('HANDOFF-A') && !text.includes('Synthetic application prompt'), 'engine status must never expose secret or content-bearing lane fields');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: scoring status totals discovered hubs but counts only served work as with-chat',
+    run: () => {
+      const keyA = 'a'.repeat(64); const keyB = 'b'.repeat(64);
+      const engine = createHandoffEngine({
+        source: source().api,
+        sources: { application: source().api, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }), status: () => ({ served: 1, discovered: [{ key: keyA, pending: 2, tasks: [{ task: 'job-scoring', pending: 2 }] }, { key: keyB, pending: 3, tasks: [{ task: 'job-scoring', pending: 3 }] }] }) } },
+      });
+      const scoring = engine.snapshot().queue.scoring;
+      assert(scoring.pending === 5 && scoring.withChat === 1 && scoring.tasks[0]?.pending === 5, 'discovery and served counts must not be conflated');
     },
   },
   {
@@ -271,6 +296,80 @@ const tests = [
       const reply = await engine.submit({ session, linkId: LINK, handoffCode: result.handoffCode, response: answer({ code: result.handoffCode, stage: result.stage }) });
       assert(reply.status === 'accepted' && reply.jobComplete === true, 'completion acceptance must not invent next prompt');
       assert((await engine.get({ session, linkId: LINK })).status === 'waiting', 'host lane must not re-serve stale prompt');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: accepted completed submit notifies its owner once and contains callback throws',
+    run: async () => {
+      const changes = [];
+      const state = await served({ engineOptions: { onJobChanged: payload => { changes.push(payload); throw new Error('advisory callback failure'); } } });
+      const result = await state.engine.submit({
+        session: state.session,
+        linkId: LINK,
+        handoffCode: state.result.handoffCode,
+        response: answer({ code: state.result.handoffCode, stage: state.result.stage }),
+      });
+      assert(result.status === 'accepted' && result.jobComplete === true, 'callback failure must not change completed acceptance');
+      assert(changes.length === 1 && JSON.stringify(changes[0]) === JSON.stringify({ jobId: JOB_A, canvasFilePath: PATH_A }), 'completed bridge mutation must notify its owning UI once with the canonical job payload');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: accepted successor submit notifies its owner once after mutation',
+    run: async () => {
+      const changes = [];
+      const state = await served({
+        sourceOverrides: { submit: async () => ({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-NEXT', revision: 2 }) }) },
+        engineOptions: { onJobChanged: payload => changes.push(payload) },
+      });
+      const result = await state.engine.submit({
+        session: state.session,
+        linkId: LINK,
+        handoffCode: state.result.handoffCode,
+        response: answer({ code: state.result.handoffCode, stage: state.result.stage }),
+      });
+      assert(result.status === 'accepted' && result.jobComplete === false, 'successor acceptance must remain successful');
+      assert(changes.length === 1 && JSON.stringify(changes[0]) === JSON.stringify({ jobId: JOB_A, canvasFilePath: PATH_A }), 'successor bridge mutation must notify its owning UI once with the canonical job payload');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: observations, rejection, errors, held lanes, and human advance never notify owners',
+    run: async () => {
+      const observed = [];
+      const observation = await started({
+        sourceOverrides: { read: async () => ({ kind: 'host' }), status: async () => ({ kind: 'host' }) },
+        engineOptions: { onJobChanged: payload => observed.push(payload) },
+      });
+      await observation.engine.get({ session: observation.session, linkId: LINK });
+      observation.clock.advance(CONSTANTS.HOST_POLL_MS);
+      await observation.engine.get({ session: observation.session, linkId: LINK });
+      assert(observed.length === 0, 'source reads and host status observations must not notify an owner');
+
+      const rejectedChanges = [];
+      const rejected = await served({
+        sourceOverrides: { submit: async () => ({ kind: 'rejected', handoff: handoff(), validationErrors: ['synthetic invalid'] }) },
+        engineOptions: { onJobChanged: payload => rejectedChanges.push(payload) },
+      });
+      await rejected.engine.submit({ session: rejected.session, linkId: LINK, handoffCode: rejected.result.handoffCode, response: answer({ code: rejected.result.handoffCode, stage: rejected.result.stage }) });
+      assert(rejectedChanges.length === 0, 'rejected submits must not notify an owner');
+
+      const erroredChanges = [];
+      const errored = await served({
+        sourceOverrides: { submit: async () => ({ kind: 'threw', code: 'LOCAL_AI_JOB_INTEGRITY' }) },
+        engineOptions: { onJobChanged: payload => erroredChanges.push(payload) },
+      });
+      await errored.engine.submit({ session: errored.session, linkId: LINK, handoffCode: errored.result.handoffCode, response: answer({ code: errored.result.handoffCode, stage: errored.result.stage }) });
+      await errored.engine.hold(JOB_A);
+      assert(erroredChanges.length === 0, 'error and held transitions must not notify an owner');
+
+      const humanChanges = [];
+      let reads = 0;
+      const humanAdvance = await served({
+        sourceOverrides: { read: async () => ({ kind: 'open', handoff: handoff({ code: ++reads === 1 ? 'HANDOFF-A' : 'HUMAN-NEW' }) }) },
+        engineOptions: { onJobChanged: payload => humanChanges.push(payload) },
+      });
+      humanAdvance.engine.hint({ jobId: JOB_A });
+      await humanAdvance.engine.get({ session: humanAdvance.session, linkId: LINK });
+      assert(humanChanges.length === 0, 'human advance holds must not notify an owner');
     },
   },
   {
@@ -419,6 +518,57 @@ const tests = [
       assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_A, canvasFilePath: PATH_A }] })).count === 1, 'duplicate release must collapse');
       const jobs = Array.from({ length: 9 }, (_, index) => { const digit = (index + 3).toString(16); return { jobId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`, canvasFilePath: `/tmp/${index}.canvas` }; });
       assert((await engine.release({ jobs })).ok && (await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).code === 'lane_limit', 'ten live lanes is hard cap');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: power resume aborts a held get and refreshes stale awaiting state',
+    run: async () => {
+      const clock = createFakeClock();
+      const state = await started({ clock, engineOptions: { holdMs: 10_000, limits: { jobsPerChat: 1 } } });
+      await state.engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const first = await state.engine.get({ session: state.session, linkId: LINK });
+      const initialPower = state.engine.powerState();
+      assert(initialPower.awaiting === true && initialPower.hostCanvasPaths.length === 0 && Number.isFinite(initialPower.lastCallAt)
+        && JSON.stringify(Object.keys(initialPower).sort()) === JSON.stringify(['awaiting', 'hostCanvasPaths', 'lastCallAt']),
+      'private power state must expose awaiting work without leaking lane metadata');
+      await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      state.engine.hint({ jobId: JOB_B }); clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
+      const held = state.engine.get({ session: state.session, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(state.engine.debugState().waiters === 1, 'second poll must be held before resume');
+      assert(state.engine.onPowerResume(), 'resume fence must be accepted');
+      const result = await held;
+      assert(result.status === 'retry' && state.fake.calls.read === 2, 'pre-resume held get must wake retry without continuing source work');
+      const lanes = state.engine.snapshot().queue.jobs;
+      assert(lanes.some(lane => lane.jobId === JOB_B && lane.phase === 'awaiting'), 'resume must preserve the awaiting lane rather than serve stale work');
+      const refreshed = state.engine.get({ session: state.session, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve)); clock.advance(10_000);
+      assert((await refreshed).status === 'waiting' && state.fake.calls.read === 3, 'next get must refresh the invalidated awaiting lane');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: power hooks stay active with keep-awake disabled and contain callbacks',
+    run: () => {
+      const listeners = new Map(); const removed = []; const calls = []; const callbackArgs = [];
+      const monitor = {
+        on(event, callback) { listeners.set(event, callback); },
+        removeListener(event, callback) { removed.push([event, callback]); },
+      };
+      const power = createHandoffBridgePower({
+        enabled: false,
+        now: () => 123,
+        powerMonitor: monitor,
+        powerSaveBlocker: { start: () => calls.push('start'), stop: () => calls.push('stop') },
+        getCanvasWindows: () => [{ webContents: { id: 7, setBackgroundThrottling: value => calls.push(value) } }],
+        onSuspend: (...args) => callbackArgs.push(args),
+        onResume: () => { throw new Error('synthetic callback'); },
+      });
+      assert(listeners.has('suspend') && listeners.has('resume'), 'lifecycle hooks must attach even while keep-awake is disabled');
+      listeners.get('suspend')(); listeners.get('resume')();
+      assert(callbackArgs.length === 1 && callbackArgs[0].length === 0, 'suspend timestamp must remain internal');
+      assert(power.update({ hostLane: true, recentChat: true, hostWindowIds: [7] }) === false && calls.length === 0, 'false keep-awake must not touch blocker or throttling ports');
+      power.dispose();
+      assert(removed.length === 2 && removed.every(([event, callback]) => listeners.get(event) === callback), 'dispose must remove both lifecycle listeners');
     },
   },
   {

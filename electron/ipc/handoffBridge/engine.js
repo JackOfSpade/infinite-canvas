@@ -31,6 +31,18 @@ import {
 } from './framing.js';
 
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const STATUS_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+const STATUS_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
+const STATUS_REASONS = new Set([
+  'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
+  'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
+  'submit_stuck', 'host_silent', 'lapsed', 'restart',
+]);
+
+function statusStage(value) { return STATUS_STAGES.has(value) ? value : null; }
+function statusPhase(value) { return STATUS_PHASES.has(value) ? value : 'unread'; }
+function statusReason(value) { return STATUS_REASONS.has(value) ? value : null; }
+function statusTime(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
 
 function sha256(value) {
   return createHash('sha256').update(value).digest();
@@ -125,6 +137,7 @@ export function createHandoffEngine({
   timers = globalThis,
   limits: initialLimits,
   confirmRestart = async () => true,
+  onJobChanged = () => undefined,
   onServeAfterIdle = () => undefined,
   holdMs = CONSTANTS.GET_HOLD_MS,
   readWatchdogMs = CONSTANTS.LANE_READ_WATCHDOG_MS,
@@ -161,6 +174,9 @@ export function createHandoffEngine({
   let lastIdleNoticeAt = 0;
   let fault = null;
   let lastGetAt = null;
+  // A power resume fences work that began before sleep.  The marker is
+  // composition-private: status and the renderer never learn power details.
+  let powerResumeGeneration = 0;
   const counts = {
     getServed: 0, getWaiting: 0, getEmpty: 0, getPaused: 0, getUnauthorized: 0,
     submitAccepted: 0, submitRejected: 0, submitDuplicate: 0, submitJunk: 0,
@@ -179,6 +195,11 @@ export function createHandoffEngine({
         : audit?.write?.({ event, fields, at: safeNow(now) });
       pending?.catch?.(() => undefined);
     } catch { /* audit failures are surfaced separately by its owner */ }
+  }
+
+  function notifyJobChanged(lane) {
+    if (!lane || !JOB_ID_RE.test(lane.jobId) || !isAbsoluteCanvasPath(lane.canvasFilePath)) return;
+    try { onJobChanged({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }); } catch { /* renderer notification is advisory */ }
   }
 
   async function persistLanes() {
@@ -247,7 +268,7 @@ export function createHandoffEngine({
     const retiringPushEpoch = pushEpochId(epoch);
     try { push?.closeEpoch?.(retiringPushEpoch); } catch { /* push state is disposable */ }
     for (const [key, value] of pushVerdicts) if (value.epochId === retiringPushEpoch) pushVerdicts.delete(key);
-    retiredEpochs.push({ hash: epoch.keyHash, linkId: epoch.linkId, endedAt: safeNow(now), reason });
+    retiredEpochs.push({ n: epoch.n, hash: epoch.keyHash, linkId: epoch.linkId, endedAt: safeNow(now), reason });
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
     auditEvent('epoch_closed', { reason });
     epoch = null;
@@ -389,11 +410,14 @@ export function createHandoffEngine({
   }
 
   async function readLane(lane, { recoveryStage = null } = {}) {
+    const resumeGeneration = powerResumeGeneration;
     const promise = startLaneCall(
       lane,
       'read',
       () => application.read({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
-      result => applyReadResult(lane, result, { recoveryStage }),
+      result => resumeGeneration === powerResumeGeneration
+        ? applyReadResult(lane, result, { recoveryStage })
+        : { kind: 'retry' },
     );
     return raceLaneCall(lane, 'read', promise);
   }
@@ -419,11 +443,14 @@ export function createHandoffEngine({
   }
 
   async function statusLane(lane, { readAfterAwaiting = true } = {}) {
+    const resumeGeneration = powerResumeGeneration;
     const promise = startLaneCall(
       lane,
       'status',
       () => application.status({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath }),
-      result => applyStatusResult(lane, result, { readAfterAwaiting }),
+      result => resumeGeneration === powerResumeGeneration
+        ? applyStatusResult(lane, result, { readAfterAwaiting })
+        : { kind: 'retry' },
     );
     return raceLaneCall(lane, 'status', promise);
   }
@@ -437,21 +464,21 @@ export function createHandoffEngine({
 
   function chooseApplicationContinuation() {
     if (!epoch) return null;
-    const focus = lanes.find(lane => lane.ord === epoch.focusLaneOrd && lane.phase === 'awaiting' && canAssign(lane));
+    const focus = lanes.find(lane => lane.ord === epoch.focusLaneOrd && lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane));
     if (focus) return focus;
-    const outstanding = lanes.find(lane => lane.phase === 'awaiting' && lane.servedAt != null && canAssign(lane));
+    const outstanding = lanes.find(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.servedAt != null && canAssign(lane));
     if (outstanding) return outstanding;
     // A correction is an application continuation even after a chat rotation;
     // it must never be displaced by an unrelated scoring handoff.
     return [...lanes]
-      .filter(lane => lane.phase === 'awaiting' && lane.current?.corrections?.length && canAssign(lane))
+      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.current?.corrections?.length && canAssign(lane))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
   }
 
   function chooseFreshApplication() {
     if (!epoch) return null;
     return [...lanes]
-      .filter(lane => lane.phase === 'awaiting' && canAssign(lane))
+      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
   }
 
@@ -571,23 +598,35 @@ export function createHandoffEngine({
       return blocked;
     }
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
+    const callAt = safeNow(now);
+    epoch.calls += 1;
+    epoch.firstCallAt ??= callAt;
+    epoch.lastCallAt = callAt;
+    epoch.lastCallKind = 'get';
     if (epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes) return makeResultBody('session_full');
     const stamp = safeNow(now);
     if (lastGetAt != null && stamp - lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) epoch.consecutiveWaits = 0;
     lastGetAt = stamp;
+    const resumeGeneration = powerResumeGeneration;
+    const resumedDuringGet = () => resumeGeneration !== powerResumeGeneration;
 
-    if (lanes.some(item => item.needsRefresh === true)) await refreshOneLane();
+    if (lanes.some(item => item.needsRefresh === true)) {
+      const refreshed = await refreshOneLane();
+      if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
+    }
     let lane = chooseApplicationContinuation();
     if (lane) return serveLane(lane);
 
     // Scoring handoffs are preferred only at application job boundaries. A
     // focused, outstanding, or correction application lane has already won.
     let pushDecision = await readPush();
+    if (resumedDuringGet()) return makeResultBody('retry');
     if (pushDecision?.status === 'served') return framePushGet(pushDecision);
 
     // A lazy read can reveal a correction or a newly-open continuation after
     // the push poll; give it another chance before starting fresh work.
-    await refreshOneLane();
+    const refreshed = await refreshOneLane();
+    if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     lane = chooseApplicationContinuation();
     if (lane) return serveLane(lane);
     lane = chooseFreshApplication();
@@ -595,21 +634,24 @@ export function createHandoffEngine({
 
     const pushWorking = pushDecision?.status === 'waiting';
     const pushNeedsUser = pushDecision?.status === 'needs_user';
-    const working = pushWorking || lanes.some(item => ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+    const working = pushWorking || lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
     if (working) {
       await waitForWake(holdMs);
-      await refreshOneLane();
+      if (resumedDuringGet()) return makeResultBody('retry');
+      const refreshedAfterWait = await refreshOneLane();
+      if (resumedDuringGet() || refreshedAfterWait?.kind === 'retry') return makeResultBody('retry');
       lane = chooseApplicationContinuation();
       if (lane) return serveLane(lane);
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
       // fresh application lane.
       pushDecision = await readPush();
+      if (resumedDuringGet()) return makeResultBody('retry');
       if (pushDecision?.status === 'served') return framePushGet(pushDecision);
       lane = chooseFreshApplication();
       if (lane) return serveLane(lane);
       const stillWorking = pushDecision?.status === 'waiting'
-        || lanes.some(item => ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+        || lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit);
       if (!stillWorking) {
         if (lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
           counts.getPaused++;
@@ -718,6 +760,7 @@ export function createHandoffEngine({
         lane.phase = 'host';
         lane.hostSince = stamp;
         lane.current = null;
+        notifyJobChanged(lane);
         await persistLanes();
         wake();
         return makeResultBody('accepted', { jobComplete: true, next: null });
@@ -727,6 +770,7 @@ export function createHandoffEngine({
         await persistCap(lane, 'write_failed');
         return makeResultBody('needs_user', { reason: 'write_failed' });
       }
+      notifyJobChanged(lane);
       if (priorStage === 'review' && lane.current.stage === 'review') lane.counters.revisedRounds++;
       if (lane.counters.revisedRounds >= CONSTANTS.APPLICATION_MAX_REVISED_ROUNDS) {
         await persistCap(lane, 'review_round_cap');
@@ -900,6 +944,11 @@ export function createHandoffEngine({
     const blocked = gate(args);
     if (blocked) return blocked;
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
+    const callAt = safeNow(now);
+    epoch.calls += 1;
+    epoch.firstCallAt ??= callAt;
+    epoch.lastCallAt = callAt;
+    epoch.lastCallKind = 'submit';
     const normalized = stringifySubmission(args.response);
     if (!normalized.ok) {
       counts.submitJunk++;
@@ -1021,6 +1070,10 @@ export function createHandoffEngine({
       bytesReceived: 0,
       lastGetAt: null,
       lastSubmitAt: null,
+      firstCallAt: null,
+      lastCallAt: null,
+      lastCallKind: null,
+      calls: 0,
       consecutiveWaits: 0,
       focusLaneOrd: null,
       servedPrompt: new Map(),
@@ -1227,6 +1280,44 @@ export function createHandoffEngine({
     try {
       if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
     } catch { /* status is advisory and must never break the control plane */ }
+    const outstandingLane = lanes.find(lane => lane.phase === 'awaiting' && lane.servedAt != null);
+    const applications = {
+      ready: lanes.filter(lane => lane.phase === 'awaiting').length,
+      working: lanes.filter(lane => ['unread', 'host'].includes(lane.phase)).length,
+      needsYou: lanes.filter(lane => ['held', 'needs_user'].includes(lane.phase)).length,
+      held: lanes.filter(lane => lane.phase === 'held').length,
+      done: lanes.filter(lane => ['done', 'gone'].includes(lane.phase)).length,
+    };
+    const safeSelectedHubs = Array.isArray(pushState.selectedHubs)
+      ? pushState.selectedHubs.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)).slice(0, 50)
+      : [];
+    const pushDiscovered = Array.isArray(pushState.discovered) ? pushState.discovered : [];
+    const pushTasks = new Map();
+    const safeDiscoveredHubs = [];
+    let discoveredPending = 0;
+    for (const hub of pushDiscovered) {
+      if (typeof hub?.key !== 'string' || !/^[a-f0-9]{64}$/.test(hub.key) || safeDiscoveredHubs.length >= 50) continue;
+      const tasks = [];
+      for (const task of Array.isArray(hub?.tasks) ? hub.tasks : []) {
+        if (task?.task !== 'job-scoring') continue;
+        const pending = Number.isSafeInteger(task.pending) ? Math.max(0, task.pending) : 0;
+        tasks.push(Object.freeze({ task: task.task, pending }));
+        pushTasks.set(task.task, (pushTasks.get(task.task) || 0) + pending);
+      }
+      const excluded = {};
+      for (const reason of ['ending', 'settling', 'attachment', 'grounded', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing']) {
+        excluded[reason] = Number.isSafeInteger(hub?.excluded?.[reason]) ? Math.max(0, hub.excluded[reason]) : 0;
+      }
+      safeDiscoveredHubs.push(Object.freeze({
+        key: hub.key,
+        pending: Number.isSafeInteger(hub.pending) ? Math.max(0, hub.pending) : 0,
+        tasks: Object.freeze(tasks),
+        excluded: Object.freeze(excluded),
+      }));
+      discoveredPending += Number.isSafeInteger(hub.pending) ? Math.max(0, hub.pending) : 0;
+    }
+    const safePush = Object.freeze({ selectedHubs: Object.freeze(safeSelectedHubs), discovered: Object.freeze(safeDiscoveredHubs) });
+    const chatCalls = epoch?.calls ?? 0;
     return Object.freeze({
       paused,
       pauseCause,
@@ -1234,19 +1325,94 @@ export function createHandoffEngine({
       autoStart: autoStart === true,
       chat: Object.freeze({
         ordinal: epoch?.n ?? 0,
-        state: epoch ? 'active' : 'none',
+        startedAt: statusTime(epoch?.mintedAt),
+        firstCallAt: statusTime(epoch?.firstCallAt),
+        lastCallAt: statusTime(epoch?.lastCallAt),
+        lastCallKind: ['get', 'submit'].includes(epoch?.lastCallKind) ? epoch.lastCallKind : null,
+        calls: Number.isSafeInteger(chatCalls) ? chatCalls : 0,
+        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? 'awaiting-first-call' : 'working',
         jobsAssigned: epoch?.assignedLaneOrds.size ?? 0,
         jobsCap: limits.jobsPerChat,
         bytesServed: epoch?.bytesServed ?? 0,
         bytesReceived: epoch?.bytesReceived ?? 0,
+        outstanding: outstandingLane ? Object.freeze({
+          servedAt: statusTime(outstandingLane.servedAt),
+          kind: 'application',
+          stage: statusStage(outstandingLane.current?.stage),
+          task: null,
+          stalled: false,
+          stalledSince: null,
+          stallsLastHour: 0,
+        }) : null,
+        servedTwice: Boolean(outstandingLane?.serves > 1),
+        previous: Object.freeze(retiredEpochs.slice(-5).map(item => Object.freeze({
+          ordinal: Number.isInteger(item.n) && item.n > 0 ? item.n : 0,
+          endedAt: statusTime(item.endedAt),
+          reason: item.reason === 'continued' || item.reason === 'rotated'
+            ? 'replaced'
+            : item.reason === 'drained'
+              ? 'queue_empty'
+              : 'disabled',
+        }))),
       }),
-      queue: Object.freeze({ ...queue, push: Object.freeze(pushState), jobs: lanes.map(lane => Object.freeze({ ord: lane.ord, phase: lane.phase, reason: lane.reason })) }),
+      queue: Object.freeze({
+        ...queue,
+        applications: Object.freeze(applications),
+        scoring: Object.freeze({
+          pending: discoveredPending,
+          withChat: Number.isSafeInteger(pushState.served) ? Math.max(0, pushState.served) : 0,
+          tasks: Object.freeze([...pushTasks].map(([task, pending]) => Object.freeze({ task, pending }))),
+        }),
+        push: safePush,
+        jobs: Object.freeze(lanes.map(lane => Object.freeze({
+          jobId: JOB_ID_RE.test(lane.jobId) ? lane.jobId : null,
+          phase: statusPhase(lane.phase),
+          stage: statusStage(lane.current?.stage),
+          reason: statusReason(lane.reason),
+          servedToChat: epoch?.assignedLaneOrds.has(lane.ord) ? epoch.n : null,
+          changedAt: statusTime(lane.changedAt ?? lane.releasedAt),
+        }))),
+      }),
+      push: safePush,
       counts: Object.freeze({ ...counts }),
     });
   }
 
   function debugState() {
     return Object.freeze({ submitActive: semaphore.active(), submitWaiting: semaphore.waiting(), waiters: waiters.size });
+  }
+
+  // Main-process-only confirmation port. This deliberately never appears in
+  // snapshot/status: canvas paths are private source material, not bridge UI.
+  function restartJobs(ords = []) {
+    const requested = new Set(Array.isArray(ords) ? ords.filter(value => Number.isInteger(value) && value > 0) : []);
+    // Enable confirmation asks with no explicit ords; that safely means every
+    // restored/released lane, while malformed non-array input means none.
+    const include = Array.isArray(ords) && requested.size === 0 ? () => true : lane => requested.has(lane.ord);
+    return Object.freeze(lanes.filter(lane => include(lane) && JOB_ID_RE.test(lane.jobId) && isAbsoluteCanvasPath(lane.canvasFilePath))
+      .map(lane => Object.freeze({ ord: lane.ord, jobId: lane.jobId, canvasFilePath: lane.canvasFilePath })));
+  }
+
+  // Another private composition port for the optional power policy. It exposes
+  // only path membership and time, never into status or an IPC reply.
+  function powerState() {
+    return Object.freeze({
+      hostCanvasPaths: Object.freeze(lanes.filter(lane => lane.phase === 'host' && isAbsoluteCanvasPath(lane.canvasFilePath)).map(lane => lane.canvasFilePath)),
+      // Awaiting work keeps the Mac awake too, but has no renderer throttle
+      // override.  This remains a private boolean rather than a status field.
+      awaiting: lanes.some(lane => lane.phase === 'awaiting'),
+      lastCallAt: statusTime(epoch?.lastCallAt),
+    });
+  }
+
+  function onPowerResume() {
+    powerResumeGeneration += 1;
+    for (const lane of lanes) {
+      lane.snapshot = null;
+      if (lane.phase === 'awaiting') lane.needsRefresh = true;
+    }
+    wake();
+    return true;
   }
 
   function setLimits(next) {
@@ -1256,6 +1422,18 @@ export function createHandoffEngine({
 
   function selectPushHub(value) {
     try { return push?.selectHub?.(value) === true; } catch { return false; }
+  }
+
+  function selectPushHubKey(value) {
+    try { return push?.selectHubKey?.(value) === true; } catch { return false; }
+  }
+
+  function unselectPushHubKey(value) {
+    try { return push?.unselectHubKey?.(value) === true; } catch { return false; }
+  }
+
+  async function refreshPushHubs() {
+    try { return await push?.refreshHubs?.() === true; } catch { return false; }
   }
 
   function clearPushHubs(value) {
@@ -1294,8 +1472,14 @@ export function createHandoffEngine({
     snapshot,
     status: snapshot,
     debugState,
+    restartJobs,
+    powerState,
+    onPowerResume,
     setLimits,
     selectPushHub,
+    selectPushHubKey,
+    unselectPushHubKey,
+    refreshPushHubs,
     clearPushHubs,
     prunePushHubs,
     close,
