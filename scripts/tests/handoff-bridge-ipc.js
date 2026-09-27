@@ -240,12 +240,14 @@ export default [
     assert(confirmed.success && forwarded === pin,
       'approval forwards only the main-derived confirmed pin, never renderer payload data');
   } },
-  { name: 'handoff bridge: ipc: setup invalidation follows only acknowledged approval or credentials mutations', async run() {
+  { name: 'handoff bridge: ipc: setup refresh follows each acknowledged durable setup mutation', async run() {
     const invalidations = [];
     const h = setup({ onSetupMutation: async kind => { invalidations.push(kind); return { success: true }; } });
-    assert((await invoke(h, IPC_CHANNELS.CHOOSE_BINARY)).success && invalidations.length === 0, 'choosing an unapproved binary leaves a composed graph intact');
-    assert((await invoke(h, IPC_CHANNELS.APPROVE_BINARY)).success && JSON.stringify(invalidations) === JSON.stringify(['approveBinary']), 'approval invalidates only after the adapter acknowledges durable trust');
-    assert((await invoke(h, IPC_CHANNELS.CHOOSE_CREDENTIALS)).success && JSON.stringify(invalidations) === JSON.stringify(['approveBinary', 'chooseCredentials']), 'credentials invalidate only after their acknowledged mutation');
+    assert((await invoke(h, IPC_CHANNELS.CHOOSE_BINARY)).success && JSON.stringify(invalidations) === JSON.stringify(['chooseBinary']), 'choosing a durable binary refreshes the off-state only after the adapter acknowledges it');
+    assert((await invoke(h, IPC_CHANNELS.APPROVE_BINARY)).success && JSON.stringify(invalidations) === JSON.stringify(['chooseBinary', 'approveBinary']), 'approval follows the selected binary refresh only after the adapter acknowledges durable trust');
+    assert((await invoke(h, IPC_CHANNELS.CHOOSE_CREDENTIALS)).success && JSON.stringify(invalidations) === JSON.stringify(['chooseBinary', 'approveBinary', 'chooseCredentials']), 'credentials follow their acknowledged durable mutation');
+    const failedBinary = setup({ tunnel: { chooseBinary: async () => ({ ok: false, code: 'INVALID' }) }, onSetupMutation: async () => { invalidations.push('bad-binary'); return { success: true }; } });
+    assert((await invoke(failedBinary, IPC_CHANNELS.CHOOSE_BINARY)).success === false && !invalidations.includes('bad-binary'), 'a failed binary selection never refreshes or detaches a graph speculatively');
     const failed = setup({ tunnel: { approveBinary: async () => ({ ok: false, code: 'NOT_READY' }) }, onSetupMutation: async () => { invalidations.push('bad'); return { success: true }; } });
     assert((await invoke(failed, IPC_CHANNELS.APPROVE_BINARY)).success === false && !invalidations.includes('bad'), 'failed approval never detaches a graph speculatively');
     const detachedFailure = setup({ onSetupMutation: async () => ({ ok: false }) });
@@ -419,6 +421,9 @@ export default [
       ['save config', IPC_CHANNELS.SAVE_CONFIG, { patch: { scope: { scoring: true } } }, gate => ({
         store: { writeConfig: () => gate.promise },
         controller: { reloadConfig: async () => ({ success: true }) },
+      })],
+      ['choose binary', IPC_CHANNELS.CHOOSE_BINARY, undefined, gate => ({
+        tunnel: { chooseBinary: () => gate.promise }, onSetupMutation: async () => ({ ok: true }),
       })],
       ['approve binary', IPC_CHANNELS.APPROVE_BINARY, undefined, gate => ({
         tunnel: { approveBinary: () => gate.promise }, onSetupMutation: async () => ({ ok: true }),

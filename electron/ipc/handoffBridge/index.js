@@ -359,8 +359,18 @@ function bootstrapSnapshot(context = bootstrapContext) {
   snapshot.limits = configured.limits;
   snapshot.prefs = configured.prefs;
   snapshot.setup.hostnameOk = Boolean(configured.hostname);
-  snapshot.setup.binaryApproved = !configUnreadable && (setup?.binaryTrusted === true || (typeof setup?.binaryPath === 'string' && /^[a-f0-9]{64}$/.test(setup?.pin || '') && Number.isFinite(setup?.approvedAt)));
+  const binarySelected = !configUnreadable
+    && typeof setup?.binaryPath === 'string'
+    && /^[a-f0-9]{64}$/.test(setup?.pin || '');
+  snapshot.setup.binaryApproved = binarySelected
+    && (setup?.binaryTrusted === true || Number.isFinite(setup?.approvedAt));
   snapshot.setup.credentialsOk = !configUnreadable && typeof setup?.credentialsPath === 'string' && path.isAbsolute(setup.credentialsPath);
+  // The off-state view deliberately never carries a path, a version, or a
+  // hash prefix. It can still distinguish a selected-but-unapproved copy
+  // from no copy at all through this closed, redacted binary shape.
+  snapshot.tunnel.binary = binarySelected
+    ? { path: null, version: null, sha256Prefix: null, approved: snapshot.setup.binaryApproved }
+    : null;
   snapshot.setup.tunnelReachable = false;
   snapshot.setup.linked = false;
   snapshot.setup.toolsListed = false;

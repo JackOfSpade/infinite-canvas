@@ -390,7 +390,12 @@ export function registerHandoffBridgeUi({
       if (!window) return fixed('NO_WINDOW'); const picked = await dialogs.choose?.(sender, 'binary');
       if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       if (!picked?.ok) return fixed(picked?.code || 'DECLINED'); const result = await safeCall(tunnel, 'chooseBinary', picked.filePath);
-      return acknowledged(result) ? success({ chosen: true }) : resultFailure(result, 'INVALID');
+      if (!acknowledged(result)) return resultFailure(result, 'INVALID');
+      // A selected replacement is deliberately unapproved. Detach any graph
+      // that captured the former executable before publishing that durable
+      // trust state, just as approval and credentials changes do.
+      if (!await invalidateAfterSetupMutation('chooseBinary')) return fixed('INTERNAL');
+      return success({ chosen: true });
     }),
     [IPC_CHANNELS.APPROVE_BINARY]: invoke(async ({ sender, window }) => {
       if (!window) return fixed('NO_WINDOW');

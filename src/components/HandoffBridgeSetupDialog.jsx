@@ -96,6 +96,14 @@ export function HandoffBridgeSetupDialog() {
   const tunnelPrerequisitesSaved = status.setup.hostnameOk
     && status.setup.binaryApproved
     && status.setup.credentialsOk;
+  const binaryApproved = status.setup.binaryApproved || status.tunnel.binary?.approved;
+  const binarySelected = binaryApproved || Boolean(status.tunnel.binary);
+  const binarySummary = status.tunnel.binary?.version
+    ? sanitizeBridgeLabel(status.tunnel.binary.version)
+    : binarySelected ? copy.binarySelected : copy.noBinary;
+  const credentialsSummary = status.tunnel.tunnelId
+    ? sanitizeBridgeLabel(status.tunnel.tunnelId)
+    : status.setup.credentialsOk ? copy.credentialsSelected : copy.noCredentials;
   const tunnelReady = status.enabled && status.setup.tunnelReachable;
   const enablePending = enabling
     && !status.enabled
@@ -251,8 +259,13 @@ export function HandoffBridgeSetupDialog() {
   const goToStep = target => {
     if (canAccessStep(target)) openBridgeSetup(target);
   };
-  const tunnelProgressMessage = !tunnelPrerequisitesSaved
-    ? copy.completeTunnelPrerequisites
+  const missingTunnelPrerequisites = [
+    !status.setup.binaryApproved && (binarySelected ? copy.approveBinaryFirst : copy.chooseAndApproveBinaryFirst),
+    !status.setup.credentialsOk && copy.chooseCredentialsFirst,
+    !status.setup.hostnameOk && copy.saveAddressFirst,
+  ].filter(Boolean);
+  const tunnelProgressMessage = missingTunnelPrerequisites.length > 0
+    ? missingTunnelPrerequisites.join(' ')
     : !status.enabled
       ? copy.turnOnBridgeFirst
       : !tunnelReady
@@ -267,8 +280,8 @@ export function HandoffBridgeSetupDialog() {
     <div className="space-y-3">
       <p>{copy.tunnelLead}</p>
       <div className="rounded bg-black/20 p-2 text-[11px]">
-        <p>{copy.binary}: {status.tunnel.binary?.version ? sanitizeBridgeLabel(status.tunnel.binary.version) : copy.noBinary} · {status.tunnel.binary?.approved ? copy.approved : copy.notApproved}</p>
-        <p>{copy.credentials}: {status.tunnel.tunnelId ? sanitizeBridgeLabel(status.tunnel.tunnelId) : copy.noCredentials}</p>
+        <p>{copy.binary}: {binarySummary}{binarySelected ? ` · ${binaryApproved ? copy.approved : copy.notApproved}` : ''}</p>
+        <p>{copy.credentials}: {credentialsSummary}</p>
         {status.tunnel.credentialsMode === 'too-open' && <p className="mt-1 text-amber-200">{copy.credentialsTooOpen}</p>}
         {status.tunnel.certPemPresent && <p className="mt-1 text-amber-200">{copy.certPresent}</p>}
       </div>

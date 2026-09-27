@@ -10,6 +10,7 @@ import { assert } from './testHelpers.js';
 import { runBackgroundE2EShutdownCleanup } from '../../electron/utils/backgroundE2e.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
+import { readTunnelState } from '../../electron/ipc/handoffBridge/tunnel/files.js';
 import {
   appendClosedHandoffAudit,
   composeHandoffBridge,
@@ -816,6 +817,108 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: inert: durable setup mutations republish the real off-state bootstrap facts',
+    async run() {
+      await stopHandoffBridge();
+      const originalLock = electronPkg.app.requestSingleInstanceLock;
+      electronPkg.app.requestSingleInstanceLock = () => false;
+      let createSetup;
+      try {
+        const mainUrl = new URL('../../electron/main.js', import.meta.url);
+        mainUrl.search = `?handoff-bridge-bootstrap-projection=${Date.now()}`;
+        ({ createHandoffBridgeTunnelSetup: createSetup } = await import(mainUrl.href));
+      } finally {
+        if (originalLock === undefined) delete electronPkg.app.requestSingleInstanceLock;
+        else electronPkg.app.requestSingleInstanceLock = originalLock;
+      }
+
+      const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-setup-projection-'));
+      const source = path.join(userData, 'source-cloudflared');
+      const copiedBinary = path.join(userData, 'handoff-bridge', 'tunnel', 'bin', 'cloudflared-deadbeef');
+      const credentials = path.join(userData, 'selected-tunnel.json');
+      const pin = 'd'.repeat(64);
+      const tunnelId = '550e8400-e29b-41d4-a716-446655440000';
+      const ipc = bridgeIpc(); const canvas = liveCanvas(110); const clock = bridgeClock();
+      let setup;
+      try {
+        // The setup adapter uses its production writeTunnelState default; only
+        // filesystem inspection/copying is replaced so this test stays local.
+        setup = createSetup(userData, {
+          prepareBinaryImpl: async () => ({ ok: true, copyPath: copiedBinary, sha256: pin, version: '2026.9.3' }),
+          inspectCredentialsImpl: value => ({ ok: true, credentialsPath: value, tunnelId, credentialsMode: '0600' }),
+          statSync: () => ({ size: 42 }),
+          codesignImpl: () => ({ verified: true, summary: 'ad-hoc signed' }),
+          now: () => 1,
+        });
+        assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+          env: {}, isPackaged: true, userData, getCanvasWindows: () => [canvas],
+          readConfig: () => ({ state: 'ok', config: READY_CONFIG }), readTunnelState,
+          tunnelSetup: setup, now: clock.now, timers: clock.timers,
+          dialogs: {
+            ask: async () => ({ ok: true }),
+            choose: async (_sender, kind) => ({ ok: true, filePath: kind === 'binary' ? source : credentials }),
+          },
+        } }), 'the production setup adapter registers through the off-state bridge composition');
+
+        const event = { sender: canvas.webContents };
+        const get = ipc.handlers.get(IPC_CHANNELS.GET_STATUS);
+        const baseline = await get(event);
+        assert(baseline.success && !baseline.status.enabled && !baseline.status.setup.binaryApproved && !baseline.status.setup.credentialsOk,
+          'the real tunnel parser projects an initially empty durable setup as incomplete');
+        const selected = await ipc.handlers.get(IPC_CHANNELS.CHOOSE_BINARY)(event);
+        clock.advance(clock.now() + 250);
+        const selectedStatus = await get(event);
+        const selectedWire = JSON.stringify(selectedStatus.status);
+        const selectedEvents = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).map(entry => entry.value);
+        assert(selected.success && !selectedStatus.status.enabled
+          && selectedStatus.status.seq > baseline.status.seq
+          && !selectedStatus.status.setup.binaryApproved && !selectedStatus.status.setup.credentialsOk
+          && selectedStatus.status.tunnel.binary?.approved === false,
+        'binary selection republishes a newer redacted off-state draft without treating it as approved');
+        assert(selectedEvents.some(value => value.seq === selectedStatus.status.seq
+          && value.tunnel.binary?.approved === false),
+        'the renderer status subscription receives the selected binary draft after batched IPC delivery');
+        assert(!selectedWire.includes(copiedBinary) && !selectedWire.includes(pin) && !selectedWire.includes(tunnelId),
+          'the selected bootstrap projection does not expose the binary path, pin, or tunnel identifier');
+
+        const approved = await ipc.handlers.get(IPC_CHANNELS.APPROVE_BINARY)(event);
+        clock.advance(clock.now() + 250);
+        const approvedStatus = await get(event);
+        const approvedWire = JSON.stringify(approvedStatus.status);
+        const approvedEvents = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).map(entry => entry.value);
+        assert(approved.success && !approvedStatus.status.enabled
+          && approvedStatus.status.seq > selectedStatus.status.seq
+          && approvedStatus.status.setup.binaryApproved && !approvedStatus.status.setup.credentialsOk,
+        'approval re-reads the production tunnel.json and publishes a newer off-state bootstrap projection');
+        assert(approvedEvents.some(value => value.seq === approvedStatus.status.seq
+          && value.setup.binaryApproved && !value.setup.credentialsOk),
+        'the renderer status subscription receives the approved bootstrap projection after batched IPC delivery');
+        assert(!approvedWire.includes(copiedBinary) && !approvedWire.includes(pin) && !approvedWire.includes(tunnelId),
+          'the approved bootstrap projection does not expose binary paths, pins, or tunnel identifiers');
+
+        const chosen = await ipc.handlers.get(IPC_CHANNELS.CHOOSE_CREDENTIALS)(event);
+        clock.advance(clock.now() + 250);
+        const credentialStatus = await get(event);
+        const credentialWire = JSON.stringify(credentialStatus.status);
+        const credentialEvents = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).map(entry => entry.value);
+        assert(chosen.success && !credentialStatus.status.enabled
+          && credentialStatus.status.seq > approvedStatus.status.seq
+          && credentialStatus.status.setup.binaryApproved && credentialStatus.status.setup.credentialsOk,
+        'credential selection re-reads the production tunnel.json and publishes both durable setup facts while off');
+        assert(credentialEvents.some(value => value.seq === credentialStatus.status.seq
+          && value.setup.binaryApproved && value.setup.credentialsOk),
+        'the renderer status subscription receives the credential-ready bootstrap projection after batched IPC delivery');
+        assert(!credentialWire.includes(copiedBinary) && !credentialWire.includes(credentials)
+          && !credentialWire.includes(pin) && !credentialWire.includes(tunnelId),
+        'the credential-ready bootstrap projection keeps all setup paths, pins, and tunnel identifiers private');
+      } finally {
+        await stopHandoffBridge();
+        await setup?.clearSession?.();
+        fs.rmSync(userData, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'handoff bridge: inert: off config saves advance public status and merge independent scope fields',
     async run() {
       await stopHandoffBridge();
@@ -1125,16 +1228,73 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: inert: binary selection fences a pending enable through the registered IPC route',
+    async run() {
+      await stopHandoffBridge();
+      const ipc = bridgeIpc(); const canvas = liveCanvas(73); const enableGate = deferred();
+      let composed = 0; let enables = 0; let disables = 0;
+      const setup = { ...READY_SETUP, pin: 'd'.repeat(64), approvedAt: 1 };
+      assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+        isPackaged: true, userData: SAFE_PATHS.userData, getCanvasWindows: () => [canvas],
+        readConfig: () => ({ state: 'ok', config: READY_CONFIG }), readTunnelState: () => setup,
+        tunnelSetup: { chooseBinary: async () => ({ ok: true }) },
+        dialogs: { choose: async () => ({ ok: true, filePath: '/tmp/replacement-cloudflared' }) },
+      } }), 'the pending-enable fixture registers the production setup mutation route');
+      const compose = () => {
+        composed += 1;
+        return {
+          controller: {
+            snapshot: () => liveStatus(), subscribe: () => () => undefined,
+            enable: async () => { enables += 1; return enableGate.promise; },
+            disable: async () => { disables += 1; return { success: true }; },
+          }, listener: {}, tunnel: {}, power: {}, tray: {},
+        };
+      };
+      const pendingStart = startHandoffBridge({ deps: completeStartDeps({
+        compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true,
+      }) });
+      await Promise.resolve(); await Promise.resolve();
+      assert(composed === 1 && enables === 1 && getHandoffBridgeStatus().enabled,
+        'the candidate is attached while its enable operation remains pending');
+
+      const selected = await ipc.handlers.get(IPC_CHANNELS.CHOOSE_BINARY)({ sender: canvas.webContents });
+      assert(selected.success && disables === 1 && !getHandoffBridgeStatus().enabled,
+        'an acknowledged replacement selection hard-detaches the pending candidate before it can serve');
+      enableGate.resolve({ success: true });
+      const stale = await pendingStart;
+      assert(stale.success === false && stale.code === 'not_enabled'
+        && composed === 1 && disables === 1 && !getHandoffBridgeStatus().enabled,
+      'a resolved stale enable is fenced, disposed once, and cannot revive the detached graph');
+      await stopHandoffBridge();
+    },
+  },
+  {
     name: 'handoff bridge: inert: hostname and acknowledged setup mutations hard-invalidate the captured graph',
     async run() {
       await stopHandoffBridge();
       const ipc = bridgeIpc(); const canvas = liveCanvas(72); const nextHostname = 'c-0123456789abcdef0123.lullascape.com';
       let persisted = { ...READY_CONFIG, scope: { applications: true, scoring: false }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } };
       let composed = 0; let disabled = 0; let reloads = 0;
-      const setup = { ...READY_SETUP, pin: 'c'.repeat(64), approvedAt: 1 };
+      let setup = { ...READY_SETUP, pin: 'c'.repeat(64), approvedAt: 1 };
+      const replacementPin = 'd'.repeat(64);
       const tunnelSetup = {
-        getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'c'.repeat(64) }),
-        approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), chooseBinary: async () => ({ ok: true }),
+        getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: setup.pin }),
+        approveBinary: async expectedPin => {
+          if (expectedPin !== setup.pin) return { ok: false, code: 'NOT_READY' };
+          setup = { ...setup, binaryTrusted: true, approvedAt: 2 };
+          return { ok: true };
+        },
+        chooseCredentials: async () => ({ ok: true }),
+        chooseBinary: async () => {
+          setup = {
+            ...setup,
+            binaryPath: `${TMP}/bin/replacement-cloudflared`,
+            pin: replacementPin,
+            approvedAt: null,
+            binaryTrusted: false,
+          };
+          return { ok: true };
+        },
       };
       assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
         isPackaged: true, userData: SAFE_PATHS.userData, getCanvasWindows: () => [canvas], tunnelSetup,
@@ -1157,9 +1317,23 @@ export default [
       const saved = await ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)(event, { patch: { hostname: nextHostname } });
       assert(saved.success && disabled === 1 && reloads === 0 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().config.hostname === nextHostname, 'hostname save detaches first and reloads only the fresh bootstrap state');
       assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success, 'a later explicit enable creates the post-hostname graph');
-      assert((await ipc.handlers.get(IPC_CHANNELS.APPROVE_BINARY)(event)).success && disabled === 2 && getHandoffBridgeStatus().enabled === false, 'acknowledged approval invalidates the graph it would otherwise stale-capture');
-      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success, 'approval requires a later explicit fresh enable');
-      assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_CREDENTIALS)(event)).success && disabled === 3 && getHandoffBridgeStatus().enabled === false && composed === 3, 'acknowledged credentials also detach and never auto-restart');
+      assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_BINARY)(event)).success
+        && setup.pin === replacementPin && setup.approvedAt === null && setup.binaryTrusted === false
+        && disabled === 2 && getHandoffBridgeStatus().enabled === false && !getHandoffBridgeStatus().setup.binaryApproved,
+      'a replacement binary selection persists an unapproved setup and detaches the graph that captured the former executable');
+      const blockedRestart = await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) });
+      assert(blockedRestart.success === false && blockedRestart.code === 'binary_untrusted' && disabled === 2 && composed === 2,
+        'the unapproved replacement blocks restart without composing or disposing another graph');
+      assert((await ipc.handlers.get(IPC_CHANNELS.APPROVE_BINARY)(event)).success
+        && setup.pin === replacementPin && setup.approvedAt === 2 && setup.binaryTrusted === true
+        && disabled === 2 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().setup.binaryApproved,
+      'approval restores trust for that exact replacement without reviving the detached graph');
+      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success
+        && composed === 3 && disabled === 2,
+      'only approval permits the replacement binary to compose a fresh runtime');
+      assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_CREDENTIALS)(event)).success
+        && disabled === 3 && getHandoffBridgeStatus().enabled === false && composed === 3,
+      'acknowledged credentials detach the approved replacement graph and never auto-restart');
       await stopHandoffBridge();
     },
   },

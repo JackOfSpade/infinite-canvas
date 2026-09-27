@@ -245,12 +245,27 @@ export default [
             const chooseCredentials = [...bootstrapDialog.querySelectorAll('button')].find(button => button.textContent.includes('Choose credentials'));
             assert(chooseBinary && approveBinary && !approveBinary.disabled && chooseCredentials?.disabled,
               'a bootstrap status without presentation-only binary details must still permit main to authoritatively approve a chosen binary, while credentials await durable approval');
+            assert(bootstrapDialog.textContent.includes('Tunnel program: Not selected')
+              && !bootstrapDialog.textContent.includes('Tunnel program: Not selected · Needs approval'),
+            'an absent binary must not be described as awaiting approval');
             await bundle.module.act(async () => { chooseBinary.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(setupCalls[0] === 'binary' && !approveBinary.disabled,
               'a successful binary choice must leave Approve callable without inventing a renderer trusted state');
+            const selectedBootstrap = status(3, {
+              enabled: false,
+              serving: 'off',
+              setup: { hostnameOk: true, binaryApproved: false, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'off', binary: { approved: false }, probe: { state: 'off' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(selectedBootstrap); await Promise.resolve(); await Promise.resolve(); });
+            assert(bootstrapDialog.textContent.includes('Tunnel program: Selected · Needs approval')
+              && bootstrapDialog.textContent.includes('Approve cloudflared before continuing.')
+              && !bootstrapDialog.textContent.includes('Choose and approve cloudflared before continuing.'),
+            'a redacted off-state binary selection must be visible and ask for approval without asking for reselection');
             await bundle.module.act(async () => { approveBinary.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(setupCalls[1] === 'approve', 'Approve must delegate selection validation and native consent to main');
-            const approvedBootstrap = status(3, {
+            const approvedBootstrap = status(4, {
               enabled: false,
               serving: 'off',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -262,7 +277,38 @@ export default [
             await bundle.module.act(async () => { chooseCredentials.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(setupCalls[2] === 'credentials', 'the unlocked credentials action must reach its main-process authority');
 
-            const offReady = status(4, {
+            const redactedPath = '/Users/ada/Library/Application Support/bridge/tunnel.json';
+            const redactedPin = 'a'.repeat(64);
+            const redactedTunnelId = '123e4567-e89b-42d3-a456-426614174000';
+            const offMissingAddress = status(5, {
+              enabled: false,
+              serving: 'off',
+              setup: {
+                hostnameOk: false, binaryApproved: true, credentialsOk: true,
+                tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false,
+                binaryPath: redactedPath, pin: redactedPin, tunnelId: redactedTunnelId,
+              },
+              tunnel: {
+                state: 'off', binary: null, probe: { state: 'off' },
+                binaryPath: redactedPath, pin: redactedPin, credentialsPath: redactedPath, tunnelSecret: redactedTunnelId,
+              },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(offMissingAddress); bundle.module.openBridgeSetup(2); });
+            const offMissingAddressDialog = window.document.querySelector('[role="dialog"]');
+            assert(offMissingAddressDialog.textContent.includes('Tunnel program: Selected · Approved')
+              && offMissingAddressDialog.textContent.includes('Credentials file: Selected')
+              && offMissingAddressDialog.textContent.includes('Save the public address before continuing.')
+              && !offMissingAddressDialog.textContent.includes('Choose and approve cloudflared before continuing.')
+              && !offMissingAddressDialog.textContent.includes('Choose the credentials file before continuing.')
+              && !offMissingAddressDialog.textContent.includes('Tunnel program: Not selected')
+              && !offMissingAddressDialog.textContent.includes('Credentials file: Not selected')
+              && !offMissingAddressDialog.textContent.includes(redactedPath)
+              && !offMissingAddressDialog.textContent.includes(redactedPin)
+              && !offMissingAddressDialog.textContent.includes(redactedTunnelId),
+            'a redacted off-state must summarize saved setup without inventing missing selections or exposing setup secrets');
+
+            const offReady = status(6, {
               enabled: false,
               serving: 'off',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -278,7 +324,7 @@ export default [
             assert(offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'an in-dialog enable failure must show only fixed feedback');
             await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(enableCalls.length === 2 && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'a successful enable request must show a bounded pending state until main publishes status');
-            const starting = status(5, {
+            const starting = status(7, {
               enabled: true,
               serving: 'starting',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -287,15 +333,15 @@ export default [
             });
             await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(starting); await Promise.resolve(); await Promise.resolve(); });
             assert(!offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.') && offReadyDialog.textContent.includes('The bridge is starting. Wait for the tunnel to be online before continuing.'), 'a newer main status must clear prior enable feedback and state the live tunnel wait');
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(6)); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(8)); await Promise.resolve(); await Promise.resolve(); });
             assert(![...offReadyDialog.querySelectorAll('button[aria-label^="Go to"]')][2].disabled && ![...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'the online status refresh must unlock Plugin and link without remounting setup');
 
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(7)); bundle.module.openBridgeSetup(2); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(9)); bundle.module.openBridgeSetup(2); });
             const liveDialog = window.document.querySelector('[role="dialog"]');
             const hostname = liveDialog.querySelector('input[aria-label="Public address"]');
             hostname.value = 'draft.example.com';
             hostname.dispatchEvent(new window.Event('input', { bubbles: true }));
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(8, { config: { hostname: 'saved.example.com' } })); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(10, { config: { hostname: 'saved.example.com' } })); });
             assert(hostname.value === 'draft.example.com', 'a newer status sequence must not replace an address draft');
 
             const focusable = [...liveDialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];
