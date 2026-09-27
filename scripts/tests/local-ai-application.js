@@ -750,6 +750,62 @@ export default [
     },
   },
   {
+    name: 'Local AI application: macOS system aliases preserve trusted roots but reject nested links',
+    run: async () => {
+      if (process.platform !== 'darwin') return { skipped: 'darwin-only' };
+      const roots = [];
+      let outsideRoot = '';
+      try {
+        const realTemporaryParent = await fs.promises.realpath(os.tmpdir());
+        assert(realTemporaryParent.startsWith('/private/var/'),
+          'the macOS temporary directory fixture must resolve through /private/var');
+        const lexicalTemporaryParent = `/var${realTemporaryParent.slice('/private/var'.length)}`;
+        for (const [temporaryParent, lexicalPrefix, canonicalPrefix] of [
+          [lexicalTemporaryParent, '/var', '/private/var'],
+          ['/tmp', '/tmp', '/private/tmp'],
+        ]) {
+          const lexicalRoot = await fs.promises.mkdtemp(path.join(temporaryParent, 'local-ai-system-alias-'));
+          roots.push(lexicalRoot);
+          const realRoot = await fs.promises.realpath(lexicalRoot);
+          assert(realRoot === `${canonicalPrefix}${lexicalRoot.slice(lexicalPrefix.length)}`,
+            `${lexicalPrefix} fixture must resolve through its macOS /private alias`);
+          const trustedDir = await ensureDirectoryWithinRoot(lexicalRoot, path.join(lexicalRoot, 'trusted'), {
+            label: 'Local AI macOS system alias',
+          });
+          assert(await fs.promises.realpath(trustedDir) === path.join(realRoot, 'trusted'),
+            `${lexicalPrefix} descendants remain usable through the trusted lexical root`);
+        }
+
+        const realEtcSsl = await fs.promises.realpath('/etc/ssl');
+        const trustedEtcSsl = await ensureDirectoryWithinRoot('/etc/ssl', '/etc/ssl', {
+          label: 'Local AI macOS system alias',
+        });
+        assert(realEtcSsl.startsWith('/private/etc/') && trustedEtcSsl === realEtcSsl,
+          '/etc descendants use the same narrowly allowed macOS alias');
+
+        outsideRoot = await fs.promises.mkdtemp('/tmp/local-ai-system-alias-outside-');
+        const linkedDir = path.join(roots[0], 'attacker-controlled');
+        await fs.promises.symlink(outsideRoot, linkedDir, 'dir');
+        let symlinkError = null;
+        try {
+          await ensureDirectoryWithinRoot(roots[0], path.join(linkedDir, 'created'), {
+            label: 'Local AI macOS system alias',
+          });
+        } catch (error) { symlinkError = error; }
+        assert(/symbolic link|resolved outside/i.test(String(symlinkError?.message || '')),
+          'a nested attacker-controlled symlink remains rejected under a system alias');
+        assert(!fs.existsSync(path.join(outsideRoot, 'created')),
+          'rejecting the nested symlink does not create a directory at its target');
+      } finally {
+        await Promise.all([
+          ...roots.map(root => fs.promises.rm(root, { recursive: true, force: true })),
+          ...(outsideRoot ? [fs.promises.rm(outsideRoot, { recursive: true, force: true })] : []),
+        ]);
+      }
+      return { aliases: 3, symlinkTraversalBlocked: true };
+    },
+  },
+  {
     name: 'Local AI application lifecycle: display deletion preserves active jobs and regeneration cleans only its replaced terminal handoff',
     run: async () => {
       const project = await createCanvasProject();

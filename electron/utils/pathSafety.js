@@ -22,9 +22,29 @@ export function isWithinDirectory(rootDir, candidatePath) {
     || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
+// These are macOS-owned root aliases, not a general `/private` equivalence.
+// `lstat` still rejects every symlink component below these prefixes; this
+// normalization only accounts for the spelling that macOS `realpath` returns.
+const MACOS_SYSTEM_PATH_ALIASES = [
+  ['/etc', '/private/etc'],
+  ['/tmp', '/private/tmp'],
+  ['/var', '/private/var'],
+];
+
+function normalizeMacOSSystemPathAlias(value) {
+  if (process.platform !== 'darwin') return value;
+  const lowerCaseValue = value.toLowerCase();
+  for (const [lexicalPrefix, canonicalPrefix] of MACOS_SYSTEM_PATH_ALIASES) {
+    if (lowerCaseValue === lexicalPrefix || lowerCaseValue.startsWith(`${lexicalPrefix}/`)) {
+      return `${canonicalPrefix}${value.slice(lexicalPrefix.length)}`;
+    }
+  }
+  return value;
+}
+
 function pathsReferToSameCanonicalSpelling(left, right) {
   const normalize = value => {
-    const resolved = path.resolve(value).normalize('NFC');
+    const resolved = normalizeMacOSSystemPathAlias(path.resolve(value).normalize('NFC'));
     return process.platform === 'win32' || process.platform === 'darwin'
       ? resolved.toLowerCase()
       : resolved;
