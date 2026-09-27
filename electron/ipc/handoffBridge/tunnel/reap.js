@@ -11,7 +11,7 @@ export function signalGroup(pid, signal, { kill = process.kill } = {}) {
 function remove(fsImpl, target) { try { fsImpl.unlinkSync(target); } catch { /* absent */ } }
 function sameIdentity(left, right) { return !!right && left.pid === right.pid && left.pgid === right.pgid && left.lstart === right.lstart && left.command === right.command; }
 
-export async function reapOrphans({ userData, configPath, parentPid = process.pid, fsImpl = fs, exec = execFixed, kill = process.kill, wait = async () => undefined } = {}) {
+export async function reapOrphans({ userData, configPath, parentPid = process.pid, fsImpl = fs, exec = execFixed, kill = process.kill, setTimeoutImpl = setTimeout, wait = ms => new Promise(resolve => setTimeoutImpl(resolve, ms)) } = {}) {
   const pidfile = path.join(userData, 'handoff-bridge', 'tunnel', 'tunnel.pid.json');
   if (!fsImpl.existsSync(pidfile)) return { ok: true, reaped: 0, notices: [] };
   let intent;

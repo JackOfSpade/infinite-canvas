@@ -191,6 +191,19 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: tunnel: reaper default wait lets each TERM and KILL grace period elapse',
+    async run() {
+      const root = '/tmp/reap-default-wait'; const configPath = `${root}/handoff-bridge/tunnel/config.yml`; const pidfile = `${root}/handoff-bridge/tunnel/tunnel.pid.json`;
+      const command = `${root}/handoff-bridge/tunnel/bin/cloudflared-deadbeef tunnel --config ${configPath} --no-autoupdate run ${TUNNEL_ID}`;
+      const alive = new Set([250]); const timers = []; const signals = [];
+      const fsPort = { existsSync: target => target === pidfile, readFileSync: () => JSON.stringify({ pid: 250, pgid: 250, lstart: 'Mon Jan  1 00:00:00 2026', configPath }), unlinkSync() {} };
+      const row = () => alive.has(250) ? `250 1 250 Mon Jan  1 00:00:00 2026 ${command}` : '';
+      const result = await reapOrphans({ userData: root, configPath, fsImpl: fsPort, exec: () => row(), kill: (pid, signal) => { signals.push([pid, signal]); if (signal === 'SIGKILL') alive.delete(Math.abs(pid)); }, setTimeoutImpl: (resolve, ms) => { timers.push(ms); queueMicrotask(resolve); } });
+      assert(result.reaped === 1 && JSON.stringify(timers) === JSON.stringify([1500, 2500, 1500]), 'the production default wait must schedule every bounded grace period before the next recheck');
+      assert(JSON.stringify(signals.map(([, signal]) => signal)) === JSON.stringify(['SIGTERM', 'SIGTERM', 'SIGKILL']), 'a stubborn owned group must retain TERM, TERM, KILL escalation through the default wait path');
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: supervisor serializes setup, classifies mandatory flag refusal and tracks unrequested exits separately',
     async run() {
       const clock = createFakeClock(); const table = createFakeProcessTable({ parentPid: 500 }); const fakeSpawn = createFakeSpawn({ processTable: table });
