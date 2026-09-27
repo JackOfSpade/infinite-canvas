@@ -11,6 +11,10 @@ import { createLogRing, createRotatingLog } from './logRing.js';
 import { redactLine } from './redact.js';
 
 const PERMANENT = new Set(['flag-rejected', 'credentials-invalid', 'tunnel-auth-rejected', 'hostname-not-public', 'binary-changed', 'binary-untrusted']);
+// The supervisor is allowed to retain only this closed probe vocabulary.  The
+// response port is injected, so treating its `code` as diagnostic text would
+// otherwise let arbitrary values cross the status boundary.
+const PROBE_REASONS = new Set(['wrong-origin', 'unexpected-redirect', 'tunnel-not-serving', 'origin-unreachable', 'ingress-mismatch', 'edge-blocked', 'edge-unreachable', 'dns-not-found', 'hostname-not-public', 'offline', 'timeout', 'too_large', 'refused']);
 function safeUnlink(fsImpl, target) { try { fsImpl?.unlinkSync?.(target); } catch { /* a stale intent is harmless */ } }
 
 export function createTunnelSupervisor(options = {}) {
@@ -27,8 +31,10 @@ export function createTunnelSupervisor(options = {}) {
   let stopping = false; let attemptedPorts = new Set(); let lastExit = null; let handledExitToken = null; let backoffAttempts = 0; let lastProbeRestartAt = -Infinity;
   let currentExitLines = [];
   const notices = new Set();
+  let publicProbeStatus = { state: 'unknown', okAt: null, failingSince: null, consecutiveFailures: 0, reason: null };
 
-  const status = () => Object.freeze({ state, metricsPort, restarts: crashTimes.length, lastExit, notices: Object.freeze([...notices]) });
+  const snapshotProbe = () => Object.freeze({ ...publicProbeStatus });
+  const status = () => Object.freeze({ state, metricsPort, restarts: crashTimes.length, lastExit, notices: Object.freeze([...notices]), probe: snapshotProbe() });
   // This is a diagnostic view, not a file reader.  The ring is populated
   // before the supervisor exposes it, and a second redaction pass means an
   // injected/spawn implementation cannot make a raw line observable later.
@@ -82,6 +88,25 @@ export function createTunnelSupervisor(options = {}) {
     return true;
   };
   const trim = (list, windowMs) => list.filter(value => value >= now() - windowMs);
+  const resetProbeStatus = () => {
+    publicProbeStatus = { state: 'unknown', okAt: null, failingSince: null, consecutiveFailures: 0, reason: null };
+  };
+  const recordPublicProbe = response => {
+    const stamp = now();
+    if (response.ok === true) {
+      publicProbeStatus = { state: 'ok', okAt: stamp, failingSince: null, consecutiveFailures: 0, reason: null };
+      return;
+    }
+    const prior = publicProbeStatus;
+    const reason = PROBE_REASONS.has(response.code) ? response.code : 'other';
+    publicProbeStatus = {
+      state: 'failing',
+      okAt: prior.okAt,
+      failingSince: prior.state === 'failing' && Number.isFinite(prior.failingSince) ? prior.failingSince : stamp,
+      consecutiveFailures: publicFailures,
+      reason,
+    };
+  };
 
   const production = {
     xattr: target => { try { execFixed('xattr', ['-p', 'com.apple.quarantine', target], options); return { present: true }; } catch { return { present: false }; } },
@@ -155,13 +180,14 @@ export function createTunnelSupervisor(options = {}) {
       if (auditReap?.notices?.length) audit('tunnel_reap_audit', { notices: auditReap.notices });
       if (token !== generation || !child || stopping) return;
     }
-    if (response.ok) {
-      publicFailures = 0; state = 'online';
+    if (response.ok === true) {
+      publicFailures = 0; recordPublicProbe(response); state = 'online';
       if (readySince && readySince !== 'fallback' && now() - readySince >= 120_000) { crashTimes = []; backoffAttempts = 0; }
       setTimer('public', () => runPublicProbe(token), 60_000);
       return;
     }
     publicFailures++;
+    recordPublicProbe(response);
     if (response.code === 'hostname-not-public') { generation++; await stopInternal('probe-failed'); return fail('hostname-not-public'); }
     if (response.code === 'tunnel-not-serving' && now() - lastProbeRestartAt >= 10 * 60_000) {
       lastProbeRestartAt = now(); generation++;
@@ -175,7 +201,7 @@ export function createTunnelSupervisor(options = {}) {
     setTimer('public', () => runPublicProbe(token), publicFailures < 6 ? TUNNEL_CONSTANTS.PUBLIC_PROBE_MS : 60_000);
   };
   const scheduleProbes = token => {
-    readyStartedAt = now(); readySince = null; publicFailures = 0; probeCount = 0;
+    readyStartedAt = now(); readySince = null; publicFailures = 0; probeCount = 0; resetProbeStatus();
     if (!setTimer('ready', () => runReadyProbe(token), TUNNEL_CONSTANTS.READY_POLL_MS)) return false;
     return setTimer('public', () => runPublicProbe(token), TUNNEL_CONSTANTS.PUBLIC_PROBE_INITIAL_MS);
   };

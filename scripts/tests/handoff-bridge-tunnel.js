@@ -675,6 +675,34 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     },
   },
   {
+    name: 'handoff bridge: tunnel: public probe telemetry is closed, immutable and drives online/degraded transitions',
+    async run() {
+      const replies = [
+        { ok: false, code: 'edge-unreachable' },
+        { ok: false, code: 'untrusted response text /tmp/secret' },
+        { ok: false, code: 'origin-unreachable' },
+        { ok: true, code: 'ok' },
+      ];
+      const harness = createSupervisorHarness({ publicProbeFn: async () => replies.shift() });
+      await harness.supervisor.start();
+      const before = harness.supervisor.status();
+      assert(Object.isFrozen(before) && Object.isFrozen(before.probe) && before.probe.state === 'unknown' && before.probe.consecutiveFailures === 0, 'a new run must expose an immutable neutral probe snapshot before the first public check');
+      await harness.supervisor.probe();
+      const first = harness.supervisor.status().probe;
+      assert(first.state === 'failing' && first.reason === 'edge-unreachable' && first.consecutiveFailures === 1 && Number.isFinite(first.failingSince), 'the first failed public check must retain only its closed class and failure time');
+      await harness.supervisor.probe();
+      const second = harness.supervisor.status().probe;
+      assert(second.state === 'failing' && second.reason === 'other' && second.consecutiveFailures === 2 && second.failingSince === first.failingSince, 'an injected diagnostic must be collapsed while a single outage retains its first-failure timestamp');
+      await harness.supervisor.probe();
+      const degraded = harness.supervisor.status();
+      assert(degraded.state === 'degraded' && degraded.probe.reason === 'origin-unreachable' && degraded.probe.consecutiveFailures === 3, 'three public failures must visibly degrade the connector with the last closed class');
+      await harness.supervisor.probe();
+      const recovered = harness.supervisor.status();
+      assert(recovered.state === 'online' && recovered.probe.state === 'ok' && recovered.probe.consecutiveFailures === 0 && recovered.probe.failingSince === null && Number.isFinite(recovered.probe.okAt) && recovered.probe.reason === null, 'one successful public check must restore online status and clear the active failure streak');
+      await harness.supervisor.stop();
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: transient network exits follow the full 1 2 4 8 16 30 backoff ladder',
     async run() {
       const harness = createSupervisorHarness(); await harness.supervisor.start();
