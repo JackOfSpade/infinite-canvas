@@ -230,3 +230,17 @@ The wire goldens under `scripts/tests/fixtures/handoff-bridge/` are the deferred
 The two temporary CI clones, parked nested dependencies and every test child were removed after the final runs. The checkout has one worktree and one branch, `main`. Nothing was pushed.
 
 B0 through B8 are complete. Work stops here by design: B9 through B11 require Jack's packaged-app observations, real Cloudflare route and DNS controls, ChatGPT staging/production plugins, pairing code and synthetic-only manual runs. No real career data crossed the bridge.
+
+## B9 — packaged-app verification (in progress, 2026-09-27)
+
+The packaged UI report exposed unstyled bridge controls and narrow-window overflow in Settings. The local-main remediation is commit `e511ef5` (`fix: refine ChatGPT bridge setup UI`). It adds shared responsive button and icon-control styles; keeps the Settings, popover, setup dialog and nested confirms within a narrow viewport; closes Settings before opening the popover; preserves in-progress setup fields across status updates; tightens action and setup-step prerequisites; restores focus correctly; and shortens the dense operational copy without removing safety instructions.
+
+| Check | Result |
+|---|---|
+| Scope / frozen files | Green. Exactly the ten listed UI, CSS, copy and regression-test files changed; the user-frozen files and package files remain untouched. |
+| Unit / baseline | Green. `npm test` passed 2242 unit tests plus all résumé-PDF checks; the required filtered baseline comparison printed nothing. |
+| Lint / compile | Green. `npm run lint` passed; production compilation passed with only the existing Vite chunk-size warnings. |
+| Electron UI | Green. `npm run test:e2e` exercised the 320px Settings, popover and setup-dialog layouts and passed. `npm run test:e2e:bridge` passed through the synthetic enabled bridge flow. |
+| Adversarial review | Green after closing the last finding: First chat can no longer be reached while a previously linked tunnel is unreachable. |
+
+The real-network, pairing, Cloudflare/DNS and production-plugin observations remain Jack-only B9–B11 work. No bridge was enabled in the user app and no real career data crossed it during this remediation.
