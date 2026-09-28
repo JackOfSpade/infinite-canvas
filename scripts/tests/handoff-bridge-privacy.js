@@ -11,7 +11,8 @@ import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contr
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
-import { composeHandoffBridge, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
+import { composeHandoffBridge, resolveTestMode, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import {
   redactReportUrl,
   redactReportUrlsInText,
@@ -433,6 +434,34 @@ export default [{
     for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic']) {
       assert(index.includes(`${cleared}()`), `${cleared} must be called so a stale observation cannot outlive its link`);
     }
+  },
+}, {
+  // The client-authentication policy is relaxed for TEST mode, which has no
+  // network to fetch the connector's JWKS. That relaxation must never be
+  // reachable from a packaged app, and production must stay pinned.
+  name: 'handoff bridge: privacy: the client-authentication relaxation is confined to unpackaged TEST mode',
+  run: () => {
+    assert(CONSTANTS.TOKEN_AUTH_MODE === 'require-assertion',
+      'production must require a signed client assertion');
+    assert(CONSTANTS.AS_AUTH_METHODS.length === 1 && CONSTANTS.AS_AUTH_METHODS[0] === 'private_key_jwt',
+      'production must advertise private_key_jwt alone, so `none` is never offered');
+    // resolveTestMode is the only gate on the relaxation: it must refuse a
+    // packaged app outright, whatever the environment claims.
+    const packaged = resolveTestMode({
+      env: { INFINITE_CANVAS_HANDOFF_BRIDGE_TEST: '1' }, isPackaged: true,
+      paths: { binaryPath: '/tmp/a', credentialsPath: '/tmp/b', userData: '/tmp/c' },
+      tmpdir: '/tmp', realpath: value => value,
+    });
+    assert(packaged === false, 'a packaged app can never enter TEST mode, so it can never relax client authentication');
+    const outsideTmp = resolveTestMode({
+      env: { INFINITE_CANVAS_HANDOFF_BRIDGE_TEST: '1' }, isPackaged: false,
+      paths: { binaryPath: '/Users/someone/a', credentialsPath: '/tmp/b', userData: '/tmp/c' },
+      tmpdir: '/tmp', realpath: value => value,
+    });
+    assert(outsideTmp === false, 'TEST mode must refuse paths outside tmp');
+    const index = fs.readFileSync(path.join(repoRoot, 'electron/ipc/handoffBridge/index.js'), 'utf8');
+    assert(/tokenAuthMode:\s*testMode\s*\?/.test(index) && /asAuthMethods:\s*testMode\s*\?/.test(index),
+      'the relaxation must be conditioned on testMode, never applied unconditionally');
   },
 }, {
   name: 'handoff bridge: privacy: native dialogs serialize and every spec has a canvas parent',

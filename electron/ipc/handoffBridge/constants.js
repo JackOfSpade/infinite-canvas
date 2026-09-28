@@ -131,15 +131,21 @@ export const CONSTANTS = Object.freeze({
   CIMD_BODY_CAP_BYTES: 16 * 1024,
   CIMD_CONCURRENCY: 4,
   CIMD_CLIENT_IDS: Object.freeze(['https://chatgpt.com/oauth/client.json']),
-  // MG1 is measured but NOT yet sufficient to pin. The real link reported
-  // `assertion_ok`, so the connector signs -- but that observation came from
-  // the authorization_code exchange alone. authenticateClient() runs for the
-  // refresh_token grant too, so requiring an assertion would kill the link at
-  // the first refresh if the connector only signs the initial exchange.
-  // Pin to ['private_key_jwt'] / 'require-assertion' once a report shows
-  // `assertion_ok` for grant `refresh_token`.
-  AS_AUTH_METHODS: Object.freeze(['private_key_jwt', 'none']),
-  TOKEN_AUTH_MODE: 'observe-both',
+  // MG1, measured on the real production link (2026-09-28). The connector
+  // signed BOTH grants: `assertion_ok` for authorization_code at 18:10:39Z and
+  // again for refresh_token at 22:12:02Z, the latter confirmed by the family's
+  // lastRefreshedAt advancing. authenticateClient() runs for both, so a signed
+  // refresh is the fact that makes requiring an assertion safe -- a code
+  // exchange alone would have pinned a policy that killed the link within the
+  // hour.
+  //
+  // Stop advertising and stop accepting `none`: an unsigned token request can
+  // no longer redeem an authorization code or rotate a refresh token. If the
+  // connector ever stops signing, the exchange fails closed with
+  // invalid_client, and because the outcome is recorded before the decision a
+  // BRIDGE report names the outcome rather than leaving a dead link unexplained.
+  AS_AUTH_METHODS: Object.freeze(['private_key_jwt']),
+  TOKEN_AUTH_MODE: 'require-assertion',
   JWKS_URL: 'https://chatgpt.com/oauth/jwks.json',
   JWKS_CACHE_MS: 60 * 60_000,
   JWKS_UNKNOWN_KID_REFETCH_MS: 60_000,

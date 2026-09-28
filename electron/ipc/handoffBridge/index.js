@@ -735,6 +735,13 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   const oauth = deps.oauth || createOAuthServer({ issuer: `https://${config.hostname}`, store: oauthStore,
     fetchClientMetadata: deps.fetchClientMetadata || createCimdFetcher({ request: deps.httpsRequest, lookup: deps.lookup }),
     fetchJwks: deps.fetchJwks || createJwksFetcher({ request: deps.httpsRequest, lookup: deps.lookup }), now,
+    // Production requires a signed client assertion (MG1: the connector signs
+    // both grants). TEST mode has no network to fetch the connector's JWKS, so
+    // it could never present one -- and resolveTestMode() refuses whenever the
+    // app is packaged or its paths are outside tmp, so this relaxation cannot
+    // reach the app a person actually runs.
+    tokenAuthMode: testMode ? 'observe-both' : CONSTANTS.TOKEN_AUTH_MODE,
+    asAuthMethods: testMode ? ['private_key_jwt', 'none'] : CONSTANTS.AS_AUTH_METHODS,
     pairingGate: request => pairing?.pairingGate?.(request) === true,
     // The token endpoint computes which client authentication the connector
     // used and previously dropped it on the floor, leaving the decision

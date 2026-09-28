@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import electronPkg from 'electron';
@@ -1003,6 +1003,8 @@ export default [
     name: 'handoff bridge: inert: real OAuth renewal reconnect composition publishes status only once per minute',
     async run() {
       let now = 10_000_000;
+      const assertionKeys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const assertionJwk = { ...assertionKeys.publicKey.export({ format: 'jwk' }), kid: 'reconnect-key', use: 'sig', alg: 'RS256', key_ops: ['verify'] };
       const hostname = READY_CONFIG.hostname;
       const issuer = `https://${hostname}`;
       const clientId = 'https://chatgpt.com/oauth/client.json';
@@ -1019,7 +1021,12 @@ export default [
         clients: [{
           id: clientId, clientKind: 'cimd', clientHost: 'chatgpt.com', name: 'ChatGPT',
           redirectUris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
-          grantTypes: ['authorization_code', 'refresh_token'], authMethods: ['none'], jwksUri: null, metadataHash: 'fixture',
+          // The measured connector signs every token exchange, including
+          // refresh, and production requires an assertion. A `none` client
+          // could not refresh at all, so it would not reach the renewal path
+          // this test is about.
+          grantTypes: ['authorization_code', 'refresh_token'], authMethods: ['private_key_jwt'],
+          jwksUri: 'https://chatgpt.com/oauth/jwks.json', metadataHash: 'fixture',
         }],
         codes: [],
         families: [{
@@ -1066,6 +1073,7 @@ export default [
           deps: {
             now: () => now,
             timers,
+            fetchJwks: async () => ({ keys: [assertionJwk] }),
             oauthStore: { read: () => state, commit: () => true, flush: () => true },
             audit: { append: (...entry) => { audit.push(entry); return Promise.resolve(true); }, flush: () => Promise.resolve(true) },
             log: { record: (...entry) => logs.push(entry) },
@@ -1077,7 +1085,16 @@ export default [
             getCanvasWindows: () => [],
           },
         });
-        const refreshBody = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: clientId, resource: `${issuer}/mcp` }).toString();
+        const seconds = Math.floor(now / 1000);
+        const encodeSegment = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+        const signingInput = `${encodeSegment({ alg: 'RS256', kid: 'reconnect-key', typ: 'JWT' })}.${encodeSegment({
+          iss: clientId, sub: clientId, aud: `${issuer}/oauth/token`, iat: seconds, exp: seconds + 240, jti: 'reconnect-jti-1',
+        })}`;
+        const clientAssertion = `${signingInput}.${cryptoSign('RSA-SHA256', Buffer.from(signingInput), assertionKeys.privateKey).toString('base64url')}`;
+        const refreshBody = new URLSearchParams({
+          grant_type: 'refresh_token', refresh_token: refresh, client_id: clientId, resource: `${issuer}/mcp`,
+          client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: clientAssertion,
+        }).toString();
         const refreshRequest = Readable.from([Buffer.from(refreshBody)]);
         refreshRequest.method = 'POST';
         refreshRequest.url = '/oauth/token';
