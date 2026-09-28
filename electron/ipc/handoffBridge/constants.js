@@ -131,6 +131,13 @@ export const CONSTANTS = Object.freeze({
   CIMD_BODY_CAP_BYTES: 16 * 1024,
   CIMD_CONCURRENCY: 4,
   CIMD_CLIENT_IDS: Object.freeze(['https://chatgpt.com/oauth/client.json']),
+  // MG1 is measured but NOT yet sufficient to pin. The real link reported
+  // `assertion_ok`, so the connector signs -- but that observation came from
+  // the authorization_code exchange alone. authenticateClient() runs for the
+  // refresh_token grant too, so requiring an assertion would kill the link at
+  // the first refresh if the connector only signs the initial exchange.
+  // Pin to ['private_key_jwt'] / 'require-assertion' once a report shows
+  // `assertion_ok` for grant `refresh_token`.
   AS_AUTH_METHODS: Object.freeze(['private_key_jwt', 'none']),
   TOKEN_AUTH_MODE: 'observe-both',
   JWKS_URL: 'https://chatgpt.com/oauth/jwks.json',

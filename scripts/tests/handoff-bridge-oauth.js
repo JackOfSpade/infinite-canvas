@@ -1730,7 +1730,10 @@ const assertionTests = [
       const linked = await grant(env);
       assert.ok(linked.token.access_token);
       assert.equal(env.auth.at(-1).outcome, 'none');
-      assert.deepEqual(Object.keys(env.auth.at(-1)).sort(), ['assertionSize', 'audience', 'jtiPresent', 'outcome']);
+      // `grant` is a closed enum naming which grant was authenticated; the
+      // refresh case is what licenses requiring an assertion.
+      assert.deepEqual(Object.keys(env.auth.at(-1)).sort(), ['assertionSize', 'audience', 'grant', 'jtiPresent', 'outcome']);
+      assert.ok(['authorization_code', 'refresh_token', 'other'].includes(env.auth.at(-1).grant), 'the recorded grant must stay a closed enum');
     },
   },
   {

@@ -863,8 +863,15 @@ export function createOAuthServer({
       assertionType: params.client_assertion_type,
       assertedClientId: params.client_id,
     });
+    // Name the grant: this runs for refresh_token as well as
+    // authorization_code, and only a refresh observation can justify requiring
+    // an assertion. A code-exchange observation alone would pin a policy that
+    // kills the link at the first refresh.
+    const authenticatedGrant = params.grant_type === 'authorization_code' || params.grant_type === 'refresh_token'
+      ? params.grant_type : 'other';
     safeCall(recordClientAuth, {
       outcome: outcome.outcome,
+      grant: authenticatedGrant,
       assertionSize: outcome.assertionSize,
       jtiPresent: outcome.jtiPresent,
       audience: outcome.audience,

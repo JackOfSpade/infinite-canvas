@@ -232,17 +232,31 @@ export default [{
       assert(unknown.includes('method `unknown`') && !unknown.includes(privateAssertion),
         'an unrecognised outcome must close to unknown and never retain the raw value');
 
+      // A signed CODE exchange alone must not read as permission to pin:
+      // client authentication also runs for refresh_token.
       clearClientAuthDiagnostic();
-      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_ok', at: 5_500 });
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_ok', grant: 'authorization_code', at: 5_500 });
       const signed = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
       const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
       const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
       assert(signed.includes('Client authentication observed: 1')
+        && signed.includes('last grant `authorization_code`')
         && signed.includes('method `assertion`')
-        && signed.includes('outcome `assertion_ok`')
+        && signed.includes('signed refresh seen `no`')
+        && signed.includes('NOT yet enough to pin')
         && bridge.includes('method `assertion`')
         && !focused.includes('Client authentication observed'),
-      'FULL and BRIDGE must name the observed client-authentication method');
+      'a signed code exchange alone must not read as permission to pin');
+
+      // Once a signed refresh is seen the verdict flips, and it stays flipped
+      // even if a later exchange is a code grant again.
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_ok', grant: 'refresh_token', at: 5_700 });
+      const refreshed = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(refreshed.includes('signed refresh seen `yes`') && refreshed.includes('can be pinned to private_key_jwt'),
+        'a signed refresh must license the pin');
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_ok', grant: 'authorization_code', at: 5_900 });
+      assert(generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('signed refresh seen `yes`'),
+        'a later code exchange cannot erase a signed refresh already observed');
 
       clearClientAuthDiagnostic();
       recordClientAuthDiagnostic({ telemetry: true, outcome: 'none', at: 6_000 });

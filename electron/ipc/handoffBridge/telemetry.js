@@ -43,6 +43,9 @@ const LINK_PRESENCE = new Set(['none', 'one', 'many', 'unreadable']);
 // the MG1 measurement: which client authentication ChatGPT actually used.
 const CLIENT_AUTH_OUTCOMES = new Set(['none', 'assertion_ok', 'assertion_bad_signature',
   'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other']);
+// Which grant was authenticated. Requiring an assertion is only justified once
+// `refresh_token` has been seen signed; the code exchange alone is not enough.
+const CLIENT_AUTH_GRANTS = new Set(['authorization_code', 'refresh_token', 'other']);
 
 let latest = null;
 let latestOAuthRejection = null;
@@ -153,15 +156,21 @@ export function getSourceRejectionDiagnostic() { return latestSourceRejection; }
 // header, claim, or credential.
 export function clearClientAuthDiagnostic() { latestClientAuth = null; }
 
-export function recordClientAuthDiagnostic({ telemetry = false, outcome, at = Date.now() } = {}) {
+export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, at = Date.now() } = {}) {
   if (telemetry !== true) return null;
   const stamp = finite(at) ?? Date.now();
   const resolved = enumOr(outcome, CLIENT_AUTH_OUTCOMES);
+  const resolvedGrant = enumOr(grant, CLIENT_AUTH_GRANTS);
+  const priorRefresh = latestClientAuth?.telemetry === true && latestClientAuth.refreshSigned === true;
   latestClientAuth = Object.freeze({
     telemetry: true,
     count: Math.min(999, (latestClientAuth?.telemetry === true ? latestClientAuth.count : 0) + 1),
     at: stamp,
     outcome: resolved,
+    grant: resolvedGrant,
+    // Sticky: the decisive fact is whether a refresh has EVER been seen signed,
+    // not whether the most recent exchange happened to be one.
+    refreshSigned: priorRefresh || (resolvedGrant === 'refresh_token' && resolved === 'assertion_ok'),
     // The single fact the pin decision needs, stated without inference.
     method: resolved === 'none' ? 'none' : resolved === 'assertion_ok' ? 'assertion' : 'unknown',
   });

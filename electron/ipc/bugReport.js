@@ -2164,9 +2164,17 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   if (observedClientAuth) {
     const at = Number.isFinite(clientAuth.at) ? new Date(clientAuth.at).toISOString() : 'not recorded';
     const count = Number.isFinite(clientAuth.count) ? Math.max(1, Math.min(999, Math.floor(clientAuth.count))) : 1;
+    // The refresh grant is the decisive one: client authentication runs for it
+    // too, so pinning on a code-exchange observation alone would kill the link
+    // at the first refresh.
+    const verdict = clientAuth.refreshSigned === true
+      ? 'a signed refresh has been seen, so AS_AUTH_METHODS can be pinned to private_key_jwt'
+      : clientAuth.method === 'assertion'
+        ? 'only the authorization_code exchange has been seen signed — NOT yet enough to pin, because client authentication also runs for refresh_token'
+        : 'the connector did not sign, so pinning private_key_jwt would break the link';
     clientAuthMarkdown = `
-- Client authentication observed: ${count} token exchange(s) · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · recorded ${at}
-  - \`assertion\` means the connector signed with private_key_jwt and AS_AUTH_METHODS can be pinned to it. \`none\` means it did not, and pinning would break the link at the next refresh.`;
+- Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · recorded ${at}
+  - ${verdict}.`;
   }
   return `
 ## Handoff Bridge Diagnostics
