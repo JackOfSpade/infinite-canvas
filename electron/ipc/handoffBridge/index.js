@@ -31,6 +31,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
+import { clearFailedStartDiagnostic, recordFailedStartDiagnostic } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -559,6 +560,11 @@ function createControllerBridge() {
     subscribe(listener) { if (typeof listener !== 'function') return noOp; listeners.add(listener); return () => listeners.delete(listener); },
     enable: async args => {
       const active = activeController(current);
+      // Go through the graph wrapper rather than invoking an attached
+      // controller directly. It owns the redacted failed-start receipt used
+      // by an opted-in FULL bug report after runtime disposal.
+      const attached = activeRuntimeForController(active);
+      if (attached) return enableAttachedRuntime(attached, args);
       if (active?.enable) return active.enable(args);
       return startHandoffBridge({ reason: 'manual', deps: { ...(bootstrapContext?.deps || {}), enabled: true, activate: true, confirmed: args?.confirmed === true } });
     },
@@ -771,7 +777,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     ? deps.createTunnelSupervisor
     : createRealTunnelSupervisor;
   supervisedTunnel = deps.tunnelSupervisor || (isTunnelSupervisor(deps.tunnel) ? deps.tunnel : null)
-    || makeTunnelSupervisor({ userData, hostname: config.hostname, socketPath, credentialsPath: setup.credentialsPath, binaryPath: setup.binaryPath, pin: setup.pin, approvedAt: setup.approvedAt, testMode, publicProbeFn: hostname => probe({ hostname }), timers, now, fsImpl: deps.fsImpl });
+    || makeTunnelSupervisor({ userData, hostname: config.hostname, socketPath, credentialsPath: setup.credentialsPath, binaryPath: setup.binaryPath, pin: setup.pin, approvedAt: setup.approvedAt, testMode, publicProbeFn: hostname => probe({ hostname }), timers, now, fsImpl: deps.fsImpl, HOME: deps.HOME ?? os.homedir(), TMPDIR: deps.TMPDIR ?? os.tmpdir() });
   // Only the app-owned production supervisor gets readiness authority. An
   // injected controller/tunnel port keeps its direct start/probe contract for
   // deterministic unit tests and narrow integration seams.
@@ -1111,17 +1117,66 @@ function openRuntimePairing(...args) {
   } catch { return Promise.resolve({ ok: false, code: 'TUNNEL_NOT_READY' }); }
 }
 
+// `current.config` is the immutable composition input, whereas reloadConfig()
+// deliberately lets an attached controller adopt a newer durable preference.
+// Failed-start telemetry is optional, so its decision must come from the
+// controller's just-produced status (or, for injected legacy results without
+// one, a fresh controller snapshot). Treat every malformed or unreadable
+// status as opt-out; diagnostics must never survive a preference read fault.
+function failedStartTelemetryEnabled(result, controller) {
+  try {
+    const status = result?.status === undefined ? controller?.snapshot?.(false) : result.status;
+    return status !== null
+      && typeof status === 'object'
+      && status.config !== null
+      && typeof status.config === 'object'
+      && status.config.telemetryInBugReports === true;
+  } catch { return false; }
+}
+
 function enableAttachedRuntime(current, args, lifecycleTicket = lifecycle) {
   if (!current?.controller?.enable) return Promise.resolve({ success: false, code: 'UNAVAILABLE', status: bootstrapSnapshot() });
   const prior = runtimeEnableOperations.get(current);
   if (prior) return prior;
+  // A new explicit Enable attempt supersedes a prior failed-start receipt.
+  // Do this only after the coalescing check: a duplicate click must never
+  // erase the diagnostic while the original operation is still running.
+  clearFailedStartDiagnostic();
+  const retainFailedStart = result => {
+    // Refusals/cancellation are ordinary control flow, not diagnostic events.
+    // A controller only supplies this closed object after an actual startup
+    // fault, and its `at` is taken from the controller's injected clock.
+    if (result?.success || !result?.diagnostic || typeof result.diagnostic !== 'object') return result;
+    // A graph may have been attached earlier (for example before its first
+    // explicit Enable). Keep the same closed receipt as the fresh-composition
+    // path before a failed controller start can be detached by its caller.
+    // Never retain the thrown value itself: controller diagnostics are the
+    // only source and telemetry.js reduces them to fixed enums.
+    const telemetry = failedStartTelemetryEnabled(result, current.controller);
+    if (!telemetry) {
+      // The receipt itself is optional telemetry. Keeping a false-marked
+      // receipt would let a later preference bug revive an opted-out attempt.
+      clearFailedStartDiagnostic();
+      return result;
+    }
+    recordFailedStartDiagnostic({
+      telemetry,
+      phase: result?.diagnostic?.phase,
+      cause: result?.diagnostic?.cause,
+      tunnel: result?.diagnostic?.tunnel || current.tunnel?.status?.(),
+      startedAt: result?.diagnostic?.startedAt,
+      at: result.diagnostic.at,
+    });
+    return result;
+  };
   let settled;
   const operation = Promise.resolve()
     .then(() => current.controller.enable(args))
     .then(result => (runtime === current && lifecycleTicket === lifecycle
       ? result
       : { success: false, code: 'CANCELLED', status: bootstrapSnapshot() }))
-    .catch(() => ({ success: false, code: 'tunnel_failed' }));
+    .catch(() => ({ success: false, code: 'tunnel_failed' }))
+    .then(retainFailedStart);
   settled = operation.finally(() => {
     if (runtimeEnableOperations.get(current) === settled) runtimeEnableOperations.delete(current);
   });
@@ -1156,6 +1211,10 @@ async function forgetActiveRuntime(current, status) {
   // Disable leaves config.json in place, so it deliberately keeps report
   // redaction. Forget is the distinct destructive action and must clear it
   // even when revocation or the durable wipe later reports a failure.
+  // The optional failed-start receipt is bridge setup state too; leaving it in
+  // memory after Forget would let a later FULL report disclose an old attempt
+  // despite the user explicitly clearing this bridge's settings.
+  clearFailedStartDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1193,6 +1252,7 @@ async function forgetActiveRuntime(current, status) {
 }
 
 async function invalidateRuntimeForMutation() {
+  clearFailedStartDiagnostic();
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1232,6 +1292,10 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       void disposeDetachedRuntime(priorRuntime).catch(noOp);
     }
     bootstrapCleared = false;
+    // A receipt is optional telemetry for exactly one app-data root.  Never
+    // carry even its closed fields into another profile/context that has not
+    // opted in to diagnostics.
+    clearFailedStartDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1278,6 +1342,9 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
     if (result?.ok === true) {
       bootstrapCleared = false;
+      // An explicit telemetry opt-out must also remove an already retained
+      // in-memory failed-start receipt before any later FULL report is built.
+      if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) clearFailedStartDiagnostic();
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
       // UI calls reloadConfig once after this adapter returns. Hostname is a
@@ -1337,6 +1404,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
 }
 
 export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
+  if (deps.activate === true) clearFailedStartDiagnostic();
   const existing = runtime;
   if (existing?.controller) {
     if (deps.activate === true) return enableAttachedRuntime(existing, { reason, confirmed: deps.confirmed === true, autoStart: reason === 'auto-start' });
@@ -1356,7 +1424,13 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
   const userData = userDataFor(deps, app);
   const prior = bootstrapContext;
   const inherited = prior?.userData === userData ? prior?.deps : {};
-  if (prior?.userData && prior.userData !== userData) setReportRedactedHosts([]);
+  if (prior?.userData && prior.userData !== userData) {
+    // This path can change roots without IPC re-registration (for example a
+    // controlled in-process test or host switch).  Keep the receipt scoped to
+    // its originating root just like hostname report redaction.
+    clearFailedStartDiagnostic();
+    setReportRedactedHosts([]);
+  }
   const composedDeps = mergeDefinedDeps(inherited, deps);
   bootstrapContext = { deps: composedDeps, userData, app, isPackaged };
   bootstrapCleared = false;

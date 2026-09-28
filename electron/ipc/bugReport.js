@@ -44,6 +44,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
+import { getFailedStartDiagnostic } from './handoffBridge/telemetry.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -2113,6 +2114,22 @@ function buildAIConfigurationMarkdown() {
   return aiConfigMarkdown;
 }
 
+function buildHandoffBridgeDiagnosticsMarkdown() {
+  const diagnostic = getFailedStartDiagnostic();
+  if (diagnostic?.telemetry !== true) return '';
+  const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
+  const at = Number.isFinite(diagnostic.at) ? new Date(diagnostic.at).toISOString() : 'not recorded';
+  const tunnel = diagnostic.tunnel && typeof diagnostic.tunnel === 'object' ? diagnostic.tunnel : {};
+  const probe = tunnel.probe && typeof tunnel.probe === 'object' ? tunnel.probe : {};
+  return `
+## Handoff Bridge Diagnostics
+- Failed start: phase \`${diagnostic.phase || 'unknown'}\` · cause \`${diagnostic.cause || 'unknown'}\`
+- Tunnel: state \`${tunnel.state || 'unknown'}\` · last exit \`${tunnel.lastExit || 'none'}\`
+- Public probe: state \`${probe.state || 'unknown'}\` · reason \`${probe.reason || 'unknown'}\` · consecutive failures ${Number.isFinite(probe.consecutiveFailures) ? probe.consecutiveFailures : 0}
+- Recorded: ${at} · elapsed ${elapsed}
+`;
+}
+
 export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
 
@@ -2215,6 +2232,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   let activeTasksMarkdown = '';
   try { activeTasksMarkdown = buildActiveTasksMarkdown(reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
+
+  let handoffBridgeDiagnosticsMarkdown = '';
+  if (isFullReport) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
+  catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
   // payload should cost this one section, not the whole report.
@@ -2701,16 +2722,16 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   let issueReporterDraftMarkdown = '';
   if (payload.issueReporterDraft) {
     const d = payload.issueReporterDraft;
-    const lsLine = d.localStorageError
-      ? `Error: ${d.localStorageError}`
-      : d.localStoragePresent
-        ? `Present (length: ${d.localStorageLength}, prefix: \`${d.localStoragePrefix}\`)`
-        : 'None';
-    const ssLine = d.sessionStorageError
-      ? `Error: ${d.sessionStorageError}`
-      : d.sessionStoragePresent
-        ? `Present (length: ${d.sessionStorageLength}, prefix: \`${d.sessionStoragePrefix}\`)`
-        : 'None';
+    const draftStateLine = (status, present, length) => {
+      if (status === 'unavailable') return 'Unavailable';
+      if (!present) return 'None';
+      const boundedLength = Number.isSafeInteger(length) && length >= 0
+        ? Math.min(length, 1_000_000)
+        : 0;
+      return `Present (length: ${boundedLength})`;
+    };
+    const lsLine = draftStateLine(d.localStorageStatus, d.localStoragePresent, d.localStorageLength);
+    const ssLine = draftStateLine(d.sessionStorageStatus, d.sessionStoragePresent, d.sessionStorageLength);
 
     issueReporterDraftMarkdown = `
 ## Issue Reporter Draft State
@@ -2746,7 +2767,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

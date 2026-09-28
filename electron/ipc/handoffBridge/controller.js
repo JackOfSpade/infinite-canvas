@@ -75,9 +75,10 @@ const TERMINAL_TUNNEL_START_STATES = new Set(['blocked', 'needs-setup', 'needs-t
 const IPV4_PREFIX = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.0\/24$/;
 const IPV6_HEXTET = '(?:0|[1-9a-f][0-9a-f]{0,3})';
 const IPV6_PREFIX = new RegExp(`^${IPV6_HEXTET}:${IPV6_HEXTET}:${IPV6_HEXTET}::/48$`);
-const failure = code => {
+const failure = (code, diagnostic = null) => {
   const error = new Error(code);
   error.code = code;
+  if (diagnostic && typeof diagnostic === 'object') error.diagnostic = diagnostic;
   return error;
 };
 
@@ -821,6 +822,8 @@ export function createHandoffBridgeController(options = {}) {
     return { success: false, code: 'CANCELLED', status: snapshot(false) };
   }
   async function runEnable(args = {}, generation) {
+    const startedAt = safeNow(now);
+    let startupPhase = 'listener-start';
     try {
       await loadConfig();
       if (!startCurrent(generation)) return cancelledStart(generation);
@@ -845,23 +848,31 @@ export function createHandoffBridgeController(options = {}) {
       if (!startCurrent(generation)) return cancelledStart(generation);
       const bound = await boundedCall(listener, 'start', [], { timers, code: 'socket_unavailable' });
       if (!startCurrent(generation)) return cancelledStart(generation);
-      if (bound === false || bound?.ok === false) throw failure('socket_unavailable');
+      if (bound === false || bound?.ok === false) throw failure('socket_unavailable', { phase: 'listener-start', cause: 'socket-unavailable' });
       if (typeof selfProbe === 'function') {
+        startupPhase = 'listener-probe';
         const local = await boundedCall(selfProbe, null, [{ hostname: config.hostname }], { timers, code: 'socket_unavailable' });
         if (!startCurrent(generation)) return cancelledStart(generation);
-        if (local === false || local?.ok === false) throw failure('socket_unavailable');
+        if (local === false || local?.ok === false) throw failure('socket_unavailable', { phase: 'listener-probe', cause: 'socket-unavailable' });
       }
+      startupPhase = 'tunnel-start';
       const started = await boundedCall(tunnel, 'start', [], { timers, code: 'tunnel_failed' });
       if (!startCurrent(generation)) return cancelledStart(generation);
-      if (started?.ok === false || started === false) throw failure('tunnel_failed');
+      if (started?.ok === false || started === false) throw failure('tunnel_failed', {
+        phase: 'tunnel-start', cause: started?.code || 'startup-timeout', tunnel: statusOf(tunnel), startedAt,
+      });
       if (options.waitForTunnelOnline === true) {
+        startupPhase = 'tunnel-readiness';
         const ready = await waitForTunnelOnline(generation);
         if (!startCurrent(generation)) return cancelledStart(generation);
-        if (ready !== true) throw failure('tunnel_failed');
+        if (ready !== true) throw failure('tunnel_failed', {
+          phase: 'tunnel-readiness', cause: statusOf(tunnel).lastExit || 'readiness-timeout', tunnel: statusOf(tunnel), startedAt,
+        });
       } else if (typeof publicProbe === 'function') {
+        startupPhase = 'tunnel-readiness';
         const probe = await boundedCall(publicProbe, null, [{ hostname: config.hostname }], { timers, code: 'tunnel_failed' });
         if (!startCurrent(generation)) return cancelledStart(generation);
-        if (probe?.ok === false || probe === false) throw failure('tunnel_failed');
+        if (probe?.ok === false || probe === false) throw failure('tunnel_failed', { phase: 'tunnel-readiness', cause: 'readiness-timeout', tunnel: statusOf(tunnel), startedAt });
       }
       if (!startCurrent(generation)) return cancelledStart(generation);
       serving = 'live'; startTicks();
@@ -870,6 +881,19 @@ export function createHandoffBridgeController(options = {}) {
       return { success: true, status: snapshot(false) };
     } catch (error) {
       if (!startCurrent(generation)) return cancelledStart(generation);
+      const observedTunnel = statusOf(tunnel);
+      const fallbackCause = error?.code === 'socket_unavailable'
+        ? 'socket-unavailable'
+        : startupPhase === 'tunnel-readiness'
+          ? observedTunnel.lastExit || 'readiness-timeout'
+          : observedTunnel.lastExit || 'startup-timeout';
+      const diagnostic = {
+        phase: error?.diagnostic?.phase || startupPhase,
+        cause: error?.diagnostic?.cause || fallbackCause,
+        tunnel: error?.diagnostic?.tunnel || observedTunnel,
+        startedAt: error?.diagnostic?.startedAt ?? startedAt,
+        at: safeNow(now),
+      };
       markFault(error?.code || 'tunnel_failed'); enabled = false; serving = 'error'; pauseCause = null; restartConfirmed = false;
       preparedChats.clear();
       const shutdown = createShutdownBudget();
@@ -880,7 +904,7 @@ export function createHandoffBridgeController(options = {}) {
         if (persisted?.state !== 'fulfilled' || persisted.value === false) markFault('persist_failed');
       } finally { shutdown.close(); }
       seq += 1; publishNow();
-      return { success: false, code: error?.code || 'tunnel_failed', status: snapshot(false) };
+      return { success: false, code: error?.code || 'tunnel_failed', status: snapshot(false), diagnostic };
     }
   }
   async function enable(args = {}) {

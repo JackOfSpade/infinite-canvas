@@ -173,6 +173,7 @@ export function createTunnelSupervisor(options = {}) {
   };
   const runPublicProbe = async token => {
     if (token !== generation || !child || stopping || state === 'paused') return;
+    const probeStartedAt = now();
     let response;
     try { response = await (options.publicProbeFn || publicProbe)(options.hostname, options); } catch { response = { ok: false, code: 'edge-unreachable' }; }
     if (!response || typeof response !== 'object') response = { ok: false, code: 'edge-unreachable' };
@@ -202,7 +203,14 @@ export function createTunnelSupervisor(options = {}) {
     if (publicFailures >= 3) state = 'degraded'; else state = readySince ? 'checking-public' : 'connecting';
     // First discovery is intentionally brisk; once the 30s window is over the
     // long cadence avoids turning a persistent edge outage into a restart loop.
-    setTimer('public', () => runPublicProbe(token), publicFailures < 6 ? TUNNEL_CONSTANTS.PUBLIC_PROBE_MS : 60_000);
+    // Keep the brisk cadence start-to-start while never overlapping a slow
+    // probe: a timeout longer than the interval retries immediately after it
+    // settles instead of adding another full interval and missing startup.
+    const elapsed = Math.max(0, now() - probeStartedAt);
+    const retryDelay = publicFailures < 6
+      ? Math.max(0, TUNNEL_CONSTANTS.PUBLIC_PROBE_MS - elapsed)
+      : 60_000;
+    setTimer('public', () => runPublicProbe(token), retryDelay);
   };
   const scheduleProbes = token => {
     readyStartedAt = now(); readySince = null; publicFailures = 0; probeCount = 0; resetProbeStatus();

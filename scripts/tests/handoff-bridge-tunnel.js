@@ -77,7 +77,10 @@ function createSupervisorHarness(overrides = {}) {
     prepareBinary: async () => { order.push('binary'); return { ok: true, copyPath: '/tmp/cloudflared-ffffffff', sha256: 'f'.repeat(64), version: '2026.9.3' }; },
     findBinary: () => '/tmp/source-cloudflared', chooseMetricsPort: () => 50000,
     atomicWriteText: (_target, text) => { order.push('config'); configText = text; }, readConfig: () => configText,
-    dryRun: async (_binary, args) => { order.push(`dry:${args.at(-1)}`); return { ok: true, output: args.at(-1) === 'validate' ? `Validating rules from ${tunnelPaths(userData).config}\nOK` : args.at(-1).includes('not-the-bridge') ? 'rule #1 http_status:404' : `rule #0 https://${host}/mcp unix:${userData}/handoff-bridge/b.sock` }; },
+    // Real cloudflared emits this acknowledgement with a final LF. Keep the
+    // shared supervisor fixture on that output so every successful start path
+    // protects the regression, not only the direct parser test below.
+    dryRun: async (_binary, args) => { order.push(`dry:${args.at(-1)}`); const configPath = tunnelPaths(userData).config; return { ok: true, output: args.at(-1) === 'validate' ? `Validating rules from ${configPath}\nOK\n` : args.at(-1).includes('not-the-bridge') ? `Using rules from ${configPath}\nMatched rule #1\n\tservice: http_status:404\n` : `Using rules from ${configPath}\nMatched rule #0\n\thostname: ${host}\n\tservice: unix:${userData}/handoff-bridge/b.sock\n` }; },
     verifyPinnedCopy: () => { order.push('verify'); return { ok: true }; },
     recordTunnelIntent: (_root, data) => { order.push(data.pid === null ? 'intent:pre' : 'intent:live'); },
     spawnCloudflared: args => { order.push('spawn'); const child = spawnCloudflared({ ...args, spawnImpl: fakeSpawn }); if (typeof overrides.rawLine === 'string') args.onLine?.(overrides.rawLine); return child; },
@@ -212,7 +215,7 @@ export default [
       const order = [];
       const supervisor = createTunnelSupervisor({ userData: '/tmp/ic-supervisor', hostname: 'b-0123456789abcdef0123.lullascape.com', socketPath: '/tmp/ic-supervisor/handoff-bridge/b.sock', credentialsPath: '/tmp/ignored.json', binaryPath: '/tmp/ignored', pin: 'pin', timers: clock, now: clock.now, testMode: true,
         reapOrphans: async () => { order.push('reap'); return { ok: true }; }, findBinary: () => '/tmp/ignored', inspectCredentials: () => { order.push('credentials'); return { ok: true, tunnelId: '123e4567-e89b-42d3-a456-426614174000', credentialsPath: '/tmp/123e4567-e89b-42d3-a456-426614174000.json' }; }, prepareBinary: () => { order.push('binary'); return { ok: true, copyPath: '/tmp/copy', sha256: 'pin', version: '2026.9.3' }; }, chooseMetricsPort: () => 50000,
-        ensureTunnelDirectory: () => order.push('directory'), atomicWriteText: () => order.push('config'), dryRun: async (_binary, args) => ({ ok: true, output: args.at(-1) === 'validate' ? 'Validating rules from /tmp/ic-supervisor/handoff-bridge/tunnel/config.yml\nOK' : args.at(-1).includes('not-the-bridge') ? 'rule #1 http_status:404' : `rule #0 https://b-0123456789abcdef0123.lullascape.com/mcp unix:/tmp/ic-supervisor/handoff-bridge/b.sock` }), verifyPinnedCopy: () => ({ ok: true }), spawnCloudflared: args => { order.push('spawn'); return spawnCloudflared({ ...args, spawnImpl: fakeSpawn }); }, recordTunnelIntent: () => order.push('intent'), getProcessInfo: async pid => ({ pid, pgid: pid, lstart: 'synthetic' }), wait: async () => { await Promise.resolve(); },
+        ensureTunnelDirectory: () => order.push('directory'), atomicWriteText: () => order.push('config'), dryRun: async (_binary, args) => ({ ok: true, output: args.at(-1) === 'validate' ? 'Validating rules from /tmp/ic-supervisor/handoff-bridge/tunnel/config.yml\nOK' : args.at(-1).includes('not-the-bridge') ? 'Using rules from /tmp/ic-supervisor/handoff-bridge/tunnel/config.yml\nMatched rule #1\n\tservice: http_status:404' : 'Using rules from /tmp/ic-supervisor/handoff-bridge/tunnel/config.yml\nMatched rule #0\n\thostname: b-0123456789abcdef0123.lullascape.com\n\tservice: unix:/tmp/ic-supervisor/handoff-bridge/b.sock' }), verifyPinnedCopy: () => ({ ok: true }), spawnCloudflared: args => { order.push('spawn'); return spawnCloudflared({ ...args, spawnImpl: fakeSpawn }); }, recordTunnelIntent: () => order.push('intent'), getProcessInfo: async pid => ({ pid, pgid: pid, lstart: 'synthetic' }), wait: async () => { await Promise.resolve(); },
       });
       const result = await supervisor.start();
       assert(result.ok && order.join(',') === 'directory,reap,credentials,binary,config,intent,spawn,intent', 'start must validate the state directory before serial reaping, trust, intent, spawn and pid update');
@@ -343,9 +346,34 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     name: 'handoff bridge: tunnel: direct dry-run probe and rotating-log seams fail closed',
     async run() {
       const host = 'b-0123456789abcdef0123.lullascape.com'; const socket = '/tmp/b.sock';
-      assert(validateDryRunOutput({ configPath: '/tmp/config.yml', hostname: host, socketPath: socket, validationOutput: 'Validating rules from /tmp/config.yml\nOK', matchingRuleOutput: `rule #0 https://${host}/mcp unix:${socket}`, fallbackRuleOutput: 'rule #1 http_status:404' }), 'exact dry-run output should pass');
+      const validation = 'Validating rules from /tmp/config.yml\nOK';
+      const matching = `Using rules from /tmp/config.yml\nMatched rule #0\n\thostname: ${host}\n\tservice: unix:${socket}`;
+      const fallback = 'Using rules from /tmp/config.yml\nMatched rule #1\n\tservice: http_status:404';
+      const dryRunBase = { configPath: '/tmp/config.yml', hostname: host, socketPath: socket, matchingRuleOutput: matching, fallbackRuleOutput: fallback };
+      assert(validateDryRunOutput({ ...dryRunBase, validationOutput: validation }), 'exact real dry-run output without a terminal newline should pass');
+      assert(validateDryRunOutput({ ...dryRunBase, validationOutput: `${validation}\n`, matchingRuleOutput: `${matching}\n`, fallbackRuleOutput: `${fallback}\n` }), 'real cloudflared LF terminal newlines should pass');
+      assert(validateDryRunOutput({ ...dryRunBase, validationOutput: `${validation}\r\n`, matchingRuleOutput: `${matching}\r\n`, fallbackRuleOutput: `${fallback}\r\n` }), 'canonical CRLF terminal newlines should pass');
+      for (const output of [
+        'Validating rules from /tmp/config.yml\r\nOK',
+        'Validating rules from /tmp/config.yml\nOK\r',
+        'Validating rules from /tmp/config.yml\nOK\n\n',
+        'Validating rules from /tmp/config.yml\nOK\nextra',
+        'extra\nValidating rules from /tmp/config.yml\nOK',
+        'Validating rules from /tmp/other.yml\nOK\n',
+      ]) assert(!validateDryRunOutput({ ...dryRunBase, validationOutput: output }), `non-canonical or hostile validation output must fail (${JSON.stringify(output)})`);
+      for (const [field, output, label] of [
+        ['matchingRuleOutput', matching.replace(host, 'wrong.example.test'), 'wrong matching hostname'],
+        ['matchingRuleOutput', matching.replace('/tmp/config.yml', '/tmp/other.yml'), 'wrong matching config path'],
+        ['matchingRuleOutput', matching.replace(`unix:${socket}`, 'unix:/tmp/other.sock'), 'wrong matching service'],
+        ['matchingRuleOutput', matching.replace('Matched rule #0', 'Matched rule #1'), 'wrong matching rule'],
+        ['matchingRuleOutput', `${matching}\nextra`, 'extra matching line'],
+        ['fallbackRuleOutput', fallback.replace('/tmp/config.yml', '/tmp/other.yml'), 'wrong fallback config path'],
+        ['fallbackRuleOutput', fallback.replace('Matched rule #1', 'Matched rule #0'), 'wrong fallback rule'],
+        ['fallbackRuleOutput', fallback.replace('http_status:404', 'http_status:500'), 'wrong fallback service'],
+        ['fallbackRuleOutput', `${fallback}\nextra`, 'extra fallback line'],
+      ]) assert(!validateDryRunOutput({ ...dryRunBase, [field]: output }), `real rule output must reject ${label}`);
       assert(!validateDryRunOutput({ configPath: '/tmp/config.yml', hostname: host, socketPath: socket, validationOutput: 'OK', matchingRuleOutput: '', fallbackRuleOutput: '' }), 'partial dry-run output must fail');
-      assert(!validateDryRunOutput({ configPath: '/tmp/config.yml', hostname: host, socketPath: socket, validationOutput: 'Validating rules from /tmp/other.yml\nOK', matchingRuleOutput: `rule #0 https://${host}/mcp unix:${socket}`, fallbackRuleOutput: 'rule #1 http_status:404' }), 'a valid-looking result for another config must fail');
+      assert(!validateDryRunOutput({ ...dryRunBase, validationOutput: 'Validating rules from /tmp/other.yml\nOK' }), 'a valid-looking result for another config must fail');
       const good = await publicProbe(host, { publicProbe: async () => ({ status: 200, body: { resource: `https://${host}/mcp` } }) });
       const bad = await publicProbe(host, { publicProbe: async () => ({ status: 200, body: { resource: 'https://other/mcp' } }) });
       assert(good.ok && bad.code === 'wrong-origin', 'I-9 must require an exact protected resource');
@@ -792,6 +820,45 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     },
   },
   {
+    name: 'handoff bridge: tunnel: slow startup public probes retain serialized start-to-start cadence',
+    async run() {
+      const clock = createFakeClock(0);
+      const replies = [
+        { ok: false, code: 'timeout' },
+        { ok: false, code: 'timeout' },
+        { ok: true, code: 'ok' },
+        { ok: true, code: 'ok' },
+      ];
+      let probes = 0; let inFlight = 0; let maxInFlight = 0;
+      const harness = createSupervisorHarness({ clock, publicProbeFn: () => {
+        probes += 1; inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise(resolve => {
+          clock.setTimeout(() => { inFlight -= 1; resolve(replies.shift()); }, 8_000);
+        });
+      } });
+      await harness.supervisor.start();
+      clock.advance(2_000); await flush();
+      assert(probes === 1 && inFlight === 1, 'the first public probe must begin at the documented +2s offset');
+      clock.advance(8_000); await flush(); clock.advance(0); await flush();
+      assert(probes === 2 && inFlight === 1, 'a slow failed probe must retry immediately on settlement rather than add another 5s delay');
+      clock.advance(8_000); await flush(); clock.advance(0); await flush();
+      assert(probes === 3 && inFlight === 1, 'the third serialized startup probe must begin immediately after the second 8s timeout');
+      clock.advance(8_000); await flush();
+      assert(clock.now() === 26_000 && harness.supervisor.status().state === 'online' && maxInFlight === 1,
+        'two 8s timeouts followed by an 8s success must reach online before the controller 30s cap without overlapping probes');
+      assert(harness.clock.pending().filter(timer => timer.at - clock.now() === 60_000).length === 1,
+        'the first healthy probe must leave exactly one 60s public-probe cadence timer');
+      clock.advance(60_000); await flush();
+      assert(probes === 4 && inFlight === 1 && maxInFlight === 1,
+        'a healthy bridge must wait 60s before its next serialized public probe');
+      clock.advance(8_000); await flush();
+      assert(inFlight === 0 && harness.supervisor.status().state === 'online',
+        'the fourth probe must settle before shutdown so the serialized supervisor queue can drain');
+      await harness.supervisor.stop();
+      assert(clock.pendingCount() === 0, 'stopping after slow probes must clear every owned timer');
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: recurring readiness polls cannot clobber public-probe authority',
     async run() {
       const online = createSupervisorHarness();
@@ -906,7 +973,7 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     name: 'handoff bridge: tunnel: stop during start cancels before spawn and timer-port faults fail closed',
     async run() {
       let releaseDry; const blocked = new Promise(resolve => { releaseDry = resolve; }); let first = true;
-      const harness = createSupervisorHarness({ dryRun: async (_binary, args) => { if (first) { first = false; await blocked; } return { ok: true, output: args.at(-1) === 'validate' ? `Validating rules from /tmp/ic-supervisor-matrix/handoff-bridge/tunnel/config.yml\nOK` : args.at(-1).includes('not-the-bridge') ? 'rule #1 http_status:404' : 'rule #0 https://b-0123456789abcdef0123.lullascape.com/mcp unix:/tmp/ic-supervisor-matrix/handoff-bridge/b.sock' }; } });
+      const harness = createSupervisorHarness({ dryRun: async (_binary, args) => { if (first) { first = false; await blocked; } return { ok: true, output: args.at(-1) === 'validate' ? `Validating rules from /tmp/ic-supervisor-matrix/handoff-bridge/tunnel/config.yml\nOK` : args.at(-1).includes('not-the-bridge') ? 'Using rules from /tmp/ic-supervisor-matrix/handoff-bridge/tunnel/config.yml\nMatched rule #1\n\tservice: http_status:404' : 'Using rules from /tmp/ic-supervisor-matrix/handoff-bridge/tunnel/config.yml\nMatched rule #0\n\thostname: b-0123456789abcdef0123.lullascape.com\n\tservice: unix:/tmp/ic-supervisor-matrix/handoff-bridge/b.sock' }; } });
       const starting = harness.supervisor.start(); await flush(8); const stopping = harness.supervisor.stop(); releaseDry();
       const [startResult, stopResult] = await Promise.all([starting, stopping]);
       assert(!startResult.ok && stopResult.ok && harness.fakeSpawn.calls.length === 0 && harness.supervisor.status().state === 'off', 'a queued stop must invalidate setup before a child is spawned');

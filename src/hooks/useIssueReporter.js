@@ -142,32 +142,32 @@ export function useIssueReporter({
 
       // Snapshot the issue reporter draft states to debug persistence issues.
       let issueReporterDraft = {
+        localStorageStatus: 'available',
         localStoragePresent: false,
         localStorageLength: 0,
-        localStoragePrefix: '',
+        sessionStorageStatus: 'available',
         sessionStoragePresent: false,
         sessionStorageLength: 0,
-        sessionStoragePrefix: '',
       };
       try {
         const lsDraft = localStorage.getItem('issue-reporter-draft');
         if (lsDraft !== null) {
           issueReporterDraft.localStoragePresent = true;
           issueReporterDraft.localStorageLength = lsDraft.length;
-          issueReporterDraft.localStoragePrefix = lsDraft.slice(0, 50) + (lsDraft.length > 50 ? '…' : '');
         }
-      } catch (e) {
-        issueReporterDraft.localStorageError = e?.message || String(e);
+      } catch {
+        // Storage exceptions can include browser/profile details. Preserve only
+        // the closed availability state needed by the bug report.
+        issueReporterDraft.localStorageStatus = 'unavailable';
       }
       try {
         const ssDraft = sessionStorage.getItem('issue-reporter-draft');
         if (ssDraft !== null) {
           issueReporterDraft.sessionStoragePresent = true;
           issueReporterDraft.sessionStorageLength = ssDraft.length;
-          issueReporterDraft.sessionStoragePrefix = ssDraft.slice(0, 50) + (ssDraft.length > 50 ? '…' : '');
         }
-      } catch (e) {
-        issueReporterDraft.sessionStorageError = e?.message || String(e);
+      } catch {
+        issueReporterDraft.sessionStorageStatus = 'unavailable';
       }
 
       // Apply the AI-issued filter code: selects which log lines and payload

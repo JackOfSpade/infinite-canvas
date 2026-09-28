@@ -31,11 +31,18 @@ export function buildChildEnv({ HOME, TMPDIR } = {}) {
 
 export function validateDryRunOutput({ configPath, hostname, socketPath, validationOutput, matchingRuleOutput, fallbackRuleOutput } = {}) {
   const service = `unix:${socketPath}`;
-  return validationOutput === `Validating rules from ${configPath}\nOK`
-    && matchingRuleOutput?.includes('rule #0')
-    && matchingRuleOutput.includes(service)
-    && fallbackRuleOutput?.includes('rule #1')
-    && fallbackRuleOutput.includes('http_status:404')
-    && matchingRuleOutput.includes(`https://${hostname}/mcp`)
-    && typeof hostname === 'string' && typeof configPath === 'string';
+  // cloudflared writes its canonical validation/rule acknowledgements with a
+  // terminal line ending. Accept exactly one optional LF or CRLF suffix, never
+  // trim, so another diagnostic line cannot be smuggled through as success.
+  const canonical = (output, text) => output === text
+    || output === `${text}\n`
+    || output === `${text}\r\n`;
+  const validationAck = `Validating rules from ${configPath}\nOK`;
+  const matchingRuleAck = `Using rules from ${configPath}\nMatched rule #0\n\thostname: ${hostname}\n\tservice: ${service}`;
+  const fallbackRuleAck = `Using rules from ${configPath}\nMatched rule #1\n\tservice: http_status:404`;
+  return typeof hostname === 'string'
+    && typeof configPath === 'string'
+    && canonical(validationOutput, validationAck)
+    && canonical(matchingRuleOutput, matchingRuleAck)
+    && canonical(fallbackRuleOutput, fallbackRuleAck);
 }

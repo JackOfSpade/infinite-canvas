@@ -204,6 +204,39 @@ function scriptedProbeRequest(script, capture = []) {
 }
 
 export default [
+  { name: 'handoff bridge: controls: failed starts retain closed supervisor causes internally', async run() {
+    const configRejected = controllerHarness({
+      tunnel: { async start() { return { ok: false, code: 'config-rejected' }; }, async stop() {}, status: () => ({ state: 'failed', lastExit: 'config-rejected', probe: { state: 'failing', reason: 'hostile private detail', consecutiveFailures: 7 } }) },
+    });
+    const rejected = await configRejected.controller.enable();
+    assert(rejected.code === 'tunnel_failed' && rejected.diagnostic?.phase === 'tunnel-start' && rejected.diagnostic?.cause === 'config-rejected'
+      && rejected.diagnostic?.tunnel?.lastExit === 'config-rejected',
+    'the frozen action code must retain the supervisor-specific config rejection for the main-owned diagnostic sink');
+
+    const clock = createFakeClock(1_000_000);
+    const timeout = controllerHarness({ now: clock.now, timers: clock,
+      tunnel: { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: 'connecting', probe: { state: 'failing', reason: 'timeout', consecutiveFailures: 3 } }) }, waitForTunnelOnline: true });
+    const pending = timeout.controller.enable(); await settle(20); clock.advance(30_000); await settle(20);
+    const timedOut = await pending;
+    assert(timedOut.code === 'tunnel_failed' && timedOut.diagnostic?.phase === 'tunnel-readiness' && timedOut.diagnostic?.cause === 'readiness-timeout'
+      && timedOut.diagnostic?.tunnel?.probe?.reason === 'timeout',
+    'readiness expiry must retain its closed phase/cause and current supervisor probe snapshot');
+
+    const startClock = createFakeClock(1_000_000);
+    const startTimeout = controllerHarness({ now: startClock.now, timers: startClock,
+      tunnel: { start: () => new Promise(() => {}), async stop() {}, status: () => ({ state: 'starting' }) } });
+    const starting = startTimeout.controller.enable(); await settle(20); startClock.advance(25_000); await settle(20);
+    const startExpired = await starting;
+    assert(startExpired.code === 'tunnel_failed' && startExpired.diagnostic?.phase === 'tunnel-start' && startExpired.diagnostic?.cause === 'startup-timeout',
+      'a bounded tunnel.start timeout must retain its phase and closed timeout cause instead of bypassing the failed-start receipt');
+
+    const startRejected = controllerHarness({
+      tunnel: { async start() { throw new Error('hostile injected rejection'); }, async stop() {}, status: () => ({ state: 'failed', lastExit: 'spawn-failed' }) },
+    });
+    const rejectedStart = await startRejected.controller.enable();
+    assert(rejectedStart.diagnostic?.phase === 'tunnel-start' && rejectedStart.diagnostic?.cause === 'spawn-failed',
+      'a tunnel.start rejection must retain the supervisor closed status rather than arbitrary error text');
+  } },
   { name: 'handoff bridge: controls: B0 pins the security and scheduling constants', run: () => {
     assert(CONSTANTS.MCP_AUTH_INFLIGHT === 24 && CONSTANTS.MCP_BODY_READ === 8, 'authenticated pool sizes must stay pinned');
     assert(CONSTANTS.ANON_BODY_READ === 3 && CONSTANTS.ANON_GET_INFLIGHT === 16, 'anonymous pools must stay isolated and pinned');
@@ -408,14 +441,14 @@ export default [
   } },
   { name: 'handoff bridge: controls: composition waits through a real supervisor probe restart before serving', async run() {
     const clock = createFakeClock(1_000_000); const table = createFakeProcessTable({ parentPid: 500 }); const fakeSpawn = createFakeSpawn({ processTable: table, pidStart: 2200 });
-    const probeResults = [{ ok: false, code: 'tunnel-not-serving' }, { ok: true }]; let configText = ''; let controllerProbeCalls = 0; let supervisorCreates = 0;
+    const probeResults = [{ ok: false, code: 'tunnel-not-serving' }, { ok: true }]; let configText = ''; let controllerProbeCalls = 0; let supervisorCreates = 0; let supervisorOptions;
     const userData = '/tmp/ic-controls-supervisor-restart';
     const graph = composeHandoffBridge({
       userData,
       config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } },
       tunnelState: { binaryPath: '/tmp/synthetic-cloudflared', binaryTrusted: true, credentialsPath: `/tmp/${TUNNEL_ID}.json`, pin: 'f'.repeat(64), approvedAt: 1 },
       deps: {
-        now: clock.now, timers: clock, engine: enginePort(), laneStore: { loadLanes: () => [] }, audit: { append: async () => true, flush: async () => ({ ok: true }) },
+        now: clock.now, timers: clock, HOME: '/tmp/ic-home', TMPDIR: '/tmp/ic-tmp', engine: enginePort(), laneStore: { loadLanes: () => [] }, audit: { append: async () => true, flush: async () => ({ ok: true }) },
         readConfig: () => ({ config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } } }),
         oauth: { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => null, revokeAll: async () => ({ ok: true }), closePairing: async () => ({ ok: true }), flush: async () => ({ ok: true }) },
         application: { describeForConfirm: async () => ({ items: [] }) }, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }) },
@@ -425,6 +458,7 @@ export default [
         publicRequest: () => { controllerProbeCalls += 1; throw new Error('composition readiness must not use the controller probe'); },
         createTunnelSupervisor: supplied => {
           supervisorCreates += 1;
+          supervisorOptions = supplied;
           return createTunnelSupervisor({ ...supplied,
             ensureTunnelDirectory: async () => undefined, reapOrphans: async () => ({ ok: true, notices: [] }),
             inspectCredentials: () => ({ ok: true, tunnelId: TUNNEL_ID, credentialsPath: `/tmp/${TUNNEL_ID}.json` }), legacyCertPresent: () => false,
@@ -432,7 +466,9 @@ export default [
             atomicWriteText: (_target, text) => { configText = text; }, readConfig: () => configText,
             dryRun: async (_binary, args) => ({ ok: true, output: args.at(-1) === 'validate'
               ? `Validating rules from ${userData}/handoff-bridge/tunnel/config.yml\nOK`
-              : args.at(-1).includes('not-the-bridge') ? 'rule #1 http_status:404' : `rule #0 https://${HOST}/mcp unix:${supplied.socketPath}` }),
+              : args.at(-1).includes('not-the-bridge')
+                ? `Using rules from ${userData}/handoff-bridge/tunnel/config.yml\nMatched rule #1\n\tservice: http_status:404`
+                : `Using rules from ${userData}/handoff-bridge/tunnel/config.yml\nMatched rule #0\n\thostname: ${HOST}\n\tservice: unix:${supplied.socketPath}` }),
             verifyPinnedCopy: () => ({ ok: true }), recordTunnelIntent: NOOP,
             spawnCloudflared: args => fakeSpawn(args.binaryPath, args.args, { cwd: args.cwd, env: args.env }),
             getProcessInfo: async pid => ({ pid, pgid: pid, lstart: 'synthetic' }), probeReady: async () => ({ ok: true, state: 'ready' }),
@@ -448,6 +484,8 @@ export default [
       },
     });
     try {
+      assert(supervisorOptions.HOME === '/tmp/ic-home' && supervisorOptions.TMPDIR === '/tmp/ic-tmp',
+        'composition must pass the explicit HOME/TMPDIR ports to the supervisor instead of inheriting process environment');
       const enabling = graph.controller.enable({ confirmed: true, startContext: { env: {}, isPackaged: true } }); await settle(100);
       assert(supervisorCreates === 1 && graph.controller.snapshot(false).serving === 'starting' && controllerProbeCalls === 0,
         'production-owned composition selects supervisor readiness instead of the direct controller probe');
@@ -458,6 +496,9 @@ export default [
       clock.advance(250); await settle(12);
       assert((await enabling).success && graph.controller.snapshot(false).serving === 'live' && controllerProbeCalls === 0,
         'the replacement child reaching online completes the same Enable operation');
+      const childEnv = fakeSpawn.calls[0]?.options?.env;
+      assert(JSON.stringify(childEnv) === JSON.stringify({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: '/tmp/ic-home', TMPDIR: '/tmp/ic-tmp' }),
+        'the composed child receives exactly PATH/HOME/TMPDIR with the injected home and tmpdir, never inherited ambient values');
       await graph.controller.disable(); await settle(20);
       assert(clock.pendingCount() === 0, 'the composed supervisor restart regression leaves no timer after Disable');
 

@@ -270,6 +270,7 @@ export const BRIDGE_SETUP_COPY = Object.freeze({
   credentialsTooOpen: 'This credentials file is readable by other accounts. Restrict its permissions before continuing.',
   certPresent: 'A cert.pem file is present. This bridge uses the named-tunnel credentials file instead.',
   advanced: 'Advanced',
+  includeDiagnostics: 'Include bridge diagnostics in FULL bug reports',
   status: 'Tunnel status',
   tunnelStates: Object.freeze({ off: 'Off', blocked: 'Blocked', 'needs-setup': 'Setup needed', 'needs-trust': 'Needs approval', starting: 'Starting', connecting: 'Connecting', 'checking-public': 'Checking public address', up: 'Online', degraded: 'Degraded', backoff: 'Waiting to retry', paused: 'Paused', stopping: 'Stopping', failed: 'Failed', unknown: 'Unknown' }),
   defaultPluginName: 'Infinite Canvas',

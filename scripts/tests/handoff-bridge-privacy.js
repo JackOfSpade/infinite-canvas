@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assert } from './testHelpers.js';
+import { generateMarkdown } from '../test-dependencies.js';
 import { SENTINEL_PREFIX, assertNoSentinel, sentinel } from './fixtures/handoff-bridge/sentinels.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
@@ -16,6 +17,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
+import { clearFailedStartDiagnostic, recordFailedStartDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -92,6 +94,73 @@ function syntheticTimers(start = 0) {
 }
 
 export default [{
+  name: 'handoff bridge: privacy: FULL reports retain only opted-in closed failed-start diagnostics',
+  run: () => {
+    const base = {
+      description: 'Bridge enable failed.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      recordFailedStartDiagnostic({
+        telemetry: true, phase: 'tunnel-start', cause: 'config-rejected', startedAt: 1_000, at: 2_500,
+        tunnel: {
+          state: 'failed', lastExit: 'config-rejected', binaryPath: '/private/secret', hostname: 'private.example.test',
+          probe: { state: 'failing', reason: 'hostile injected value', consecutiveFailures: 4, rawLog: 'PRIVATE_BRIDGE_LOG' },
+        },
+      });
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      assert(full.includes('## Handoff Bridge Diagnostics') && full.includes('phase `tunnel-start`') && full.includes('cause `config-rejected`')
+        && full.includes('reason `unknown`') && full.includes('elapsed 1500 ms') && !focused.includes('## Handoff Bridge Diagnostics'),
+      'only FULL reports render the opted-in failed-start receipt');
+      for (const privateValue of ['/private/secret', 'private.example.test', 'PRIVATE_BRIDGE_LOG', 'hostile injected value']) {
+        assert(!full.includes(privateValue), `handoff diagnostics must drop hostile/private value ${privateValue}`);
+      }
+      recordFailedStartDiagnostic({ telemetry: false, phase: 'tunnel-readiness', cause: 'readiness-timeout', tunnel: { state: 'connecting' } });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('## Handoff Bridge Diagnostics'),
+        'telemetry opt-out must omit the failed-start receipt entirely');
+    } finally { clearFailedStartDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL issue-reporter draft diagnostics retain only closed state and bounded length',
+  run: () => {
+    const privateLocalDraft = 'PRIVATE_ISSUE_REPORTER_LOCAL_DRAFT';
+    const privateSessionDraft = 'PRIVATE_ISSUE_REPORTER_SESSION_DRAFT';
+    const privateStorageError = 'PRIVATE_ISSUE_REPORTER_STORAGE_ERROR';
+    const base = {
+      description: 'Issue reporter draft persistence check.', filterCode: 'FULL',
+      nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    const present = generateMarkdown({
+      ...base,
+      issueReporterDraft: {
+        localStorageStatus: 'available', localStoragePresent: true, localStorageLength: 71,
+        localStoragePrefix: privateLocalDraft,
+        sessionStorageStatus: 'available', sessionStoragePresent: true, sessionStorageLength: 1_000_001,
+        sessionStoragePrefix: privateSessionDraft,
+      },
+    }).markdown;
+    const unavailable = generateMarkdown({
+      ...base,
+      issueReporterDraft: {
+        localStorageStatus: 'unavailable', localStoragePresent: true, localStorageLength: 71,
+        localStorageError: privateStorageError,
+        sessionStorageStatus: 'unavailable', sessionStoragePresent: true, sessionStorageLength: 71,
+        sessionStorageError: privateStorageError,
+      },
+    }).markdown;
+    for (const report of [present, unavailable]) {
+      for (const secret of [privateLocalDraft, privateSessionDraft, privateStorageError]) {
+        assert(!report.includes(secret), 'FULL must never export issue-reporter draft or storage-error text');
+      }
+    }
+    assert(present.includes('LocalStorage legacy draft: `Present (length: 71)`')
+      && present.includes('SessionStorage draft (current session): `Present (length: 1000000)`')
+      && unavailable.includes('LocalStorage legacy draft: `Unavailable`')
+      && unavailable.includes('SessionStorage draft (current session): `Unavailable`'),
+    'FULL preserves closed availability, presence, and bounded draft length diagnostics');
+    return { privacySafe: true };
+  },
+}, {
   name: 'handoff bridge: privacy: sentinels, fixture contacts and paths are safe',
   run: () => {
     const value = sentinel('chat-key');

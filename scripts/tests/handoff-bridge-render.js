@@ -223,7 +223,8 @@ export default [
           let rootNode;
           try {
             const enableCalls = [];
-            const enableResults = [{ success: false, code: 'INTERNAL' }, { success: true }];
+            const pendingEnable = [];
+            const configPatches = [];
             const setupCalls = [];
             window.electronAPI = {
               handoffBridgeGetStatus: async () => ({ status: status(1) }),
@@ -231,9 +232,11 @@ export default [
               handoffBridgeChooseBinary: async () => { setupCalls.push('binary'); return { success: true }; },
               handoffBridgeApproveBinary: async () => { setupCalls.push('approve'); return { success: true }; },
               handoffBridgeChooseCredentials: async () => { setupCalls.push('credentials'); return { success: true }; },
+              handoffBridgeSaveConfig: async ({ patch }) => { configPatches.push(patch); return { success: true }; },
               handoffBridgeSetEnabled: async ({ enabled }) => {
                 enableCalls.push(enabled);
-                return enableResults.shift() || { success: false, code: 'INTERNAL' };
+                if (enableCalls.length === 2) return { success: true };
+                return new Promise(resolve => pendingEnable.push(resolve));
               },
             };
             bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests();
@@ -337,11 +340,21 @@ export default [
             const enableBridge = [...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Turn on bridge'));
             assert(enableBridge && !enableBridge.disabled && offReadyDialog.textContent.includes('Tunnel setup is saved. Turn on the bridge to start the tunnel.'), 'a saved off-state tunnel must expose the in-dialog enable action and explain why plugin setup is locked');
             await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(enableCalls.length === 1 && enableCalls[0] === true && !enableBridge.disabled, 'a failed enable must remain non-optimistic, retain the saved off-state and allow a retry');
+            assert(enableCalls.length === 1 && enableCalls[0] === true && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'an in-flight enable remains pending despite later status refreshes');
+            const offProgress = status(7, {
+              enabled: false,
+              serving: 'starting',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'starting', probe: { state: 'checking' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(offProgress); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { pendingEnable[0]({ success: false, code: 'INTERNAL' }); await Promise.resolve(); await Promise.resolve(); });
+            assert(!enableBridge.disabled, 'a failed enable after a newer off-state snapshot must allow retry');
             assert(offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'an in-dialog enable failure must show only fixed feedback');
             await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(enableCalls.length === 2 && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'a successful enable request must show a bounded pending state until main publishes status');
-            const starting = status(7, {
+            const starting = status(8, {
               enabled: true,
               serving: 'starting',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -350,15 +363,51 @@ export default [
             });
             await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(starting); await Promise.resolve(); await Promise.resolve(); });
             assert(!offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.') && offReadyDialog.textContent.includes('The bridge is starting. Wait for the tunnel to be online before continuing.'), 'a newer main status must clear prior enable feedback and state the live tunnel wait');
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(8)); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(9)); await Promise.resolve(); await Promise.resolve(); });
             assert(![...offReadyDialog.querySelectorAll('button[aria-label^="Go to"]')][2].disabled && ![...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'the online status refresh must unlock Plugin and link without remounting setup');
 
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(9)); bundle.module.openBridgeSetup(2); });
+            const offForRetry = status(10, {
+              enabled: false,
+              serving: 'off',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'off', probe: { state: 'off' } },
+              link: { state: 'unlinked' },
+            });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(offForRetry); bundle.module.openBridgeSetup(2); });
+            const retryDialog = window.document.querySelector('[role="dialog"]');
+            const retryEnable = [...retryDialog.querySelectorAll('button')].find(button => button.textContent.includes('Turn on bridge'));
+            const telemetry = retryDialog.querySelector('input[type="checkbox"]');
+            assert(telemetry && !telemetry.checked, 'Advanced tunnel setup must expose the persisted bridge-diagnostics preference');
+            assert(retryDialog.textContent.includes('Include bridge diagnostics in FULL bug reports'),
+              'the diagnostics preference uses the setup copy contract');
+            await bundle.module.act(async () => { retryEnable.click(); await Promise.resolve(); await Promise.resolve(); telemetry.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(configPatches.some(patch => patch.telemetryInBugReports === true) && !retryEnable.disabled,
+              'changing bridge diagnostics clears the old enable request and persists only the telemetry preference');
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(11, {
+                enabled: false,
+                serving: 'off',
+                config: { telemetryInBugReports: true },
+                setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+                tunnel: { state: 'off', probe: { state: 'off' } },
+                link: { state: 'unlinked' },
+              }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(retryDialog.querySelector('input[type="checkbox"]')?.checked, 'the diagnostics checkbox follows the persisted status snapshot');
+            await bundle.module.act(async () => { retryEnable.click(); await Promise.resolve(); await Promise.resolve(); pendingEnable[1]({ success: false, code: 'INTERNAL' }); await Promise.resolve(); await Promise.resolve(); });
+            assert(!retryDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.') && retryEnable.disabled,
+              'a stale failed enable response cannot overwrite a newer pending attempt');
+            await bundle.module.act(async () => { pendingEnable[2]({ success: false, code: 'INTERNAL' }); await Promise.resolve(); await Promise.resolve(); });
+            assert(retryDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'),
+              'the current failed enable response remains visible after newer status snapshots');
+
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(12)); bundle.module.openBridgeSetup(2); });
             const liveDialog = window.document.querySelector('[role="dialog"]');
             const hostname = liveDialog.querySelector('input[aria-label="Public address"]');
             hostname.value = 'draft.example.com';
             hostname.dispatchEvent(new window.Event('input', { bubbles: true }));
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(10, { config: { hostname: 'saved.example.com' } })); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(13, { config: { hostname: 'saved.example.com' } })); });
             assert(hostname.value === 'draft.example.com', 'a newer status sequence must not replace an address draft');
 
             const focusable = [...liveDialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];

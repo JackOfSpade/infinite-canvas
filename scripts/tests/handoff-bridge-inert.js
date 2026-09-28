@@ -11,6 +11,7 @@ import { runBackgroundE2EShutdownCleanup } from '../../electron/utils/background
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { readTunnelState } from '../../electron/ipc/handoffBridge/tunnel/files.js';
+import { clearFailedStartDiagnostic, getFailedStartDiagnostic, recordFailedStartDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 import {
   appendClosedHandoffAudit,
   composeHandoffBridge,
@@ -221,6 +222,120 @@ async function disposeCompositionGraph(graph) {
 
 export default [
   {
+    name: 'handoff bridge: inert: a failed composed enable retains its closed receipt after runtime detach',
+    async run() {
+      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      const graph = {
+        config: { telemetryInBugReports: true },
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'error', paused: false, pauseCause: null, config: { telemetryInBugReports: true } }), subscribe: () => () => undefined,
+          enable: async () => ({ success: false, code: 'tunnel_failed', diagnostic: { phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected', probe: { state: 'failing', reason: 'timeout', consecutiveFailures: 2 } }, startedAt: 10 } }),
+          disable: async () => ({ success: true }),
+        },
+        listener: { stop() {} }, tunnel: { status: () => ({ state: 'failed', lastExit: 'config-rejected' }), dispose() {} },
+        power: { dispose() {} }, tray: { destroy() {} }, pairing: { cancel() {} }, oauth: { closePairing() {} }, audit: { flush() {} }, engine: { close() {} },
+      };
+      try {
+        const result = await startHandoffBridge({ deps: completeStartDeps({ compose: () => graph, activate: true, confirmed: true }) });
+        const retained = getFailedStartDiagnostic();
+        assert(result.success === false && retained?.telemetry === true && retained.phase === 'tunnel-start'
+          && retained.cause === 'config-rejected' && retained.tunnel.lastExit === 'config-rejected' && retained.tunnel.probe.reason === 'timeout',
+        'a failed runtime must detach without discarding its closed supervisor-start receipt');
+      } finally { clearFailedStartDiagnostic(); await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: an already-attached controller retains a failed-enable receipt',
+    async run() {
+      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      const graph = {
+        config: { telemetryInBugReports: true },
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'error', paused: false, pauseCause: null, config: { telemetryInBugReports: true } }), subscribe: () => () => undefined,
+          enable: async () => ({ success: false, code: 'tunnel_failed', diagnostic: { phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' }, startedAt: 10 } }),
+          disable: async () => ({ success: true }),
+        },
+        listener: { stop() {} }, tunnel: { status: () => ({ state: 'failed', lastExit: 'config-rejected' }), dispose() {} },
+        power: { dispose() {} }, tray: { destroy() {} }, pairing: { cancel() {} }, oauth: { closePairing() {} }, audit: { flush() {} }, engine: { close() {} },
+      };
+      try {
+        const deps = completeStartDeps({ compose: () => graph });
+        assert((await startHandoffBridge({ deps })).success, 'the inert attached graph must be available before its first explicit Enable');
+        const result = await startHandoffBridge({ deps: { ...deps, activate: true, confirmed: true } });
+        const retained = getFailedStartDiagnostic();
+        assert(result.success === false && retained?.telemetry === true && retained.phase === 'tunnel-start' && retained.cause === 'config-rejected',
+          'an attached-controller Enable failure must preserve its fixed receipt instead of bypassing the diagnostic sink');
+      } finally { clearFailedStartDiagnostic(); await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: failed-start telemetry uses the controller\'s current preference, never a stale graph config',
+    async run() {
+      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      const failed = telemetryInBugReports => ({
+        success: false, code: 'tunnel_failed',
+        status: { enabled: false, serving: 'error', config: { telemetryInBugReports } },
+        diagnostic: { phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' }, startedAt: 10, at: 11 },
+      });
+      const graph = staleTelemetry => ({
+        // This is the captured composition input. It intentionally disagrees
+        // with the result status, as it can after controller.reloadConfig().
+        config: { telemetryInBugReports: staleTelemetry },
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'error', paused: false, pauseCause: null, config: { telemetryInBugReports: staleTelemetry } }),
+          subscribe: () => () => undefined,
+          enable: async () => failed(!staleTelemetry), disable: async () => ({ success: true }),
+        },
+        listener: { stop() {} }, tunnel: { status: () => ({ state: 'failed', lastExit: 'config-rejected' }), dispose() {} },
+        power: { dispose() {} }, tray: { destroy() {} }, pairing: { cancel() {} }, oauth: { closePairing() {} }, audit: { flush() {} }, engine: { close() {} },
+      });
+      try {
+        // A stale opt-in must not record after the active controller's opt-out.
+        let result = await startHandoffBridge({ deps: completeStartDeps({ compose: () => graph(true), activate: true, confirmed: true }) });
+        assert(result.code === 'tunnel_failed' && getFailedStartDiagnostic() === null,
+          'an authoritative opt-out in the failed result suppresses a stale composition opt-in');
+        await stopHandoffBridge(); clearFailedStartDiagnostic();
+
+        // Conversely, an opt-in adopted by reloadConfig must be honored even
+        // when the original graph was composed while telemetry was off.
+        result = await startHandoffBridge({ deps: completeStartDeps({ compose: () => graph(false), activate: true, confirmed: true }) });
+        assert(result.code === 'tunnel_failed' && getFailedStartDiagnostic()?.telemetry === true,
+          'an authoritative opt-in in the failed result records the closed receipt despite a stale composition opt-out');
+        await stopHandoffBridge(); clearFailedStartDiagnostic();
+
+        const hostileResult = failed(true);
+        Object.defineProperty(hostileResult.status, 'config', { get: () => { throw new Error('unreadable preference'); } });
+        result = await startHandoffBridge({ deps: completeStartDeps({ compose: () => ({
+          ...graph(true), controller: { ...graph(true).controller, enable: async () => hostileResult },
+        }), activate: true, confirmed: true }) });
+        assert(result.code === 'tunnel_failed' && getFailedStartDiagnostic() === null,
+          'an unreadable current preference fails closed instead of retaining optional telemetry');
+      } finally { clearFailedStartDiagnostic(); await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: a cancelled attached enable leaves no failed-start receipt',
+    async run() {
+      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      const graph = {
+        config: { telemetryInBugReports: true },
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }), subscribe: () => () => undefined,
+          enable: async () => ({ success: false, code: 'CANCELLED' }), disable: async () => ({ success: true }),
+        },
+        listener: { stop() {} }, tunnel: { status: () => ({ state: 'off' }), dispose() {} },
+        power: { dispose() {} }, tray: { destroy() {} }, pairing: { cancel() {} }, oauth: { closePairing() {} }, audit: { flush() {} }, engine: { close() {} },
+      };
+      try {
+        const deps = completeStartDeps({ compose: () => graph });
+        assert((await startHandoffBridge({ deps })).success, 'the cancellation fixture must attach before explicit Enable');
+        const result = await startHandoffBridge({ deps: { ...deps, activate: true, confirmed: true } });
+        assert(result.code === 'CANCELLED' && getFailedStartDiagnostic() === null,
+          'a declined/cancelled Enable is not a bridge failure and must not create a report receipt');
+      } finally { clearFailedStartDiagnostic(); await stopHandoffBridge(); }
+    },
+  },
+  {
     name: 'handoff bridge: inert: I-01 import has no process, listener, spawn, write or timer machinery',
     run: () => {
       const source = fs.readFileSync(indexUrl, 'utf8');
@@ -310,7 +425,7 @@ export default [
       let compositions = 0;
       const graph = () => ({
         controller: {
-          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }),
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null, config: { telemetryInBugReports: true } }),
           disable: async () => ({ success: true }),
         },
         listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
@@ -367,12 +482,18 @@ export default [
     async run() {
       await stopHandoffBridge();
       const canvas = liveCanvas(88);
-      let packagedCompositions = 0; let packagedEnables = 0;
+      let packagedCompositions = 0; let packagedEnables = 0; let enableOutcome = 'success';
       const graph = () => ({
+        config: { telemetryInBugReports: true },
         controller: {
-          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }),
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null, config: { telemetryInBugReports: true } }),
           subscribe: () => () => undefined,
-          enable: async () => { packagedEnables += 1; return { success: true }; },
+          enable: async () => {
+            packagedEnables += 1;
+            return enableOutcome === 'failure'
+              ? { success: false, code: 'tunnel_failed', diagnostic: { phase: 'tunnel-start', cause: 'config-rejected', at: 123, startedAt: 100, tunnel: { state: 'failed', lastExit: 'config-rejected' } } }
+              : { success: true };
+          },
           disable: async () => ({ success: true }),
         },
         listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
@@ -393,6 +514,14 @@ export default [
         const enabled = await packagedIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
         assert(enabled.success && packagedCompositions === 1 && packagedEnables === 1,
           'explicit packaged state reaches the normal enable path despite an ambient development fallback');
+        enableOutcome = 'failure';
+        const failedRetry = await packagedIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
+        assert(failedRetry.success === false && getFailedStartDiagnostic()?.cause === 'config-rejected',
+          'the active controller route retains the closed failure receipt rather than bypassing the runtime wrapper');
+        enableOutcome = 'success';
+        const successfulRetry = await packagedIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
+        assert(successfulRetry.success && getFailedStartDiagnostic() === null,
+          'a successful attached retry clears the prior failed-start receipt before a later FULL report');
         await stopHandoffBridge();
 
         let devCompositions = 0;
@@ -1179,6 +1308,8 @@ export default [
           }),
         }) })).success, 'the old root can attach a synthetic live graph');
 
+        recordFailedStartDiagnostic({ telemetry: true, phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' } });
+        assert(getFailedStartDiagnostic()?.telemetry === true, 'the old root fixture must seed a retained opted-in receipt');
         assert(registerHandoffBridgeHandlers({ ipcMain: newIpc, deps: {
           isPackaged: true, userData: newUserData, getCanvasWindows: () => [canvas],
           dialogs: { ask: async () => ({ ok: true }) },
@@ -1202,8 +1333,39 @@ export default [
           'a late callback from the detached old controller cannot republish old-root state');
         assert((await save({ sender: canvas.webContents }, { patch: { autoStart: true } })).success && writeTarget === newUserData,
           'the replacement registry saves only to its new user-data root');
+        assert(getFailedStartDiagnostic() === null,
+          'cross-root IPC registration must discard the prior root\'s optional failed-start receipt');
       } finally {
+        clearFailedStartDiagnostic(); await stopHandoffBridge();
+        fs.rmSync(oldUserData, { recursive: true, force: true });
+        fs.rmSync(newUserData, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: a direct cross-root start cannot retain another root\'s failed-start receipt',
+    async run() {
+      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      const oldUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-start-old-root-'));
+      const newUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-start-new-root-'));
+      const graph = userData => ({
+        userData,
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null, config: { telemetryInBugReports: false } }),
+          subscribe: () => () => {}, disable: async () => ({ success: true }),
+        },
+        listener: {}, tunnel: {}, power: {}, tray: {},
+      });
+      try {
+        assert((await startHandoffBridge({ deps: completeStartDeps({ userData: oldUserData, compose: () => graph(oldUserData) }) })).success,
+          'the old root graph must attach before testing a direct root switch');
         await stopHandoffBridge();
+        recordFailedStartDiagnostic({ telemetry: true, phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' } });
+        assert((await startHandoffBridge({ deps: completeStartDeps({ userData: newUserData, compose: () => graph(newUserData) }) })).success
+          && getFailedStartDiagnostic() === null,
+        'direct start with a new user-data root must clear the old root\'s optional receipt before composing');
+      } finally {
+        clearFailedStartDiagnostic(); await stopHandoffBridge();
         fs.rmSync(oldUserData, { recursive: true, force: true });
         fs.rmSync(newUserData, { recursive: true, force: true });
       }

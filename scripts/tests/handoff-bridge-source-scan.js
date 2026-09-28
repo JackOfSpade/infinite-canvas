@@ -63,7 +63,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'errors.js': { allow: sibling('node:crypto') },
   'audit.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../logger.js'] },
   'log.js': { allow: ['../logger.js'] },
-  'telemetry.js': { allow: ['node:crypto', '../logger.js'] },
+  'telemetry.js': { allow: [] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js'] },
   'controller.js': { allow: sibling('node:crypto') },

@@ -100,17 +100,16 @@ export function HandoffBridgeSetupDialog() {
   const [pendingAddress, setPendingAddress] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [enabling, setEnabling] = useState(false);
-  const [enableRequestSequence, setEnableRequestSequence] = useState(null);
   const [enableError, setEnableError] = useState(null);
   const hostnameRef = useRef(null);
   const pluginNameRef = useRef(null);
   const dialogRef = useRef(null);
   const previousFocusRef = useRef(null);
   const mountedRef = useRef(true);
+  const enableRequestRef = useRef(0);
   const copy = BRIDGE_SETUP_COPY;
   const visible = Boolean(ui.setup) && status.availability.ok;
   const requestedStep = ui.setup?.step || 1;
-  const { seq: statusSequence } = status;
   const tunnelPrerequisitesSaved = status.setup.hostnameOk
     && status.setup.binaryApproved
     && status.setup.credentialsOk;
@@ -123,10 +122,8 @@ export function HandoffBridgeSetupDialog() {
     ? sanitizeBridgeLabel(status.tunnel.tunnelId)
     : status.setup.credentialsOk ? copy.credentialsSelected : copy.noCredentials;
   const tunnelReady = status.enabled && status.setup.tunnelReachable;
-  const enablePending = enabling
-    && !status.enabled
-    && statusSequence <= (enableRequestSequence ?? statusSequence);
-  const visibleEnableError = enableError?.sequence >= statusSequence ? enableError.message : '';
+  const enablePending = enabling && !status.enabled;
+  const visibleEnableError = !status.enabled ? enableError?.message || '' : '';
   const linkReady = status.enabled && status.setup.linked;
   const canAccessStep = target => target <= 2
     || (target === 3 && tunnelReady)
@@ -142,11 +139,30 @@ export function HandoffBridgeSetupDialog() {
     && tunnelReady
     && linkReady;
 
+  const clearEnableFeedback = useCallback(() => {
+    enableRequestRef.current += 1;
+    setEnabling(false);
+    setEnableError(null);
+  }, []);
+
+  const dismissSetup = useCallback(() => {
+    clearEnableFeedback();
+    closeBridgeSetup();
+  }, [clearEnableFeedback]);
+
   useEffect(() => {
     if (!visible) return undefined;
     updateModalCount(1);
     return () => updateModalCount(-1);
   }, [visible]);
+
+  useEffect(() => {
+    if (visible && !status.enabled) return undefined;
+    // Defer the feedback reset so it follows the status/visibility update
+    // rather than synchronously cascading another render from this effect.
+    const timer = setTimeout(clearEnableFeedback, 0);
+    return () => clearTimeout(timer);
+  }, [clearEnableFeedback, status.enabled, visible]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -173,12 +189,12 @@ export function HandoffBridgeSetupDialog() {
     const onKey = event => {
       if (event.key === 'Escape' && !pendingAddress) {
         event.preventDefault();
-        closeBridgeSetup();
+        dismissSetup();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pendingAddress, visible]);
+  }, [dismissSetup, pendingAddress, visible]);
 
   const trapFocus = useCallback(event => {
     if (event.key !== 'Tab') return;
@@ -209,6 +225,11 @@ export function HandoffBridgeSetupDialog() {
     return result;
   }, []);
 
+  const mutateSetup = useCallback(async (method, payload) => {
+    clearEnableFeedback();
+    return call(method, payload);
+  }, [call, clearEnableFeedback]);
+
   const saveAddress = useCallback(async () => {
     const hostname = hostnameRef.current?.value || '';
     const pluginName = pluginNameRef.current?.value || '';
@@ -217,29 +238,27 @@ export function HandoffBridgeSetupDialog() {
       return;
     }
     const patch = { hostname, pluginName };
-    const result = await call('handoffBridgeSaveConfig', { patch });
+    const result = await mutateSetup('handoffBridgeSaveConfig', { patch });
     if (result?.success === false && result.code === 'LINK_WOULD_BREAK' && mountedRef.current) {
       setPendingAddress(patch);
     }
-  }, [call]);
+  }, [mutateSetup]);
 
   const enableBridge = useCallback(async () => {
-    const awaitingMain = enabling
-      && !status.enabled
-      && statusSequence <= (enableRequestSequence ?? statusSequence);
-    if (awaitingMain || status.enabled || !tunnelPrerequisitesSaved) return;
-    setEnableRequestSequence(statusSequence);
+    if (enabling || status.enabled || !tunnelPrerequisitesSaved) return;
+    const requestId = enableRequestRef.current + 1;
+    enableRequestRef.current = requestId;
     setEnabling(true);
     setEnableError(null);
     setNotice('');
     const result = await invoke(bridgeApi(), 'handoffBridgeSetEnabled', { enabled: true });
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || requestId !== enableRequestRef.current) return;
     if (result?.success === false) {
       setEnabling(false);
-      setEnableError({ message: ipcErrorMessage(result.code), sequence: statusSequence });
+      setEnableError({ message: ipcErrorMessage(result.code) });
       return;
     }
-  }, [enableRequestSequence, enabling, status.enabled, statusSequence, tunnelPrerequisitesSaved]);
+  }, [enabling, status.enabled, tunnelPrerequisitesSaved]);
 
   const openPlugins = useCallback(async () => {
     const result = await openExternalUrl('https://chatgpt.com/plugins', {
@@ -304,9 +323,9 @@ export function HandoffBridgeSetupDialog() {
         {status.tunnel.certPemPresent && <p className="mt-1 text-amber-200">{copy.certPresent}</p>}
       </div>
       <div className="flex min-w-0 flex-wrap gap-2">
-        <button type="button" className="bridge-button-secondary" onClick={() => void call('handoffBridgeChooseBinary')}>{copy.chooseBinary}</button>
-        <button type="button" className="bridge-button-secondary" onClick={() => void call('handoffBridgeApproveBinary')}>{copy.approveBinary}</button>
-        <button type="button" className="bridge-button-secondary" disabled={!status.setup.binaryApproved} onClick={() => void call('handoffBridgeChooseCredentials')}>{copy.chooseCredentials}</button>
+        <button type="button" className="bridge-button-secondary" onClick={() => void mutateSetup('handoffBridgeChooseBinary')}>{copy.chooseBinary}</button>
+        <button type="button" className="bridge-button-secondary" onClick={() => void mutateSetup('handoffBridgeApproveBinary')}>{copy.approveBinary}</button>
+        <button type="button" className="bridge-button-secondary" disabled={!status.setup.binaryApproved} onClick={() => void mutateSetup('handoffBridgeChooseCredentials')}>{copy.chooseCredentials}</button>
       </div>
       <label className="block min-w-0 text-xs text-white/70">
         {copy.publicAddress}
@@ -317,6 +336,16 @@ export function HandoffBridgeSetupDialog() {
         <label className="mt-2 block min-w-0 text-xs text-white/70">
           {copy.pluginName}
           <input ref={pluginNameRef} aria-label={copy.pluginName} defaultValue={status.config.pluginName || copy.defaultPluginName} className="mt-1 w-full rounded border border-white/15 bg-black/30 px-2 py-1.5 text-white" />
+        </label>
+        <label className="mt-2 flex items-start gap-2 text-[11px] text-white/70">
+          <input
+            type="checkbox"
+            checked={status.config.telemetryInBugReports}
+            onChange={() => void mutateSetup('handoffBridgeSaveConfig', {
+              patch: { telemetryInBugReports: !status.config.telemetryInBugReports },
+            })}
+          />
+          {copy.includeDiagnostics}
         </label>
       </details>
       <p className="text-[11px] text-white/45">{copy.status}: {copy.tunnelStates[status.tunnel.state] || copy.tunnelStates.unknown}</p>
@@ -389,7 +418,7 @@ export function HandoffBridgeSetupDialog() {
       onConfirm={() => {
         const patch = pendingAddress;
         setPendingAddress(null);
-        void call('handoffBridgeSaveConfig', { patch, confirmBreak: true });
+        void mutateSetup('handoffBridgeSaveConfig', { patch, confirmBreak: true });
       }}
       onCancel={() => setPendingAddress(null)}
     />
@@ -400,7 +429,7 @@ export function HandoffBridgeSetupDialog() {
       <div
         className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
         onMouseDown={event => {
-          if (!pendingAddress && event.target === event.currentTarget) closeBridgeSetup();
+          if (!pendingAddress && event.target === event.currentTarget) dismissSetup();
         }}
       >
         <section
@@ -417,7 +446,7 @@ export function HandoffBridgeSetupDialog() {
               <h2 id="handoff-bridge-setup-title" className="text-base font-semibold text-white">{copy.title}</h2>
               <p className="text-xs text-white/45">{copy.steps[step - 1]}</p>
             </div>
-            <button type="button" onClick={closeBridgeSetup} aria-label={copy.close} className="bridge-icon-button"><X size={18} /></button>
+            <button type="button" onClick={dismissSetup} aria-label={copy.close} className="bridge-icon-button"><X size={18} /></button>
           </header>
           <div className="mt-4 flex gap-1">
             {copy.steps.map((item, index) => {
@@ -446,7 +475,7 @@ export function HandoffBridgeSetupDialog() {
             {step < 4 ? (
               <button type="button" disabled={!canAdvance} onClick={() => goToStep(nextStep)} className="bridge-button-primary">{copy.next} <ChevronRight size={14} /></button>
             ) : (
-              <button type="button" onClick={closeBridgeSetup} className="bridge-button-primary"><Check size={14} /> {copy.finish}</button>
+              <button type="button" onClick={dismissSetup} className="bridge-button-primary"><Check size={14} /> {copy.finish}</button>
             )}
           </footer>
         </section>

@@ -482,11 +482,11 @@ if (args.includes('ingress') && args.includes('validate')) {
   process.exit(0);
 }
 if (args.includes('ingress') && args.includes('rule') && target === ${JSON.stringify(`https://${HOSTNAME}/mcp`)}) {
-  process.stdout.write(${JSON.stringify(`rule #0 unix:${socketPath} https://${HOSTNAME}/mcp\\n`)});
+  process.stdout.write('Using rules from ' + config + '\\nMatched rule #0\\n\\thostname: ' + ${JSON.stringify(HOSTNAME)} + '\\n\\tservice: unix:' + ${JSON.stringify(socketPath)} + '\\n');
   process.exit(0);
 }
 if (args.includes('ingress') && args.includes('rule') && target === 'https://not-the-bridge.invalid/') {
-  process.stdout.write('rule #1 http_status:404\\n');
+  process.stdout.write('Using rules from ' + config + '\\nMatched rule #1\\n\\tservice: http_status:404\\n');
   process.exit(0);
 }
 if (!path.isAbsolute(invokedAs)) process.exit(64);
