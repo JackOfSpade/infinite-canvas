@@ -419,6 +419,15 @@ export default [{
     for (const [sink, recorder] of [['recordClientAuth', 'recordClientAuthDiagnostic'], ['recordSourceRejection', 'recordSourceRejectionDiagnostic']]) {
       assert(index.includes(recorder), `${sink} must reach ${recorder}`);
     }
+    // Wiring the sink is not enough: a forwarder that names only some fields
+    // silently degrades the rest to their enum fallback. `grant` decides
+    // whether requiring a client assertion is safe, and it was dropped here
+    // once already while `outcome` came through intact.
+    const forwarder = index.slice(index.indexOf('recordClientAuth:'), index.indexOf('recordClientAuthDiagnostic(') + 200);
+    for (const field of ['outcome', 'grant']) {
+      assert(new RegExp(`${field}:\\s*entry\\?\\.${field}`).test(forwarder),
+        `the recordClientAuth forwarder must pass ${field} through, or it degrades to unknown in the report`);
+    }
     // Every telemetry recorder composition imports must also be cleared, or a
     // stale observation outlives the link it described.
     for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic']) {

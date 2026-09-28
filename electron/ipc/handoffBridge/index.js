@@ -739,10 +739,13 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     // The token endpoint computes which client authentication the connector
     // used and previously dropped it on the floor, leaving the decision
     // between pinning `private_key_jwt` and accepting `none` unmeasurable.
-    // Keep only the closed outcome; the assertion itself never travels.
+    // Keep only the closed outcome and grant; the assertion, its claims and
+    // the client key never travel. The grant is load-bearing: requiring an
+    // assertion is justified only once a refresh_token exchange has been seen
+    // signed, so dropping it here would silently strand the decision.
     recordClientAuth: entry => {
       if (!bridgeDiagnosticsEnabled()) return;
-      recordClientAuthDiagnostic({ telemetry: true, outcome: entry?.outcome, at: now() });
+      recordClientAuthDiagnostic({ telemetry: true, outcome: entry?.outcome, grant: entry?.grant, at: now() });
     },
     onPairingClosed: reason => pairing?.onOAuthPairingClosed?.(reason),
     onConsentRequested: value => {
