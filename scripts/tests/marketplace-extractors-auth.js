@@ -1337,37 +1337,40 @@ export default [
     },
   },
 {
-    // A login-verify FAILURE captured the page text per-check but never rendered
-    // it (top-level bodyHead is connected-path only), so a soft-wall "logged out"
-    // verdict showed no way to see WHAT the page said — was it a real sign-in
-    // shell, or a logged-in SPA that hadn't client-rendered its account UI yet?
-    // The bug-report trace must now surface the per-check bodyHead on failures.
-    name: 'session trace surfaces captured bodyHead on a verify FAILURE (not just connected)',
+    // Captured page text can include authenticated account content. The report
+    // keeps only the structural fact that the verifier captured text.
+    name: 'session trace records captured page text without exporting it',
     run: () => {
       const platforms = [{ id: 'aptdeco', name: 'AptDeco' }];
       // Soft-wall failure: no top-level bodyHead (matches verifySellMonitorLogin's
       // failure return shape `{ target, checks }`), bodyHead lives on the check.
       const failCache = {
-        aptdeco: { lastTrace: { target: 'https://www.aptdeco.com/sell/new', checks: [{
+        aptdeco: { lastTrace: {
+          target: 'https://www.aptdeco.com/sell/new',
+          pageTitle: 'Ada Lovelace private account',
+          error: 'Marisol Quenby free-form verifier error',
+          checks: [{
           target: 'https://www.aptdeco.com/sell/new', status: 200, finalUrl: 'https://www.aptdeco.com/sell/new',
           softWallMatch: 'already have an account? sign in',
-          bodyHead: "Let's start listing your furniture. First time selling? Already have an account? Sign in",
+          bodyHead: 'Marisol Quenby has an account on example.com',
         }] } },
       };
       const failOut = renderSessionTraceBlocks(platforms, failCache);
-      assert(/bodyHead:/.test(failOut), `failure trace must render the captured bodyHead -> ${failOut}`);
-      assert(/start listing your furniture/.test(failOut), 'the actual captured page text must appear so logged-out-shell vs logged-in-SPA is distinguishable');
+      assert(/pageText: captured \(content withheld\)/.test(failOut), `failure trace must retain the captured-text fact -> ${failOut}`);
+      assert(!/Marisol Quenby|Ada Lovelace|example\.com/.test(failOut),
+        'captured authenticated page text, page title, and free-form verifier error must never reach a report');
 
-      // Connected path already has a top-level bodyHead — don't duplicate it per check.
+      // Connected path records one structural capture fact, not the page text.
       const okCache = {
         aptdeco: { lastTrace: {
           target: 'https://www.aptdeco.com/sell/new', finalUrl: 'https://www.aptdeco.com/sell/new', status: 200,
-          bodyHead: 'Beds Chairs Sofas What are you selling',
-          checks: [{ target: 'https://www.aptdeco.com/sell/new', status: 200, bodyHead: 'Beds Chairs Sofas What are you selling' }],
+          bodyHead: 'Ada Lovelace 555-0101',
+          checks: [{ target: 'https://www.aptdeco.com/sell/new', status: 200, bodyHead: 'Ada Lovelace 555-0101' }],
         } },
       };
       const okOut = renderSessionTraceBlocks(platforms, okCache);
-      assert((okOut.match(/bodyHead:/g) || []).length === 1, `connected trace renders bodyHead once (no per-check dup) -> ${okOut}`);
+      assert((okOut.match(/pageText: captured/g) || []).length === 1 && !/Ada Lovelace|555-0101/.test(okOut),
+        `connected trace records the page-text fact once without duplicating or leaking it -> ${okOut}`);
       return { ok: true };
     },
   },

@@ -3619,7 +3619,8 @@ export default [
       `the per-hub block must render each hub's own Continue trail under its hub id, got ${snapshot.slice(0, 5000)}`);
       // Naming only whichever hub wrote telemetry last is what sent the original
       // investigation at the healthy run's preflight. Both must be attributable.
-      assert(snapshot.includes('/blocked/profile') && snapshot.includes('/healthy/profile')
+      assert(!snapshot.includes('/blocked/profile') && !snapshot.includes('/healthy/profile')
+        && (snapshot.match(/<local-path>/g) || []).length >= 2
         && snapshot.includes('    - Preflight status: challenge')
         && snapshot.includes('    - Preflight status: authenticated'),
       `both hubs' preflights must be shown with their owner, got ${snapshot.slice(0, 5000)}`);

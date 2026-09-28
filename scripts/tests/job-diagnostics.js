@@ -41,7 +41,7 @@ import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
-import { redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
+import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportPath, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
@@ -3440,7 +3440,7 @@ export default [
       const evidence = buildNativeChallengeHistoryEvidence({
         nativeChallenge: {
           initialChallengeObserved: true,
-          initialSignal: 'cf-verify-text',
+          initialSignal: 'caller-observed',
           pollCount: 7,
           pollErrorCount: 1,
           lastClassification: 'cleared',
@@ -3449,7 +3449,7 @@ export default [
           terminalSource: 'child-exit',
           exitCode: 0,
           postCloseVerify: {
-            outcome: 'challenge-cleared', status: 200,
+            outcome: 'clean-tab-observed', status: 200,
             reason: 'account page reached',
             finalUrl: 'https://secure.indeed.com/settings/account?private=token',
           },
@@ -3458,7 +3458,7 @@ export default [
       assert(evidence.includes('initial challenge=yes')
         && evidence.includes('polls=7')
         && evidence.includes('terminal=child-exit')
-        && evidence.includes('post-close=challenge-cleared HTTP 200')
+        && evidence.includes('post-close=clean-tab-observed HTTP 200')
         && evidence.includes('https://secure.indeed.com/settings/account')
         && !evidence.includes('secret-token')
         && !evidence.includes('private=token'),
@@ -3494,7 +3494,7 @@ export default [
       });
       assert(blind.includes('first-party tab seen=no')
         && blind.includes('poll errors=40')
-        && blind.includes('first poll error=osascript: execution error: Not authorized to send Apple events')
+        && blind.includes('first poll error=recorded')
         && watched.includes('first-party tab seen=yes')
         && !watched.includes('first poll error=')
         && blind !== watched,
@@ -3502,14 +3502,12 @@ export default [
       assert(!blind.includes('leak-me') && !blind.includes('`') && !blind.includes('|'),
         'the first poll error is redacted and stripped of markup the way its neighbouring bits are');
 
-      // 200 is the producer's cap on the stored field, and the renderer prints at
-      // the same width — so a message that filled the record cannot pick up a
-      // second, unmarked cut here. (Anything longer was already cut upstream.)
+      // Browser/OS error prose is never exported, regardless of the producer cap.
       const atCap = buildNativeChallengeHistoryEvidence({
         nativeChallenge: { pollCount: 3, pollErrorCount: 3, sawFirstPartyTab: false, firstPollError: 'E'.repeat(200) },
       });
-      assert(atCap.includes(`first poll error=${'E'.repeat(200)}`),
-        'a first poll error already at the record cap renders whole rather than being truncated twice');
+      assert(atCap.includes('first poll error=recorded') && !atCap.includes('E'.repeat(20)),
+        'a first poll error is retained only as a closed observation');
 
       // Absent on records written before the fields existed. "Not recorded" is
       // not an observation of absence, so neither bit may be invented there.
@@ -3537,7 +3535,8 @@ export default [
         },
       }]);
       assert(rendered.includes('first-party tab seen=no')
-        && rendered.includes('Not authorized to send Apple events'),
+        && rendered.includes('first poll error=recorded')
+        && !rendered.includes('Not authorized to send Apple events'),
       'the always-on handoff section renders the two bits, not just the evidence helper');
       return { blindBits: blind.split('; ').length };
     },
@@ -3693,6 +3692,8 @@ export default [
         platformId: phase ? `indeed-${phase}` : 'indeed-unstamped', mode: 'native-chrome',
         result: 'closed', finishedAt: new Date().toISOString(),
         cookieFlushMs: 1_800, cookieFlushPhase: phase,
+        executable: '/Applications/Ada Lovelace.app/Contents/MacOS/Ada Lovelace',
+        profileDir: '/Users/marisol-quenby/Library/Application Support/example.com',
       });
       const table = buildAuthLifecycleTableMarkdown([
         row('pre-close-fixed'), row('pre-close-checkpoint'), row('post-close-observe'), row(null),
@@ -3709,6 +3710,8 @@ export default [
         'a record carrying a wait but no stamped phase says so rather than being attributed to a phase');
       assert(table.includes('| — (phase not recorded) |'),
         'a record with neither a wait nor a phase reports both as unrecorded');
+      assert(table.includes('<local-path>') && !table.includes('Ada Lovelace') && !table.includes('marisol-quenby'),
+        'the auth lifecycle preserves configured-path facts without exporting executable or profile paths');
       return { phasesRendered: 3 };
     },
   },
@@ -3816,18 +3819,18 @@ export default [
       assert(reconnected.includes('ℹ️ historical NOT-CONNECTED verdict (')
         && !reconnected.includes('⚠️ preserved prior NOT-CONNECTED verdict'),
       'a prior negative is retained as historical evidence without presenting it as a conflicting current warning');
-      assert(reconnected.includes('without auth redirect or sign-in body')
-        && !reconnected.includes('token=secret'),
-      'the preserved negative reason renders but its URL query token is redacted, same as every other trace field');
-      assert(reconnected.includes('bodyHead: `Sign in to Glassdoor to continue`')
-        && reconnected.includes('HTTP 200'),
-      'the preserved negative carries its own nested trace evidence (status/bodyHead), not just the bare reason string');
+      assert(reconnected.includes('current cached status is connected.')
+        && !reconnected.includes('token=secret')
+        && !reconnected.includes('Sign in to Glassdoor to continue'),
+      'a historical verdict retains its closed status fact without exporting URL tokens or page text');
+      assert(reconnected.includes('HTTP 200') && reconnected.includes('pageText: captured (content withheld)'),
+        'the preserved negative keeps structural trace evidence while withholding captured page text');
       assert(reconnected.includes(new Date(clobberedTs).toISOString()),
         'the preserved negative is dated with the same absolute/relative style the surrounding session rows use, so a stale verdict cannot read as this-session');
       // The age belongs to the HISTORICAL verdict. Trailing the current-status
       // clause instead, it read as the age of the CURRENT status and dated a
       // freshly verified row three weeks back.
-      assert(new RegExp(`historical NOT-CONNECTED verdict \\(${new Date(clobberedTs).toISOString()} \\(\\d+s ago\\)\\); current cached status is connected:`).test(reconnected),
+      assert(new RegExp(`historical NOT-CONNECTED verdict \\(${new Date(clobberedTs).toISOString()} \\(\\d+s ago\\)\\); current cached status is connected\\.`).test(reconnected),
         'the preserved negative age attaches to the historical clause, never to the current cached status');
 
       // Currently NOT connected: the platform's own reason/trace already say
@@ -3854,7 +3857,7 @@ export default [
         },
       });
       assert(restored.includes('ℹ️ historical NOT-CONNECTED verdict (')
-        && restored.includes('restored: prior session read not-connected'),
+        && restored.includes('current cached status is connected.'),
       'a disk-restored entry with no lastTrace at all still surfaces its preserved negative verdict');
       assert(!restored.includes('target:') && !restored.includes('HTTP status:'),
         'a disk-restored entry with no current trace does not fabricate positive-trace lines it never had');
@@ -3872,7 +3875,9 @@ export default [
     name: 'FULL report redacts query and fragment tokens from recent main-process logs',
     run: () => {
       const secret = 'main-log-secret-token';
-      logger.info(`[Accounts] verifier redirected to https://secure.indeed.com/settings/account?__cf_chl_rt_tk=${secret}#challenge`);
+      const localPath = '/Users/ada-lovelace/Documents/example.com/canvas.json';
+      const apiKey = 'example.com-555-0112';
+      logger.info(`[Accounts] verifier redirected to https://secure.indeed.com/settings/account?__cf_chl_rt_tk=${secret}#challenge from ${localPath} | api-key=${apiKey}`);
       const report = generateMarkdown({
         description: 'Verify recent-log URL redaction.',
         filterCode: 'FULL',
@@ -3883,8 +3888,58 @@ export default [
       assert(logs.includes('https://secure.indeed.com/settings/account')
         && !logs.includes('__cf_chl_rt_tk')
         && !logs.includes(secret)
-        && !logs.includes('#challenge'),
-      'FULL keeps the diagnostic URL path in main-process logs but never exports query/hash tokens');
+        && !logs.includes('#challenge')
+        && !logs.includes(localPath)
+        && !logs.includes(apiKey)
+        && logs.includes('credential=<redacted>')
+        && logs.includes('<local-path>')
+        && !report.includes('USAJobs key prefix:'),
+      'FULL keeps the diagnostic URL path in main-process logs but never exports query/hash tokens, local paths, or an API-key prefix');
+
+      // Exercise the shared report-boundary helpers here as part of the
+      // existing FULL-redaction regression so the non-bridge baseline group
+      // count remains frozen.
+      const pathValue = '/Users/marisol-quenby/Documents/example.com/555-0101.txt';
+      const privatePath = '/private/tmp/Ada Lovelace (555-0102)/report.txt';
+      const volumePath = '/System/Volumes/Data/Users/marisol-quenby/Library/example.com';
+      const linuxPath = '/usr/local/bin/example.com';
+      const homePath = '/home/marisol-quenby/555-0103.txt';
+      const tildePath = '~/Library/Application Support/Ada Lovelace/example.com';
+      const fileUrlPath = 'file:///Users/marisol-quenby/Documents/example.com/555-0104.txt';
+      const networkFileUrlPath = 'file://server/share/Ada Lovelace/555-0120.txt';
+      const windowsPath = 'C:\\Users\\Ada Lovelace\\example.com\\555-0113.txt';
+      const uncPath = '\\\\server\\share\\Marisol Quenby\\555-0114.txt';
+      const devicePath = '\\\\?\\C:\\Users\\Ada Lovelace\\555-0115.txt';
+      assert(redactReportPath(pathValue) === '<local-path>'
+        && redactReportPath(null, '(none)') === '(none)',
+      'path-only report fields preserve only presence');
+      const prose = redactReportLocalPathsInText(`loaded ${pathValue} | for Ada Lovelace`);
+      assert(prose.includes('<local-path>') && !prose.includes(pathValue) && prose.endsWith('| for Ada Lovelace'),
+        'free-text report logs redact every private path with spaces while retaining a structured trailing diagnostic');
+      const variants = [privatePath, volumePath, linuxPath, homePath, tildePath, fileUrlPath, networkFileUrlPath, windowsPath, uncPath, devicePath];
+      const variantOutput = redactReportLocalPathsInText(variants.map(value => `path=${value}`).join(' | '));
+      assert(variants.every(value => !variantOutput.includes(value))
+        && (variantOutput.match(/<local-path>/g) || []).length === variants.length,
+      'report redacts file URLs plus macOS/Linux/private/home path variants without exposing suffixes');
+      const freeDiagnostic = 'Marisol Quenby error at file:///Users/ada-lovelace/example.com?token=555-0105';
+      assert(!projectReportDiagnostic(freeDiagnostic).includes('/Users/')
+        && !projectReportDiagnostic(freeDiagnostic).includes('token=')
+        && closeReportDiagnostic(freeDiagnostic) === 'recorded',
+      'trusted diagnostics redact paths/tokens while browser-derived diagnostics stay closed');
+      const secrets = redactReportLogSecrets('password: "Ada Lovelace 555-0116" | token: [Marisol Quenby 555-0117] | "apiKey":"example.com-555-0118" | Authorization-Key: example.com-555-0119 | Bearer eyJabcdefghijklmnopqrstuvwxyz.abcdefghijklmnopqrstuvwxyz.abcdefghijklmnopqrstuvwxyz');
+      const escapedSecrets = redactReportLogSecrets(String.raw`{"password":"before \"Ada Lovelace 555-0121"} | token='before \'Marisol Quenby 555-0122'`);
+      const bearerSecrets = redactReportLogSecrets('Authorization: Bearer "Ada Lovelace 555-0123" | Authorization: Bearer [Marisol Quenby 555-0124]');
+      const headerSecrets = redactReportLogSecrets('Cookie=session=555-0125; other=555-0126 | set_cookie=555-0127 | proxy-authorization: Basic QWRhIExvdmVsYWNlLTU1NS0wMTI4');
+      assert(!/Ada Lovelace|Marisol Quenby|555-011[6-9]|example\.com-555-011[8-9]|eyJabcdefghijklmnopqrstuvwxyz/.test(secrets)
+        && (secrets.match(/<redacted>/g) || []).length >= 4
+        && !/Ada Lovelace|Marisol Quenby|555-012[12]|after words/.test(escapedSecrets)
+        && (escapedSecrets.match(/<redacted>/g) || []).length === 2
+        && !/Ada Lovelace|Marisol Quenby|555-012[34]/.test(bearerSecrets)
+        && (bearerSecrets.match(/<redacted>/g) || []).length === 2
+        && !/555-012[5-8]|QWRhIExvdmVsYWNl/.test(headerSecrets)
+        && (headerSecrets.match(/<redacted>/g) || []).length === 3
+        && redactReportLogSecrets('token mismatch at retry 2') === 'token mismatch at retry 2',
+      'log secret redaction handles quoted/escaped/JSON/header/Bearer forms without erasing ordinary diagnostic prose');
       return { redacted: true };
     },
   },
@@ -3896,6 +3951,7 @@ export default [
       const rawRole = 'PRIVATE "TARGET" ROLE, SECOND VALUE';
       const rawPreference = 'PRIVATE PREFERENCE, SECOND VALUE';
       const rawDocumentId = 'PRIVATE-GOOGLE-JOBS-DOCUMENT-ID';
+      const rawPath = '/Users/ada-lovelace/Desktop/example.com/555-0102.json';
       const report = generateMarkdown({
         description: 'Event-history redaction fixture.', filterCode: 'FULL',
         nodes: [], edges: [], drawings: [], frontEndState: {},
@@ -3907,6 +3963,7 @@ export default [
           `[2026-09-13T04:00:03.000-04:00] [JobCard] external-link requested id=card-1 q=${rawQuery} htidocid=${rawDocumentId} target=google-jobs`,
           `[2026-09-13T04:00:04.000-04:00] [JobSearch] source=usajobs stage=collecting request=${rawUrl}`,
           `[2026-09-13T04:00:04.500-04:00] [JobSearch] preferences=${rawPreference} stage=scoring`,
+          `[2026-09-13T04:00:04.750-04:00] [Canvas] loaded target=${rawPath}`,
           '[2026-09-13T04:00:05.000-04:00] [JobSearch] source=indeed stage=scoring scored=3',
           '[2026-09-13T04:00:06.000-04:00] [JobCard] external-link requested q=present htidocid=missing target=google-jobs',
         ],
@@ -3920,6 +3977,7 @@ export default [
         rawRole,
         rawPreference,
         rawDocumentId,
+        rawPath,
         // Catch partial leaks from comma-delimited values and a quote inside
         // a quoted target role, not merely the original whole value.
         'SECOND VALUE',
@@ -3933,6 +3991,7 @@ export default [
         && history.includes('show more in role "[redacted role]"')
         && history.includes('q=[redacted query] htidocid=[redacted document identifier] target=google-jobs')
         && history.includes('preferences=[redacted preferences] stage=scoring')
+        && history.includes('target=<local-path>')
         && history.includes('source=indeed stage=scoring scored=3')
         && history.includes('q=present htidocid=missing target=google-jobs'),
       'Event History retains timestamps, event type, stage, safe URL identity, and non-sensitive diagnostic structure');
@@ -4054,19 +4113,19 @@ export default [
           { platformId: 'failed', ms: 10, connected: false, outcome: 'error', error: 'navigation failed' },
         ],
       });
-      assert(report.includes('retained prior: connected (inconclusive verify) — transient fetch failure at https://secure.indeed.com/settings/account')
-        && !report.includes('__cf_chl_rt_tk') && !report.includes('secret'),
-        'verification timing must not render a retained cache state as freshly connected');
+      assert(report.includes('retained prior: connected (inconclusive verify) — recorded')
+        && !report.includes('__cf_chl_rt_tk') && !report.includes('secret') && !report.includes('transient fetch failure'),
+        'verification timing keeps a retained cache state distinct while closing arbitrary verifier text');
       assert(report.includes('verified connected'),
         'verification timing must mark a fresh verifier verdict');
       const clipped = formatLoginVerificationTimingResult({
         connected: true, outcome: 'retained-prior', inconclusive: true,
         reason: `Anti-bot wall at https://example.test/${'very-long-path/'.repeat(20)}`,
       });
-      assert(clipped.endsWith('…') && clipped.length < 280,
-        'bounded verification reasons mark truncation with an ellipsis instead of ending mid-token silently');
-      assert(report.includes('skipped native read (prior: not connected) — native read owns login state'),
-        'verification timing must distinguish an intentional native-read skip');
+      assert(clipped.endsWith('— recorded') && !clipped.includes('very-long-path'),
+        'verification timing closes arbitrary verifier text');
+      assert(report.includes('skipped native read (prior: not connected) — recorded'),
+        'verification timing must distinguish an intentional native-read skip without exporting its reason');
       assert(report.includes('Platforms considered: 7')
         && report.includes('Fresh verifier attempts: 4 — 2 fresh verdicts; 1 retained prior after inconclusive verify; 1 error')
         && report.includes('Skipped without a verifier navigation: 3 — 1 native-state read; 1 login-flow skip; 1 legacy generic skip'),
@@ -4399,7 +4458,7 @@ export default [
         }).markdown;
         assert(report.includes('### Application Generation (last)')
           && report.includes('Outcome: **⚠️ failed** · current/final stage: résumé generation')
-          && report.includes('Gemini quota exhausted after all compatible fallbacks.')
+          && report.includes('Error: `recorded`')
           && report.includes('Company/role research unavailable — generation used only the scraped job description')
           && report.includes('application-resume → gemini / `gemini-3.7-flash`'),
         'FULL report must retain the failed application attempt, its exact stage/error, research fallback, and task route');
@@ -4452,7 +4511,6 @@ export default [
         assert(degradedReport.includes('Limited application context:')
           && degradedReport.includes('no scraped job description was captured')
           && degradedReport.includes('scraped description 0 char(s) (missing)')
-          && degradedReport.includes('Gemini quota exhausted while searching.')
           && degradedReport.includes('application-letter-needs → gemini / `gemini-3.5-flash` [completed] (fallback after 2: rate-limit)')
           && degradedReport.includes('needs evidence source: job metadata only (title/company/location/salary; no scraped description or research)'),
         'Application report must state when generation had only metadata/career context, not claim an empty scraped description was used');
@@ -5331,9 +5389,10 @@ export default [
           nodeInternals: [], nodeComponentStates: [], mediaState: [malformedMedia],
         }).markdown;
         assert(report.includes('## Media Player State')
-          && report.includes('section failed to render: `malformed media \'payload\'`'),
-        'Bug report must visibly preserve a bounded, sanitized marker when a section renderer fails');
-        assert(report.includes('Shared profile reservation: `captcha-resolve:bug-report-test`')
+          && report.includes('section failed to render; diagnostic: `recorded`')
+          && !report.includes('malformed media') && !report.includes('payload'),
+        'Bug report must visibly preserve a closed marker when a section renderer fails');
+        assert(report.includes('Shared profile reservation: `recorded`')
           && report.includes('a headless scrape must wait until that visible browser closes'),
         'Bug report must show an active shared-profile reservation even before a browser launches');
       } finally {
@@ -5947,13 +6006,13 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['glassdoor-resolve-diagnostics']), null, null);
-        assert(report.includes('closed: user-closed') && report.includes('extractor: never-extracted'),
-          'job pipeline report retains the manual-close/extractor outcome');
+        assert(report.includes('closed: recorded') && report.includes('extractor: recorded'),
+          'job pipeline report retains the manual-close/extractor facts without exporting browser text');
         assert(report.includes('final URL: `https://www.glassdoor.com/Job/jobs.htm`')
           && !report.includes('sc.keyword=Camera%20Operator'),
           'job pipeline report identifies the Solve destination without exporting query parameters');
-        assert(report.includes('final title: "Jobs in United States | Glassdoor"'),
-          'job pipeline report retains the final page title to distinguish a results page from login/challenge pages');
+        assert(report.includes('final title: captured') && !report.includes('Jobs in United States | Glassdoor'),
+          'job pipeline report retains the final-title capture fact without exporting page text');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6040,7 +6099,7 @@ export default [
           && report.includes('**Skip recommended after 2 unchanged full-list checks**')
           && report.includes('unavailable now: "Expired Architect"')
           && report.includes('https://jobs/missing-jd')
-          && report.includes('detail postprocess: completed 6'),
+          && report.includes('detail postprocess: recorded'),
         'resolved-source diagnostics retain admission and detail-enrichment provenance');
       } finally {
         Object.assign(telemetry, saved);
@@ -7110,7 +7169,7 @@ export default [
         assert(report.includes('**Job Board combine aborted** on 92 scored job(s)')
           && report.includes('no new job results were added')
           && report.includes('existing board was left unchanged')
-          && report.includes('Gemini quota exhausted while organizing the Job Board.')
+          && report.includes('Captured taxonomy-provider error: recorded')
           && report.includes('stage classifying · 2/4 chunk(s) · max 24 jobs/request')
           && report.includes('18 planning sample(s) · 7 role label(s) · provider `claude`')
           && report.includes('90/92 required entries received')
@@ -9975,10 +10034,11 @@ export default [
         phase: 'challenge-hard-block',
         sourceId: 'glassdoor',
         srcName: 'Glassdoor',
-        reason: 'hard-block',
-        title: 'Just a moment...',
-        bodyHead: 'Humans only. Glassdoor uses advanced security systems.',
-        pageState: { interactive: false, cfFrame: false, turnstileWidget: false, recaptchaFrames: 0 },
+        reason: 'Marisol Quenby free error at file:///Users/ada-lovelace/example.com/555-0106.txt',
+        error: 'Ada Lovelace API-key prefix example.com-555-0107',
+        title: 'Ada Lovelace private account',
+        bodyHead: 'Marisol Quenby account page at example.com',
+        pageState: { accountName: 'Ada Lovelace', privatePath: '/home/marisol-quenby/555-0108.txt' },
       });
       // A terminal source event replaces `active`; the retained event trail must
       // still carry the decisive classifier inputs in FULL/JOBS.
@@ -9986,11 +10046,12 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['challenge-signal-diagnostics']), null, null);
         const phaseLine = report.split('\n').find(line => line.includes('challenge-hard-block')) || '';
-        assert(phaseLine.includes('reason=hard-block')
-          && phaseLine.includes('title="Just a moment..."')
-          && phaseLine.includes('turnstileWidget')
-          && phaseLine.includes('Humans only'),
-        'retained challenge phase shows reason, title, structured signals, and bounded body evidence');
+        assert(phaseLine.includes('reason=recorded')
+          && phaseLine.includes('title=captured')
+          && phaseLine.includes('signals=captured')
+          && phaseLine.includes('pageText=captured')
+          && !/Marisol Quenby|Ada Lovelace|example\.com|555-010[6-8]|API-key/.test(phaseLine),
+        'FULL/JOBS retains only closed challenge facts, never page/account/error/path/key material');
       } finally {
         resetManualScraperTelemetry();
         Object.assign(telemetry, saved);
@@ -10014,18 +10075,16 @@ export default [
         sourceId: 'glassdoor',
         srcName: 'Glassdoor',
         key: 'Principal Architect',
-        reason: 'hard-block',
-        title: 'Just a moment...',
+        reason: 'Marisol Quenby private error at file:///Users/ada-lovelace/example.com/555-0109.txt',
+        error: 'Ada Lovelace API-key prefix example.com-555-0110',
+        title: 'Ada Lovelace private account',
         repeatCount: 2,
         hardBlock: true,
         finalUrl: 'https://www.glassdoor.ca/job-listing/principal-architect.htm',
-        bodyHead: 'Humans only. Glassdoor uses advanced security systems to keep its site safe.',
+        bodyHead: 'Marisol Quenby account page at example.com',
         pageState: {
-          interactive: false,
-          terminalHardBlockText: true,
-          cfFrame: false,
-          turnstileWidget: false,
-          recaptchaFrames: 0,
+          accountName: 'Ada Lovelace',
+          privatePath: '/home/marisol-quenby/555-0111.txt',
         },
       }, { updateActive: false });
       // A later ordinary source phase must not evict the decisive detail diagnostic.
@@ -10033,13 +10092,14 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['detail-challenge-policy-diagnostics']), null, null);
         const detailLine = report.split('\n').find(line => line.includes('detail-challenge')
-          && line.includes('Principal Architect') && line.includes('reason=hard-block')) || '';
-        assert(detailLine.includes('reason=hard-block')
+        && line.includes('Principal Architect') && line.includes('reason=recorded')) || '';
+        assert(detailLine.includes('reason=recorded')
           && detailLine.includes('repeat=2')
-          && detailLine.includes('title="Just a moment..."')
-          && detailLine.includes('terminalHardBlockText')
-          && detailLine.includes('Humans only'),
-        'FULL/JOBS keeps the detail challenge reason, retry count, title, DOM state, and bounded page text after teardown');
+          && detailLine.includes('title=captured')
+          && detailLine.includes('signals=captured')
+          && detailLine.includes('pageText=captured')
+          && !/Marisol Quenby|Ada Lovelace|example\.com|555-01(?:09|10|11)|API-key/.test(detailLine),
+        'FULL/JOBS keeps retry/status structure while withholding page, error, title, state, path, and key material');
       } finally {
         resetManualScraperTelemetry();
         Object.assign(telemetry, saved);
@@ -10283,7 +10343,7 @@ export default [
     },
   },
 {
-    name: 'a challenge report states the page size and matched phrase behind a verification-text verdict',
+    name: 'a challenge report states the page size and matched-marker count behind a verification-text verdict',
     run: () => {
       const falsePositive = formatChallengeTextEvidence({
         bodyTextLength: 18_400,
@@ -10291,22 +10351,23 @@ export default [
         matchedVerificationMarkers: ['security check'],
       });
       assert(falsePositive.includes('18400 chars') && falsePositive.includes('past the 2000-char interstitial ceiling')
-        && falsePositive.includes('security check'),
-      'the report names the phrase that fired and shows the page was full content — the two facts a verification-text verdict cannot be checked without');
+        && falsePositive.includes('matched 1 verification marker(s)')
+        && !falsePositive.includes('security check'),
+      'the report shows the page-size classification and closed marker count without exporting matched page text');
 
       const genuine = formatChallengeTextEvidence({
         bodyTextLength: 210,
         interstitialMaxChars: 2_000,
         matchedVerificationMarkers: ['verify you are human'],
       });
-      assert(genuine.includes('interstitial-sized') && genuine.includes('verify you are human'),
-        'a real interstitial is reported as interstitial-sized rather than merely asserted to be a challenge');
+      assert(genuine.includes('interstitial-sized') && genuine.includes('matched 1 verification marker(s)') && !genuine.includes('verify you are human'),
+        'a real interstitial is reported as interstitial-sized with a closed marker count');
 
       assert(formatChallengeTextEvidence(null) === '' && formatChallengeTextEvidence({}) === '',
         'a phase that carries no text evidence adds no line, so unrelated phases are not padded with empty claims');
       const unmeasured = formatChallengeTextEvidence({ matchedVerificationMarkers: ['humans only'] });
-      assert(!unmeasured.includes('chars') && unmeasured.includes('humans only'),
-        'an unmeasured document reports the matched phrase without asserting a size it never observed');
+      assert(!unmeasured.includes('chars') && unmeasured.includes('matched 1 verification marker(s)') && !unmeasured.includes('humans only'),
+        'an unmeasured document reports only the matched-marker count without asserting a size it never observed');
       return { falsePositive };
     },
   },
@@ -13061,16 +13122,16 @@ export default [
         'the marketplace summary cell clips before escaping its pipes');
       assert(sellHub.includes('escapeCell(clipReportText(productLabel(d), 70))'),
         'the sell-hub item cell clips before escapeCell runs');
-      assert(report.includes("truncateDiagnosticText(redactReportUrlsInText(duration.error), 80).replace(/\\|/g, '\\\\|')")
-        && report.includes("truncateDiagnosticText(String(d.title || '—'), 80).replace(/\\|/g, '\\\\|')"),
-      'both bugReport.js table cells clip before escaping their pipes');
+      assert(report.includes("closeReportDiagnostic(duration.error, 'recorded')")
+        && report.includes("d.title ? 'captured' : '—'"),
+      'bugReport.js closes arbitrary error/title table cells instead of exporting them');
 
       // Identifiers must NOT gain a marker — a URL, hash, selector or JSON blob
       // with '…' appended is no longer a value anyone can match or copy.
       const snap = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
-      assert(snap.includes('JSON.stringify(e.pageState).slice(0, 240)')
+      assert(snap.includes("isChallengePhase && e.pageState   ? 'signals=captured' : null")
         && snap.includes('JSON.stringify(String(e.panelSelector).slice(0, 180))'),
-      'JSON blobs and selectors keep their bare slice — a marker would corrupt the value');
+      'page-state blobs are closed while stable selectors retain their bounded identifier behavior');
       return { ok: true };
     },
   },
@@ -13390,9 +13451,9 @@ export default [
           && pipeline.includes('provider retrieval horizon 400d')
           && pipeline.includes('Location `United States`'),
           `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
-        assert(pipeline.includes('Last stage error: `Cancelled by user — clicked Reset on this hub`')
-          && !pipeline.includes('Last stage error: `Node deleted`'),
-          'a user Reset is never reported as a deleted node');
+        assert(pipeline.includes('Last stage error: `recorded`')
+          && !pipeline.includes('Node deleted'),
+          'a provider/runtime failure is retained structurally without exporting its free-form text');
 
         // With no intent retained (e.g. scoring resumed from a captcha-resolve)
         // the original honest line is still the right answer. Keep a pipeline
@@ -13512,8 +13573,8 @@ export default [
           'another hub’s run token is not a second opinion about this run');
         assert(assessment.includes('Separate later run in this process: hub `')
           && assessment.includes('reached phase `aborted`')
-          && assessment.includes('Cancelled by user — clicked Reset on this hub'),
-          'the stopped run is reported as its own fact, with the real cancel cause rather than the shared sentinel');
+          && assessment.includes('stage error: `recorded`'),
+          'the stopped run is reported as its own fact without exporting its free-form cause');
         assert(assessment.includes('Live search stage: not retained for this run'),
           'another hub’s phase is never presented as this run’s gather stage');
         // The board that actually consumed hub A must be the one assessed.

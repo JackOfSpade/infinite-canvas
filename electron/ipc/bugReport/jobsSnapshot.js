@@ -13,7 +13,7 @@ import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
 import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
-import { ago, modelTag, pipelineScope, formatAge, redactReportUrl, redactReportUrlsInText, shortId } from './helpers.js';
+import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, redactReportLocalPathsInText, redactReportPath, redactReportUrl, redactReportUrlsInText, shortId } from './helpers.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 // The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
 // electron/ipc/jobs.js both use it) — imported directly rather than
@@ -36,12 +36,9 @@ export function buildJobsConfigSnapshot() {
 
   const usajobsKey = jobs.usajobsApiKey;
   const usajobsEmail = jobs.usajobsEmail;
-  const keyPrefix = usajobsKey ? `${String(usajobsKey).slice(0, 5)}…` : '(none)';
-
   return {
     hasUsajobsKey: !!usajobsKey,
     hasUsajobsEmail: !!usajobsEmail,
-    usajobsKeyPrefix: keyPrefix,
     // A live key captured from dice.com, not the bootstrap default — the plain
     // getter never returns empty, so truthiness on it would always read green.
     hasCapturedDiceKey: hasStoredDiceApiKey(),
@@ -76,7 +73,7 @@ export function formatChallengeTextEvidence(entry) {
       : '';
     bits.push(`body ${chars} chars${verdict}`);
   }
-  if (markers.length) bits.push(`matched ${JSON.stringify(markers.join(' | ')).slice(0, 200)}`);
+  if (markers.length) bits.push(`matched ${markers.length} verification marker(s)`);
   return bits.join(' · ');
 }
 
@@ -2830,7 +2827,7 @@ export function buildJobCompletionAssessment(
   const foreignPipelineToken = recordedRunToken(telemetry?.pipeline?.runId);
   // Free prose (a cancel-cause label), not an identifier — `receiptIdentifier`
   // would reject every one of them for containing spaces.
-  const foreignPipelineError = historyReportValue(telemetry?.pipeline?.error, '', 120);
+  const foreignPipelineError = closeReportDiagnostic(telemetry?.pipeline?.error, '');
   const foreignRunLine = foreignLiveRun
     ? `- Separate later run in this process: hub \`${sourceHubLabel(liveTelemetryNodeId)}\` reached phase \`${pipelinePhase || 'not retained'}\`${foreignPipelineToken ? ` (run \`${foreignPipelineToken}\`)` : ''}${foreignPipelineError ? ` · stage error: \`${foreignPipelineError}\`` : ''} — a different hub's run, excluded from the reconciliation above.`
     : null;
@@ -4270,7 +4267,7 @@ export function formatGlassdoorCacheProvenance(entry = {}) {
 }
 
 function historyReportValue(value, fallback, max = 240) {
-  const text = String(value ?? '')
+  const text = redactReportLocalPathsInText(redactReportUrlsInText(String(value ?? '')))
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/`/g, "'")
@@ -4364,7 +4361,7 @@ function reportUrl(value, fallback = '(no URL)', max = 240) {
 }
 
 function reportText(value, fallback, max = 240) {
-  return historyReportValue(redactReportUrlsInText(value), fallback, max);
+  return projectReportDiagnostic(value, fallback, max);
 }
 
 function historyJobReportValue(job, { includeSeenDate = false } = {}) {
@@ -4438,11 +4435,11 @@ function indeedSessionPreflightLines(isess, indent = '') {
     : '(none observed)';
   const out = [
     `${indent}- Landed URL: \`${reportUrl(isess.landedUrl, '(unrecorded)')}\``,
-    `${indent}- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${reportText(isess.preflightReason, '(unrecorded)')}\`` : ''}`,
+    `${indent}- Preflight status: ${isess.preflightStatus || '(unrecorded)'}${isess.preflightReason ? ` · reason: \`${projectReportDiagnostic(isess.preflightReason, 'recorded')}\`` : ''}`,
     `${indent}- PPID session cookie present: ${ppidLabel}`,
     `${indent}- Cookie names observed: ${cookieList}`,
-    `${indent}- Chrome executable: \`${String(isess.executablePath || '(unrecorded)').replace(/`/g, "'")}\``,
-    `${indent}- Profile dir: \`${String(isess.userDataDir || '(unrecorded)').replace(/`/g, "'")}\``,
+    `${indent}- Chrome executable: \`${redactReportPath(isess.executablePath, '(unrecorded)')}\``,
+    `${indent}- Profile dir: \`${redactReportPath(isess.userDataDir, '(unrecorded)')}\``,
   ];
   if (isess.host) out.push(`${indent}- Host: \`${String(isess.host).replace(/`/g, "'")}\``);
   return out;
@@ -4648,7 +4645,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (Number.isFinite(cache.readVerbatim) || Number.isFinite(cache.transcribed)) {
         lines.push(`- Pass 1: ${cache.readVerbatim || 0} file(s) read verbatim (no AI handoff) · ${cache.transcribed || 0} transcribed · ${cache.careerDataChars || 0} chars of career data`);
       }
-      if (cache.error) lines.push(`- ⚠️ Cache write error: \`${historyReportValue(cache.error, '', 240)}\``);
+      if (cache.error) lines.push(`- ⚠️ Cache write error: \`${projectReportDiagnostic(cache.error, 'recorded')}\``);
     }
   }
   if (visibleLocalApplications.length) {
@@ -4657,7 +4654,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const local = item.localApplication;
       const title = item.title || '(untitled)';
       const company = item.company || '(no company)';
-      const message = historyReportValue(local.message, '', 500);
+      const message = projectReportDiagnostic(local.message, '');
       lines.push(`- ${title} @ ${company}${item.nodeId ? ` · node ${item.nodeId}` : ''} · job \`${local.id}\` · status: **${local.status || 'unknown'}**${message ? ` — ${message}` : ''}`);
     }
     if (visibleLocalApplications.length > 20) lines.push(`- _${visibleLocalApplications.length - 20} additional Local AI card state(s) omitted._`);
@@ -4716,7 +4713,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }[p.profileInputMode] || String(p.profileInputMode || 'career-input mode not recorded');
       lines.push(`- Trigger: **${runOriginLabel}** · ${profileInputLabel}`);
     }
-    if (p.error) lines.push(`- Last stage error: \`${historyReportValue(p.error, '', 300)}\``);
+    if (p.error) lines.push(`- Last stage error: \`${closeReportDiagnostic(p.error, 'recorded')}\``);
     if (Array.isArray(p.pendingSources) && p.pendingSources.length > 0) {
       lines.push(`- Pending source(s): ${p.pendingSources.map(sourceId => `\`${sourceId}\``).join(', ')}${p.lastSource ? ` · last progress from \`${p.lastSource}\`` : ''}`);
       lines.push('- Active source progress (status@+s from search start):');
@@ -4838,7 +4835,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // print here — the screen is a per-listing judgement, not a token
         // filter — so the reason IS the evidence. Nothing here explains why a
         // board returned the row in the first place.
-        lines.push(`  - Rejected titles (sample): ${samples.map(x => `\`${historyReportValue(x?.title, '', 60)}\` (${x?.source || '?'}${x?.reason ? ` — ${historyReportValue(x.reason, '', 60)}` : ''})`).join(', ')}`);
+        lines.push(`  - Rejected titles (sample): ${samples.map(x => `\`${historyReportValue(x?.title, '', 60)}\` (${x?.source || '?'}${x?.reason ? ' — reason recorded' : ''})`).join(', ')}`);
       }
     }
     if (postCompletionRecoveryAttempts > 0) {
@@ -6132,9 +6129,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       ].filter(Boolean);
       lines.push(`- Current: ${bits.join(' · ')}`);
       if (a.url) lines.push(`  - URL: ${reportUrl(a.url)}`);
-      if (a.reason) lines.push(`  - Reason: ${reportText(a.reason, '(unrecorded)', 360)}`);
+      if (a.reason) lines.push(`  - Reason: ${closeReportDiagnostic(a.reason, 'recorded')}`);
       if (a.key) lines.push(`  - Key: ${a.key}`);
-      if (a.evidence) lines.push(`  - Evidence: ${reportText(a.evidence, '(unrecorded)', 360)}`);
+      if (a.evidence) lines.push(`  - Evidence: ${closeReportDiagnostic(a.evidence, 'recorded')}`);
       // Anti-bot challenge diagnostics — present when a challenge fired. These rank
       // the cause: a datacenter/hosting egress IP points at IP reputation; the
       // browser profile rules out "wasn't headful"; the incident ID aids vendor
@@ -6158,7 +6155,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const challengeTextEvidence = formatChallengeTextEvidence(a);
       if (challengeTextEvidence) lines.push(`  - Verification text evidence: ${challengeTextEvidence}`);
       if (a.pageState) {
-        lines.push(`  - Page state: ${JSON.stringify(a.pageState).slice(0, 360)}`);
+        lines.push('  - Page state: captured');
       }
     } else {
       lines.push('- Current: (no active scrape)');
@@ -6212,7 +6209,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Manual-scrape Chrome: ${scrapeBrowser.running ? '🟢 running' : '⚪ closed'} · launched ${launchedAgo}${scrapeBrowser.pid ? ` · pid ${scrapeBrowser.pid}` : ''}`);
       if (scrapeBrowser.profileDir) {
         const dir = String(scrapeBrowser.profileDir);
-        lines.push(`  - Profile: \`${dir.length > 48 ? `…${dir.slice(-48)}` : dir}\``);
+        lines.push(`  - Profile: \`${redactReportPath(dir)}\``);
       }
       if (scrapeBrowser.running) {
         lines.push('  - This process is separate from the stealthBrowser singleton and holds the SHARED profile directory, so the singleton-derived browser line elsewhere in this report can read "not running" while this one is live.');
@@ -6289,20 +6286,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           isChromephase && e.alive != null  ? `alive=${e.alive}`                                 : null,
           isChromephase && e.polls != null  ? `polls=${e.polls}`                                 : null,
           isChromephase && e.elapsedMs != null ? `elapsed=${(e.elapsedMs / 1000).toFixed(1)}s`  : null,
-          isChromephase && e.error          ? `err=${e.error}`                                   : null,
-          isChromephase && e.stderr         ? `stderr=${historyReportValue(e.stderr, '', 200)}`          : null,
-          isChallengePhase && e.reason      ? `reason=${historyReportValue(e.reason, '', 80)}`           : null,
+          isChromephase && e.error          ? `err=${closeReportDiagnostic(e.error, 'recorded')}`        : null,
+          isChromephase && e.stderr         ? `stderr=${closeReportDiagnostic(e.stderr, 'recorded')}`    : null,
+          isChallengePhase && e.reason      ? `reason=${closeReportDiagnostic(e.reason, 'recorded')}`    : null,
           isChallengePhase && e.repeatCount ? `repeat=${e.repeatCount}`                           : null,
-          isChallengePhase && e.title       ? `title=${JSON.stringify(historyReportValue(e.title, '', 100))}` : null,
-          isChallengePhase && e.pageState   ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
+          isChallengePhase && e.title       ? 'title=captured' : null,
+          isChallengePhase && e.pageState   ? 'signals=captured' : null,
           isChallengePhase && formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
-          isChallengePhase && e.bodyHead    ? `body=${JSON.stringify(historyReportValue(e.bodyHead, '', 160))}` : null,
+          isChallengePhase && e.bodyHead    ? 'pageText=captured' : null,
           // A skipped source has to say WHY on its own line. Without this the
           // phase read "location-resolution-failed Glassdoor q1/12" and the
           // actual per-endpoint result lived only in the raw log tail.
           e.phase === 'location-resolution-failed' && e.location ? `location="${e.location}"`     : null,
           e.phase === 'location-resolution-failed' && e.failureKind ? `kind=${e.failureKind}`     : null,
-          e.phase === 'location-resolution-failed' && e.reason ? `reason=${historyReportValue(e.reason, '', 300)}` : null,
+          e.phase === 'location-resolution-failed' && e.reason ? `reason=${projectReportDiagnostic(e.reason, 'recorded')}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
         lines.push(`  - ${label}`);
@@ -6317,11 +6314,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.phase,
           e.srcName || e.sourceId || null,
           e.key ? `key=${e.key}` : null,
-          e.reason ? `reason=${e.reason}` : null,
+          e.reason ? `reason=${closeReportDiagnostic(e.reason, 'recorded')}` : null,
           e.repeatCount ? `repeat=${e.repeatCount}` : null,
           e.hardBlock ? 'hardBlock=yes' : null,
-          e.title ? `title=${JSON.stringify(historyReportValue(e.title, '', 100))}` : null,
-          e.pageState ? `signals=${JSON.stringify(e.pageState).slice(0, 240)}` : null,
+          e.title ? 'title=captured' : null,
+          e.pageState ? 'signals=captured' : null,
           formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
           e.status != null ? `HTTP=${e.status}` : null,
           // The panel rate-limit / HTTP-error phases record `url`, not
@@ -6334,8 +6331,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.attempt != null ? `attempt=${e.attempt}${e.maxAttempts != null ? `/${e.maxAttempts}` : ''}` : null,
           e.expanded != null ? `expanded=${e.expanded}${e.attempted != null ? `/${e.attempted}` : ''}` : null,
           (e.finalUrl || e.url) ? `url=${reportUrl(e.finalUrl || e.url, '(unrecorded)', 140)}` : null,
-          e.bodyHead ? `body=${JSON.stringify(historyReportValue(e.bodyHead, '', 180))}` : null,
-          e.error ? `err=${historyReportValue(e.error, '', 160)}` : null,
+          e.bodyHead ? 'pageText=captured' : null,
+          e.error ? `err=${closeReportDiagnostic(e.error, 'recorded')}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
         lines.push(`  - ⚠️ ${label}`);
@@ -6402,9 +6399,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const abortPosition = Number.isFinite(interruptedAt) && interruptedAt > 0
           ? ` before #${interruptedAt}`
           : Number.isFinite(completedAt) && completedAt > 0 ? ` after #${completedAt}` : '';
-        const abortReason = e.abortReason ?? e.interruptReason ?? e.stopReason ?? e.reason;
+        const abortReason = projectReportDiagnostic(e.abortReason ?? e.interruptReason ?? e.stopReason ?? e.reason, '');
         const abortLabel = aborted
-          ? `${e.aborted === true || e.cancelled === true ? 'aborted' : 'interrupted'}${abortPosition}${abortReason ? ` (${historyReportValue(abortReason, '', 160)})` : ''}`
+          ? `${e.aborted === true || e.cancelled === true ? 'aborted' : 'interrupted'}${abortPosition}${abortReason ? ` (${abortReason})` : ''}`
           : null;
         // Identical consecutive retries are folded on write into ONE ring entry
         // so a stuck loop cannot evict the distinct history around it. Say how
@@ -6455,7 +6452,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const index = Number(sample?.itemIndex);
           const position = Number.isFinite(index) && index > 0 ? `#${index}` : '#?';
           const key = sample?.key ? ` key=${String(sample.key).slice(0, 100)}` : '';
-          const reason = sample?.reason ? ` reason=${historyReportValue(sample.reason, '', 160)}` : '';
+          const reason = sample?.reason ? ` reason=${projectReportDiagnostic(sample.reason, 'recorded')}` : '';
           lines.push(`    - ⚠️ ${position}${key}${reason}`);
         }
         const modalSamples = Array.isArray(e.modalSamples) ? e.modalSamples.slice(0, 6) : [];
@@ -6680,8 +6677,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push('**Network:**');
       for (const e of networkErrors.slice(-20)) {
         const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
-        const detail = e.status ? `HTTP ${e.status}` : e.errorText;
-        lines.push(`- [-${ageS}s] ${e.method} ${reportUrl(e.url, '(unrecorded)')} → ${reportText(detail, '(unrecorded)', 240)}`);
+        const detail = e.status ? `HTTP ${e.status}` : closeReportDiagnostic(e.errorText, 'recorded');
+        lines.push(`- [-${ageS}s] ${e.method} ${reportUrl(e.url, '(unrecorded)')} → ${detail}`);
       }
     }
     if (consoleLogs.length > 0) {
@@ -6692,7 +6689,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // console provenance while avoiding opaque provider/challenge tokens.
         const tail = e.url ? reportUrl(e.url, '', 180).split('/').pop() : '';
         const src = e.url ? ` (${tail.slice(0, 60)}${tail.length > 60 ? '…' : ''}${e.line != null ? `:${e.line}` : ''})` : '';
-        lines.push(`- [-${ageS}s] [${e.type}] ${reportText(e.text, '(no message)', 300)}${src}`);
+        lines.push(`- [-${ageS}s] [${e.type}] ${closeReportDiagnostic(e.text, 'recorded')}${src}`);
       }
     }
   }
@@ -6799,8 +6796,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // thrown extractor, a genuinely empty page, or a window closed too early.
       const d = r.diag;
       if (d) {
-        const bits = [`closed: ${d.closeReason}`, `extractor: ${d.extractOutcome}`];
-        if (d.postprocessOutcome) bits.push(`detail postprocess: ${d.postprocessOutcome}`);
+        const bits = [`closed: ${closeReportDiagnostic(d.closeReason, 'recorded')}`, `extractor: ${closeReportDiagnostic(d.extractOutcome, 'recorded')}`];
+        if (d.postprocessOutcome) bits.push(`detail postprocess: ${closeReportDiagnostic(d.postprocessOutcome, 'recorded')}`);
         if (d.textLen != null) bits.push(`page textLen ${d.textLen}`);
         if (d.sawChallenge) bits.push('challenge seen');
         if (d.sawConsent) bits.push('consent wall seen');
@@ -6811,8 +6808,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // immediately before close (when available), and make a manual close
         // actionable instead of the ambiguous "never-extracted, textLen 0".
         if (d.finalUrl) bits.push(`final URL: \`${reportUrl(d.finalUrl, '(unrecorded)', 500)}\``);
-        if (d.finalTitle) bits.push(`final title: "${historyReportValue(d.finalTitle, '', 180).replace(/"/g, "'")}"`);
-        if (d.hostMismatch) bits.push(`probe skipped: ${d.probeSkippedReason || 'host-mismatch'}`);
+        if (d.finalTitle) bits.push('final title: captured');
+        if (d.hostMismatch) bits.push(`probe skipped: ${closeReportDiagnostic(d.probeSkippedReason, 'recorded')}`);
         lines.push(`  - resolve detail: ${bits.join(' · ')}`);
         // Stale-selector / changed-layout fingerprint: the extractor matched 0
         // on a page that had real text and no challenge/consent that would have
@@ -7279,7 +7276,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Failed cohort(s) (bounded; capped at 5 of ${rec(c.failedCohorts)}):`);
       for (const f of c.failures.slice(0, 5)) {
         const cohort = historyReportValue(f?.cohort, '(unknown cohort)', 200);
-        const reason = historyReportValue(f?.reason, '(no reason recorded)', 240);
+        const reason = closeReportDiagnostic(f?.reason, 'not recorded');
         lines.push(`  - \`${cohort}\`: ${reason}`);
       }
     }
@@ -7296,7 +7293,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (!h) continue;
       const age = ago(h.ts);
       if (h.error) {
-        lines.push(`- ❌ ${label}${age}: ${h.input} job(s) → history write failed: \`${h.error}\``);
+        lines.push(`- ❌ ${label}${age}: ${h.input} job(s) → history write failed: \`${projectReportDiagnostic(h.error, 'recorded')}\``);
       } else if (h.skipped) {
         lines.push(`- ℹ️ ${label}${age}: ${h.input} job(s) → skipped (${h.skipped})`);
       } else {
@@ -7368,7 +7365,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // imply that a renderer-side fallback created results from an incomplete
       // response.
       lines.push(`- ❌ **Job Board combine aborted** on ${b.input} scored job(s)${modelTag(b.model, b.fallback)} — taxonomy did not complete; no new job results were added and the existing board was left unchanged.`);
-      lines.push(`  - Captured taxonomy-provider error: ${b.error}`);
+      lines.push(`  - Captured taxonomy-provider error: ${closeReportDiagnostic(b.error, 'recorded')}`);
       const shape = b.roleShape && typeof b.roleShape === 'object' ? b.roleShape : null;
       if (shape) {
         const defects = [];
@@ -7568,11 +7565,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             ? ` · résumé type area ${formatTypeAreaUtilization(utilization)}`
             : '';
           const coverPages = cover.pageCount != null ? ` · cover ${cover.pageCount}/${cover.targetPageCount ?? '?'}p` : '';
-          const detail = event?.detail ? ` — ${historyReportValue(event.detail, '', 320)}` : '';
+          const detail = event?.detail ? ` — ${projectReportDiagnostic(event.detail, 'recorded')}` : '';
           lines.push(`  - ${event?.at || '?'} · ${event?.type || 'unknown'}${round}${resultHash}${resumePages}${resumeUtilization}${coverPages}${attempts}${detail}`);
           const qualityReview = event?.qualityReview;
           if (qualityReview?.resume || qualityReview?.coverLetter) {
-            const formatReview = (label, review) => `${label} ${review?.decision || 'unknown'}${review?.rationale ? ` — ${historyReportValue(review.rationale, '', 320)}` : ''}`;
+            const formatReview = (label, review) => `${label} ${review?.decision || 'unknown'}${review?.rationale ? ' — rationale recorded' : ''}`;
             lines.push(`    - AI-authored quality review: ${formatReview('résumé', qualityReview.resume)}; ${formatReview('cover letter', qualityReview.coverLetter)}`);
           }
         }
@@ -7609,13 +7606,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const fallback = outcome?.fallback?.attempts
             ? ` (fallback after ${outcome.fallback.attempts}: ${outcome.fallback.reason || 'unknown'})`
             : '';
-          const failure = outcome?.error ? ` — ${historyReportValue(outcome.error, '', 180)}` : '';
+          const failure = outcome?.error ? ` — ${closeReportDiagnostic(outcome.error, 'recorded')}` : '';
           return `${outcome?.task || '?'} → ${outcome?.provider || '?'}${actual} [${outcome?.status || 'unknown'}]${fallback}${failure}`;
         });
         lines.push(`- Actual task outcomes: ${outcomes.join('; ')}`);
       }
       if (a.status === 'failed' || a.status === 'cancelled') {
-        if (a.error) lines.push(`- ${a.status === 'failed' ? 'Error' : 'Cancellation'}: \`${historyReportValue(a.error, '', 800)}\``);
+        if (a.error) lines.push(`- ${a.status === 'failed' ? 'Error' : 'Cancellation'}: \`${closeReportDiagnostic(a.error, 'recorded')}\``);
         // There is intentionally no fake blank résumé/cover-letter snapshot
         // here: those artifacts were never generated. The lifecycle, model
         // route, and terminal error are the actionable diagnostics.
@@ -7625,8 +7622,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (a.companyResearch.available === false) {
         const descriptionMissing = a.jobContext?.scrapedDescriptionAvailable === false;
         lines.push(descriptionMissing
-          ? `- ⚠️ **Limited application context:** company/role research unavailable AND no scraped job description was captured — generation used only job metadata plus candidate career data${a.companyResearch.error ? `: \`${historyReportValue(a.companyResearch.error, '', 300)}\`` : ''}`
-          : `- ⚠️ Company/role research unavailable — generation used only the scraped job description${a.companyResearch.error ? `: \`${historyReportValue(a.companyResearch.error, '', 300)}\`` : ''}`);
+          ? `- ⚠️ **Limited application context:** company/role research unavailable AND no scraped job description was captured — generation used only job metadata plus candidate career data${a.companyResearch.error ? `: \`${closeReportDiagnostic(a.companyResearch.error, 'recorded')}\`` : ''}`
+          : `- ⚠️ Company/role research unavailable — generation used only the scraped job description${a.companyResearch.error ? `: \`${closeReportDiagnostic(a.companyResearch.error, 'recorded')}\`` : ''}`);
       } else if (a.companyResearch.available === true) {
         lines.push('- Company/role research: live web context available.');
       }
@@ -7866,24 +7863,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : ex.status === 'failed' ? '⚠️ failed' : ex.status || 'unknown';
       lines.push(`\n### Application Export (last)${ago(ex.savedAt || ex.failedAt)}`);
       lines.push(`- Outcome: **${exportOutcome}**${ex.phase ? ` · phase: ${ex.phase}` : ''}`);
-      if (ex.destination) lines.push(`- Destination: \`${String(ex.destination).replace(/`/g, "'").slice(0, 1000)}\``);
-      if (ex.error) lines.push(`- Error: \`${historyReportValue(ex.error, '', 800)}\``);
-      if (ex.bundleError) lines.push(`- ⚠️ Bundle warning: ${historyReportValue(ex.bundleError, '', 500)}`);
+      if (ex.destination) lines.push(`- Destination: \`${redactReportPath(ex.destination)}\``);
+      if (ex.error) lines.push(`- Error: \`${projectReportDiagnostic(ex.error, 'recorded')}\``);
+      if (ex.bundleError) lines.push(`- ⚠️ Bundle warning: ${projectReportDiagnostic(ex.bundleError, 'recorded')}`);
       if (Array.isArray(ex.manifest) && ex.manifest.length) {
         lines.push('- Destination readback manifest:');
         for (const item of ex.manifest.slice(0, 8)) {
           const state = item.exists
             ? `${item.readable ? 'readable' : 'NOT readable'} · ${item.bytes ?? 0} bytes${item.mtimeMs ? ` · mtime ${new Date(item.mtimeMs).toISOString()}` : ''}${item.sha256 ? ` · sha256 ${item.sha256}` : ''}${item.matchesSource != null ? ` · source bytes ${item.matchesSource ? 'exact' : 'MISMATCH'}` : ''}${item.pdfHeaderValid != null ? ` · PDF header ${item.pdfHeaderValid ? 'valid' : 'INVALID'}` : ''}${item.pdfParsed != null ? ` · PDF parse ${item.pdfParsed ? `valid (${item.pageCount ?? '?'}p${item.firstPagePoints ? `, ${item.firstPagePoints}pt` : ''})` : 'INVALID'}` : ''}${item.htmlStructureValid != null ? ` · HTML workspace ${item.htmlStructureValid ? `valid (${item.htmlPanelCount ?? '?'} panels, Sync config ${item.syncConfigValid ? 'valid' : 'INVALID'})` : 'INVALID'}` : ''}${item.markdownNonEmpty != null ? ` · listing ${item.markdownNonEmpty ? 'non-empty' : 'EMPTY'}` : ''}`
             : item.expected === false ? 'not generated · stale sibling absent' : 'MISSING';
-          lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${historyReportValue(item.error, '', 300)}` : ''}`);
+          lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${projectReportDiagnostic(item.error, 'recorded')}` : ''}`);
         }
       }
       if (ex.sync) {
         const sync = ex.sync;
         const serviceState = sync.serverListening ? 'listening' : sync.serverStarting ? 'starting (not listening yet)' : 'NOT listening';
-        lines.push(`- Local edit Sync: ${sync.registered ? 'workspace registered' : 'NOT registered'} · service ${serviceState}${sync.endpoint ? ` · ${String(sync.endpoint).slice(0, 200)}` : ''}${sync.error ? ` · ${historyReportValue(sync.error, '', 300)}` : ''}`);
+        lines.push(`- Local edit Sync: ${sync.registered ? 'workspace registered' : 'NOT registered'} · service ${serviceState}${sync.endpoint ? ` · ${redactReportUrl(sync.endpoint)}` : ''}${sync.error ? ` · ${projectReportDiagnostic(sync.error, 'recorded')}` : ''}`);
       }
-      if (ex.revealSucceeded != null) lines.push(`- Opened destination folder: ${ex.revealSucceeded ? '✅' : `❌${ex.revealError ? ` — ${historyReportValue(ex.revealError, '', 300)}` : ''}`}`);
+      if (ex.revealSucceeded != null) lines.push(`- Opened destination folder: ${ex.revealSucceeded ? '✅' : `❌${ex.revealError ? ` — ${projectReportDiagnostic(ex.revealError, 'recorded')}` : ''}`}`);
       lines.push('- Submission state: not tracked — use this bundle to apply manually on the employer site.');
     } else if (a.status === 'completed') {
       lines.push('- Application export: not recorded — generation completed, but this process has no verified destination readback for the last attempt.');
@@ -7898,13 +7895,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push(`\n### Application Sync (last)${ago(applicationSync.finishedAt || applicationSync.failedAt || applicationSync.startedAt || applicationSync.ts)}`);
     lines.push(`- Outcome: **${syncOutcome}**${applicationSync.phase ? ` · phase: ${applicationSync.phase}` : ''}`);
     lines.push(`- Document: ${applicationSync.document === 'cover' ? 'cover letter' : applicationSync.document === 'resume' ? 'résumé' : applicationSync.document || 'unknown'}`);
-    lines.push(`- Workspace: \`${String(applicationSync.workspaceDir).replace(/`/g, "'").slice(0, 1000)}\``);
-    if (applicationSync.error) lines.push(`- Error: \`${historyReportValue(applicationSync.error, '', 500)}\``);
+    lines.push(`- Workspace: \`${redactReportPath(applicationSync.workspaceDir)}\``);
+    if (applicationSync.error) lines.push(`- Error: \`${projectReportDiagnostic(applicationSync.error, 'recorded')}\``);
     if (Array.isArray(applicationSync.manifest) && applicationSync.manifest.length) {
       lines.push('- Revision readback manifest:');
       for (const item of applicationSync.manifest.slice(0, 4)) {
         const state = `${item.readable ? 'readable' : 'NOT readable'} · ${item.bytes ?? 0} bytes${item.mtimeMs ? ` · mtime ${new Date(item.mtimeMs).toISOString()}` : ''}${item.sha256 ? ` · sha256 ${item.sha256}` : ''}${item.matchesSource != null ? ` · source bytes ${item.matchesSource ? 'exact' : 'MISMATCH'}` : ''}${item.pdfParsed != null ? ` · PDF parse ${item.pdfParsed ? `valid (${item.pageCount ?? '?'}p${item.firstPagePoints ? `, ${item.firstPagePoints}pt` : ''})` : 'INVALID'}` : ''}${item.htmlStructureValid != null ? ` · HTML workspace ${item.htmlStructureValid ? `valid (Sync config ${item.syncConfigValid ? 'valid' : 'INVALID'})` : 'INVALID'}` : ''}`;
-        lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${historyReportValue(item.error, '', 300)}` : ''}`);
+        lines.push(`  - ${item.name || '(unnamed artifact)'}: ${state}${item.error ? ` · ${projectReportDiagnostic(item.error, 'recorded')}` : ''}`);
       }
     }
   }

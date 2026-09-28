@@ -70,14 +70,17 @@ function redactedReportOrigin(parsed) {
 export function redactReportUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  if (/^(?:file:\/\/|~\/|\/(?:System\/Volumes\/Data\/)?(?:Users|private|tmp|Applications|opt|Volumes|Library|var|etc|usr|home|root|run|mnt|srv|dev|workspace)(?:\/|$)|[a-z]:[\\/])/i.test(raw)) {
+    return '<local-path>';
+  }
   try {
     const parsed = new URL(raw);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
       return redactConfiguredReportHosts(`${redactedReportOrigin(parsed)}${parsed.pathname}`);
     }
-    return redactConfiguredReportHosts(raw.split(/[?#]/, 1)[0]);
+    return '<redacted-url>';
   } catch {
-    return redactConfiguredReportHosts(raw.split(/[?#]/, 1)[0]);
+    return '<redacted-url>';
   }
 }
 
@@ -92,6 +95,48 @@ export function redactReportUrlsInText(value) {
     return `${redactReportUrl(url)}${suffix}`;
   });
   return redactConfiguredReportHosts(text);
+}
+
+// Reports can be copied outside the app, so a local path is identifying data
+// rather than useful support evidence. Keep the fact that a path was present
+// while withholding every component, including a user name or workspace name.
+const LOCAL_REPORT_PATH = /(^|[\s=:([`'"])(?:file:\/\/[^\r\n|`]*|(?:~\/|[a-z]:[\\/]|\\\\(?:\?\\)?|\/(?:(?:System\/Volumes\/Data\/)?Users|private|tmp|Applications|opt|Volumes|Library|var|etc|usr|home|root|run|mnt|srv|dev|workspace))(?:[^\r\n|`]*)?)/gimu;
+
+export function redactReportPath(value, fallback = '(unavailable)') {
+  return typeof value === 'string' && value.trim() ? '<local-path>' : fallback;
+}
+
+export function redactReportLocalPathsInText(value) {
+  return String(value ?? '').replace(LOCAL_REPORT_PATH, '$1<local-path>');
+}
+
+/**
+ * Project trusted app-authored diagnostics into bounded report text. URLs,
+ * paths, and credential-bearing forms are removed before the text is rendered.
+ */
+export function projectReportDiagnostic(value, fallback = 'not recorded', max = 240) {
+  const normalized = redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value)))
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/`/g, "'")
+    .replace(/\|/g, '\\|')
+    .trim();
+  if (!normalized) return fallback;
+  return normalized.length > max ? `${normalized.slice(0, Math.max(1, max - 1))}…` : normalized;
+}
+
+/** Browser/provider/page-derived text is untrusted account content; retain only presence. */
+export function closeReportDiagnostic(value, fallback = 'not recorded') {
+  return String(value ?? '').trim() ? 'recorded' : fallback;
+}
+
+/** Preserve log structure while removing high-confidence credential forms. */
+export function redactReportLogSecrets(value) {
+  return String(value ?? '')
+    .replace(/\b"?(?:cookie|set[-_ ]?cookie)"?\s*(?:=|:)\s*[^\r\n|]+/gi, 'credential=<redacted>')
+    .replace(/\b"?(?:(?:proxy[-_ ]?)?authorization(?:[-_ ]?key)?|password|passphrase|api[-_ ]?key|client[-_ ]?secret|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|session[-_ ]?(?:id|token|key)|token|key)"?\s*(?:=|:)\s*(?:(?:Bearer|Basic)\s+)?(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|\{[^}]*\}|[^\s,;|]+)/gi, () => 'credential=<redacted>')
+    .replace(/\bBearer\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|\{[^}]*\}|[^\s,;|]+)/gi, 'Bearer <redacted>')
+    .replace(/\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+\b/g, '<redacted-jwt>');
 }
 
 // Renderer events are deliberately a human-readable ring rather than a rigid
@@ -133,7 +178,7 @@ export function redactReportEventHistoryLine(value) {
   // Match the old event export's String(value) coercion exactly; malformed
   // mocked/legacy rows remain visible as "null"/"undefined" rather than
   // silently disappearing from a timeline.
-  let text = redactReportUrlsInText(String(value));
+  let text = redactReportLocalPathsInText(redactReportUrlsInText(String(value)));
 
   // These are the prose forms emitted by JobSearchNode / JobGroupNode. Match
   // only an explicit sensitive cue and quoted value; ordinary quoted event
@@ -329,7 +374,7 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   const lastConfirmed = entry?.ts
     ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
     : '—';
-  const reason = entry?.lastReason ? redactReportUrlsInText(entry.lastReason).replace(/\|/g, '\\|') : '—';
+  const reason = entry?.lastReason ? closeReportDiagnostic(entry.lastReason, 'recorded') : '—';
   return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
 }).join('\n');
 
@@ -366,13 +411,12 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         t.finalUrl != null ? `  - finalUrl: \`${redactReportUrl(t.finalUrl)}\`` : null,
         t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
         t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
-        t.pageTitle ? `  - pageTitle: \`${clipReportText(String(t.pageTitle).replace(/`/g, "'"), 160)}\`` : null,
-        t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
-        t.error ? `  - error: \`${redactReportUrlsInText(t.error)}\`` : null,
+        t.softWallMatch ? '  - softWall: detected' : null,
+        t.error ? '  - error: recorded' : null,
         typeof t.authCookiePresent === 'boolean' ? `  - authCookiePresent: \`${t.authCookiePresent}\` (names only; values never exported)` : null,
         Array.isArray(t.authCookieNames) && t.authCookieNames.length > 0 ? `  - authCookieNames: \`${t.authCookieNames.join(', ')}\`` : null,
-        t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
-        t.bodyHead ? `  - bodyHead: \`${clipReportText(t.bodyHead.replace(/`/g, "'"), 240)}\`` : null,
+        t.ambiguousShell ? '  - ⚠️ ambiguousShell: detected' : null,
+        t.bodyHead ? '  - pageText: captured (content withheld)' : null,
       ].filter(Boolean),
     );
     if (Array.isArray(t.checks) && t.checks.length > 0) {
@@ -382,22 +426,17 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
           redactReportUrl(check.target) || '—',
           check.status != null ? `HTTP ${check.status}` : null,
           check.finalUrl ? redactReportUrl(check.finalUrl) : null,
-          check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+          check.softWallMatch ? 'softWall=detected' : null,
           check.antiBot ? `antiBot=${check.antiBot}` : null,
           check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
-          check.error ? `error=${redactReportUrlsInText(check.error)}` : null,
+          check.error ? 'error=recorded' : null,
         ].filter(Boolean);
         lines.push(`    - ${clipReportText(parts.join(' | ').replace(/`/g, "'"), 320)}`);
-        // Surface the captured visible-text head per check. The top-level bodyHead
-        // is only set on the CONNECTED return path, so on a verify FAILURE
-        // (soft-wall match, redirect, 401/403) the page text was captured per-check
-        // but never rendered — leaving "logged out per body sniff" with no way to
-        // see WHAT the page actually said. That's the difference between "genuinely
-        // logged out (login form / sign-in shell)" and "logged in but the signal
-        // mis-fired / an SPA hadn't client-rendered the account UI yet". Only when
-        // the top-level bodyHead is absent, to avoid duplicating it for connected.
+        // A captured page-text fact distinguishes a body-sniffed verdict from
+        // a redirect/status-only verdict. The text itself can be authenticated
+        // account content, so it never crosses the report boundary.
         if (!t.bodyHead && check.bodyHead) {
-          lines.push(`      bodyHead: \`${clipReportText(String(check.bodyHead).replace(/`/g, "'"), 240)}\``);
+          lines.push('      pageText: captured (content withheld)');
         }
       }
     }
@@ -423,7 +462,7 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     // session table three lines above had verified 6890s ago — two
     // timestamps for one status, apparently contradicting each other, with
     // nothing in the sentence saying they describe different things.
-    lines.push(`  - ℹ️ historical NOT-CONNECTED verdict (${negAge}); current cached status is connected: ${redactReportUrlsInText(negative.reason)}`);
+    lines.push(`  - ℹ️ historical NOT-CONNECTED verdict (${negAge}); current cached status is connected.`);
     // The disk-restored shape never carries `trace` (persistStatusCache strips
     // it) — only render this when the in-memory write kept it.
     if (negative.trace && typeof negative.trace === 'object') {
@@ -432,15 +471,13 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         nt.finalUrl != null ? `finalUrl=${redactReportUrl(nt.finalUrl)}` : null,
         nt.status != null ? `HTTP ${nt.status}` : null,
         nt.htmlBytes != null ? `htmlBytes=${nt.htmlBytes}` : null,
-        nt.softWallMatch ? `softWall=${nt.softWallMatch}` : null,
-        nt.error ? `error=${redactReportUrlsInText(nt.error)}` : null,
+        nt.softWallMatch ? 'softWall=detected' : null,
+        nt.error ? 'error=recorded' : null,
       ].filter(Boolean);
       if (negTraceParts.length > 0) {
         lines.push(`    - ${clipReportText(negTraceParts.join(' | ').replace(/`/g, "'"), 320)}`);
       }
-      if (nt.bodyHead) {
-        lines.push(`    - bodyHead: \`${clipReportText(String(nt.bodyHead).replace(/`/g, "'"), 240)}\``);
-      }
+      if (nt.bodyHead) lines.push('    - pageText: captured (content withheld)');
     }
   }
   return lines.join('\n');

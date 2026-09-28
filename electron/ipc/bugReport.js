@@ -18,7 +18,7 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
-import { shortId, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { closeReportDiagnostic, shortId, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
@@ -103,11 +103,18 @@ function redactNativeChallengeUrl(value) {
   return redactReportUrl(value).replace(/`/g, "'").slice(0, 180);
 }
 
-function nativeChallengeText(value, max = 160) {
-  return truncateDiagnosticText(redactReportUrlsInText(value)
-    .replace(/[\r\n\t`|]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim(), max);
+const NATIVE_INITIAL_SIGNALS = new Set(['caller-observed', 'url-or-title']);
+const NATIVE_CLASSIFICATIONS = new Set(['hard-block', 'pending', 'cleared', 'unknown']);
+const NATIVE_TERMINAL_SOURCES = new Set(['child-exit-after-clean', 'child-exit', 'app-close', 'abort', 'hard-block', 'stalled', 'poll-clear', 'timeout']);
+const NATIVE_POST_CLOSE_OUTCOMES = new Set(['clean-tab-observed', 'profile-checkpoint-only', 'no-clearance-evidence', 'verify-error']);
+const NATIVE_EXIT_SIGNALS = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP']);
+const AUTH_RESULTS = new Set(['launching', 'open', 'auto-detected', 'closed', 'timeout', 'launch-error', 'app-window-destroyed', 'aborted', 'navigated', 'navigation-error', 'cleared', 'hard-block']);
+const AUTH_CLOSE_DISPOSITIONS = new Set(['graceful-exit', 'sigterm-exit', 'sigkill-fallback', 'user-close-after-clean-observation']);
+function nativeChallengeEnum(value, allowed) {
+  return allowed.has(String(value || '')) ? String(value) : closeReportDiagnostic(value, '');
+}
+function authCloseDisposition(value, fallback = '—') {
+  return AUTH_CLOSE_DISPOSITIONS.has(value) ? value : value ? 'recorded' : fallback;
 }
 
 /**
@@ -126,7 +133,7 @@ export function buildNativeChallengeHistoryEvidence(attempt = {}) {
   if (typeof native.initialChallengeObserved === 'boolean') {
     bits.push(`initial challenge=${native.initialChallengeObserved ? 'yes' : 'no'}`);
   }
-  const initialSignal = nativeChallengeText(native.initialSignal, 90);
+  const initialSignal = nativeChallengeEnum(native.initialSignal, NATIVE_INITIAL_SIGNALS);
   if (initialSignal) bits.push(`signal=${initialSignal}`);
   if (Number.isFinite(native.pollCount)) bits.push(`polls=${Math.max(0, Math.round(native.pollCount))}`);
   if (Number.isFinite(native.pollErrorCount) && native.pollErrorCount > 0) {
@@ -147,24 +154,24 @@ export function buildNativeChallengeHistoryEvidence(attempt = {}) {
   // after collapsing whitespace), so rendering at the same width means this
   // renderer can never add a second, unmarked cut on top of the record's: what
   // prints here is exactly what the record retains.
-  const firstPollError = nativeChallengeText(native.firstPollError, 200);
+  const firstPollError = closeReportDiagnostic(native.firstPollError, '');
   if (firstPollError) bits.push(`first poll error=${firstPollError}`);
-  const classification = nativeChallengeText(native.lastClassification, 50);
+  const classification = nativeChallengeEnum(native.lastClassification, NATIVE_CLASSIFICATIONS);
   if (classification) bits.push(`last=${classification}`);
   const tabUrl = redactNativeChallengeUrl(native.lastTabUrl);
-  const tabTitle = nativeChallengeText(native.lastTabTitle, 100);
+  const tabTitle = closeReportDiagnostic(native.lastTabTitle, '');
   if (tabUrl || tabTitle) bits.push(`tab=${tabUrl || '—'}${tabTitle ? ` (${tabTitle})` : ''}`);
-  const terminalSource = nativeChallengeText(native.terminalSource, 60);
+  const terminalSource = nativeChallengeEnum(native.terminalSource, NATIVE_TERMINAL_SOURCES);
   if (terminalSource) bits.push(`terminal=${terminalSource}`);
   if (native.exitCode != null || native.exitSignal) {
-    bits.push(`child exit=${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeText(native.exitSignal, 40)}` : ''}`);
+    bits.push(`child exit=${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeEnum(native.exitSignal, NATIVE_EXIT_SIGNALS)}` : ''}`);
   }
   const verify = native.postCloseVerify && typeof native.postCloseVerify === 'object'
     ? native.postCloseVerify
     : null;
   if (verify) {
-    const outcome = nativeChallengeText(verify.outcome, 60) || 'unknown';
-    const reason = nativeChallengeText(verify.reason, 150);
+    const outcome = nativeChallengeEnum(verify.outcome, NATIVE_POST_CLOSE_OUTCOMES) || 'unknown';
+    const reason = closeReportDiagnostic(verify.reason, '');
     const status = Number.isFinite(verify.status) ? ` HTTP ${Math.round(verify.status)}` : '';
     const finalUrl = redactNativeChallengeUrl(verify.finalUrl || verify.url);
     bits.push(`post-close=${outcome}${status}${reason ? ` (${reason})` : ''}${finalUrl ? ` → ${finalUrl}` : ''}`);
@@ -237,18 +244,10 @@ export function formatAuthHistoryTruncationNote(selection, label = 'record(s)') 
  * went unguarded.
  */
 export function buildAuthLifecycleTableMarkdown(history) {
-  // Basename / trailing-slice truncation — keeps the lifecycle table readable
-  // while still distinguishing "which binary" and "which profile dir" a login
-  // window used, the two facts needed to tell whether it could share cookies
-  // with the scrape that read the session back afterward (see PPID / Indeed:
-  // a native login and a Puppeteer-launched scrape use different OSCrypt keys
-  // even on the SAME userDataDir when their executable differs).
-  const execLabel = (value) => value ? path.basename(String(value)) : '—';
-  const profileLabel = (value) => {
-    const s = String(value || '');
-    if (!s) return '—';
-    return s.length > 40 ? `…${s.slice(-40)}` : s;
-  };
+  // The lifecycle only needs to establish whether each launch had a configured
+  // executable/profile; private path components do not aid that diagnosis.
+  const execLabel = (value) => redactReportPath(value, '—');
+  const profileLabel = (value) => redactReportPath(value, '—');
   const retainedRecords = (Array.isArray(history) ? history : []).filter(Boolean);
   const isLifecycleMode = (item) => item?.mode === 'puppeteer-visible' || item?.mode === 'native-chrome';
   const selection = selectAuthHistoryForReport(retainedRecords.filter(isLifecycleMode));
@@ -283,7 +282,7 @@ export function buildAuthLifecycleTableMarkdown(history) {
     const flushMs = Number.isFinite(item.cookieFlushMs) ? item.cookieFlushMs : null;
     const flushPhase = item.cookieFlushPhase ? String(item.cookieFlushPhase) : null;
     const flushCell = `${flushMs ?? '—'} (${flushPhase ? `phase ${flushPhase}` : 'phase not recorded'})`;
-    return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${loginDetected} | ${flushCell} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${item.closeDisposition || '—'} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
+    return `| \`${item.platformId || '?'}\` | ${item.mode || '—'} | ${loginDetected} | ${flushCell} | ${item.cookieStoreCommitted == null ? 'n/a' : (item.cookieStoreCommitted ? 'yes' : 'NO')} | ${authCloseDisposition(item.closeDisposition)} | ${item.processExitObserved == null ? '—' : (item.processExitObserved ? 'yes' : 'NO')} | \`${execLabel(item.executable)}\` | \`${profileLabel(item.profileDir)}\` | ${cookies} |`;
   }).join('\n');
   // A Markdown table cell cannot contain a literal `|`, so the mode list is
   // comma-joined and this sentence carries none.
@@ -343,13 +342,13 @@ export function buildNativeChallengeSessionMarkdown(history) {
     // terminal observation there IS no app-initiated close to stamp. Report both
     // observations side by side and let the reader draw the conclusion.
     const closeDisposition = item.closeDisposition
-      ? `\`${item.closeDisposition}\``
+      ? `\`${authCloseDisposition(item.closeDisposition, 'recorded')}\``
       : exitObserved
-        ? `none stamped on this record; the child process exit WAS observed (exit code ${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeText(native.exitSignal, 40)}` : ''}${native.terminalSource ? `, terminal source ${nativeChallengeText(native.terminalSource, 60)}` : ''})`
+        ? `none stamped on this record; the child process exit WAS observed (exit code ${native.exitCode ?? '—'}${native.exitSignal ? `/${nativeChallengeEnum(native.exitSignal, NATIVE_EXIT_SIGNALS)}` : ''}${native.terminalSource ? `, terminal source ${nativeChallengeEnum(native.terminalSource, NATIVE_TERMINAL_SOURCES)}` : ''})`
         : 'none stamped on this record, and no child process exit was observed on it either';
     const evidence = buildNativeChallengeHistoryEvidence(item)
       || ' · native: no bounded handoff evidence is retained on this record';
-    return `- \`${item.platformId || '?'}\` — finished ${finishedIso} (${age}) · result **${item.result || 'not recorded'}** · open ${open} · cookie store checkpointed ${committed} · close disposition: ${closeDisposition}${evidence}`;
+    return `- \`${item.platformId || '?'}\` — finished ${finishedIso} (${age}) · result **${AUTH_RESULTS.has(item.result) ? item.result : item.result ? 'recorded' : 'not recorded'}** · open ${open} · cookie store checkpointed ${committed} · close disposition: ${closeDisposition}${evidence}`;
   });
   const body = lines.length > 0
     ? lines.join('\n')
@@ -405,27 +404,15 @@ function formatStealthBrowserActivity(activity) {
 // broken diagnostic section from suppressing the rest, but make that omission
 // explicit (and bounded) so it cannot be mistaken for an observed empty state.
 function diagnosticRenderFailureMarkdown(section, err) {
-  const detail = truncateDiagnosticText(String(err?.message || err || 'unknown error')
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/`/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim(), 240) || 'unknown error';
-  return `\n## ${section}\n_(section failed to render: \`${detail}\`)_\n`;
+  const detail = closeReportDiagnostic(err?.message || err, 'recorded');
+  return `\n## ${section}\n_(section failed to render; diagnostic: \`${detail}\`)_\n`;
 }
 
 /** Render one startup-verification outcome without mistaking cached state for proof. */
 export function formatLoginVerificationTimingResult(duration = {}) {
   const state = duration.connected ? 'connected' : 'not connected';
-  const reason = redactReportUrlsInText(duration.reason || duration.skipReason || duration.error || '')
-    .replace(/[|\r\n]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  // 220, not 120: the auth-cookie discriminator the verifier appends ("Auth cookie
-  // li_at IS present on disk → session invalidated server-side…") sits at the END
-  // of the reason, so a tighter bound truncates away the only sentence that says
-  // WHY a platform reads logged-out.
-  const boundedReason = truncateDiagnosticText(reason, 220);
-  const withReason = (label) => boundedReason ? `${label} — ${boundedReason}` : label;
+  const detail = closeReportDiagnostic(duration.reason || duration.skipReason || duration.error, '');
+  const withReason = (label) => detail ? `${label} — ${detail}` : label;
 
   switch (duration.outcome) {
     case 'verified':
@@ -439,13 +426,13 @@ export function formatLoginVerificationTimingResult(duration = {}) {
     case 'skipped-login-flow':
       return withReason(`skipped during login flow (prior: ${state})`);
     case 'error':
-      return `error: ${boundedReason || 'unknown verification failure'}`;
+      return `error: ${detail || 'recorded'}`;
     default:
       // Older running processes may have duration records from before `outcome`
       // was introduced. Keep their prior report shape rather than treating them
       // as an unverified failure.
       if (duration.skipped) return withReason('skipped');
-      if (duration.error) return `error: ${truncateDiagnosticText(redactReportUrlsInText(duration.error), 80).replace(/\|/g, '\\|')}`;
+      if (duration.error) return `error: ${closeReportDiagnostic(duration.error, 'recorded')}`;
       return duration.connected ? 'connected' : 'not connected';
   }
 }
@@ -803,21 +790,21 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
   try {
     raw = fs.readFileSync(filePath, 'utf8');
     mtime = fs.statSync(filePath).mtime.toISOString();
-  } catch (err) {
+  } catch {
     return `
 ## Persisted Workspace Snapshot
-- File: \`${filePath}\`
-- ⚠️ Could not read file on disk: ${err?.message || String(err)}
+- File: \`${redactReportPath(filePath)}\`
+- ⚠️ Could not read workspace file on disk.
 `;
   }
 
   let parsed;
   try { parsed = JSON.parse(raw); }
-  catch (err) {
+  catch {
     return `
 ## Persisted Workspace Snapshot
-- File: \`${filePath}\` (mtime ${mtime})
-- ⚠️ File is not valid JSON: ${err?.message || String(err)}
+- File: \`${redactReportPath(filePath)}\` (mtime ${mtime})
+- ⚠️ Workspace file is not valid JSON.
 `;
   }
 
@@ -884,7 +871,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 > pending state during a live session; only a field found HERE proves a
 > bug where stale state survives a restart.
 
-- File: \`${filePath}\` (mtime ${mtime})
+- File: \`${redactReportPath(filePath)}\` (mtime ${mtime})
 - Embedded progress state on disk: \`${parsed?.transientProgress ? 'Yes' : 'No'}\`
 - Legacy progress sidecar: \`${sidecarExists ? 'Present (will restore on load)' : 'None'}\`
 - Persisted hub nodes scanned: ${hubCount}
@@ -1227,7 +1214,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       }
       if (Array.isArray(d.images)) previewParts.push(`images: ${d.images.length}`);
       if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
-      if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
+      if (d.filePath) previewParts.push(`filePath: ${redactReportPath(d.filePath)}`);
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
       if (n.type === 'jobcard') previewParts.push(`link: ${effectiveJobCardLinkState(d)}`);
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
@@ -1581,8 +1568,8 @@ function buildLastSaveErrorMarkdown(lastSaveError) {
   if (lastSaveError) {
     lastSaveErrorMarkdown = `
 ## Last Save Error
-- Reason: \`${lastSaveError.reason || 'unknown'}\`
-- File: \`${lastSaveError.filePath || '(no current file)'}\`
+- Reason: \`${closeReportDiagnostic(lastSaveError.reason, 'unknown')}\`
+- File: \`${redactReportPath(lastSaveError.filePath, '(no current file)')}\`
 - When: ${lastSaveError.timestamp || 'unknown'}
 `;
   }
@@ -1804,8 +1791,8 @@ function buildSessionPersistenceMarkdown() {
 > live query) — \`idle — 0 live pages\` while \`running\` means it holds the shared
 > profile lock but isn't doing anything, the signature of a wake-and-forget call.
 
-- Browser profile: \`${String(profile.userDataDir || '(unavailable)').replace(/`/g, "'")}\`
-- Current shared browser: ${currentBrowser.connected ? 'running' : 'stopped'} · generation ${currentBrowser.generation ?? '—'} · executable \`${String(currentBrowser.executablePath || '(not launched this process)').replace(/`/g, "'")}\` · activity: ${formatStealthBrowserActivity(currentBrowser.activity)}
+- Browser profile: \`${redactReportPath(profile.userDataDir)}\`
+- Current shared browser: ${currentBrowser.connected ? 'running' : 'stopped'} · generation ${currentBrowser.generation ?? '—'} · executable \`${redactReportPath(currentBrowser.executablePath, '(not launched this process)')}\` · activity: ${formatStealthBrowserActivity(currentBrowser.activity)}
 ${fileLine('Cookies DB', profile.cookies)}
 ${fileLine('Cookies journal', profile.cookiesJournal)}
 ${fileLine('Cookies WAL', profile.cookiesWal)}
@@ -1841,9 +1828,8 @@ function buildMarketplaceSessionsMarkdown(sectionOmitted) {
 > exists after \`verifyAllPlatforms\` has reached that platform (or after a
 > manual \`openLoginWindow\` flow). "No entry" means startup verify hasn't
 > finished yet or the platform was skipped. \`false\` with the user reporting
-> "I just logged in" points at \`verifySellMonitorLogin\` failing —
-> \`bodyHead\` + \`softWallMatch\` in the trace below distinguish
-> anti-bot challenges from real login redirects from genuine logout.
+> "I just logged in" points at \`verifySellMonitorLogin\` failing. The trace
+> below retains route/status and closed detection facts, but never page text.
 
 | Platform ID | Name | Cached connected | Last confirmed | Last reason |
 |---|---|---|---|---|
@@ -1886,10 +1872,10 @@ export function formatAuthAttemptStatus(attempt) {
   if (isChallenge) {
     return attempt?.result === 'cleared'
       ? '✅ challenge cleared'
-      : `challenge result=${attempt?.result || '—'}`;
+      : `challenge result=${/^(?:timeout|closed|failed|cancelled)$/i.test(String(attempt?.result || '')) ? attempt.result : closeReportDiagnostic(attempt?.result, '—')}`;
   }
   return attempt?.loginDetected
-    ? `✅ detected${attempt.loginSignal ? ` (${attempt.loginSignal})` : ''}`
+    ? `✅ detected${attempt.loginSignal === 'auth-cookie' ? ' (auth-cookie)' : attempt.loginSignal ? ' (signal recorded)' : ''}`
     : '❌ NOT detected';
 }
 
@@ -1910,11 +1896,11 @@ function buildAuthWindowMarkdown() {
     if (entries.length > 0 || profileReservation || (collisionTelemetry?.total || 0) > 0) {
       const rows = entries.map(d => {
         const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
-        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${truncateDiagnosticText(String(d.title || '—'), 80).replace(/\|/g, '\\|')} | ${d.result || '—'} | ${age} |`;
+        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${redactReportUrl(d.currentUrl || d.loginUrl) || '—'}\` | ${d.title ? 'captured' : '—'} | ${AUTH_RESULTS.has(d.result) ? d.result : d.result ? 'recorded' : '—'} | ${age} |`;
       }).join('\n');
       const argsRows = entries
         .filter(d => Array.isArray(d.chromeArgs) && d.chromeArgs.length > 0)
-        .map(d => `**${d.platformId ?? '?'} (${d.state})**: \`${redactReportUrlsInText(d.chromeArgs.join(' '))}\``);
+        .map(d => `**${d.platformId ?? '?'} (${d.state})**: \`${redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(d.chromeArgs.join(' '))))}\``);
       const argsSection = argsRows.length > 0
         ? `\n### Chrome launch args\n${argsRows.join('\n')}\n`
         : '';
@@ -1929,17 +1915,17 @@ function buildAuthWindowMarkdown() {
         .filter(d => d.closeReason || d.extractOutcome || d.siteChangedError)
         .map(d => {
           const bits = [];
-          if (d.closeReason) bits.push(`closed=${d.closeReason}`);
-          if (d.extractOutcome) bits.push(`extractor=${d.extractOutcome}`);
+          if (d.closeReason) bits.push(`closed=${closeReportDiagnostic(d.closeReason, 'recorded')}`);
+          if (d.extractOutcome) bits.push(`extractor=${closeReportDiagnostic(d.extractOutcome, 'recorded')}`);
           if (typeof d.textLen === 'number') bits.push(`textLen=${d.textLen}`);
-          if (d.hostMismatch) bits.push(`probe skipped=${d.probeSkippedReason || 'host-mismatch'}`);
+          if (d.hostMismatch) bits.push(`probe skipped=${closeReportDiagnostic(d.probeSkippedReason, 'recorded')}`);
           bits.push(`saw captcha=${d.sawChallenge ? 'yes' : 'no'} / consent=${d.sawConsent ? 'yes' : 'no'}`);
           // 1400, not 400: matches the cap in marketplace.js's classifyCompScrapeFailure —
           // 400 was clipping the diag's card0=[…] class skeleton (the new markup's
           // title/price sub-selector names) before a bug report ever showed it, even
           // under FULL. This is a bounded, per-window field (not a log ring buffer),
           // so the wider cap can't blow the report's size budget.
-          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${truncateDiagnosticText(redactReportUrlsInText(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' '), 1400)}`);
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${closeReportDiagnostic(d.siteChangedError, 'recorded')}`);
           return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
         });
       const resolveDiagSection = resolveDiagRows.length > 0
@@ -1962,10 +1948,10 @@ function buildAuthWindowMarkdown() {
         .map(h => {
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
           const detected = formatAuthAttemptStatus(h);
-          const title = h.title ? `, title="${truncateDiagnosticText(String(h.title).replace(/\s+/g, ' '), 100)}"` : '';
+          const title = h.title ? ', title=captured' : '';
           const open = Number.isFinite(h.openMs) ? ` · open ${(h.openMs / 1000).toFixed(1)}s` : '';
           const close = h.closeDisposition
-            ? ` · close=${h.closeDisposition}, flush=${h.cookieFlushMs ?? 0}ms, exit=${h.processExitObserved ? 'observed' : 'NOT observed'}`
+            ? ` · close=${authCloseDisposition(h.closeDisposition, 'recorded')}, flush=${h.cookieFlushMs ?? 0}ms, exit=${h.processExitObserved ? 'observed' : 'NOT observed'}`
             : '';
           const cookieMeta = Array.isArray(h.authCookiesBeforeClose) && h.authCookiesBeforeClose.length > 0
             ? ` · auth cookies before close=${h.authCookiesBeforeClose.map(c => `${c.name}:${c.persistent ? 'persistent' : 'session'}`).join(',')}`
@@ -1973,7 +1959,7 @@ function buildAuthWindowMarkdown() {
           const isNativeChallenge = h.mode === 'native-chrome'
             && String(h.platformId || '').endsWith('-native-challenge');
           const nativeEvidence = isNativeChallenge ? buildNativeChallengeHistoryEvidence(h) : '';
-          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${nativeEvidence}${title}${h.url ? ` — \`${redactReportUrl(h.url)}\`` : ''}`;
+          return `- \`${h.platformId || '?'}\` — ${AUTH_RESULTS.has(h.result) ? h.result : h.result ? 'recorded' : '—'}, ${detected}, ${h.mode || '—'}, ${age}${open}${close}${cookieMeta}${nativeEvidence}${title}${h.url ? ` — \`${redactReportUrl(h.url)}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
         ? `\n### Recent login and captcha attempts (this session)\n> The completed login/captcha windows this process still retains, newest first. Login rows state whether the window CONFIRMED login: **detected** ⇒ a later logged-out state means the session did not persist or re-verification rejected it; **NOT detected** ⇒ login did not complete in that window. Captcha rows state challenge clearance only — clearing a challenge is not a login assertion. Native Indeed handoffs additionally retain bounded poll/child-exit/post-close-verification evidence; URL query tokens and cookie values are never reported. \`open\` is how long the window stayed open: an auto-detected window open for only a few seconds means the session was already live when the window opened; paired with an earlier same-session startup verify that said not-connected, that indicates the startup verify missed a live session rather than a fresh login.\n${historyRows.join('\n')}\n${formatAuthHistoryTruncationNote(historySelection, 'completed login/captcha window record(s)')}`
@@ -2013,7 +1999,7 @@ function buildAuthWindowMarkdown() {
         const age = Number.isFinite(profileReservation.since)
           ? `${Math.max(0, Math.round((Date.now() - profileReservation.since) / 1000))}s ago`
           : 'at an unknown time';
-        const reason = truncateDiagnosticText(String(profileReservation.reason || 'visible window').replace(/`/g, "'"), 180);
+        const reason = closeReportDiagnostic(profileReservation.reason, 'visible-window');
         profileReservationLine = `\n- ⚠️ Shared profile reservation: \`${reason}\` (${age}) — a headless scrape must wait until that visible browser closes.\n`;
       }
       // Shared-profile launch collisions — PERSISTED across the log ring buffer.
@@ -2108,7 +2094,7 @@ function buildRecentMainProcessLogLines({ filter } = {}) {
         // Logger messages can contain redirect/challenge URLs with OAuth,
         // Cloudflare, or tracking tokens. The path is useful diagnostic
         // evidence; query and fragment values are not safe to export.
-        const raw = redactReportUrlsInText(l.message || '').replace(/\r?\n/g, ' ⏎ ');
+        const raw = redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(l.message || '')).replace(/\r?\n/g, ' ⏎ '));
         const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
@@ -2426,7 +2412,6 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 ## Job Search API Configuration
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
-- USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
 - Dice API key: ${jobsConfig.hasCapturedDiceKey ? 'captured from dice.com ✅' : 'using the built-in bootstrap default'}${testModeLines}
 `;
   } catch (err) { jobsConfigMarkdown = diagnosticRenderFailureMarkdown('Job Search API Configuration', err); }
