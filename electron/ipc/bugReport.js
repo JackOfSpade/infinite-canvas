@@ -44,7 +44,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
@@ -2120,10 +2120,12 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   const diagnostic = getFailedStartDiagnostic();
   const oauthRejection = getOAuthRejectionDiagnostic();
   const sourceRejection = getSourceRejectionDiagnostic();
+  const clientAuth = getClientAuthDiagnostic();
   const failedStart = diagnostic?.telemetry === true;
   const rejectedOrigin = oauthRejection?.telemetry === true;
   const rejectedSource = sourceRejection?.telemetry === true;
-  if (!failedStart && !rejectedOrigin && !rejectedSource) return '';
+  const observedClientAuth = clientAuth?.telemetry === true;
+  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth) return '';
   let failedStartMarkdown = '';
   if (failedStart) {
     const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
@@ -2158,9 +2160,17 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   - The caller was refused for its NETWORK, not its token: the request came from a network this link was not paired from and outside the pinned connector ranges. A token that is otherwise valid still gets a generic 401 here.
   - Recovery: Disconnect the existing link FIRST, then pair again. Re-pairing without disconnecting fails, because the token exchange is itself checked against the old link's pinned network.`;
   }
+  let clientAuthMarkdown = '';
+  if (observedClientAuth) {
+    const at = Number.isFinite(clientAuth.at) ? new Date(clientAuth.at).toISOString() : 'not recorded';
+    const count = Number.isFinite(clientAuth.count) ? Math.max(1, Math.min(999, Math.floor(clientAuth.count))) : 1;
+    clientAuthMarkdown = `
+- Client authentication observed: ${count} token exchange(s) · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · recorded ${at}
+  - \`assertion\` means the connector signed with private_key_jwt and AS_AUTH_METHODS can be pinned to it. \`none\` means it did not, and pinning would break the link at the next refresh.`;
+  }
   return `
 ## Handoff Bridge Diagnostics
-${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}
+${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}
 `;
 }
 

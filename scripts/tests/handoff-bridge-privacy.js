@@ -17,7 +17,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -218,6 +218,44 @@ export default [{
     } finally { clearSourceRejectionDiagnostic(); }
   },
 }, {
+  // The token endpoint computed this outcome and dropped it, so the choice
+  // between pinning private_key_jwt and accepting none had no evidence.
+  name: 'handoff bridge: privacy: FULL reports state which client authentication the connector used',
+  run: () => {
+    const privateAssertion = 'PRIVATE_CLIENT_ASSERTION_JWT';
+    const base = {
+      description: 'Client authentication observation.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      recordClientAuthDiagnostic({ telemetry: true, outcome: privateAssertion, at: 5_000 });
+      const unknown = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(unknown.includes('method `unknown`') && !unknown.includes(privateAssertion),
+        'an unrecognised outcome must close to unknown and never retain the raw value');
+
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'assertion_ok', at: 5_500 });
+      const signed = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      assert(signed.includes('Client authentication observed: 1')
+        && signed.includes('method `assertion`')
+        && signed.includes('outcome `assertion_ok`')
+        && bridge.includes('method `assertion`')
+        && !focused.includes('Client authentication observed'),
+      'FULL and BRIDGE must name the observed client-authentication method');
+
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: true, outcome: 'none', at: 6_000 });
+      assert(generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('method `none`'),
+        'an unsigned token exchange must be reported as none, not inferred as assertion');
+
+      clearClientAuthDiagnostic();
+      recordClientAuthDiagnostic({ telemetry: false, outcome: 'assertion_ok' });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Client authentication observed'),
+        'the diagnostics opt-out cannot retain a client-authentication observation');
+    } finally { clearClientAuthDiagnostic(); }
+  },
+}, {
   name: 'handoff bridge: privacy: FULL issue-reporter draft diagnostics retain only closed state and bounded length',
   run: () => {
     const privateLocalDraft = 'PRIVATE_ISSUE_REPORTER_LOCAL_DRAFT';
@@ -352,6 +390,26 @@ export default [{
     ].map(file => fs.readFileSync(path.join(repoRoot, file), 'utf8'));
     for (const source of sources) assert(!/\b(?:error\.message|error\.stack|req\.url)\b/.test(source), 'B6 sources must not emit free error/request text');
     assert(forbidden.every(value => value.length > 0), 'privacy negative corpus remains explicit');
+  },
+}, {
+  // createOAuthServer defaults every observation callback to a no-op, so a
+  // sink that composition forgets to pass fails silently and forever: the
+  // token endpoint computed the client-authentication outcome and dropped it.
+  // Pin the wiring, not just the sink.
+  name: 'handoff bridge: privacy: composition passes every bridge observation sink it declares',
+  run: () => {
+    const index = fs.readFileSync(path.join(repoRoot, 'electron/ipc/handoffBridge/index.js'), 'utf8');
+    for (const sink of ['recordClientAuth:', 'recordOAuthRejection:', 'recordSourceRejection:']) {
+      assert(index.includes(sink), `composition must pass ${sink.replace(':', '')} or its observation is silently discarded`);
+    }
+    for (const [sink, recorder] of [['recordClientAuth', 'recordClientAuthDiagnostic'], ['recordSourceRejection', 'recordSourceRejectionDiagnostic']]) {
+      assert(index.includes(recorder), `${sink} must reach ${recorder}`);
+    }
+    // Every telemetry recorder composition imports must also be cleared, or a
+    // stale observation outlives the link it described.
+    for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic']) {
+      assert(index.includes(`${cleared}()`), `${cleared} must be called so a stale observation cannot outlive its link`);
+    }
   },
 }, {
   name: 'handoff bridge: privacy: native dialogs serialize and every spec has a canvas parent',

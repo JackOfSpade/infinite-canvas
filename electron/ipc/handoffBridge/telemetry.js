@@ -39,10 +39,15 @@ const SOURCE_REJECTION_MODES = new Set(['enforce', 'alert']);
 // link metadata, so the prefix itself never reaches this sink.
 const SOURCE_CLASSES = new Set(['link-family', 'connector-range', 'other-public', 'private', 'unknown']);
 const LINK_PRESENCE = new Set(['none', 'one', 'many', 'unreadable']);
+// Exactly the token-endpoint outcome vocabulary from clientAuth.js. This is
+// the MG1 measurement: which client authentication ChatGPT actually used.
+const CLIENT_AUTH_OUTCOMES = new Set(['none', 'assertion_ok', 'assertion_bad_signature',
+  'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other']);
 
 let latest = null;
 let latestOAuthRejection = null;
 let latestSourceRejection = null;
+let latestClientAuth = null;
 const finite = value => Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? Math.round(value) : null;
 const enumOr = (value, allowed, fallback = 'unknown') => allowed.has(value) ? value : fallback;
 
@@ -140,6 +145,30 @@ export function recordSourceRejectionDiagnostic({ telemetry = false, route, mode
 }
 
 export function getSourceRejectionDiagnostic() { return latestSourceRejection; }
+
+// Which client authentication the connector actually used at the token
+// endpoint. The outcome was already computed there and then discarded, so the
+// choice between pinning `private_key_jwt` and accepting `none` had no
+// evidence behind it. Closed outcome vocabulary only: no assertion, key,
+// header, claim, or credential.
+export function clearClientAuthDiagnostic() { latestClientAuth = null; }
+
+export function recordClientAuthDiagnostic({ telemetry = false, outcome, at = Date.now() } = {}) {
+  if (telemetry !== true) return null;
+  const stamp = finite(at) ?? Date.now();
+  const resolved = enumOr(outcome, CLIENT_AUTH_OUTCOMES);
+  latestClientAuth = Object.freeze({
+    telemetry: true,
+    count: Math.min(999, (latestClientAuth?.telemetry === true ? latestClientAuth.count : 0) + 1),
+    at: stamp,
+    outcome: resolved,
+    // The single fact the pin decision needs, stated without inference.
+    method: resolved === 'none' ? 'none' : resolved === 'assertion_ok' ? 'assertion' : 'unknown',
+  });
+  return latestClientAuth;
+}
+
+export function getClientAuthDiagnostic() { return latestClientAuth; }
 
 // The live supervisor owns a redacted output ring, but a failed startup tears
 // that owner down before the renderer can ask for it.  Preserve a short

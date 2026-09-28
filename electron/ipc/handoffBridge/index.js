@@ -31,7 +31,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from './telemetry.js';
+import { clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -736,6 +736,14 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     fetchClientMetadata: deps.fetchClientMetadata || createCimdFetcher({ request: deps.httpsRequest, lookup: deps.lookup }),
     fetchJwks: deps.fetchJwks || createJwksFetcher({ request: deps.httpsRequest, lookup: deps.lookup }), now,
     pairingGate: request => pairing?.pairingGate?.(request) === true,
+    // The token endpoint computes which client authentication the connector
+    // used and previously dropped it on the floor, leaving the decision
+    // between pinning `private_key_jwt` and accepting `none` unmeasurable.
+    // Keep only the closed outcome; the assertion itself never travels.
+    recordClientAuth: entry => {
+      if (!bridgeDiagnosticsEnabled()) return;
+      recordClientAuthDiagnostic({ telemetry: true, outcome: entry?.outcome, at: now() });
+    },
     onPairingClosed: reason => pairing?.onOAuthPairingClosed?.(reason),
     onConsentRequested: value => {
       // A consent request reaches this callback only after an active pairing
@@ -1296,7 +1304,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
-  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1335,7 +1343,7 @@ async function forgetActiveRuntime(current, status) {
 
 async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
-  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); }
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1379,7 +1387,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1430,7 +1438,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       // in-memory failed-start receipt before any later FULL report is built.
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
         clearFailedStartDiagnostic();
-        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
       }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
@@ -1516,7 +1524,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);
