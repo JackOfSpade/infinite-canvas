@@ -329,3 +329,27 @@ The renderer no longer turns an unresolved first status replay into a false deve
 | G10 | Green after independent main-process, renderer, cleanup-fault, release and final integrated reviews. Registration rollback, auto-start suppression, closed diagnostics, strict status admission, retry ordering and hostile getter handling have direct regressions; the final reviewer found no actionable release blocker. |
 
 Nothing was pushed. The signed packaged app is open on the saved Tunnel step with the bridge still off. B9's real pairing and synthetic-only manual observations, G11 sign-off, and the B10–B11 ChatGPT plugin work still require Jack; no real career data crossed the bridge.
+
+### B9 startup readiness and bug-report privacy remediation (2026-09-27)
+
+Commits `49236ae` (`fix: wait for bridge tunnel readiness`) and `0807dd1` (`fix: redact private bug report diagnostics`) close the failed production enable observed after setup and the sensitive diagnostics exposed by the accompanying FULL report.
+
+The production controller had treated the app-owned supervisor's asynchronous `start()` acknowledgement as public readiness and immediately ran a second public probe. That raced cloudflared's first connection and made a normal startup look like a failed or unavailable build. Composed production startup now observes the supervisor's closed state for its exact 30-second first-success window at 250 ms intervals; only `online` succeeds, Disable cancels the wait immediately, and `failed`, `blocked`, `needs-setup` or `needs-trust` fail closed. The intentional `stopping`/`off` transition during the first probe-restart remains waitable. Direct and injected controller ports keep their immediate probe contract. Recurring local `/ready` probes can advance only `connecting` or `checking-public`, so they cannot overwrite the public probe's later `online`, `degraded` or backoff authority.
+
+`set-enabled` now exposes only its frozen result set (`DECLINED`, `UNAVAILABLE`, `BUSY`, `NO_WINDOW`) and never relays local socket, file or platform failure detail. Renderer action failures, including a stale preload missing an action method, use neutral retry copy and cannot replace an authoritative available/off status with the static unavailable-build verdict.
+
+The report hardening removes the USAJobs key prefix and closes browser/provider/page-derived titles, body text, DOM state and free-form errors to structural markers while retaining safe routes, statuses, counts and allow-listed lifecycle enums. Local paths and file URLs are replaced with `<local-path>` across macOS, Linux, Windows drive, UNC and device forms; malformed and non-HTTP URLs close; recent trusted app diagnostics redact URL query/fragment data, credentials, cookies, Basic/Bearer headers, JWTs and token/key assignments. Export destinations, profiles, Chrome arguments, persisted-workspace failures and report-render failures no longer reveal private path or error prose. Synthetic sentinels cover those forms in the existing registered test owners. Independent final reviews found no remaining bridge or report-privacy blocker.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. The two code commits contain only the 16 explicitly staged implementation/test paths; the documentation update is separate. `git diff --check` is clean, the temporary nested conformance dependencies were removed, package files and frozen files are untouched, and `electron/ipc/nonApiAi.js` remains SHA-256 `4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`. |
+| G1 | Green. `npm run test:unit` passed 2267 tests with 0 failed; the exact filtered comparison with `~/ic-baseline-units.txt` printed nothing. |
+| G2 | Green. `npm test` passed all 2267 unit tests and every resume-PDF suite. |
+| G3/G4 | Green. `npm run lint` and `npm run build:compile` passed with only the existing Vite chunk-size warnings. |
+| G5/G6 | Green. `npm run test:e2e` printed `Electron smoke test passed`; `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. |
+| G7 | Not scheduled for B9. The completed B8 CI gate remains the governing required result. |
+| G8 | Green. The full SDK/socket suite passed wire (83 ms), OAuth (9 ms), drain (105 ms), push (under 1 ms), abuse (1765 ms), soak (600004 ms), tunnel (4714 ms) and orphan (5700 ms). The separate watchdog self-test passed all five generated child/process-group cases outside the process-restricted sandbox. No real connector was started. |
+| Packaging | Green. The canonical launcher rebuilt and signed the package; strict deep signature verification passed. The ASAR contains the boot/registration diagnostics, supervisor readiness state and corrected action copy. The running production app remained bridge-off with no bridge socket and no `cloudflared tunnel run` process. |
+| G10 | Green after independent startup-state, IPC/copy, bug-report privacy and final adversarial reviews. The enable race, readiness-authority regression, cancellation, exact timeout, hostile IPC mapping and path/credential redaction cases have direct tests. |
+
+Nothing was pushed. The production bridge was never enabled during this remediation and no career data crossed it. B9's real enable/pairing observations and B10–B11 still require Jack.
