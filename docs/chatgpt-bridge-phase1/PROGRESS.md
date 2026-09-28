@@ -353,3 +353,25 @@ The report hardening removes the USAJobs key prefix and closes browser/provider/
 | G10 | Green after independent startup-state, IPC/copy, bug-report privacy and final adversarial reviews. The enable race, readiness-authority regression, cancellation, exact timeout, hostile IPC mapping and path/credential redaction cases have direct tests. |
 
 Nothing was pushed. The production bridge was never enabled during this remediation and no career data crossed it. B9's real enable/pairing observations and B10–B11 still require Jack.
+
+### B9 real cloudflared dry-run remediation (2026-09-28)
+
+Commit `d90614d` (`fix: accept real cloudflared startup checks`) closes the second packaged Enable failure without starting the production connector. An offline reproduction against the installed cloudflared showed that its successful ingress dry runs use a multi-line `Using rules from ...` / `Matched rule ...` acknowledgement and normally end with a line terminator. The old parser expected prototype-only fragments, including a request URL that the real command does not echo, so it rejected a valid configuration before spawn. The parser now accepts only the complete canonical validation, matching-rule and fallback-rule forms with at most one terminal LF or CRLF; altered paths, hostnames, sockets, rule numbers, services or extra lines fail closed. The Electron and conformance fakes now emit the same real format.
+
+Composition now supplies explicit `HOME` and `TMPDIR` values to the already restricted child environment. Serialized slow public probes preserve the five-second start-to-start discovery cadence, allowing two eight-second failures followed by an eight-second success to reach `online` inside the fixed 30-second startup window without overlap.
+
+Failed Enable actions can retain one opt-in, in-memory receipt containing only closed phase/cause/state/probe enums, a bounded failure count and timing. It appears only in FULL reports, never retains a hostname, path, tunnel id, credential, raw output, prompt, response or exception text, fails closed on an unreadable preference, and is cleared on retry, opt-out, setup mutation, Forget or app-data-root replacement. This narrow receipt is not the optional D10 counts/lens/filter feature, which remains unimplemented. The setup UI exposes the existing diagnostics preference under Advanced and keeps the current neutral Enable failure visible across newer off-state snapshots while rejecting stale replies. The report also no longer exports issue-draft prefixes or storage exception prose; the triggering report had shown that FULL was otherwise insufficient to diagnose this failure safely.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. The code commit contains exactly 17 explicitly staged bridge, report, UI, fixture and registered-test paths; the documentation update is separate. `telemetry.js` uses its predeclared B0 module/source-scan row and has no imports. No ignored path, whitespace error, package-file or frozen-file change exists; `electron/ipc/nonApiAi.js` remains SHA-256 `4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`. |
+| G1 | Green. `npm run test:unit` passed 2276 tests with 0 failed; the exact required filtered comparison with `~/ic-baseline-units.txt` printed nothing. The bridge additions remain in bridge-owned registered groups. |
+| G2 | Green. `npm test` passed all 2276 unit tests and every resume-PDF suite. |
+| G3/G4 | Green. `npm run lint` and `npm run build:compile` passed with only the existing Vite chunk-size warnings. |
+| G5/G6 | Green. The final `npm run test:e2e` printed `Electron smoke test passed`; the final synthetic enabled-path `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. Neither used the production connector. |
+| G7 | Not scheduled for B9. The build plan requires `act` only at B2, B5a, B6 and B8. |
+| G8 | Green for the changed tunnel seams. The targeted real-SDK/socket tunnel and orphan suites passed in 4692 ms and 5697 ms, and the final watchdog/reaper self-test passed all five generated-child cases. The completed B8 full-suite/soak gate remains the governing all-suite result. |
+| Packaging | Green. The canonical launcher rebuilt, signed and relaunched the package. Host-side `codesign --verify --deep --strict` passed again after relaunch; sandboxed codesign is not authoritative on this host. The final process audit contained the packaged app only—no builder and no `cloudflared tunnel run`. |
+| G10 | Green after independent tunnel/startup, telemetry/privacy, UI/race, source-ownership and final integrated reviews. The last finding—an opted-in receipt surviving an in-process app-data-root switch—was fixed and regression-tested before commit. No critical or high finding remains. |
+
+Nothing was pushed. G11 and B9's real Enable, pairing and synthetic-only manual observations remain Jack-owned; B10–B11 still require the ChatGPT staging/production plugin work. No real career data crossed the bridge.
