@@ -375,3 +375,21 @@ Failed Enable actions can retain one opt-in, in-memory receipt containing only c
 | G10 | Green after independent tunnel/startup, telemetry/privacy, UI/race, source-ownership and final integrated reviews. The last finding—an opted-in receipt surviving an in-process app-data-root switch—was fixed and regression-tested before commit. No critical or high finding remains. |
 
 Nothing was pushed. G11 and B9's real Enable, pairing and synthetic-only manual observations remain Jack-owned; B10–B11 still require the ChatGPT staging/production plugin work. No real career data crossed the bridge.
+
+### B9 bridge warning and copy remediation (2026-09-28)
+
+Commit `4c65ed2` (`fix: streamline ChatGPT bridge warnings`) removes the panel's routine Safety/privacy, clipboard-hygiene, dock-conflict and keep-awake blocks; the keep-awake explanation remains only beside its Settings control. Setup and operational copy is shorter, the initial enable disclosure is limited to the essential data path and lifecycle impact, and routine enable, hostname save, pairing progress, successful linking, ordinary Resume and ordinary Disable no longer stack confirmations or informational sheets. The 24/72-hour “bridge is still on” operating-system reminder is also removed. Native warnings remain only at material data release, trust/security downgrade, destructive action, anomaly resume or outstanding-work interruption boundaries; actionable alarm, served-after-idle and link-expiry notifications remain.
+
+The main process now owns every warning decision. Outstanding-work Disable is guarded consistently from Settings, the panel and the Tray, while ordinary Disable stays direct. Deferred restart, pairing, prepared-chat, Tray resume and Tray disable paths retain their exact live canvas owner across awaited work, fail closed if it disappears and cannot write the clipboard or mutate bridge state afterward. Repeat enable preserves the post-restart hold until the first New chat or Continue. Native sheets use action-specific affirmative labels, and renderer duplicate confirmations were removed.
+
+| Gate | Result |
+|---|---|
+| G0/G9 | Green. The implementation commit contains exactly 18 explicitly staged bridge production, renderer, documentation and registered-test paths. `git diff --check` was clean, no untracked path existed, package files and frozen files were untouched, and `electron/ipc/nonApiAi.js` remained SHA-256 `4c475c198a173dd81531b33f65edf22a05d9d48c258044a5d6722c1ac1b7c4f6`. |
+| G1 | Green. `npm run test:unit` passed 2293 tests with 0 failed; the exact required filtered comparison with `~/ic-baseline-units.txt` printed nothing. |
+| G2 | Green. `npm test` passed all 2293 unit tests and every resume-PDF suite. |
+| G3/G4 | Green. `npm run lint` and `npm run build:compile` passed; compile reported only the existing Vite chunk-size warnings. |
+| G5/G6 | Green. `npm run test:e2e` printed `Electron smoke test passed`; the synthetic enabled-path `npm run test:e2e:bridge` printed `Electron bridge smoke test passed`. A final process-table check found no `cloudflared tunnel run` process. |
+| G7 | Not scheduled for this B9 remediation. The completed B8 CI gate remains the governing required result. |
+| G10 | Green after independent copy/modal, runtime/security and final integrated reviews. The last two findings—Tray interruption paths bypassing/reusing a stale parent and the noncritical long-running bridge notification—were fixed and regression-tested before commit. |
+
+Nothing was pushed. The Electron tests used synthetic data and a fake tunnel only; no real connector was started and no career data crossed the bridge.
