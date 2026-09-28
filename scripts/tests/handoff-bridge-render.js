@@ -178,10 +178,17 @@ export default [
   {
     name: 'handoff bridge: render: source wiring is guarded, accessible and uses only the frozen renderer IPC surface',
     run() {
-      const app = source('src/App.jsx'); const settings = source('src/components/SettingsPanel.jsx'); const setup = source('src/components/HandoffBridgeSetup.jsx'); const sidebar = source('src/components/Sidebar.jsx'); const panel = source('src/components/HandoffBridgePanel.jsx'); const dialog = source('src/components/HandoffBridgeSetupDialog.jsx'); const confirmDialog = source('src/components/ConfirmDialog.jsx'); const trigger = source('src/components/HandoffBridgeTrigger.jsx'); const styles = source('src/index.css');
+      const app = source('src/App.jsx'); const settings = source('src/components/SettingsPanel.jsx'); const setup = source('src/components/HandoffBridgeSetup.jsx'); const sidebar = source('src/components/Sidebar.jsx'); const panel = source('src/components/HandoffBridgePanel.jsx'); const dialog = source('src/components/HandoffBridgeSetupDialog.jsx'); const confirmDialog = source('src/components/ConfirmDialog.jsx'); const styles = source('src/index.css');
       assert(app.includes('<HandoffBridgeGuard label="panel">') && app.indexOf('<HandoffBridgePanel') > app.indexOf('<NonApiAiDialog'), 'App must mount the guarded panel after the non-API dialog');
       assert(settings.includes('<HandoffBridgeGuard label="settings">') && settings.includes('<HandoffBridgeSetup'), 'Settings must mount its guarded bridge section');
-      assert(sidebar.includes('<HandoffBridgeTrigger />'), 'Sidebar must mount the bridge trigger');
+      // The bridge has no rail button: a dedicated trigger beside the bug
+      // report made the bridge a second operational surface competing with the
+      // dock that already shows the same handoffs. Settings owns the panel and
+      // setup entry points instead, and the component is gone rather than
+      // orphaned.
+      assert(!sidebar.includes('HandoffBridgeTrigger'), 'the Sidebar must not carry a bridge trigger of its own');
+      assert(!fs.existsSync(path.resolve('src/components/HandoffBridgeTrigger.jsx')), 'the removed trigger component must not linger unreferenced');
+      assert(setup.includes('BRIDGE_UI_COPY.openPanel'), 'Settings must keep the only entry point that opens the panel');
       assert(app.indexOf('<HandoffBridgeSetupDialog') > app.indexOf('<HandoffBridgePanel') && !panel.includes('<HandoffBridgeSetupDialog'), 'App must own setup independently so Settings survives a panel boundary failure');
       for (const text of [panel, dialog]) assert(!text.includes('dangerouslySetInnerHTML'), 'bridge surfaces must not inject HTML');
       assert(!dialog.includes('handoffBridgeCopyServerUrl'), 'Copy server URL must use an existing IPC channel or a non-secret renderer clipboard helper');
@@ -198,7 +205,6 @@ export default [
       assert(!panel.includes('<details') && !panel.includes('safetyDetails') && !panel.includes('BRIDGE_COPY.hygiene') && !panel.includes('BRIDGE_COPY.dockNote') && !panel.includes('BRIDGE_COPY.keepAwake'), 'panel must not render or reference the removed safety and privacy notes');
       for (const className of ['bridge-button-primary', 'bridge-button-secondary', 'bridge-button-danger']) assert(new RegExp(`\\.${className}(?:,|\\s*\\{)`).test(styles), `${className} must have a shared CSS definition`);
       for (const rule of ['display: inline-flex', 'max-width: 100%', 'min-height: 2.25rem', 'overflow-wrap: anywhere', ':disabled']) assert(styles.includes(rule), `bridge buttons must retain the compact responsive rule ${rule}`);
-      assert(trigger.includes("health.badge > 9 ? '9+'"), 'the trigger badge must cap visibly at 9+');
       assert(!panel.includes('now || Date.now()'), 'new-chat confirmation must use state time, never a wall-clock fallback');
       assert(panel.includes("if (id === 'open-pairing')") && panel.includes('openBridgeSetup(3)')
         && !panel.includes("'open-pairing': 'handoffBridgeOpenPairing'"),
@@ -725,8 +731,8 @@ export default [
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-preload-'));
       const entry = path.join(directory, 'NoPreloadProbe.jsx');
-      const panel = path.resolve('src/components/HandoffBridgePanel.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const dialog = path.resolve('src/components/HandoffBridgeSetupDialog.jsx'); const trigger = path.resolve('src/components/HandoffBridgeTrigger.jsx'); const sidebar = path.resolve('src/components/Sidebar.jsx');
-      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgePanel } from ${JSON.stringify(panel)};\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nimport { HandoffBridgeSetupDialog } from ${JSON.stringify(dialog)};\nimport { HandoffBridgeTrigger } from ${JSON.stringify(trigger)};\nimport { Sidebar } from ${JSON.stringify(sidebar)};\nexport function NoPreloadProbe() { return <><HandoffBridgePanel /><HandoffBridgeSetup /><HandoffBridgeSetupDialog /><HandoffBridgeTrigger /><Sidebar onReportBugClick={() => {}} /></>; }\n`);
+      const panel = path.resolve('src/components/HandoffBridgePanel.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const dialog = path.resolve('src/components/HandoffBridgeSetupDialog.jsx'); const sidebar = path.resolve('src/components/Sidebar.jsx');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgePanel } from ${JSON.stringify(panel)};\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nimport { HandoffBridgeSetupDialog } from ${JSON.stringify(dialog)};\nimport { Sidebar } from ${JSON.stringify(sidebar)};\nexport function NoPreloadProbe() { return <><HandoffBridgePanel /><HandoffBridgeSetup /><HandoffBridgeSetupDialog /><Sidebar onReportBugClick={() => {}} /></>; }\n`);
       const controller = new AbortController(); let bundle;
       try {
         bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);

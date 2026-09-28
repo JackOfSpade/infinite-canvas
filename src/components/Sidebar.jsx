@@ -4,7 +4,6 @@ import { Store, BarChart3, Briefcase, Bug } from 'lucide-react';
 import { JobsTab } from './sidebar/JobsTab';
 import { SellTab } from './sidebar/SellTab';
 import { DashboardTab } from './sidebar/DashboardTab';
-import { HandoffBridgeTrigger } from './HandoffBridgeTrigger';
 
 /**
  * Sidebar — three-tab sliding panel.
@@ -78,8 +77,9 @@ export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubs
 
         <div className="flex-1" />
 
-        <HandoffBridgeTrigger />
-        <div className="gradient-divider w-6 mx-auto" />
+        {/* The bridge has no rail button of its own: handoffs surface in the
+            dock that already shows them, and its configuration lives in
+            Settings, which owns the panel and setup entry points. */}
         <button
           onClick={onReportBugClick}
           className="p-2.5 rounded-lg transition-all text-red-400/35 hover:text-red-400 hover:bg-red-400/10"

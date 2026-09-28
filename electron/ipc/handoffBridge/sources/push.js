@@ -8,18 +8,39 @@ import { snapshotActiveNodeTasks } from '../../ipcUtils.js';
 
 // A complete table keeps unknown future tasks paste-only until explicitly
 // reviewed. Only release_one rows can ever be given to the seam allow-list.
+//
+// Reviewed 2026-09-28 against what each task actually sends, not its name:
+//   never      -- structurally cannot cross an MCP text tool.
+//                 vision/hub-scan send product PHOTOS (callLLMVision,
+//                 marketplace.js); career-file-extract IS the file->text step
+//                 itself (callLLMDocument, jobs.js) and has no text to send
+//                 yet; the *-research rows set grounding:true, and the tool
+//                 framing forbids the chat from browsing or opening links,
+//                 which is the defence against injected listing text.
+//   paste_only -- text and schema'd, so technically carriable, but they send
+//                 marketplace/listing data. `scope` only consents to
+//                 applications and scoring, so there is no consent boundary
+//                 covering them; moving them needs a scope of their own.
+//   release_one-- text in, schema out, no attachment, no grounding. The whole
+//                 job pipeline now rides the bridge instead of the dock.
 const policy = {
-  'vision-product-analysis': 'never', 'price-synthesis': 'paste_only', 'price-synthesis-batch': 'paste_only',
-  'bundle-price-synthesis': 'paste_only', 'platform-fit-assessment': 'paste_only', 'marketplace-hub-scan': 'never',
-  'marketplace-hub-scan-batch': 'never', 'resume-parse': 'paste_only', 'career-file-extract': 'never',
-  'job-query-generation': 'off', 'job-scoring': 'release_one', 'job-taxonomy-plan': 'off',
-  'job-taxonomy-classify': 'off', 'job-taxonomy-classify-batch': 'off', 'job-compensation-research': 'never',
-  'job-compensation-assessment': 'off', 'job-compensation-research-batch': 'never',
-  'job-compensation-assessment-batch': 'off', 'job-preference-interpretation': 'off',
-  'job-preference-evaluation': 'off', 'job-preference-research': 'never',
-  'job-preference-research-assessment': 'off', 'job-preference-research-batch': 'never',
-  'job-preference-research-batch-assessment': 'off', 'job-role-audit': 'off', 'job-role-screen': 'off',
-  'job-role-screen-batch': 'off',
+  'vision-product-analysis': 'never', 'marketplace-hub-scan': 'never', 'marketplace-hub-scan-batch': 'never',
+  'career-file-extract': 'never', 'job-compensation-research': 'never', 'job-compensation-research-batch': 'never',
+  'job-preference-research': 'never', 'job-preference-research-batch': 'never',
+
+  'price-synthesis': 'paste_only', 'price-synthesis-batch': 'paste_only',
+  'bundle-price-synthesis': 'paste_only', 'platform-fit-assessment': 'paste_only',
+
+  // resume-parse was paste_only, but it calls callLLMText with
+  // RESUME_PARSE_SCHEMA (jobs.js) -- text in, schema out, no file. The mark
+  // was stale, not a constraint.
+  'resume-parse': 'release_one',
+  'job-query-generation': 'release_one', 'job-scoring': 'release_one', 'job-taxonomy-plan': 'release_one',
+  'job-taxonomy-classify': 'release_one', 'job-taxonomy-classify-batch': 'release_one',
+  'job-compensation-assessment': 'release_one', 'job-compensation-assessment-batch': 'release_one',
+  'job-preference-interpretation': 'release_one', 'job-preference-evaluation': 'release_one',
+  'job-preference-research-assessment': 'release_one', 'job-preference-research-batch-assessment': 'release_one',
+  'job-role-audit': 'release_one', 'job-role-screen': 'release_one', 'job-role-screen-batch': 'release_one',
 };
 
 export const PUSH_TASK_POLICY = Object.freeze(Object.fromEntries(Object.entries(policy).map(([task, mode]) => [task, Object.freeze({ mode, bridgeable: mode === 'release_one' || mode === 'off' })])));

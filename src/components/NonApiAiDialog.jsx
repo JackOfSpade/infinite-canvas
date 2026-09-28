@@ -3,6 +3,10 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { EventLogger } from '../utils/EventLogger';
+// Read-only: which jobIds the ChatGPT bridge already holds. Same hook
+// HandoffBridgePanel uses, no new IPC channel — see isBridgeHeldApplication
+// below for the one thing this dock does with it.
+import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
@@ -333,6 +337,11 @@ export function NonApiAiDialog() {
   // prompt, and filing it where it belongs is the repair — so only an answer
   // accepted SOMEWHERE ELSE is proof of a duplicate.
   const [submittedResponses, setSubmittedResponses] = useState([]);
+  // The bridge's own live status, including which jobIds it currently holds
+  // (status.queue.jobs). Subscribed unconditionally like every other hook
+  // here — the render below reads it only for application items, but Rules
+  // of Hooks forbids calling it conditionally.
+  const bridgeStatus = useHandoffBridgeStatus();
   const dockButtonRef = useRef(null);
   const copiedTimerRef = useRef(null);
   // The dock's two scrollers: the prompt box, and the panel body around it.
@@ -400,6 +409,17 @@ export function NonApiAiDialog() {
   const activeValidationDetails = activeError || formatValidationDiagnostic(activeRequest?.validationDiagnostic);
 
   const isApplicationRequest = activeRequest?.kind === 'application';
+  // True only when the connected ChatGPT bridge already holds THIS exact
+  // application bundle (its jobId is in status.queue.jobs) — never for a
+  // push item, and never for an application item the bridge has not taken.
+  // Degrades to false, never throws, if bridgeStatus/queue/jobs is missing
+  // or malformed (bridge disabled, preload still connecting, or an older
+  // main process): Array.isArray guards the .some() below, and optional
+  // chaining guards every step reaching it.
+  const isBridgeHeldApplication = isApplicationRequest
+    && typeof activeRequest?.jobId === 'string' && activeRequest.jobId.length > 0
+    && Array.isArray(bridgeStatus?.queue?.jobs)
+    && bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId);
   // The same fault, whichever way it reached the dock: caught by submit(), or
   // read by a routine discovery pass that published a prompt-less item.
   const brokenApplicationMessage = isApplicationRequest && activeRequestId
@@ -1751,6 +1771,36 @@ export function NonApiAiDialog() {
                   {activeRequest.subject || activeRequest.label || 'This application'}
                 </div>
               </div>
+            </div>
+          ) : isBridgeHeldApplication ? (
+            // The ChatGPT bridge already holds this exact bundle and is
+            // working it in its own chat. Offering this dock's copy/paste
+            // workflow too would invite a second, disagreeing answer for the
+            // same prompt, so none of that working area renders here — only
+            // a calm status line and the one control this dock still owns:
+            // giving the bundle up entirely.
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-start gap-3 rounded-lg border border-violet-400/25 bg-violet-500/10 px-3 py-3 text-xs leading-relaxed text-violet-100"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-semibold text-white">
+                  Working in ChatGPT
+                </div>
+                <div className="mt-1 text-violet-100/75">
+                  This application is being handled in your connected ChatGPT chat. No paste is needed here — Discard bundle is still available if you want to take it back.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={requestApplicationDiscardConfirm}
+                disabled={isDiscarding || !!cancelConfirmTarget}
+                className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Delete this application bundle and its private job folder"
+              >
+                {isDiscarding ? 'Discarding…' : 'Discard bundle'}
+              </button>
             </div>
           ) : (
             <>

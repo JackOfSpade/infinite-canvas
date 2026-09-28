@@ -1438,4 +1438,73 @@ export default [
       assert(removed === 2, 'both application modal components must be deleted');
     },
   },
+  {
+    name: 'application dock: an item the ChatGPT bridge already holds renders "Working in ChatGPT" instead of the copy/paste workflow, and an unheld item is unaffected',
+    run: () => {
+      // A source-substring check, the same convention this file already uses
+      // for the render gate above (see "the render gate itself" test just
+      // above): mounting this component is impractical here, so the render
+      // ternary's own text is the closest available proof of which branch
+      // shows what.
+      const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+
+      // The dock must read bridge status off the existing hook — the same one
+      // HandoffBridgePanel already uses — never a new IPC channel of its own.
+      assert(
+        dock.includes("import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';"),
+        'the dock must read bridge status via the existing useHandoffBridgeStatus hook',
+      );
+
+      // The gate itself: scoped to application requests only (a push item's
+      // jobId, if any, must never be compared against the bridge's queue),
+      // and defensive against a missing or malformed queue/jobs shape —
+      // bridge disabled, preload still connecting, or an older main process
+      // — so it degrades to "not held" instead of throwing.
+      assert(
+        dock.includes('const isBridgeHeldApplication = isApplicationRequest')
+        && dock.includes('Array.isArray(bridgeStatus?.queue?.jobs)')
+        && dock.includes('bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId)'),
+        'isBridgeHeldApplication must gate on isApplicationRequest first and read status.queue.jobs defensively',
+      );
+
+      // Isolate the bridge-held branch's own markup from its two neighbors:
+      // applicationWorkingState's branch before it, and the ordinary
+      // copy/paste fragment after it.
+      const heldStart = dock.indexOf(') : isBridgeHeldApplication ? (');
+      assert(heldStart >= 0, 'the render ternary must add a isBridgeHeldApplication branch');
+      const unheldMarker = ') : (\n            <>';
+      const unheldStart = dock.indexOf(unheldMarker, heldStart);
+      assert(unheldStart > heldStart, 'the bridge-held branch must sit before the ordinary copy/paste fragment, not replace it');
+      const heldBlock = dock.slice(heldStart, unheldStart);
+      const unheldEnd = dock.indexOf('</form>', unheldStart);
+      assert(unheldEnd > unheldStart, 'the ordinary copy/paste fragment must still close the same form');
+      const unheldBlock = dock.slice(unheldStart, unheldEnd);
+
+      // Held: a calm status line, and only the one control this dock still
+      // owns for such an item — Discard bundle. No prompt box, no paste box,
+      // no Submit response, no Copy prompt.
+      assert(heldBlock.includes('Working in ChatGPT'), 'a bridge-held application item must show the "Working in ChatGPT" state');
+      assert(heldBlock.includes('Discard bundle') && heldBlock.includes('requestApplicationDiscardConfirm'),
+        'a bridge-held application item must still offer Discard bundle');
+      assert(
+        !heldBlock.includes('Paste AI response')
+        && !heldBlock.includes('id="non-api-ai-response"')
+        && !heldBlock.includes('id="non-api-ai-prompt"')
+        && !heldBlock.includes('Submit response')
+        && !heldBlock.includes('Copy prompt'),
+        'a bridge-held application item must not render the prompt textarea, the paste textarea, Submit response, or Copy prompt',
+      );
+
+      // Unheld (and every push item, which can never reach this ternary
+      // branch at all): today's exact copy/paste workflow, untouched.
+      assert(
+        unheldBlock.includes('id="non-api-ai-prompt"')
+        && unheldBlock.includes('id="non-api-ai-response"')
+        && unheldBlock.includes('Paste AI response')
+        && unheldBlock.includes('Submit response')
+        && unheldBlock.includes('Copy prompt'),
+        'an application item the bridge does not hold, and every push item, must keep rendering the prompt box, the paste box, Submit response and Copy prompt',
+      );
+    },
+  },
 ];

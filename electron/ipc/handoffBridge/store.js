@@ -45,7 +45,12 @@ export function emptyConfig() {
     pluginName: 'infinite_canvas',
     scope: { applications: true, scoring: false },
     autoStart: false,
-    autoRelease: false,
+    // Handing an application to ChatGPT is the point of enabling the bridge;
+    // requiring a per-job Release afterwards left every bundle sitting in the
+    // dock behind a button people had to go find. Turning the bridge on is
+    // still the explicit, disclosed decision -- this only stops asking again
+    // for each job it was turned on to carry.
+    autoRelease: true,
     limits: { ...DEFAULT_LIMITS },
     prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
     telemetryInBugReports: false,
