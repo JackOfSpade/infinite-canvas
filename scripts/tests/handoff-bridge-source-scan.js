@@ -450,6 +450,15 @@ export default [
       const packageJson = JSON.parse(read('package.json'));
       assert(Object.keys(packageJson.scripts).includes('test:e2e:bridge'), 'B0 bridge smoke script remains registered');
       assert(main.includes('requestSingleInstanceLock'), 'main must retain the single-instance guard');
+      assert(/const bridgeBootContext = Object\.freeze\(\{ app, isPackaged: Boolean\(app\.isPackaged\) \}\);/.test(main)
+        && /registerHandoffBridgeHandlers\(\{ ipcMain: electronPkg\.ipcMain, deps: \{\s*\.\.\.bridgeBootContext,/.test(main)
+        && /scheduleRegisteredHandoffBridgeLaunch\(\{\s*registered: bridgeRegistered,/.test(main)
+        && /startHandoffBridge\(\{ reason, deps: \{\s*\.\.\.bridgeBootContext,/.test(main),
+      'main must pass one explicit canonical packaging state to registration and only schedule a delayed start after complete registration');
+      assert(main.includes("logger.info(`[HandoffBridge] boot packaged=${bridgeBootContext.isPackaged ? 'yes' : 'no'} registered=yes`)")
+        && main.includes("registration_failed reason=incomplete")
+        && main.includes('registration_failed reason=exception kind=${handoffBridgeRegistrationErrorKind(error)}'),
+      'bridge boot diagnostics must be closed and present in the main-log ring');
     },
   },
   {

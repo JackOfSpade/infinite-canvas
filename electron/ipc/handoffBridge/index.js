@@ -1293,26 +1293,39 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     } catch { return false; }
   };
   uiRegistration?.dispose?.();
-  uiRegistration = registerHandoffBridgeUi({ ipc: ipcMain, controller,
-    store: { writeConfig: writeBootstrapConfig }, getCanvasWindows,
-    dialogs: bootstrapDialogs, clipboard: deps.clipboard || electronPkg.clipboard,
-    application: deps.application || runtimePort('application', ['describeForConfirm']),
-    tunnel: tunnelUiPort(setupPortFromDeps(deps)),
-    oauth: deps.oauth || Object.freeze({ openPairing: (...args) => openRuntimePairing(...args), cancelPairing: (...args) => runtime?.pairing?.cancel?.(...args) || Promise.resolve({ ok: false, code: 'NOT_READY' }) }),
-    engine: deps.engine || runtimePort('engine', ['hold', 'resume', 'hint']),
-    push: deps.push || Object.freeze({
-      release: keys => controller.releasePushHubs?.(keys),
-      unrelease: key => controller.unreleasePushHub?.(key),
-    }),
-    enableConsent: enableConsentPort({ userData: bootstrapUserData, deps }),
-    validateHostname: isValidHostname,
-    now: deps.now,
-    timers: deps.timers,
-    onOpenPanel: openPanel,
-    onSetupMutation: async () => invalidateRuntimeForMutation(),
-  });
-  registered = Boolean(uiRegistration);
-  return registered;
+  uiRegistration = null;
+  let nextRegistration = null;
+  try {
+    nextRegistration = registerHandoffBridgeUi({ ipc: ipcMain, controller,
+      store: { writeConfig: writeBootstrapConfig }, getCanvasWindows,
+      dialogs: bootstrapDialogs, clipboard: deps.clipboard || electronPkg.clipboard,
+      application: deps.application || runtimePort('application', ['describeForConfirm']),
+      tunnel: tunnelUiPort(setupPortFromDeps(deps)),
+      oauth: deps.oauth || Object.freeze({ openPairing: (...args) => openRuntimePairing(...args), cancelPairing: (...args) => runtime?.pairing?.cancel?.(...args) || Promise.resolve({ ok: false, code: 'NOT_READY' }) }),
+      engine: deps.engine || runtimePort('engine', ['hold', 'resume', 'hint']),
+      push: deps.push || Object.freeze({
+        release: keys => controller.releasePushHubs?.(keys),
+        unrelease: key => controller.unreleasePushHub?.(key),
+      }),
+      enableConsent: enableConsentPort({ userData: bootstrapUserData, deps }),
+      validateHostname: isValidHostname,
+      now: deps.now,
+      timers: deps.timers,
+      onOpenPanel: openPanel,
+      onSetupMutation: async () => invalidateRuntimeForMutation(),
+    });
+  } catch {
+    registered = false;
+    return false;
+  }
+  if (nextRegistration?.registration?.ok !== true) {
+    try { nextRegistration?.dispose?.(); } catch { /* failed registration is already inert */ }
+    registered = false;
+    return false;
+  }
+  uiRegistration = nextRegistration;
+  registered = true;
+  return true;
 }
 
 export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {

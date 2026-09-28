@@ -189,6 +189,8 @@ export const BRIDGE_UI_COPY = Object.freeze({
   settingsHeading: 'ChatGPT bridge',
   settingsGroup: 'ChatGPT bridge controls',
   enabledLabel: 'Turn on the ChatGPT bridge',
+  checkingAvailability: 'Checking bridge availability…',
+  retryAvailability: 'Try again',
   unavailable: 'The bridge is unavailable in this build.',
   envDisabled: 'The bridge was disabled by this app launch.',
   setUp: 'Set up…',

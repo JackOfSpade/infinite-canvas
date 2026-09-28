@@ -304,6 +304,110 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: inert: explicit main packaging state wins over an ambient Electron fallback',
+    async run() {
+      await stopHandoffBridge();
+      let compositions = 0;
+      const graph = () => ({
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }),
+          disable: async () => ({ success: true }),
+        },
+        listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
+      });
+      try {
+        const packaged = await startHandoffBridge({ deps: completeStartDeps({
+          app: { isPackaged: false }, isPackaged: true,
+          compose: () => { compositions += 1; return graph(); },
+        }) });
+        assert(packaged.success && compositions === 1,
+          'the explicit packaged main dependency permits production composition even if an ambient fallback says dev');
+        await stopHandoffBridge();
+        const devBuild = await startHandoffBridge({ deps: completeStartDeps({
+          app: { isPackaged: true }, isPackaged: false,
+          compose: () => { compositions += 1; return graph(); },
+        }) });
+        assert(devBuild.code === 'unpackaged' && compositions === 1,
+          'the explicit dev main dependency remains closed even if an ambient fallback says packaged');
+      } finally { await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: bootstrap status uses the explicit main packaging state before composition',
+    async run() {
+      await stopHandoffBridge();
+      const canvas = liveCanvas(87);
+      const base = {
+        userData: SAFE_PATHS.userData,
+        getCanvasWindows: () => [canvas],
+        readConfig: () => ({ state: 'ok', config: READY_CONFIG }),
+        readTunnelState: () => READY_SETUP,
+      };
+      const packagedIpc = bridgeIpc();
+      try {
+        assert(registerHandoffBridgeHandlers({ ipcMain: packagedIpc, deps: {
+          ...base, app: { isPackaged: false }, isPackaged: true,
+        } }), 'a complete fake IPC registry installs the bootstrap status route');
+        const packaged = await packagedIpc.handlers.get(IPC_CHANNELS.GET_STATUS)({ sender: canvas.webContents });
+        assert(packaged.success && packaged.status?.availability?.ok === true,
+          'a packaged main context must not inherit an ambient development fallback before any graph is composed');
+
+        const devIpc = bridgeIpc();
+        assert(registerHandoffBridgeHandlers({ ipcMain: devIpc, deps: {
+          ...base, app: { isPackaged: true }, isPackaged: false,
+        } }), 'a replacement fake IPC registry installs its own bootstrap status route');
+        const devBuild = await devIpc.handlers.get(IPC_CHANNELS.GET_STATUS)({ sender: canvas.webContents });
+        assert(devBuild.success && devBuild.status?.availability?.ok === false && devBuild.status?.availability?.reason === 'dev-build',
+          'an explicit development main context remains unavailable even when an ambient fallback claims packaged');
+      } finally { await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: explicit packaging state controls SET_ENABLED before a graph can compose',
+    async run() {
+      await stopHandoffBridge();
+      const canvas = liveCanvas(88);
+      let packagedCompositions = 0; let packagedEnables = 0;
+      const graph = () => ({
+        controller: {
+          snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }),
+          subscribe: () => () => undefined,
+          enable: async () => { packagedEnables += 1; return { success: true }; },
+          disable: async () => ({ success: true }),
+        },
+        listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
+      });
+      const base = {
+        userData: SAFE_PATHS.userData,
+        getCanvasWindows: () => [canvas],
+        readConfig: () => ({ state: 'ok', config: { ...READY_CONFIG, consentVersion: 1 } }),
+        readTunnelState: () => READY_SETUP,
+        dialogs: { ask: async () => ({ ok: true }) },
+      };
+      try {
+        const packagedIpc = bridgeIpc();
+        assert(registerHandoffBridgeHandlers({ ipcMain: packagedIpc, deps: {
+          ...base, app: { isPackaged: false }, isPackaged: true,
+          compose: () => { packagedCompositions += 1; return graph(); },
+        } }), 'the packaged registration installs SET_ENABLED');
+        const enabled = await packagedIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
+        assert(enabled.success && packagedCompositions === 1 && packagedEnables === 1,
+          'explicit packaged state reaches the normal enable path despite an ambient development fallback');
+        await stopHandoffBridge();
+
+        let devCompositions = 0;
+        const devIpc = bridgeIpc();
+        assert(registerHandoffBridgeHandlers({ ipcMain: devIpc, deps: {
+          ...base, app: { isPackaged: true }, isPackaged: false,
+          compose: () => { devCompositions += 1; return graph(); },
+        } }), 'the development registration installs SET_ENABLED');
+        const refused = await devIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
+        assert(refused.success === false && refused.code === 'UNAVAILABLE' && devCompositions === 0,
+          'explicit development state refuses before consent or graph composition despite an ambient packaged fallback');
+      } finally { await stopHandoffBridge(); }
+    },
+  },
+  {
     name: 'handoff bridge: inert: I-04 corrupt state fails closed and is never rewritten',
     async run() {
       await stopHandoffBridge();
@@ -434,12 +538,41 @@ export default [
     name: 'handoff bridge: inert: I-07 through I-14 bridge-off equivalence has only documented registration and launch effects',
     async run() {
       let binds = 0; let writes = 0;
-      const ipc = { handlers: [], handle(channel) { this.handlers.push(channel); }, removeHandler() {}, on(channel) { this.handlers.push(channel); }, __getInvokeHandler() { return null; } };
+      const ipc = { handlers: [], invokeHandlers: new Map(), handle(channel, handler) { this.handlers.push(channel); this.invokeHandlers.set(channel, handler); }, removeHandler(channel) { this.invokeHandlers.delete(channel); }, on(channel) { this.handlers.push(channel); }, removeListener() {}, __getInvokeHandler(channel) { return this.invokeHandlers.get(channel); } };
       const result = await startHandoffBridge({ deps: { env: {}, isPackaged: true, enabled: false, app: { getPath: () => { binds++; return '/not/read'; } }, readConfig: () => { writes++; return null; } } });
-      registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { getCanvasWindows: () => [] } });
+      assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { getCanvasWindows: () => [] } }), 'a complete inert fake IPC registry must register every bridge route');
       assert(result.code === 'not_enabled' && binds === 0 && writes === 0, 'off bridge must not bind, write or spawn');
       assert(ipc.handlers.length === 25, 'off equivalence permits exactly 24 invokes and publish-jobs');
       await stopHandoffBridge();
+    },
+  },
+  {
+    name: 'handoff bridge: inert: failed registration suppresses auto-start scheduling before any start can run',
+    async run() {
+      const originalLock = electronPkg.app.requestSingleInstanceLock;
+      let scheduleRegistered;
+      try {
+        electronPkg.app.requestSingleInstanceLock = () => false;
+        const mainUrl = new URL('../../electron/main.js', import.meta.url);
+        mainUrl.search = `?handoff-bridge-registration-gate=${Date.now()}`;
+        ({ scheduleRegisteredHandoffBridgeLaunch: scheduleRegistered } = await import(mainUrl.href));
+      } finally {
+        if (originalLock === undefined) delete electronPkg.app.requestSingleInstanceLock;
+        else electronPkg.app.requestSingleInstanceLock = originalLock;
+      }
+      let schedules = 0; let starts = 0;
+      const schedule = options => {
+        schedules += 1;
+        options.start?.({ reason: 'auto-start' });
+        return 'scheduled';
+      };
+      const autoStart = { autoStart: true, start: () => { starts += 1; } };
+      const failed = scheduleRegistered({ registered: false, schedule, options: autoStart });
+      assert(failed === null && schedules === 0 && starts === 0,
+        'a failed bridge registration leaves a persisted autoStart unable to schedule or invoke its start path');
+      const registered = scheduleRegistered({ registered: true, schedule, options: autoStart });
+      assert(registered === 'scheduled' && schedules === 1 && starts === 1,
+        'the regression has a positive control: a complete registration still owns the existing delayed start path');
     },
   },
   {

@@ -38,6 +38,23 @@ import { createPendingGlobalQuitDeferral } from './utils/quitDeferral.js';
 
 const execFile = promisify(execFileCb);
 const handoffBridgeSetupSessions = new Map();
+const HANDOFF_BRIDGE_ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError']);
+
+function handoffBridgeRegistrationErrorKind(error) {
+  let name;
+  try { name = error?.name; } catch { return 'unknown'; }
+  return typeof name === 'string' && HANDOFF_BRIDGE_ERROR_NAMES.has(name) ? name : 'unknown';
+}
+
+// A persisted autoStart may create a listener and a cloudflared child. That
+// work is valid only after every renderer IPC route registered successfully;
+// otherwise the bridge stays hard-off instead of becoming an unreachable
+// background service. Keeping this tiny gate injectable makes the boot
+// ordering testable without starting Electron or a tunnel.
+export function scheduleRegisteredHandoffBridgeLaunch({ registered = false, schedule = scheduleHandoffBridgeLaunch, options = {} } = {}) {
+  if (registered !== true || typeof schedule !== 'function') return null;
+  return schedule(options);
+}
 
 // Setup paths come solely from Electron's native file chooser. Every accepted
 // partial selection is immediately persisted to tunnel.json; presentation
@@ -1415,14 +1432,20 @@ if (!gotTheLock) {
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerMarketplaceHandlers();
     registerAccountsHandlers();
+    // Capture Electron's packaging state once at main-process boot and pass it
+    // through every bridge entrypoint.
+    const bridgeBootContext = Object.freeze({ app, isPackaged: Boolean(app.isPackaged) });
+    let bridgeRegistered = false;
+    let bridgeUserData = '';
     registerBugReportHandlers();
     registerNetworkHandlers();
     registerSettingsHandlers();
     registerNonApiAiHandlers();
     try {
-      const bridgeUserData = app.getPath('userData');
+      bridgeUserData = app.getPath('userData');
       const tunnelSetup = createHandoffBridgeTunnelSetup(bridgeUserData);
-      registerHandoffBridgeHandlers({ ipcMain: electronPkg.ipcMain, deps: {
+      bridgeRegistered = registerHandoffBridgeHandlers({ ipcMain: electronPkg.ipcMain, deps: {
+        ...bridgeBootContext,
         getCanvasWindows: () => [...canvasWindows], readTunnelState,
         // The bridge factory receives the app logger through its composed
         // dependency graph, so both direct and scheduled starts share the
@@ -1430,7 +1453,17 @@ if (!gotTheLock) {
         appLogger: logger,
         tunnelSetup,
       } });
-    } catch { /* bridge registration must never block the app */ }
+      if (bridgeRegistered) {
+        logger.info(`[HandoffBridge] boot packaged=${bridgeBootContext.isPackaged ? 'yes' : 'no'} registered=yes`);
+      } else {
+        logger.warn('[HandoffBridge] registration_failed reason=incomplete');
+      }
+    } catch (error) {
+      bridgeRegistered = false;
+      // The bridge is optional at boot, but its failure must be diagnosable in
+      // a FULL report without leaking an error message, path, or environment.
+      logger.warn(`[HandoffBridge] registration_failed reason=exception kind=${handoffBridgeRegistrationErrorKind(error)}`);
+    }
 
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by Claude design and replaced
@@ -1456,15 +1489,18 @@ if (!gotTheLock) {
 
     setupApplicationMenu();
     createWindow({ mode: 'auto' });
-    const bridgeUserData = app.getPath('userData');
-    scheduleHandoffBridgeLaunch({
-      userData: bridgeUserData,
-      stat: fs.promises.stat,
-      reapOrphans: () => reapOrphans({ userData: bridgeUserData, configPath: path.join(bridgeUserData, 'handoff-bridge', 'tunnel', 'config.yml') }),
-      start: ({ reason, loadedConfig }) => startHandoffBridge({ reason, deps: {
-        enabled: true, activate: true, tunnelState: readTunnelState(bridgeUserData), readTunnelState,
-        loadedConfig, getCanvasWindows: () => [...canvasWindows],
-      } }),
+    scheduleRegisteredHandoffBridgeLaunch({
+      registered: bridgeRegistered,
+      options: {
+        userData: bridgeUserData,
+        stat: fs.promises.stat,
+        reapOrphans: () => reapOrphans({ userData: bridgeUserData, configPath: path.join(bridgeUserData, 'handoff-bridge', 'tunnel', 'config.yml') }),
+        start: ({ reason, loadedConfig }) => startHandoffBridge({ reason, deps: {
+          ...bridgeBootContext,
+          enabled: true, activate: true, tunnelState: readTunnelState(bridgeUserData), readTunnelState,
+          loadedConfig, getCanvasWindows: () => [...canvasWindows],
+        } }),
+      },
     });
 
     if (process.env.INFINITE_CANVAS_E2E !== '1') {

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
 import { AVAILABILITY_REASONS, CHAT_STATES, EMPTY_BRIDGE_STATUS, FAULT_CODES, JOB_PHASES, JOB_REASONS, LINK_STATES, normalizeBridgeStatus, PROBE_REASONS, PROBE_STATES, TUNNEL_EXIT_CODES, TUNNEL_STATES } from '../../src/utils/handoffBridgeStatus.js';
-import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoffBridgeStatus, hasHandoffBridgeApi, startHandoffBridgeStatusSync } from '../../src/utils/handoffBridgeStore.js';
+import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoffBridgeStatus, hasHandoffBridgeApi, hasHandoffBridgeStatusSnapshot, retryHandoffBridgeStatusSync, startHandoffBridgeStatusSync } from '../../src/utils/handoffBridgeStore.js';
 import { BRIDGE_ACTION_COPY, BRIDGE_COPY, BRIDGE_SETUP_COPY, IPC_ERROR_COPY, ipcErrorMessage, sanitizeTunnelLogLine } from '../../src/utils/handoffBridgeCopy.js';
 import { HEALTH_IDS, describeJobRow, deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { projectDockItemsForBridge, startBridgeJobPublisher } from '../../src/utils/handoffBridgeQueue.js';
@@ -10,12 +10,26 @@ import { isValidHostname, isValidPluginName, isValidSocketPath } from '../../src
 
 const configUrl = new URL('../../src/utils/handoffBridgeConfig.js', import.meta.url);
 const copyUrl = new URL('../../src/utils/handoffBridgeCopy.js', import.meta.url);
+const storeUrl = new URL('../../src/utils/handoffBridgeStore.js', import.meta.url);
 const IMPORT_SYNTAX = /\bimport(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*(?:\(|['"{*A-Za-z_$])/;
 const NOW = 1_700_000_000_000;
 
 function rawStatus(seq = 1, overrides = {}) {
-  const base = { v: 1, seq, at: NOW, availability: { ok: true }, enabled: true, serving: 'live', setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true }, tunnel: { state: 'up', probe: { state: 'ok' } }, link: { state: 'linked' }, chat: { state: 'none' }, queue: { applications: {}, scoring: {} }, limits: { idlePauseMinutes: 1440 } };
-  return { ...base, ...overrides, setup: { ...base.setup, ...(overrides.setup || {}) }, tunnel: { ...base.tunnel, ...(overrides.tunnel || {}), probe: { ...base.tunnel.probe, ...(overrides.tunnel?.probe || {}) } }, link: { ...base.link, ...(overrides.link || {}) }, chat: { ...base.chat, ...(overrides.chat || {}) }, queue: { ...base.queue, ...(overrides.queue || {}), applications: { ...base.queue.applications, ...(overrides.queue?.applications || {}) }, scoring: { ...base.queue.scoring, ...(overrides.queue?.scoring || {}) } } };
+  const merge = (target, patch) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const prior = target[key] && typeof target[key] === 'object' && !Array.isArray(target[key]) ? target[key] : {};
+        target[key] = merge({ ...prior }, value);
+      } else target[key] = value;
+    }
+    return target;
+  };
+  const base = JSON.parse(JSON.stringify(EMPTY_BRIDGE_STATUS));
+  Object.assign(base, { v: 1, seq, at: NOW, enabled: true, autoStart: false, autoRelease: false, serving: 'live', paused: false }); base.availability = { ...base.availability, ok: true };
+  Object.assign(base.config, { hostname: null, pluginName: 'Infinite Canvas', mcpUrl: null, telemetryInBugReports: false }); base.config.scope = { ...base.config.scope, applications: true, scoring: false };
+  Object.assign(base.setup, { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true });
+  Object.assign(base.tunnel, { state: 'up' }); base.tunnel.probe = { ...base.tunnel.probe, state: 'ok' }; Object.assign(base.link, { state: 'linked' }); Object.assign(base.chat, { state: 'none' }); base.windows.canvasOpen = true;
+  return merge(base, overrides);
 }
 
 function healthFixture(id) {
@@ -116,5 +130,77 @@ export default [
     let callback; let unsubscribed = 0; let resolveGet; const api = { onHandoffBridgeStatus(listener) { callback = listener; return () => { unsubscribed += 1; }; }, handoffBridgeGetStatus() { return new Promise(resolve => { resolveGet = resolve; }); } };
     const first = startHandoffBridgeStatusSync(api); const second = startHandoffBridgeStatusSync(api); assert(typeof callback === 'function', 'sync subscribes before status replay'); callback(rawStatus(8)); assert(getHandoffBridgeStatus().seq === 8, 'event during replay must not be lost'); await Promise.resolve(); assert(typeof resolveGet === 'function', 'status replay must be scheduled after listener registration'); first(); assert(unsubscribed === 0, 'one remaining reference must keep IPC listener alive'); second(); assert(unsubscribed === 1, 'last reference must unsubscribe exactly once'); resolveGet(rawStatus(99)); await Promise.resolve(); await Promise.resolve(); assert(getHandoffBridgeStatus().seq === 8, 'stale async replay after stop must not update the store');
     applyHandoffBridgeStatus(rawStatus(9)); applyHandoffBridgeStatus(rawStatus(8)); applyHandoffBridgeStatus(rawStatus(9)); assert(getHandoffBridgeStatus().seq === 9, 'store must ignore stale and equal snapshots'); __resetHandoffBridgeStoreForTests(); assert(getHandoffBridgeStatus() === EMPTY_BRIDGE_STATUS, 'test reset must restore empty stable snapshot');
+  } },
+  { name: 'handoff bridge: ui: hostile preload accessors never throw or manufacture a bridge snapshot', async run() {
+    const flush = async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); };
+    __resetHandoffBridgeStoreForTests();
+    const getterApi = {};
+    Object.defineProperty(getterApi, 'handoffBridgeGetStatus', { get() { throw new Error('synthetic status getter'); } });
+    assert(!hasHandoffBridgeApi(getterApi), 'a throwing get-status accessor must look like an unavailable older preload');
+    const getterStop = startHandoffBridgeStatusSync(getterApi); await flush(); getterStop();
+    assert(!hasHandoffBridgeStatusSnapshot(), 'a throwing get-status accessor must leave the renderer neutral');
+
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    try {
+      Object.defineProperty(globalThis, 'window', { configurable: true, get() { throw new Error('synthetic preload container getter'); } });
+      assert(!hasHandoffBridgeApi(), 'a throwing window/electronAPI accessor must not crash bridge feature detection');
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+      else delete globalThis.window;
+    }
+
+    __resetHandoffBridgeStoreForTests();
+    let requests = 0;
+    const listenerGetterApi = { handoffBridgeGetStatus() { requests += 1; return { status: rawStatus(30) }; } };
+    Object.defineProperty(listenerGetterApi, 'onHandoffBridgeStatus', { get() { throw new Error('synthetic listener getter'); } });
+    const listenerStop = startHandoffBridgeStatusSync(listenerGetterApi); await flush();
+    assert(requests === 1 && hasHandoffBridgeStatusSnapshot() && getHandoffBridgeStatus().seq === 30, 'a throwing listener accessor must not block the safe one-shot replay');
+    listenerStop(); __resetHandoffBridgeStoreForTests();
+  } },
+  { name: 'handoff bridge: ui: status sync needs an explicit retry after a failed or hung preload replay', async run() {
+    __resetHandoffBridgeStoreForTests();
+    let attempts = 0; let resolveHung; let unsubscribed = 0; let statusListener;
+    const flush = async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); };
+    const api = {
+      onHandoffBridgeStatus(listener) { statusListener = listener; return () => { unsubscribed += 1; }; },
+      handoffBridgeGetStatus() {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(new Error('synthetic initial failure'));
+        if (attempts === 2) { const truncated = rawStatus(2); truncated.link.progress = {}; return { status: truncated }; }
+        if (attempts === 3) return { status: { v: 1, seq: 1, at: NOW, availability: { ok: true } } };
+        if (attempts === 4) return { status: rawStatus(2.5) };
+        if (attempts === 5) return { status: rawStatus(5, { at: NOW + 0.5 }) };
+        if (attempts === 6) return new Promise(resolve => { resolveHung = resolve; });
+        return { status: rawStatus(20) };
+      },
+    };
+    const first = startHandoffBridgeStatusSync(api); const second = startHandoffBridgeStatusSync(api);
+    await flush();
+    assert(attempts === 1 && !hasHandoffBridgeStatusSnapshot(), 'a rejected initial replay must remain neutral instead of inventing an unavailable build state');
+    const retry = async label => { assert(retryHandoffBridgeStatusSync(), label); await flush(); };
+    await retry('a person may explicitly retry a rejected replay');
+    assert(attempts === 2 && !hasHandoffBridgeStatusSnapshot(), 'a full-root snapshot with an empty required nested container must remain neutral');
+    const invalidLeaf = rawStatus(3); invalidLeaf.counts.getServed = null; statusListener(invalidLeaf);
+    assert(!hasHandoffBridgeStatusSnapshot(), 'a non-core numeric status leaf with an invalid null type must not become authoritative');
+    await retry('a person may explicitly retry a nested-truncated replay');
+    assert(attempts === 3 && !hasHandoffBridgeStatusSnapshot(), 'a partial snapshot without Settings/control roots must remain neutral');
+    await retry('a person may explicitly retry a partial replay');
+    assert(attempts === 4 && !hasHandoffBridgeStatusSnapshot(), 'a fractional sequence must not become an authoritative snapshot');
+    await retry('a person may explicitly retry a fractional sequence');
+    assert(attempts === 5 && !hasHandoffBridgeStatusSnapshot(), 'a fractional timestamp must not become an authoritative snapshot');
+    const throwingEvent = {};
+    Object.defineProperty(throwingEvent, 'v', { get() { throw new Error('synthetic hostile getter'); } });
+    statusListener(throwingEvent);
+    assert(!hasHandoffBridgeStatusSnapshot(), 'a throwing status-event getter must be ignored without changing the neutral snapshot');
+    await retry('a person may explicitly retry a malformed replay');
+    assert(attempts === 6 && !hasHandoffBridgeStatusSnapshot(), 'a hung replay must remain neutral until the person retries');
+    assert(retryHandoffBridgeStatusSync(), 'a person may retry even while an earlier preload promise is hung'); await flush();
+    assert(attempts === 7 && hasHandoffBridgeStatusSnapshot() && getHandoffBridgeStatus().seq === 20, 'an explicit retry must recover with the newer authoritative snapshot');
+    resolveHung(rawStatus(99)); await flush();
+    assert(getHandoffBridgeStatus().seq === 20, 'a late completion from the hung replay must not overwrite the newer snapshot');
+    second(); assert(unsubscribed === 0, 'one StrictMode subscriber must keep the shared listener alive');
+    first(); assert(unsubscribed === 1 && !retryHandoffBridgeStatusSync(), 'the final subscriber must release the listener and disable manual retries');
+    assert(!fs.readFileSync(storeUrl, 'utf8').includes('setTimeout') && !fs.readFileSync(storeUrl, 'utf8').includes('clearTimeout'), 'bridge-off status sync must not create retry or watchdog timers');
+    __resetHandoffBridgeStoreForTests();
   } },
 ];

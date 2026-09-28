@@ -45,12 +45,24 @@ const TONE_CLASS = Object.freeze({
   nudge: 'bg-sky-400',
 });
 
-function invoke(api, method, payload) {
-  const fn = api?.[method];
-  if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+function bridgeApi() {
+  try { return globalThis.window?.electronAPI || null; } catch { return null; }
+}
+function safeResult(result) {
   try {
+    if (!result || typeof result !== 'object') return { success: true, items: [] };
+    if (result.success === false) return { success: false, code: typeof result.code === 'string' ? result.code : 'INTERNAL', items: [] };
+    return { success: true, items: Array.isArray(result.items) ? result.items : [] };
+  } catch {
+    return { success: false, code: 'INTERNAL', items: [] };
+  }
+}
+function invoke(api, method, payload) {
+  try {
+    const fn = api?.[method];
+    if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
     const result = payload === undefined ? fn.call(api) : fn.call(api, payload);
-    return Promise.resolve(result).catch(() => ({ success: false, code: 'INTERNAL' }));
+    return Promise.resolve(result).then(safeResult, () => ({ success: false, code: 'INTERNAL', items: [] }));
   } catch {
     return Promise.resolve({ success: false, code: 'INTERNAL' });
   }
@@ -123,7 +135,7 @@ export function HandoffBridgePanel() {
   useEffect(() => {
     if (!ui.popoverOpen) return undefined;
     let cancelled = false;
-    void invoke(globalThis.window?.electronAPI, 'handoffBridgeGetActivity').then(result => {
+    void invoke(bridgeApi(), 'handoffBridgeGetActivity').then(result => {
       if (!cancelled && result?.success !== false && Array.isArray(result?.items)) {
         setActivity(result.items.slice(0, 200));
       }
@@ -134,10 +146,9 @@ export function HandoffBridgePanel() {
   }, [status.activityVersion, ui.popoverOpen]);
 
   useEffect(() => {
-    const api = globalThis.window?.electronAPI;
-    const listener = api?.onHandoffBridgeJobChanged;
-    if (typeof listener !== 'function') return undefined;
     try {
+      const api = bridgeApi(); const listener = api?.onHandoffBridgeJobChanged;
+      if (typeof listener !== 'function') return undefined;
       return listener.call(api, value => requestApplicationHandoffRefresh(value?.jobId || null));
     } catch {
       return undefined;
@@ -145,10 +156,9 @@ export function HandoffBridgePanel() {
   }, []);
 
   useEffect(() => {
-    const api = globalThis.window?.electronAPI;
-    const listener = api?.onHandoffBridgeOpenPanel;
-    if (typeof listener !== 'function') return undefined;
     try {
+      const api = bridgeApi(); const listener = api?.onHandoffBridgeOpenPanel;
+      if (typeof listener !== 'function') return undefined;
       return listener.call(api, value => {
         if (value?.step) openBridgeSetup(value.step);
         else openBridgePopover();
@@ -167,7 +177,7 @@ export function HandoffBridgePanel() {
   }, [notice]);
 
   const call = useCallback(async (method, payload) => {
-    const result = await invoke(globalThis.window?.electronAPI, method, payload);
+    const result = await invoke(bridgeApi(), method, payload);
     if (mountedRef.current) {
       setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.done);
     }

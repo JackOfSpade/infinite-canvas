@@ -50,8 +50,111 @@ export default [
     assert(Object.values(IPC_EVENTS).length === 3 && new Set(Object.values(IPC_EVENTS)).size === 3, 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
   } },
   { name: 'handoff bridge: ipc: registers exactly the frozen invokes and one publish listener', run: () => {
-    const h = setup(); assert(h.ipc.handlers.size === 24 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
+    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 24 && h.api.registration.expectedInvokes === 24 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 24 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
     assert([...h.ipc.handlers.keys()].every(channel => Object.values(IPC_CHANNELS).includes(channel)), 'no unlisted invoke channel is permitted');
+  } },
+  { name: 'handoff bridge: ipc: partial or missing IPC registration is reported false and leaves no route behind', run: () => {
+    const handlers = new Map(); const listeners = new Map(); let failedOnce = false;
+    const throwingIpc = {
+      handlers, listeners,
+      handle(channel, handler) {
+        handlers.set(channel, handler);
+        if (!failedOnce && channel === IPC_CHANNELS.CHOOSE_BINARY) { failedOnce = true; throw new Error('synthetic handler failure'); }
+      },
+      removeHandler(channel) { handlers.delete(channel); },
+      on(channel, listener) { listeners.set(channel, listener); },
+      removeListener(channel, listener) { if (listeners.get(channel) === listener) listeners.delete(channel); },
+    };
+    const partial = setup({ ipc: throwingIpc });
+    assert(!partial.api.registration.ok && partial.api.registration.invokes < partial.api.registration.expectedInvokes,
+      'a throwing invoke registration is not reported as a working bridge');
+    assert(handlers.size === 0 && listeners.size === 0,
+      'a failed registration removes every earlier invoke and publisher listener before returning');
+
+    const missingHandlers = new Map(); const missingListeners = new Map();
+    const missingHandleIpc = {
+      handlers: missingHandlers, listeners: missingListeners,
+      removeHandler(channel) { missingHandlers.delete(channel); },
+      on(channel, listener) { missingListeners.set(channel, listener); },
+      removeListener(channel, listener) { if (missingListeners.get(channel) === listener) missingListeners.delete(channel); },
+    };
+    const missing = setup({ ipc: missingHandleIpc });
+    assert(!missing.api.registration.ok && missing.api.registration.invokes === 0 && missingHandlers.size === 0 && missingListeners.size === 0,
+      'a missing ipc.handle fails closed without creating an invoke or publisher route');
+
+    const publisherHandlers = new Map(); const publisherListeners = new Map();
+    const throwingPublisherIpc = {
+      handlers: publisherHandlers, listeners: publisherListeners,
+      handle(channel, handler) { publisherHandlers.set(channel, handler); },
+      removeHandler(channel) { publisherHandlers.delete(channel); },
+      on(channel, listener) { publisherListeners.set(channel, listener); throw new Error('synthetic publisher failure'); },
+      removeListener(channel, listener) { if (publisherListeners.get(channel) === listener) publisherListeners.delete(channel); },
+    };
+    const publisherFailure = setup({ ipc: throwingPublisherIpc });
+    assert(!publisherFailure.api.registration.ok && publisherHandlers.size === 0 && publisherListeners.size === 0,
+      'a publisher that retains then throws is also removed with every invoke before returning');
+
+    let noopPublishers = 0;
+    const noopHandleIpc = {
+      handle() {}, removeHandler() {}, on() { noopPublishers += 1; }, removeListener() {},
+      __getInvokeHandler: () => undefined,
+    };
+    const noop = setup({ ipc: noopHandleIpc });
+    assert(!noop.api.registration.ok && noop.api.registration.invokes === 0 && noopPublishers === 0,
+      'where an IPC test seam exposes handler introspection, a no-op handle is not treated as a registered bridge');
+  } },
+  { name: 'handoff bridge: ipc: a failed replacement clears old and new bridge routes', run: () => {
+    const ipc = fakeIpc();
+    const initial = setup({ ipc });
+    assert(initial.api.registration.ok && ipc.handlers.size === 24 && ipc.listeners.size === 1,
+      'the regression begins with a complete prior bridge registry');
+
+    const realHandle = ipc.handle;
+    let threw = false;
+    ipc.handle = (channel, handler) => {
+      realHandle(channel, handler);
+      if (!threw && channel === IPC_CHANNELS.CHOOSE_BINARY) {
+        threw = true;
+        throw new Error('synthetic replacement failure');
+      }
+    };
+    const replacement = setup({ ipc });
+    assert(!replacement.api.registration.ok,
+      'a replacement that throws while registering an invoke is not working');
+    assert(ipc.handlers.size === 0 && ipc.listeners.size === 0,
+      'a failed replacement must clear both retained old routes and newly attempted routes');
+  } },
+  { name: 'handoff bridge: ipc: failed replacement cleanup isolates publisher removal faults', run: () => {
+    const ipc = fakeIpc();
+    const initial = setup({ ipc });
+    assert(initial.api.registration.ok && ipc.listeners.size === 1,
+      'the cleanup-fault regression begins with a registered publisher');
+
+    const realHandle = ipc.handle;
+    const realRemoveListener = ipc.removeListener;
+    let threw = false;
+    ipc.handle = (channel, handler) => {
+      realHandle(channel, handler);
+      if (channel === IPC_CHANNELS.CHOOSE_BINARY) throw new Error('synthetic replacement failure');
+    };
+    ipc.removeListener = (channel, listener) => {
+      if (!threw) {
+        threw = true;
+        throw new Error('synthetic listener removal fault');
+      }
+      realRemoveListener(channel, listener);
+    };
+    const replacement = setup({ ipc });
+    assert(!replacement.api.registration.ok && threw,
+      'the replacement and its first publisher cleanup attempt both fail');
+    assert(ipc.handlers.size === 0 && ipc.listeners.size === 0,
+      'a listener-removal fault cannot prevent remaining publisher cleanup or invoke rollback');
+
+    ipc.handle = realHandle;
+    ipc.removeListener = () => { throw new Error('stale publisher ownership would fail this registration'); };
+    const recovered = setup({ ipc });
+    assert(recovered.api.registration.ok && ipc.listeners.size === 1,
+      'failed cleanup deletes publisher ownership even when a later registration cannot remove a stale listener');
   } },
   { name: 'handoff bridge: ipc: sender guard applies to every invoke and publish route', async run() {
     const h = setup(); const hostile = { sender: { id: 99, __isCanvasRenderer: false } };

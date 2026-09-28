@@ -9,14 +9,30 @@ import { withConsoleCollector } from './fixtures/handoff-bridge/renderHarness.js
 import { withDom } from './fixtures/handoff-bridge/mountComponent.js';
 import { withTimeout } from './fixtures/handoff-bridge/harness.js';
 import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoffBridgeStatus } from '../../src/utils/handoffBridgeStore.js';
-import { normalizeBridgeStatus } from '../../src/utils/handoffBridgeStatus.js';
+import { EMPTY_BRIDGE_STATUS, normalizeBridgeStatus } from '../../src/utils/handoffBridgeStatus.js';
 import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { __resetBridgeUiForTests } from '../../src/utils/handoffBridgeUiStore.js';
 
 const NOW = 1_700_000_000_000;
 const root = path.resolve('.');
 const source = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-function status(seq, extra = {}) { return { v: 1, seq, at: NOW, availability: { ok: true }, enabled: true, serving: 'live', setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true }, tunnel: { state: 'up', probe: { state: 'ok' } }, link: { state: 'linked' }, chat: { state: 'none' }, queue: { applications: {}, scoring: {} }, ...extra }; }
+function status(seq, extra = {}) {
+  const merge = (target, patch) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const prior = target[key] && typeof target[key] === 'object' && !Array.isArray(target[key]) ? target[key] : {};
+        target[key] = merge({ ...prior }, value);
+      } else target[key] = value;
+    }
+    return target;
+  };
+  const base = JSON.parse(JSON.stringify(EMPTY_BRIDGE_STATUS));
+  Object.assign(base, { v: 1, seq, at: NOW, enabled: true, autoStart: false, autoRelease: false, serving: 'live', paused: false }); base.availability = { ...base.availability, ok: true };
+  Object.assign(base.config, { hostname: null, pluginName: 'Infinite Canvas', mcpUrl: null, telemetryInBugReports: false }); base.config.scope = { ...base.config.scope, applications: true, scoring: false };
+  Object.assign(base.setup, { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: true, linked: true, toolsListed: true, firstCallSeen: true });
+  Object.assign(base.tunnel, { state: 'up' }); base.tunnel.probe = { ...base.tunnel.probe, state: 'ok' }; Object.assign(base.link, { state: 'linked' }); Object.assign(base.chat, { state: 'none' }); base.windows.canvasOpen = true;
+  return merge(base, extra);
+}
 
 function sameDescriptor(first, second) {
   return ['configurable', 'enumerable', 'writable', 'value', 'get', 'set'].every(key => first?.[key] === second?.[key]);
@@ -379,6 +395,93 @@ export default [
         const html = await withTimeout(mountInStrictMode({ React: bundle.module.React, createRoot: bundle.module.createRoot, act: bundle.module.act, Component: bundle.module.NoPreloadProbe }), 5000);
         assert(!html.includes('ChatGPT bridge') && !html.includes('Set up ChatGPT bridge'), 'all guarded surfaces must render nothing without bridge preload keys');
       } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: render: Settings checks a live preload before showing a real unavailable-build state',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-availability-'));
+      const entry = path.join(directory, 'AvailabilityProbe.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nexport { __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport function AvailabilityProbe() { return <HandoffBridgeSetup />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          let resolveStatus;
+          window.electronAPI = {
+            handoffBridgeGetStatus: () => new Promise(resolve => { resolveStatus = resolve; }),
+            onHandoffBridgeStatus: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.AvailabilityProbe)); await Promise.resolve(); await Promise.resolve(); });
+            const enabled = window.document.querySelector('input[type="checkbox"]');
+            assert(window.document.body.textContent.includes('Checking bridge availability') && !window.document.body.textContent.includes('unavailable in this build') && !window.document.body.textContent.includes('Bridge off') && !window.document.body.textContent.includes('Turn on the bridge when') && enabled?.disabled,
+              'a live preload with an unresolved first status must be visibly checking, hide stale off copy, and keep bridge controls inert');
+            const retry = [...window.document.querySelectorAll('button')].find(button => button.textContent.includes('Try again'));
+            assert(retry && !retry.disabled, 'an unresolved live preload must offer a person-initiated status retry without starting the bridge');
+            await bundle.module.act(async () => { resolveStatus({ status: status(1, { availability: { ok: false, reason: 'dev-build' } }) }); await Promise.resolve(); await Promise.resolve(); });
+            assert(!window.document.body.textContent.includes('Checking bridge availability') && window.document.body.textContent.includes('unavailable in this build') && enabled.disabled,
+              'only an authoritative unavailable snapshot may show the unavailable-build message');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+          }
+          assert(entries.length === 0, 'availability state transitions must not emit console output');
+        }));
+      } finally { bundle?.module.__resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: render: Settings manually retries a hung availability replay without accepting its late result',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-availability-retry-'));
+      const entry = path.join(directory, 'AvailabilityRetryProbe.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nexport { __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport function AvailabilityRetryProbe() { return <HandoffBridgeSetup />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          let calls = 0; let resolveInitial; let resolveRetry;
+          window.electronAPI = {
+            handoffBridgeGetStatus: () => {
+              calls += 1;
+              return new Promise(resolve => {
+                if (calls === 1) resolveInitial = resolve;
+                else resolveRetry = resolve;
+              });
+            },
+            onHandoffBridgeStatus: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.AvailabilityRetryProbe)); await Promise.resolve(); await Promise.resolve(); });
+            const retry = [...window.document.querySelectorAll('button')].find(button => button.textContent.includes('Try again'));
+            assert(retry && calls === 1, 'the first unresolved replay must expose one manual retry action');
+            await bundle.module.act(async () => { retry.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls === 2, 'clicking Try again must issue a fresh status request while the first request is hung');
+            await bundle.module.act(async () => { resolveRetry({ status: status(20, { enabled: false }) }); await Promise.resolve(); await Promise.resolve(); });
+            const enabled = window.document.querySelector('input[type="checkbox"]');
+            assert(!window.document.body.textContent.includes('Checking bridge availability') && !enabled.disabled && window.document.body.textContent.includes('Bridge off'), 'a successful manual retry must leave checking and restore controls from the authoritative status');
+            await bundle.module.act(async () => { resolveInitial({ status: status(99, { availability: { ok: false, reason: 'dev-build' } }) }); await Promise.resolve(); await Promise.resolve(); });
+            assert(!window.document.body.textContent.includes('unavailable in this build') && !enabled.disabled, 'a late initial result must not change the DOM after a newer manual retry wins');
+            Object.defineProperty(window.electronAPI, 'handoffBridgeSetEnabled', { configurable: true, get() { throw new Error('synthetic action getter'); } });
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(window.document.body.textContent.includes('Something went wrong in the bridge'), 'a throwing Settings action accessor must return fixed feedback instead of crashing the renderer');
+            Object.defineProperty(window.electronAPI, 'handoffBridgeSetEnabled', { configurable: true, value: () => {
+              const hostileResult = {};
+              Object.defineProperty(hostileResult, 'success', { get() { throw new Error('synthetic result getter'); } });
+              return hostileResult;
+            } });
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(window.document.body.textContent.includes('Something went wrong in the bridge'), 'a throwing resolved action-result getter must become fixed feedback instead of escaping the caller');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+          }
+          assert(entries.length === 0, 'manual availability retry must not emit console output');
+        }));
+      } finally { bundle?.module.__resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
     },
   },
   {

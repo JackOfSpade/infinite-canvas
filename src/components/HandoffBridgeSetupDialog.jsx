@@ -45,11 +45,29 @@ const LINK_PROGRESS_KEYS = Object.freeze([
   'toolsListed',
 ]);
 
-function invoke(api, method, payload) {
-  const fn = api?.[method];
-  if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+function bridgeApi() {
+  try { return globalThis.window?.electronAPI || null; } catch { return null; }
+}
+function externalDispatcher() {
+  try { return bridgeApi()?.openExternal; } catch { return null; }
+}
+function browserOpen() {
+  try { return globalThis.window?.open; } catch { return null; }
+}
+function safeResult(result) {
   try {
-    return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload));
+    if (!result || typeof result !== 'object') return { success: true, lines: [] };
+    if (result.success === false) return { success: false, code: typeof result.code === 'string' ? result.code : 'INTERNAL', lines: [] };
+    return { success: true, lines: Array.isArray(result.lines) ? result.lines : [] };
+  } catch {
+    return { success: false, code: 'INTERNAL', lines: [] };
+  }
+}
+function invoke(api, method, payload) {
+  try {
+    const fn = api?.[method];
+    if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+    return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload)).then(safeResult, () => ({ success: false, code: 'INTERNAL', lines: [] }));
   } catch {
     return Promise.resolve({ success: false, code: 'INTERNAL' });
   }
@@ -184,7 +202,7 @@ export function HandoffBridgeSetupDialog() {
   }, []);
 
   const call = useCallback(async (method, payload) => {
-    const result = await invoke(globalThis.window?.electronAPI, method, payload);
+    const result = await invoke(bridgeApi(), method, payload);
     if (mountedRef.current) {
       setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.saved);
     }
@@ -214,7 +232,7 @@ export function HandoffBridgeSetupDialog() {
     setEnabling(true);
     setEnableError(null);
     setNotice('');
-    const result = await invoke(globalThis.window?.electronAPI, 'handoffBridgeSetEnabled', { enabled: true });
+    const result = await invoke(bridgeApi(), 'handoffBridgeSetEnabled', { enabled: true });
     if (!mountedRef.current) return;
     if (result?.success === false) {
       setEnabling(false);
@@ -225,14 +243,14 @@ export function HandoffBridgeSetupDialog() {
 
   const openPlugins = useCallback(async () => {
     const result = await openExternalUrl('https://chatgpt.com/plugins', {
-      dispatcher: globalThis.window?.electronAPI?.openExternal,
-      fallback: globalThis.window?.open,
+      dispatcher: externalDispatcher(),
+      fallback: browserOpen(),
     });
     if (!result.ok && mountedRef.current) setNotice(BRIDGE_UI_COPY.externalLinkFailure);
   }, []);
 
   const showTunnelLog = useCallback(async () => {
-    const result = await invoke(globalThis.window?.electronAPI, 'handoffBridgeGetTunnelLog');
+    const result = await invoke(bridgeApi(), 'handoffBridgeGetTunnelLog');
     if (!mountedRef.current) return;
     if (result?.success === false) {
       setNotice(ipcErrorMessage(result.code));

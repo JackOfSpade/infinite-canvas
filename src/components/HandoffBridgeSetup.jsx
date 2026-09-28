@@ -2,16 +2,28 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Cable, Pause, Play, Settings2 } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
-import { hasHandoffBridgeApi, startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
+import { hasHandoffBridgeApi, hasHandoffBridgeStatusSnapshot, retryHandoffBridgeStatusSync, startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
 import { openBridgePopover, openBridgeSetup } from '../utils/handoffBridgeUiStore';
 import { deriveBridgeHealth } from '../utils/handoffBridgeView';
 import { BRIDGE_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 
-function invoke(api, method, payload) {
-  const fn = api?.[method];
-  if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+function bridgeApi() {
+  try { return globalThis.window?.electronAPI || null; } catch { return null; }
+}
+function safeResult(result) {
   try {
-    return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload));
+    if (!result || typeof result !== 'object') return { success: true };
+    if (result.success === false) return { success: false, code: typeof result.code === 'string' ? result.code : 'INTERNAL' };
+    return { success: true };
+  } catch {
+    return { success: false, code: 'INTERNAL' };
+  }
+}
+function invoke(api, method, payload) {
+  try {
+    const fn = api?.[method];
+    if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+    return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload)).then(safeResult, () => ({ success: false, code: 'INTERNAL' }));
   } catch {
     return Promise.resolve({ success: false, code: 'INTERNAL' });
   }
@@ -48,7 +60,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
   }, [notice]);
 
   const call = useCallback(async (method, payload) => {
-    const result = await invoke(globalThis.window?.electronAPI, method, payload);
+    const result = await invoke(bridgeApi(), method, payload);
     if (mountedRef.current) {
       setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.saved);
     }
@@ -61,7 +73,9 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
   }, [onOpenPanel]);
 
   const health = deriveBridgeHealth(status, 0);
-  const unavailable = !status.availability.ok;
+  const checking = apiPresent && !hasHandoffBridgeStatusSnapshot();
+  const unavailable = !checking && !status.availability.ok;
+  const controlsDisabled = checking || unavailable;
   const canToggleServing = status.enabled && (status.paused || status.serving === 'live');
 
   if (!apiPresent) return null;
@@ -129,23 +143,33 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               className="mt-0.5 shrink-0"
               type="checkbox"
               checked={status.enabled}
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onChange={event => void call('handoffBridgeSetEnabled', { enabled: event.target.checked })}
             />
           </label>
+          {checking && (
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <p className="break-words text-[11px] text-white/50">{BRIDGE_UI_COPY.checkingAvailability}</p>
+              <button type="button" onClick={retryHandoffBridgeStatusSync} className="bridge-button-secondary text-[11px]">
+                {BRIDGE_UI_COPY.retryAvailability}
+              </button>
+            </div>
+          )}
           {unavailable && (
             <p className="break-words text-[11px] text-amber-300">
               {unavailableCopy(status.availability.reason)}
             </p>
           )}
-          <p className="break-words text-[11px] text-white/50">{health.headline}: {health.detail}</p>
-          <p className="break-words text-[11px] text-white/45">
-            {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
-          </p>
+          {!checking && <>
+            <p className="break-words text-[11px] text-white/50">{health.headline}: {health.detail}</p>
+            <p className="break-words text-[11px] text-white/45">
+              {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
+            </p>
+          </>}
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onClick={() => openBridgeSetup(status.enabled ? 2 : 1)}
               className="bridge-button-secondary"
             >
@@ -153,7 +177,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             </button>
             <button
               type="button"
-              disabled={unavailable || !status.enabled}
+              disabled={controlsDisabled || !status.enabled}
               onClick={handleOpenPanel}
               className="bridge-button-secondary"
             >
@@ -162,7 +186,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             {status.enabled && (
               <button
                 type="button"
-                disabled={unavailable || !canToggleServing}
+                disabled={controlsDisabled || !canToggleServing}
                 onClick={() => void call(status.paused ? 'handoffBridgeResume' : 'handoffBridgePause')}
                 className="bridge-button-secondary"
               >
@@ -176,7 +200,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               className="mt-0.5 shrink-0"
               type="checkbox"
               checked={status.config.scope.applications}
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onChange={event => patchScope('applications', event.target.checked)}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.applications}</span>
@@ -186,7 +210,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               className="mt-0.5 shrink-0"
               type="checkbox"
               checked={status.config.scope.scoring}
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onChange={event => patchScope('scoring', event.target.checked)}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.scoringSetting}</span>
@@ -196,7 +220,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               className="mt-0.5 shrink-0"
               type="checkbox"
               checked={status.autoStart}
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoStart: event.target.checked } })}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.autoStart}</span>
@@ -206,7 +230,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               className="mt-0.5 shrink-0"
               type="checkbox"
               checked={status.autoRelease}
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoRelease: event.target.checked }})}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.autoRelease}</span>
@@ -215,7 +239,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             <span className="text-[11px] text-white/35">{BRIDGE_UI_COPY.dangerZone}</span>
             <button
               type="button"
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onClick={() => setConfirm('revoke')}
               className="bridge-button-danger"
             >
@@ -223,7 +247,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             </button>
             <button
               type="button"
-              disabled={unavailable}
+              disabled={controlsDisabled}
               onClick={() => setConfirm('forget')}
               className="bridge-button-danger"
             >

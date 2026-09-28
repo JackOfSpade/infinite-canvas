@@ -52,6 +52,8 @@ const INTERNAL_CODES = Object.freeze({
   sender: 'SENDER', no_window: 'NO_WINDOW', persist_failed: 'INTERNAL', internal_error: 'INTERNAL',
 });
 const registeredPublishListeners = new WeakMap();
+const REQUIRED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS)
+  .filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS));
 function fixedCode(code, fallback = 'INTERNAL') {
   if (typeof code !== 'string') return fallback;
   const normalized = code.toUpperCase();
@@ -604,27 +606,85 @@ export function registerHandoffBridgeUi({
       await safeCall(controller, 'release', { jobs: eligible.map(value => value.job) });
     })();
   }
-  for (const [channel, handler] of Object.entries(handlers)) {
-    try { ipc.removeHandler?.(channel); ipc.handle?.(channel, handler); } catch { /* a partial Electron stub is inert */ }
-  }
-  try {
-    const previous = registeredPublishListeners.get(ipc);
-    if (previous) ipc.removeListener?.(IPC_CHANNELS.PUBLISH_JOBS, previous);
-    ipc.on?.(IPC_CHANNELS.PUBLISH_JOBS, publish);
-    registeredPublishListeners.set(ipc, publish);
-  } catch { /* test fake owns this route */ }
-  return Object.freeze({
-    dispose() {
-      try { unsubscribe?.(); } catch { /* optional */ }
-      if (statusTimer !== null) try { timers.clearTimeout?.(statusTimer); } catch { /* optional */ }
-      candidates.clear();
+  // Registration is a closed all-or-nothing fact.  A partial Electron stub is
+  // useful in isolated tests, but it is not a working bridge: reporting it as
+  // registered would make the renderer retry an IPC surface that does not
+  // exist.  The production IPC object supplies all four functions below.
+  const registeredInvokes = [];
+  let invokeRegistrationOk = typeof ipc?.handle === 'function' && typeof ipc?.removeHandler === 'function';
+  if (invokeRegistrationOk) {
+    for (const channel of REQUIRED_INVOKE_CHANNELS) {
       try {
-        if (registeredPublishListeners.get(ipc) === publish) {
-          ipc.removeListener?.(IPC_CHANNELS.PUBLISH_JOBS, publish);
-          registeredPublishListeners.delete(ipc);
-        }
-      } catch { /* optional Electron cleanup */ }
-    },
+        ipc.removeHandler(channel);
+        ipc.handle(channel, handlers[channel]);
+        // Electron does not expose handler introspection, but the test stub
+        // does. Where that seam exists, a no-op `handle` is a failed route,
+        // not a successful registration claim.
+        if (typeof ipc.__getInvokeHandler === 'function' && ipc.__getInvokeHandler(channel) !== handlers[channel]) throw new Error('invoke handler missing');
+        registeredInvokes.push(channel);
+      } catch {
+        invokeRegistrationOk = false;
+        break;
+      }
+    }
+  }
+  let publishRegistered = false;
+  let publishAttempted = false;
+  if (invokeRegistrationOk && registeredInvokes.length === REQUIRED_INVOKE_CHANNELS.length
+    && typeof ipc?.on === 'function' && typeof ipc?.removeListener === 'function') {
+    try {
+      const previous = registeredPublishListeners.get(ipc);
+      if (previous) ipc.removeListener(IPC_CHANNELS.PUBLISH_JOBS, previous);
+      publishAttempted = true;
+      ipc.on(IPC_CHANNELS.PUBLISH_JOBS, publish);
+      registeredPublishListeners.set(ipc, publish);
+      publishRegistered = true;
+    } catch { /* cleanup below makes a failed partial registration inert */ }
+  }
+  const registration = Object.freeze({
+    ok: invokeRegistrationOk && registeredInvokes.length === REQUIRED_INVOKE_CHANNELS.length && publishRegistered,
+    invokes: registeredInvokes.length,
+    expectedInvokes: REQUIRED_INVOKE_CHANNELS.length,
+    publish: publishRegistered,
+  });
+  let disposed = false;
+  const dispose = ({ removePartialInvokes = false } = {}) => {
+    if (disposed) return;
+    disposed = true;
+    try { unsubscribe?.(); } catch { /* optional */ }
+    if (statusTimer !== null) try { timers.clearTimeout?.(statusTimer); } catch { /* optional */ }
+    statusTimer = null;
+    candidates.clear();
+    try {
+      if (publishAttempted || registeredPublishListeners.get(ipc) === publish) {
+        ipc.removeListener?.(IPC_CHANNELS.PUBLISH_JOBS, publish);
+        if (registeredPublishListeners.get(ipc) === publish) registeredPublishListeners.delete(ipc);
+      }
+    } catch { /* optional Electron cleanup */ }
+    if (removePartialInvokes) {
+      // This may be a replacement over a prior bridge registry. A throw at
+      // channel N leaves the old handlers for N+1…end in Electron unless we
+      // clear the full owned route set, not only the routes this attempt saw.
+      for (const channel of REQUIRED_INVOKE_CHANNELS) {
+        try { ipc.removeHandler?.(channel); } catch { /* best-effort failed-registration cleanup */ }
+      }
+      // Do not couple these cleanup attempts: a hostile/broken test double
+      // (or a transient Electron failure) removing this attempt's listener
+      // must not leave the prior registry's publisher or our ownership entry
+      // behind.
+      let previous;
+      try { previous = registeredPublishListeners.get(ipc); } catch { /* best effort */ }
+      try { ipc.removeListener?.(IPC_CHANNELS.PUBLISH_JOBS, publish); } catch { /* best effort */ }
+      if (previous && previous !== publish) {
+        try { ipc.removeListener?.(IPC_CHANNELS.PUBLISH_JOBS, previous); } catch { /* best effort */ }
+      }
+      try { registeredPublishListeners.delete(ipc); } catch { /* best effort */ }
+    }
+  };
+  if (!registration.ok) dispose({ removePartialInvokes: true });
+  return Object.freeze({
+    registration,
+    dispose: () => dispose(),
     publishStatus, publish, candidates: () => { sweep(); return candidates; },
     // Main-only composition port for engine/application mutations.  It sends
     // to the publishing live window, never broadcasts by canvas path.
