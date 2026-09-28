@@ -47,7 +47,7 @@ export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   availability: { ok: false, reason: null },
   enabled: false, autoStart: false, autoRelease: false, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
-  config: { hostname: null, pluginName: '', mcpUrl: null, scope: { applications: true, scoring: false }, telemetryInBugReports: false },
+  config: { hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: { applications: true, scoring: false }, telemetryInBugReports: false },
   limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, jobsPerChat: 2, epochSoftBytes: 500000, epochHardBytes: 900000 },
   prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
   setup: { hostnameOk: false, binaryApproved: false, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },

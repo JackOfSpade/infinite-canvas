@@ -31,7 +31,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearFailedStartDiagnostic, recordFailedStartDiagnostic } from './telemetry.js';
+import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -297,7 +297,7 @@ function safeBootstrapConfig(value) {
   const hostname = isValidHostname(value?.hostname) ? value.hostname : null;
   return {
     hostname,
-    pluginName: isValidPluginName(value?.pluginName) ? value.pluginName : '',
+    pluginName: isValidPluginName(value?.pluginName) ? value.pluginName : 'infinite_canvas',
     scope: {
       applications: value?.scope?.applications !== false,
       scoring: value?.scope?.scoring === true,
@@ -605,6 +605,23 @@ function runtimePort(name, methods) {
   return Object.freeze(port);
 }
 
+// This is intentionally separate from the UI adapter so the post-disposal
+// fallback has a focused, testable boundary. A live supervisor is always the
+// sole authority for its log, including an empty/failed read; only the absent
+// runtime path is synthesized from closed telemetry.
+export async function tunnelLogLinesForUi(tunnel = runtime?.tunnel) {
+  if (tunnel) {
+    if (typeof tunnel.getLog !== 'function') return [];
+    try {
+      const lines = await tunnel.getLog();
+      return Array.isArray(lines) ? lines : [];
+    } catch {
+      return [];
+    }
+  }
+  return getFailedStartDiagnosticLines();
+}
+
 function tunnelUiPort(setup = null) {
   const setupMethod = name => (...args) => setup?.[name]?.(...args) || Promise.resolve({ ok: false, code: 'NOT_READY' });
   const runtimeMethod = name => (...args) => runtime?.tunnel?.[name]?.(...args) || Promise.resolve(name === 'getLog' ? [] : { ok: false, code: 'NOT_READY' });
@@ -613,7 +630,12 @@ function tunnelUiPort(setup = null) {
     // Reaping is a fixed-argument setup operation. Do not route it through a
     // live supervisor or accept a renderer-supplied PID/path.
     reapOrphans: setupMethod('reapOrphans'),
-    restart: runtimeMethod('restart'), getLog: runtimeMethod('getLog'),
+    restart: runtimeMethod('restart'),
+    // A failed Enable disposes the runtime by design.  Keep Show tunnel log
+    // useful after that teardown without retaining child output: the telemetry
+    // module returns only fixed text made from closed diagnostic enums and
+    // only when the user opted into bridge diagnostics.
+    getLog: () => tunnelLogLinesForUi(),
   });
 }
 
@@ -759,6 +781,10 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     const policy = controller?.snapshot?.()?.prefs?.sourcePolicy || config.prefs?.sourcePolicy;
     return ['enforce', 'alert', 'off'].includes(policy) ? policy : 'enforce';
   };
+  const bridgeDiagnosticsEnabled = () => {
+    try { return controller?.snapshot?.(false)?.config?.telemetryInBugReports === true; }
+    catch { return false; }
+  };
   const mcp = deps.mcp || createMcpHandler({
     // Do not expose the engine directly: source, auth, window and pause gates
     // belong to the controller and must apply to every MCP tool request.
@@ -771,6 +797,18 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     // projects its closed counters; it must not turn transport noise into a
     // security event or write a second audit record.
     counters: { increment: kind => controller?.onTransportCount?.(kind) },
+    diagnostics: { recordOAuthRejection: event => {
+      // HTTP has already reduced this to closed route/method/reason categories.
+      // The current opt-in is checked here rather than captured at composition
+      // time, so a person can turn report telemetry off immediately.
+      if (!bridgeDiagnosticsEnabled()) return;
+      recordOAuthRejectionDiagnostic({ telemetry: true, ...event, at: now() });
+    }, recordSourceRejection: event => {
+      // Same opt-in and the same closed-class contract: HTTP has already
+      // reduced the caller's network to a class before it reaches here.
+      if (!bridgeDiagnosticsEnabled()) return;
+      recordSourceRejectionDiagnostic({ telemetry: true, ...event, at: now() });
+    } },
     audit: { write: entry => {
       const event = entry?.ev;
       const appended = appendClosedHandoffAudit(audit, event, entry, now());
@@ -813,6 +851,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   const dialogs = deps.dialogs || createHandoffBridgeDialogs({ dialog: deps.dialog || electronPkg.dialog, getCanvasWindows: windows.getCanvasWindows });
   let pairingParent = null;
   let pairingCode = null;
+  let publishedPairingOpen = false;
   const pairingLifecycle = (event, cause) => {
     const safeCause = event === 'pairing_opened'
       ? 'user'
@@ -839,6 +878,16 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     },
     showNotice: value => dialogs.showNotice?.({ ...value, parentWindow: pairingParent }),
     hint: () => controller?.onReconnectHint?.(),
+    // Pairing also emits when its private egress observation changes. Publish
+    // only actual open/close transitions, and only through the controller's
+    // code-free projection, so renderers can retire an ephemeral direct reply
+    // without turning probe bookkeeping into user-visible status churn.
+    onState: value => {
+      const open = value?.open === true;
+      if (open === publishedPairingOpen) return;
+      publishedPairingOpen = open;
+      controller?.onPairingState?.();
+    },
     onOpened: () => pairingLifecycle('pairing_opened', 'user'),
     onClosed: cause => pairingLifecycle('pairing_closed', cause) });
   const openPairing = async value => {
@@ -1247,6 +1296,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1283,8 +1333,9 @@ async function forgetActiveRuntime(current, status) {
   }
 }
 
-async function invalidateRuntimeForMutation() {
+async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1328,6 +1379,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1376,14 +1428,17 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       bootstrapCleared = false;
       // An explicit telemetry opt-out must also remove an already retained
       // in-memory failed-start receipt before any later FULL report is built.
-      if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) clearFailedStartDiagnostic();
+      if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
+        clearFailedStartDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
+      }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
       // UI calls reloadConfig once after this adapter returns. Hostname is a
       // captured graph value, so detach first and let that one reload publish
       // the newly persisted bootstrap projection rather than reloading twice.
       if (changedHostname) {
-        const invalidated = await invalidateRuntimeForMutation();
+        const invalidated = await invalidateRuntimeForMutation({ clearOAuthDiagnostics: true });
         if (invalidated?.success === false) return { ok: false, code: 'STATE_UNREADABLE' };
       }
     }
@@ -1461,6 +1516,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);

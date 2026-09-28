@@ -200,6 +200,9 @@ export default [
       for (const rule of ['display: inline-flex', 'max-width: 100%', 'min-height: 2.25rem', 'overflow-wrap: anywhere', ':disabled']) assert(styles.includes(rule), `bridge buttons must retain the compact responsive rule ${rule}`);
       assert(trigger.includes("health.badge > 9 ? '9+'"), 'the trigger badge must cap visibly at 9+');
       assert(!panel.includes('now || Date.now()'), 'new-chat confirmation must use state time, never a wall-clock fallback');
+      assert(panel.includes("if (id === 'open-pairing')") && panel.includes('openBridgeSetup(3)')
+        && !panel.includes("'open-pairing': 'handoffBridgeOpenPairing'"),
+      'the panel renewal action must enter the setup surface that owns the direct pairing-code response');
       assert(!dialog.includes('${BRIDGE_SETUP_COPY.stepComplete}') && !dialog.includes('${BRIDGE_SETUP_COPY.stepPending}'), 'setup progress must use icons or CSS, not visible glyph text');
       assert(!dialog.includes('ConfirmDialog') && !dialog.includes('LINK_WOULD_BREAK') && !dialog.includes('confirmBreak') && !dialog.includes('pendingAddress'), 'the renderer must leave linked-address confirmation to one authoritative main-process dialog');
       assert(!setup.includes("confirm === 'off'") && !panel.includes("confirm === 'off'")
@@ -264,12 +267,32 @@ export default [
           const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
           Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value: () => [{ width: 1, height: 1 }] });
           Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
-          let rootNode;
+          let rootNode; let priorClipboard;
           try {
             const enableCalls = [];
             const pendingEnable = [];
             const configPatches = [];
             const setupCalls = [];
+            const copiedValues = [];
+            const pairingCalls = [];
+            let clipboardShouldFail = false;
+            let delayedClipboardValue = null;
+            let releaseDelayedClipboard = null;
+            let nextPairingResult = { success: true, pairingCode: '23456-789AB', expiresAt: Date.now() + 60_000 };
+            priorClipboard = Object.getOwnPropertyDescriptor(window.navigator, 'clipboard');
+            Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async value => {
+              if (value === delayedClipboardValue) {
+                await new Promise(resolve => {
+                  releaseDelayedClipboard = () => {
+                    copiedValues.push(value);
+                    resolve();
+                  };
+                });
+                return;
+              }
+              if (clipboardShouldFail) throw new Error('synthetic clipboard rejection');
+              copiedValues.push(value);
+            } } });
             window.electronAPI = {
               handoffBridgeGetStatus: async () => ({ status: status(1) }),
               onHandoffBridgeStatus: () => () => {},
@@ -282,6 +305,8 @@ export default [
                 if (enableCalls.length === 2) return { success: true };
                 return new Promise(resolve => pendingEnable.push(resolve));
               },
+              handoffBridgeOpenPairing: async () => { pairingCalls.push('open'); return nextPairingResult; },
+              handoffBridgeCancelPairing: async () => { pairingCalls.push('cancel'); return { success: true }; },
             };
             bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests();
             rootNode = bundle.module.createRoot(window.document.getElementById('root'));
@@ -385,20 +410,34 @@ export default [
             assert(enableBridge && !enableBridge.disabled && offReadyDialog.textContent.includes('Tunnel setup is saved. Turn on the bridge to start the tunnel.'), 'a saved off-state tunnel must expose the in-dialog enable action and explain why plugin setup is locked');
             await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(enableCalls.length === 1 && enableCalls[0] === true && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'an in-flight enable remains pending despite later status refreshes');
-            const offProgress = status(7, {
-              enabled: false,
+            const transientEnabled = status(7, {
+              enabled: true,
               serving: 'starting',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
               tunnel: { state: 'starting', probe: { state: 'checking' } },
               link: { state: 'unlinked' },
             });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(transientEnabled); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => {
+              pendingEnable[0]({ success: false, code: 'TUNNEL_NOT_SERVING' });
+              await Promise.resolve(); await Promise.resolve();
+              await new Promise(resolve => setTimeout(resolve, 0));
+            });
+            const offProgress = status(8, {
+              enabled: false,
+              serving: 'starting',
+              setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+              tunnel: { state: 'degraded', probe: { state: 'failing', reason: 'tunnel-not-serving', consecutiveFailures: 5 } },
+              link: { state: 'unlinked' },
+            });
             await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(offProgress); await Promise.resolve(); await Promise.resolve(); });
-            await bundle.module.act(async () => { pendingEnable[0]({ success: false, code: 'INTERNAL' }); await Promise.resolve(); await Promise.resolve(); });
-            assert(!enableBridge.disabled, 'a failed enable after a newer off-state snapshot must allow retry');
-            assert(offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'an in-dialog enable failure must show only fixed feedback');
-            await bundle.module.act(async () => { enableBridge.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(enableCalls.length === 2 && enableBridge.disabled && enableBridge.textContent.includes('Turning on bridge'), 'a successful enable request must show a bounded pending state until main publishes status');
-            const starting = status(8, {
+            const failedEnable = [...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Turn on bridge'));
+            assert(failedEnable && !failedEnable.disabled, 'a failed enable before the final off status must allow retry');
+            assert(offReadyDialog.textContent.includes(IPC_ERROR_COPY.TUNNEL_NOT_SERVING), 'a rejected enable response must survive its stale transient enabled snapshot and explain the Cloudflare tunnel-target fix once main publishes off');
+            await bundle.module.act(async () => { failedEnable.click(); await Promise.resolve(); await Promise.resolve(); });
+            const completedEnable = [...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Turn on bridge'));
+            assert(enableCalls.length === 2 && completedEnable && !completedEnable.disabled, 'a successful enable response clears the in-flight state instead of leaving the setup action disabled');
+            const starting = status(9, {
               enabled: true,
               serving: 'starting',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -407,10 +446,10 @@ export default [
             });
             await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(starting); await Promise.resolve(); await Promise.resolve(); });
             assert(!offReadyDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.') && offReadyDialog.textContent.includes('The bridge is starting. Wait for the tunnel to be online before continuing.'), 'a newer main status must clear prior enable feedback and state the live tunnel wait');
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(9)); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(10)); await Promise.resolve(); await Promise.resolve(); });
             assert(![...offReadyDialog.querySelectorAll('button[aria-label^="Go to"]')][2].disabled && ![...offReadyDialog.querySelectorAll('button')].find(button => button.textContent.includes('Next'))?.disabled, 'the online status refresh must unlock Plugin and link without remounting setup');
 
-            const offForRetry = status(10, {
+            const offForRetry = status(11, {
               enabled: false,
               serving: 'off',
               setup: { hostnameOk: true, binaryApproved: true, credentialsOk: true, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
@@ -428,7 +467,7 @@ export default [
             assert(configPatches.some(patch => patch.telemetryInBugReports === true) && !retryEnable.disabled,
               'changing bridge diagnostics clears the old enable request and persists only the telemetry preference');
             await bundle.module.act(async () => {
-              bundle.module.applyHandoffBridgeStatus(status(11, {
+              bundle.module.applyHandoffBridgeStatus(status(12, {
                 enabled: false,
                 serving: 'off',
                 config: { telemetryInBugReports: true },
@@ -446,13 +485,170 @@ export default [
             assert(retryDialog.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'),
               'the current failed enable response remains visible after newer status snapshots');
 
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(12)); bundle.module.openBridgeSetup(2); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(13)); bundle.module.openBridgeSetup(2); });
             const liveDialog = window.document.querySelector('[role="dialog"]');
             const hostname = liveDialog.querySelector('input[aria-label="Public address"]');
             hostname.value = 'draft.example.com';
             hostname.dispatchEvent(new window.Event('input', { bubbles: true }));
-            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(13, { config: { hostname: 'saved.example.com' } })); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(status(14, { config: { hostname: 'saved.example.com' } })); });
             assert(hostname.value === 'draft.example.com', 'a newer status sequence must not replace an address draft');
+
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(15, {
+                config: { hostname: 'bridge.example.com', pluginName: 'infinite_canvas', mcpUrl: 'https://bridge.example.com/mcp' },
+                link: { state: 'unlinked', pairing: { open: false } },
+              }));
+              bundle.module.openBridgeSetup(3);
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const pluginDialog = window.document.querySelector('[role="dialog"]');
+            const copyFeedback = target => pluginDialog.querySelector(`[data-copy-feedback-for="${target}"]`);
+            assert(pluginDialog.textContent.includes('infinite_canvas') && pluginDialog.textContent.includes('https://bridge.example.com/mcp'),
+              'Plugin and link shows the exact suggested plugin name and the configured MCP server URL');
+            await bundle.module.act(async () => {
+              pluginDialog.querySelector('button[aria-label="Copy plugin name"]').click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(copyFeedback('plugin-name')?.getAttribute('role') === 'status'
+              && copyFeedback('plugin-name')?.textContent.includes('Copied plugin name.')
+              && !copyFeedback('server-url') && !copyFeedback('pairing-code'),
+            'copying the plugin name must show an inline, accessible success confirmation at that value only');
+            await bundle.module.act(async () => {
+              pluginDialog.querySelector('button[aria-label="Copy server URL"]').click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(JSON.stringify(copiedValues) === JSON.stringify(['infinite_canvas', 'https://bridge.example.com/mcp']),
+              'the displayed plugin name and MCP URL are directly click-to-copy values');
+            assert(copyFeedback('server-url')?.getAttribute('role') === 'status'
+              && copyFeedback('server-url')?.textContent.includes('Copied server URL.')
+              && !copyFeedback('plugin-name') && !copyFeedback('pairing-code'),
+            'copying a new value must move the inline confirmation to the latest copied server URL');
+            delayedClipboardValue = 'infinite_canvas';
+            await bundle.module.act(async () => {
+              pluginDialog.querySelector('button[aria-label="Copy plugin name"]').click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(typeof releaseDelayedClipboard === 'function', 'the out-of-order copy test must hold the first clipboard completion');
+            clipboardShouldFail = true;
+            await bundle.module.act(async () => {
+              pluginDialog.querySelector('button[aria-label="Copy server URL"]').click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(pluginDialog.textContent.includes(IPC_ERROR_COPY.CLIPBOARD_FAILED)
+              && !copyFeedback('plugin-name') && !copyFeedback('server-url') && !copyFeedback('pairing-code'),
+            'a newer clipboard failure clears prior success feedback instead of claiming the server URL was copied');
+            delayedClipboardValue = null;
+            await bundle.module.act(async () => {
+              releaseDelayedClipboard();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(pluginDialog.textContent.includes(IPC_ERROR_COPY.CLIPBOARD_FAILED)
+              && !copyFeedback('plugin-name') && !copyFeedback('server-url') && !copyFeedback('pairing-code'),
+            'a delayed earlier clipboard success cannot overwrite the feedback from a later clipboard failure');
+            clipboardShouldFail = false;
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(16, {
+                config: { hostname: 'bridge.example.com', pluginName: 'My Bridge 2', mcpUrl: 'https://bridge.example.com/mcp' },
+                link: { state: 'unlinked', pairing: { open: false } },
+              }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const customPluginName = pluginDialog.querySelector('button[aria-label="Copy plugin name"]');
+            assert(customPluginName?.textContent.includes('My Bridge 2') && !customPluginName.textContent.includes('infinite_canvas'),
+              'an existing custom plugin name is shown exactly so it stays consistent with the chat starter');
+            await bundle.module.act(async () => { customPluginName.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(copiedValues.at(-1) === 'My Bridge 2', 'the configured custom plugin name is the value copied to ChatGPT');
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(17, {
+                config: { hostname: 'bridge.example.com', pluginName: 'infinite_canvas', mcpUrl: 'https://bridge.example.com/mcp' },
+                link: { state: 'unlinked', pairing: { open: false } },
+              }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const openPairing = [...pluginDialog.querySelectorAll('button')].find(button => button.textContent.includes('Open pairing'));
+            let resolvePairingOpen;
+            nextPairingResult = new Promise(resolve => { resolvePairingOpen = resolve; });
+            await bundle.module.act(async () => {
+              // Fire both events before React can commit the disabled state.
+              // The synchronous ref guard must still admit only one IPC.
+              openPairing.click();
+              openPairing.click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(pairingCalls.filter(value => value === 'open').length === 1
+              && openPairing.disabled && openPairing.getAttribute('aria-busy') === 'true',
+            'a fast double-click must create one pairing request and expose its in-flight state');
+            await bundle.module.act(async () => {
+              resolvePairingOpen({ success: true, pairingCode: '23456-789AB', expiresAt: Date.now() + 60_000 });
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const pairingCode = pluginDialog.querySelector('button[aria-label="Copy pairing code"]');
+            assert(pairingCalls[0] === 'open' && pairingCode?.textContent.includes('23456-789AB') && openPairing.getAttribute('aria-busy') === null,
+              'a direct successful pairing reply displays its ephemeral code inside the setup panel');
+            await bundle.module.act(async () => { pairingCode.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(copiedValues.at(-1) === '23456-789AB', 'the displayed pairing code is click-to-copy');
+            assert(copyFeedback('pairing-code')?.getAttribute('role') === 'status'
+              && copyFeedback('pairing-code')?.textContent.includes('Copied pairing code.')
+              && !copyFeedback('plugin-name') && !copyFeedback('server-url'),
+            'copying a pairing code must move the inline confirmation to the code, rather than leaving it at an earlier value');
+            clipboardShouldFail = true;
+            await bundle.module.act(async () => { pairingCode.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(pluginDialog.textContent.includes(IPC_ERROR_COPY.CLIPBOARD_FAILED)
+              && pluginDialog.querySelector('button[aria-label="Copy pairing code"]')
+              && !copyFeedback('plugin-name') && !copyFeedback('server-url') && !copyFeedback('pairing-code'),
+            'a clipboard rejection gives fixed feedback without clearing the code or claiming any value was copied');
+            clipboardShouldFail = false;
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(18, { link: { state: 'unlinked', pairing: { open: false } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(!pluginDialog.querySelector('button[aria-label="Copy pairing code"]'),
+              'a pairing code clears after this dialog has observed its live pairing close');
+            nextPairingResult = { success: true, pairingCode: '23456-789AB', expiresAt: Date.now() + 60_000 };
+            await bundle.module.act(async () => { openPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            const cancelPairing = [...pluginDialog.querySelectorAll('button')].find(button => button.textContent.includes('Cancel pairing'));
+            await bundle.module.act(async () => { cancelPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(pairingCalls.includes('cancel') && !pluginDialog.querySelector('button[aria-label="Copy pairing code"]'),
+              'Cancel pairing clears the local code before it asks main to close the pairing');
+            nextPairingResult = { success: false, code: 'TUNNEL_NOT_READY' };
+            await bundle.module.act(async () => { openPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(!pluginDialog.querySelector('button[aria-label="Copy pairing code"]'),
+              'a failed new pairing attempt cannot retain the prior code');
+
+            const originalNow = Date.now;
+            try {
+              let fakeNow = originalNow();
+              Date.now = () => fakeNow;
+              nextPairingResult = { success: true, pairingCode: '34567-89ABC', expiresAt: fakeNow + 60_000 };
+              await bundle.module.act(async () => { openPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+              const expiringCode = pluginDialog.querySelector('button[aria-label="Copy pairing code"]');
+              const copiedBeforeExpiry = copiedValues.length;
+              assert(expiringCode?.textContent.includes('34567-89ABC'), 'a fresh pairing code renders before its declared expiry');
+              fakeNow += 60_001;
+              await bundle.module.act(async () => { expiringCode.click(); await Promise.resolve(); await Promise.resolve(); });
+              assert(copiedValues.length === copiedBeforeExpiry && !pluginDialog.querySelector('button[aria-label="Copy pairing code"]'),
+                'an expired code cannot be copied even when its timer callback has been delayed');
+            } finally {
+              Date.now = originalNow;
+            }
+
+            let resolveClosedBeforeReply;
+            nextPairingResult = new Promise(resolve => { resolveClosedBeforeReply = resolve; });
+            await bundle.module.act(async () => { openPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(19, { link: { state: 'unlinked', pairing: { open: true, expiresAt: Date.now() + 60_000 } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(20, { link: { state: 'unlinked', pairing: { open: false, expiresAt: null } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              resolveClosedBeforeReply({ success: true, pairingCode: '45678-9ABCD', expiresAt: Date.now() + 60_000 });
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(!pluginDialog.querySelector('button[aria-label="Copy pairing code"]') && !openPairing.disabled && openPairing.getAttribute('aria-busy') === null,
+              'a native open-to-closed publication wins over a queued direct success and cannot resurrect its code');
 
             const focusable = [...liveDialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];
             const first = focusable[0]; const last = focusable[focusable.length - 1];
@@ -460,8 +656,54 @@ export default [
             const tab = new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
             await bundle.module.act(async () => { last.dispatchEvent(tab); });
             assert(tab.defaultPrevented && window.document.activeElement === first, 'Tab from the final setup control must wrap inside the dialog');
+
+            let resolveAfterDismiss;
+            nextPairingResult = new Promise(resolve => { resolveAfterDismiss = resolve; });
+            const cancelsBeforeDismiss = pairingCalls.filter(value => value === 'cancel').length;
+            await bundle.module.act(async () => { openPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            const closeSetup = pluginDialog.querySelector('button[aria-label="Close setup"]');
+            await bundle.module.act(async () => { closeSetup.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(!window.document.querySelector('[role="dialog"]')
+              && pairingCalls.filter(value => value === 'cancel').length === cancelsBeforeDismiss + 1,
+            'closing setup immediately cancels the pairing attempt this renderer owns');
+            await bundle.module.act(async () => {
+              resolveAfterDismiss({ success: true, pairingCode: '56789-ABCDE', expiresAt: Date.now() + 60_000 });
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(pairingCalls.filter(value => value === 'cancel').length === cancelsBeforeDismiss + 2,
+              'a synthetic late success after dismissal is cancelled again instead of silently arming');
+            await bundle.module.act(async () => { bundle.module.openBridgeSetup(3); await Promise.resolve(); await Promise.resolve(); });
+            let reopenedDialog = window.document.querySelector('[role="dialog"]');
+            assert(reopenedDialog && !reopenedDialog.querySelector('button[aria-label="Copy pairing code"]'),
+              'reopening setup after a stale result cannot reveal its discarded pairing code');
+
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(21, { link: { state: 'unlinked', pairing: { open: true, expiresAt: Date.now() + 60_000 } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const cancelsBeforeForeignClose = pairingCalls.filter(value => value === 'cancel').length;
+            await bundle.module.act(async () => {
+              reopenedDialog.querySelector('button[aria-label="Close setup"]').click();
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(pairingCalls.filter(value => value === 'cancel').length === cancelsBeforeForeignClose,
+              'closing a renderer that did not open the published pairing leaves the owning window session alone');
+
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(22, { link: { state: 'unlinked', pairing: { open: false, expiresAt: null } } }));
+              bundle.module.openBridgeSetup(3);
+              await Promise.resolve(); await Promise.resolve();
+            });
+            reopenedDialog = window.document.querySelector('[role="dialog"]');
+            const reopenedOpenPairing = [...reopenedDialog.querySelectorAll('button')].find(button => button.textContent.includes('Open pairing'));
+            nextPairingResult = { success: true, pairingCode: '6789A-BCDEF', expiresAt: Date.now() + 60_000 };
+            await bundle.module.act(async () => { reopenedOpenPairing.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(reopenedDialog.querySelector('button[aria-label="Copy pairing code"]'), 'the unmount case begins with a renderer-owned live pairing');
+            const cancelsBeforeUnmount = pairingCalls.filter(value => value === 'cancel').length;
             await bundle.module.act(async () => rootNode.unmount());
             rootNode = null;
+            assert(pairingCalls.filter(value => value === 'cancel').length === cancelsBeforeUnmount + 1,
+              'unmounting setup cancels its renderer-owned live pairing exactly once');
             assert(entries.length === 0, 'setup dialog interaction must emit no console warnings or errors');
           } finally {
             if (rootNode) await bundle.module.act(async () => rootNode.unmount());
@@ -469,6 +711,8 @@ export default [
             else delete window.HTMLElement.prototype.getClientRects;
             if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent);
             else delete globalThis.CustomEvent;
+            if (priorClipboard) Object.defineProperty(window.navigator, 'clipboard', priorClipboard);
+            else delete window.navigator.clipboard;
           }
         }));
       } finally {

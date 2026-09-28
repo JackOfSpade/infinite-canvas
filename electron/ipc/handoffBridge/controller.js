@@ -134,7 +134,7 @@ function statusOf(port) {
 
 function defaultConfig() {
   return {
-    hostname: null, pluginName: '', autoStart: false, autoRelease: false,
+    hostname: null, pluginName: 'infinite_canvas', autoStart: false, autoRelease: false,
     scope: { applications: true, scoring: false },
     limits: {
       releaseTtlHours: CONSTANTS.RELEASE_TTL_HOURS,
@@ -156,7 +156,7 @@ function cleanConfig(value) {
   const prefs = isObject(value.prefs) ? value.prefs : {};
   return {
     hostname: typeof value.hostname === 'string' ? value.hostname : null,
-    pluginName: typeof value.pluginName === 'string' ? value.pluginName : '',
+    pluginName: typeof value.pluginName === 'string' && value.pluginName ? value.pluginName : fallback.pluginName,
     autoStart: value.autoStart === true,
     autoRelease: value.autoRelease === true,
     scope: { applications: value.scope?.applications !== false, scoring: value.scope?.scoring === true },
@@ -488,7 +488,7 @@ export function createHandoffBridgeController(options = {}) {
     base.serving = serving; base.paused = serving === 'paused'; base.pauseCause = pauseCause;
     base.hold = !canvasOpen() && enabled ? 'no-window' : (!restartConfirmed && enabled ? 'restart' : null);
     base.fault = fault;
-    base.config = { hostname: config.hostname, pluginName: shortText(config.pluginName, ''), mcpUrl: config.hostname ? `https://${config.hostname}${CONSTANTS.MCP_PATH}` : null, scope: { applications: config.scope.applications, scoring: config.scope.scoring }, telemetryInBugReports: config.telemetryInBugReports };
+    base.config = { hostname: config.hostname, pluginName: shortText(config.pluginName, '') || 'infinite_canvas', mcpUrl: config.hostname ? `https://${config.hostname}${CONSTANTS.MCP_PATH}` : null, scope: { applications: config.scope.applications, scoring: config.scope.scoring }, telemetryInBugReports: config.telemetryInBugReports };
     base.limits = { ...config.limits }; base.prefs = { ...config.prefs };
     base.setup.hostnameOk = Boolean(config.hostname);
     base.setup.binaryApproved = bool(tunnelStatus.binary?.approved ?? tunnelStatus.binaryApproved);
@@ -1430,6 +1430,14 @@ export function createHandoffBridgeController(options = {}) {
     change();
     return true;
   }
+  function onPairingState() {
+    // Pairing owns its short-lived secret. The controller only republishes a
+    // fresh code-free projection when that state opens or closes, so every
+    // renderer can discard an expired/cancelled code without retaining it
+    // here or waiting for an unrelated controller mutation.
+    change();
+    return true;
+  }
   function onAnonymous() { counters.anonymousRequests += 1; change(); return { paused: false }; }
   function onReconnectHint() {
     // OAuth/pairing already established a real renewal, fresh own-egress, and
@@ -1496,7 +1504,7 @@ export function createHandoffBridgeController(options = {}) {
     enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, releasePushHubs, unreleasePushHub,
     newChat: args => chat('new', args), continueChat: args => chat('continue', args),
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
-    holdForQuit, resumeAfterQuitCancel, notePairingAction, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, reloadConfig, ackAlarm,
+    holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, reloadConfig, ackAlarm,
   });
 }
 

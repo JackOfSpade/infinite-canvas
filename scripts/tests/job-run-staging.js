@@ -2435,15 +2435,16 @@ export default [
         && search.includes('aria-describedby={jobPreferencesHelpId}')
         && search.includes('maxLength={4000}')
         && search.includes('const cleanupRetirementPending = hasPendingManualAiRetirement(data);')
-        && search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
-        && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;')
+        && search.includes('const baseControlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
+        && search.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;')
+        && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;')
         && search.includes('disabled={controlsLocked}')
         // Location controls carry the PERMANENT settingsFrozen freeze in
         // addition to the transient controlsLocked busy-state (see
         // the SETTINGS LOCKING FREEZE test above for the full inventory).
         && search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
         && search.includes('locked={errorControlsLocked}'),
-      'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, or finishing cancellation cleanup without hiding the cleanup retry action');
+      'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, finishing cancellation cleanup, or awaiting a stale manual-AI recovery decision without hiding the cleanup retry action');
       assert(locations.includes('disabled = false')
         && locations.includes('disabled={disabled}'),
       'structured location inputs must honor the parent locked state rather than remaining editable');
@@ -2577,7 +2578,7 @@ export default [
     // or `const controlsLocked = ... || settingsFrozen;`, either of which
     // would silently let a transient unlock reopen permanently-frozen
     // settings, or permanently lock the transient controls.
-    name: 'SETTINGS FREEZE is a separate expression from the transient lock: settingsFrozen derives only from hasResolvedRoleLock(data); controlsLocked/errorControlsLocked derive only from data.locked/queuedModuleRun/cleanup, in both directions',
+    name: 'SETTINGS FREEZE remains separate from transient locks: settingsFrozen derives only from hasResolvedRoleLock(data), while controls add only durable recovery admission',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -2585,10 +2586,11 @@ export default [
       ]);
       // JobSearchNode.jsx: the three lock/freeze definitions, verbatim. None
       // of the three right-hand sides mentions either of the other two names.
-      assert(search.includes('const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;'),
-      'controlsLocked must derive only from data.locked / data.queuedModuleRun / cleanupRetirementPending — not settingsFrozen or resolvedRoles');
-      assert(search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;'),
-      'errorControlsLocked must derive only from data.locked / data.queuedModuleRun — not settingsFrozen, resolvedRoles, or cleanupRetirementPending');
+      assert(search.includes('const baseControlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
+        && search.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;'),
+      'controlsLocked must compose only the ordinary transient lock with the deliberate stale-manual-recovery admission lock — never settingsFrozen or resolvedRoles');
+      assert(search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;'),
+      'errorControlsLocked must add only the deliberate stale-manual-recovery admission lock — never settingsFrozen, resolvedRoles, or cleanupRetirementPending');
       // FIX2: settingsFrozen is keyed on hasResolvedRoleLock(data) — i.e.
       // resolvedRolesMeta presence — not `resolvedRoles.length > 0` (which
       // cannot distinguish "never locked" from "locked with zero titles").

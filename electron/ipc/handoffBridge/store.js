@@ -42,7 +42,7 @@ export function emptyConfig() {
   return freezeConfig({
     v: CONFIG_VERSION,
     hostname: null,
-    pluginName: '',
+    pluginName: 'infinite_canvas',
     scope: { applications: true, scoring: false },
     autoStart: false,
     autoRelease: false,
@@ -101,7 +101,9 @@ function normalizeConfig(value) {
   return freezeConfig({
     v: CONFIG_VERSION,
     hostname,
-    pluginName,
+    // Older v1 configs allowed an empty name. Resolve it on read instead of
+    // asking the chat-start path to handle a value the starter rejects.
+    pluginName: pluginName || defaults.pluginName,
     scope: { applications: scope.applications, scoring: scope.scoring },
     autoStart,
     autoRelease,

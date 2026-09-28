@@ -24,6 +24,7 @@ import {
 import { isValidHostname, isValidPluginName } from '../utils/handoffBridgeConfig';
 import { openExternalUrl } from '../utils/openExternal';
 import { sanitizeBridgeLabel } from '../utils/handoffBridgeQueue';
+import { TIMINGS } from '../utils/timings';
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -43,6 +44,12 @@ const LINK_PROGRESS_KEYS = Object.freeze([
   'tokenIssued',
   'toolsListed',
 ]);
+const PAIRING_CODE = /^[2-9A-HJ-NP-Z]{5}-[2-9A-HJ-NP-Z]{5}$/i;
+const COPY_TARGET = Object.freeze({
+  PLUGIN_NAME: 'plugin-name',
+  SERVER_URL: 'server-url',
+  PAIRING_CODE: 'pairing-code',
+});
 
 function bridgeApi() {
   try { return globalThis.window?.electronAPI || null; } catch { return null; }
@@ -62,11 +69,39 @@ function safeResult(result) {
     return { success: false, code: 'INTERNAL', lines: [] };
   }
 }
+function safePairingResult(result) {
+  const base = safeResult(result);
+  if (base.success === false) return base;
+  try {
+    const expiresAt = Number.isFinite(result?.expiresAt) && result.expiresAt > Date.now()
+      ? result.expiresAt
+      : null;
+    const pairingCode = expiresAt && typeof result?.pairingCode === 'string' && PAIRING_CODE.test(result.pairingCode)
+      ? result.pairingCode.toUpperCase()
+      : null;
+    // A successful Open pairing response is useful only as the complete,
+    // short-lived capability tuple. Fail closed if a malformed preload/main
+    // implementation returns a partial success, then cancel it below.
+    if (!expiresAt || !pairingCode) return { success: false, code: 'INTERNAL', lines: [] };
+    return { ...base, expiresAt, pairingCode };
+  } catch {
+    return { success: false, code: 'INTERNAL', lines: [] };
+  }
+}
 function invoke(api, method, payload) {
   try {
     const fn = api?.[method];
     if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
     return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload)).then(safeResult, () => ({ success: false, code: 'INTERNAL', lines: [] }));
+  } catch {
+    return Promise.resolve({ success: false, code: 'INTERNAL' });
+  }
+}
+function invokePairing(api) {
+  try {
+    const fn = api?.handoffBridgeOpenPairing;
+    if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
+    return Promise.resolve(fn.call(api)).then(safePairingResult, () => ({ success: false, code: 'INTERNAL' }));
   } catch {
     return Promise.resolve({ success: false, code: 'INTERNAL' });
   }
@@ -94,17 +129,29 @@ function focusableElements(container) {
 
 export function HandoffBridgeSetupDialog() {
   const status = useHandoffBridgeStatus();
+  const { seq: statusSequence } = status;
   const ui = useSyncExternalStore(subscribeBridgeUi, getBridgeUiState, getBridgeUiState);
   const [notice, setNotice] = useState('');
   const [logLines, setLogLines] = useState([]);
   const [enabling, setEnabling] = useState(false);
   const [enableError, setEnableError] = useState(null);
+  const [pairing, setPairing] = useState(null);
+  const [pairingOpening, setPairingOpening] = useState(false);
+  const [copiedTarget, setCopiedTarget] = useState(null);
   const hostnameRef = useRef(null);
   const pluginNameRef = useRef(null);
   const dialogRef = useRef(null);
   const previousFocusRef = useRef(null);
   const mountedRef = useRef(true);
   const enableRequestRef = useRef(0);
+  const pairingWasOpenRef = useRef(false);
+  const pairingRequestRef = useRef(0);
+  const pairingOpeningRef = useRef(false);
+  const pairingOwnedRef = useRef(false);
+  const setupWasVisibleRef = useRef(false);
+  const statusSeqRef = useRef(statusSequence);
+  const copyFeedbackTimerRef = useRef(null);
+  const copyRequestRef = useRef(0);
   const copy = BRIDGE_SETUP_COPY;
   const visible = Boolean(ui.setup) && status.availability.ok;
   const requestedStep = ui.setup?.step || 1;
@@ -136,6 +183,11 @@ export function HandoffBridgeSetupDialog() {
     && !status.paused
     && tunnelReady
     && linkReady;
+  const pluginNameForChatGpt = status.config.pluginName || copy.suggestedPluginName;
+  // The expiry effect owns visible lifetime. The copy handler independently
+  // checks wall time so a background-throttled timer cannot make a stale code
+  // usable during the first event-loop turn after wake.
+  const activePairing = pairing;
 
   const clearEnableFeedback = useCallback(() => {
     enableRequestRef.current += 1;
@@ -143,10 +195,43 @@ export function HandoffBridgeSetupDialog() {
     setEnableError(null);
   }, []);
 
+  const cancelOwnedPairing = useCallback(() => {
+    if (!pairingOwnedRef.current) return false;
+    pairingOwnedRef.current = false;
+    void invoke(bridgeApi(), 'handoffBridgeCancelPairing');
+    return true;
+  }, []);
+
+  const clearCopyFeedback = useCallback(() => {
+    copyRequestRef.current += 1;
+    if (copyFeedbackTimerRef.current !== null) {
+      clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = null;
+    }
+    setCopiedTarget(null);
+  }, []);
+
+  const showCopyFeedback = useCallback((target, requestId) => {
+    if (requestId !== copyRequestRef.current) return;
+    if (copyFeedbackTimerRef.current !== null) clearTimeout(copyFeedbackTimerRef.current);
+    setCopiedTarget(target);
+    copyFeedbackTimerRef.current = setTimeout(() => {
+      copyFeedbackTimerRef.current = null;
+      if (mountedRef.current && requestId === copyRequestRef.current) setCopiedTarget(null);
+    }, TIMINGS.FEEDBACK_MS);
+  }, []);
+
   const dismissSetup = useCallback(() => {
     clearEnableFeedback();
+    clearCopyFeedback();
+    cancelOwnedPairing();
+    pairingWasOpenRef.current = false;
+    pairingRequestRef.current += 1;
+    pairingOpeningRef.current = false;
+    setPairingOpening(false);
+    setPairing(null);
     closeBridgeSetup();
-  }, [clearEnableFeedback]);
+  }, [cancelOwnedPairing, clearCopyFeedback, clearEnableFeedback]);
 
   useEffect(() => {
     if (!visible) return undefined;
@@ -155,19 +240,89 @@ export function HandoffBridgeSetupDialog() {
   }, [visible]);
 
   useEffect(() => {
-    if (visible && !status.enabled) return undefined;
+    // Main publishes enabled/starting before the Enable IPC resolves.  Do not
+    // clear that request's token on the transient snapshot: its later failure
+    // must still be able to render after main returns to the saved off state.
+    // Once an Enable response failed, its error must outlive the preceding
+    // optimistic enabled snapshot until the user retries, changes setup, or
+    // closes the dialog. Main can publish the final saved-off snapshot after
+    // that response; clearing here would hide the actionable error exactly
+    // when it becomes renderable.
+    if (visible && (enabling || enableError || !status.enabled)) return undefined;
     // Defer the feedback reset so it follows the status/visibility update
     // rather than synchronously cascading another render from this effect.
     const timer = setTimeout(clearEnableFeedback, 0);
     return () => clearTimeout(timer);
-  }, [clearEnableFeedback, status.enabled, visible]);
+  }, [clearEnableFeedback, enableError, enabling, status.enabled, visible]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
+      cancelOwnedPairing();
+      copyRequestRef.current += 1;
+      if (copyFeedbackTimerRef.current !== null) {
+        clearTimeout(copyFeedbackTimerRef.current);
+        copyFeedbackTimerRef.current = null;
+      }
       mountedRef.current = false;
+      pairingWasOpenRef.current = false;
+      pairingRequestRef.current += 1;
+      pairingOpeningRef.current = false;
     };
-  }, []);
+  }, [cancelOwnedPairing]);
+
+  useEffect(() => {
+    if (visible) {
+      setupWasVisibleRef.current = true;
+      return;
+    }
+    if (!setupWasVisibleRef.current) return;
+    setupWasVisibleRef.current = false;
+    // The setup UI can be hidden by its external store as well as its own X,
+    // overlay and Escape controls. Treat every such hide as a close for the
+    // pairing this renderer started, without touching another window's pair.
+    cancelOwnedPairing();
+    clearCopyFeedback();
+    pairingWasOpenRef.current = false;
+    pairingRequestRef.current += 1;
+    pairingOpeningRef.current = false;
+    setPairingOpening(false);
+    setPairing(null);
+  }, [cancelOwnedPairing, clearCopyFeedback, visible]);
+
+  useEffect(() => {
+    statusSeqRef.current = statusSequence;
+  }, [statusSequence]);
+
+  useEffect(() => {
+    if (status.link.pairing.open) {
+      pairingWasOpenRef.current = true;
+      return;
+    }
+    // A direct response can arrive before its status publication. Only clear
+    // it after this dialog has actually observed a live pairing turn closed.
+    if (pairingWasOpenRef.current || (pairing?.code && statusSequence > pairing.afterSeq)) {
+      pairingOwnedRef.current = false;
+      pairingWasOpenRef.current = false;
+      pairingRequestRef.current += 1;
+      pairingOpeningRef.current = false;
+      setPairingOpening(false);
+      setPairing(null);
+    }
+  }, [pairing?.afterSeq, pairing?.code, status.link.pairing.open, statusSequence]);
+
+  useEffect(() => {
+    if (!pairing?.expiresAt) return undefined;
+    const delay = Math.max(0, pairing.expiresAt - Date.now());
+    const timer = setTimeout(() => {
+      cancelOwnedPairing();
+      pairingRequestRef.current += 1;
+      pairingOpeningRef.current = false;
+      setPairingOpening(false);
+      setPairing(null);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [cancelOwnedPairing, pairing]);
 
   useEffect(() => {
     if (!visible) return undefined;
@@ -253,6 +408,8 @@ export function HandoffBridgeSetupDialog() {
       setEnableError({ message: ipcErrorMessage(result.code) });
       return;
     }
+    setEnabling(false);
+    setEnableError(null);
   }, [enabling, status.enabled, tunnelPrerequisitesSaved]);
 
   const openPlugins = useCallback(async () => {
@@ -275,16 +432,88 @@ export function HandoffBridgeSetupDialog() {
       : []);
   }, []);
 
-  const copyServerUrl = useCallback(async () => {
-    try {
-      const url = status.config.mcpUrl;
-      if (!url || typeof navigator?.clipboard?.writeText !== 'function') throw new Error('unavailable');
-      await navigator.clipboard.writeText(url);
-      if (mountedRef.current) setNotice(BRIDGE_UI_COPY.copied);
-    } catch {
-      if (mountedRef.current) setNotice(ipcErrorMessage('CLIPBOARD_FAILED'));
+  const copyValue = useCallback(async (value, target) => {
+    const requestId = copyRequestRef.current + 1;
+    copyRequestRef.current = requestId;
+    if (copyFeedbackTimerRef.current !== null) {
+      clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = null;
     }
-  }, [status.config.mcpUrl]);
+    setCopiedTarget(null);
+    setNotice('');
+    try {
+      if (typeof value !== 'string' || !value || typeof navigator?.clipboard?.writeText !== 'function') throw new Error('unavailable');
+      await navigator.clipboard.writeText(value);
+      if (mountedRef.current && requestId === copyRequestRef.current) showCopyFeedback(target, requestId);
+    } catch {
+      if (mountedRef.current && requestId === copyRequestRef.current) {
+        setCopiedTarget(null);
+        setNotice(ipcErrorMessage('CLIPBOARD_FAILED'));
+      }
+    }
+  }, [showCopyFeedback]);
+
+  const copyServerUrl = useCallback(() => copyValue(status.config.mcpUrl, COPY_TARGET.SERVER_URL), [copyValue, status.config.mcpUrl]);
+
+  const openPairing = useCallback(async () => {
+    // React may not commit a disabled button between the two click events of
+    // a fast double-click. Keep a synchronous guard as well, so the second
+    // event cannot turn the first successful open into a BUSY result and hide
+    // its only renderer-local code.
+    if (pairingOpeningRef.current) return { success: false, code: 'BUSY' };
+    pairingOpeningRef.current = true;
+    pairingOwnedRef.current = true;
+    setPairingOpening(true);
+    // A new attempt never leaves an older code visible, including a failed
+    // attempt. The native sheet remains main-owned and opens as before.
+    const requestId = pairingRequestRef.current + 1;
+    pairingRequestRef.current = requestId;
+    setPairing(null);
+    const result = await invokePairing(bridgeApi());
+    if (!mountedRef.current || requestId !== pairingRequestRef.current) {
+      // Dismiss/cancel may race an admitted main-process open. A late success
+      // must be closed even though this renderer will never display its code.
+      if (result?.success !== false) void invoke(bridgeApi(), 'handoffBridgeCancelPairing');
+      return result;
+    }
+    pairingOpeningRef.current = false;
+    setPairingOpening(false);
+    if (result?.success === false) {
+      cancelOwnedPairing();
+      setNotice(ipcErrorMessage(result.code));
+      return result;
+    }
+    if (result?.pairingCode && result.expiresAt) setPairing({
+      code: result.pairingCode,
+      expiresAt: result.expiresAt,
+      // A false snapshot that predates this click is stale relative to this
+      // response. Any later false sequence conclusively closes its code even
+      // if a coalesced main publication hid the intervening open state.
+      afterSeq: statusSeqRef.current,
+    });
+    setNotice(BRIDGE_UI_COPY.saved);
+    return result;
+  }, [cancelOwnedPairing]);
+
+  const cancelPairing = useCallback(() => {
+    pairingOwnedRef.current = false;
+    pairingWasOpenRef.current = false;
+    pairingRequestRef.current += 1;
+    pairingOpeningRef.current = false;
+    setPairingOpening(false);
+    setPairing(null);
+    void call('handoffBridgeCancelPairing');
+  }, [call]);
+
+  const copyPairingCode = useCallback(() => {
+    if (!pairing?.code || pairing.expiresAt <= Date.now()) {
+      cancelOwnedPairing();
+      pairingRequestRef.current += 1;
+      setPairing(null);
+      return Promise.resolve();
+    }
+    return copyValue(pairing.code, COPY_TARGET.PAIRING_CODE);
+  }, [cancelOwnedPairing, copyValue, pairing]);
 
   if (!visible || typeof document === 'undefined') return null;
 
@@ -380,14 +609,46 @@ export function HandoffBridgeSetupDialog() {
     <div className="space-y-3">
       <p>{copy.pairingLead}</p>
       <div className="flex min-w-0 flex-wrap gap-2">
-        <button type="button" className="bridge-button-secondary" disabled={!tunnelReady} onClick={() => void call('handoffBridgeOpenPairing')}>{copy.openPairing}</button>
+        <button type="button" className="bridge-button-secondary" disabled={!tunnelReady || pairingOpening || Boolean(activePairing?.code) || status.link.pairing.open} aria-busy={pairingOpening || undefined} onClick={() => void openPairing()}>{copy.openPairing}</button>
         <button type="button" className="bridge-button-secondary" onClick={openPlugins}>{copy.openChatGpt}</button>
-        <button type="button" className="bridge-button-secondary" disabled={!status.config.mcpUrl} onClick={() => void copyServerUrl()}>{copy.copyServerUrl}</button>
-        <button type="button" className="bridge-button-secondary" disabled={!status.link.pairing.open} onClick={() => void call('handoffBridgeCancelPairing')}>{copy.cancelPairing}</button>
+        <button type="button" className="bridge-button-secondary" disabled={!status.link.pairing.open && !activePairing?.code} onClick={cancelPairing}>{copy.cancelPairing}</button>
+      </div>
+      <div className="rounded bg-black/20 p-2 text-[11px] text-white/55">
+        <p>{copy.suggestedPluginNameLead}</p>
+        <button type="button" aria-label={copy.copyPluginName} className="mt-1 break-all text-left text-sky-200 underline decoration-sky-200/40 underline-offset-2" onClick={() => void copyValue(pluginNameForChatGpt, COPY_TARGET.PLUGIN_NAME)}>
+          <code>{pluginNameForChatGpt}</code>
+          {copiedTarget === COPY_TARGET.PLUGIN_NAME && (
+            <span role="status" data-copy-feedback-for={COPY_TARGET.PLUGIN_NAME} className="ml-2 inline-flex items-center gap-1 whitespace-nowrap text-emerald-300 no-underline">
+              <Check size={12} aria-hidden="true" /> {copy.pluginNameCopied}
+            </span>
+          )}
+        </button>
       </div>
       <ul className="space-y-1 text-[11px]">{copy.progressItems.map((item, index) => <CheckRow key={item} complete={Boolean(status.link.progress[LINK_PROGRESS_KEYS[index]])}>{item}</CheckRow>)}</ul>
       <ol className="list-decimal space-y-1 pl-5 text-white/55">{copy.pluginSteps.map(item => <li key={item}>{item}</li>)}</ol>
-      <code className="block break-all rounded bg-black/30 p-2 text-[11px] text-sky-200">{status.config.mcpUrl || copy.serverUnavailable}</code>
+      <button type="button" aria-label={copy.copyServerUrl} disabled={!status.config.mcpUrl} className="block w-full break-all rounded bg-black/30 p-2 text-left text-[11px] text-sky-200 disabled:cursor-not-allowed disabled:text-white/45" onClick={() => void copyServerUrl()}>
+        <code>{status.config.mcpUrl || copy.serverUnavailable}</code>
+        {copiedTarget === COPY_TARGET.SERVER_URL && (
+          <span role="status" data-copy-feedback-for={COPY_TARGET.SERVER_URL} className="ml-2 inline-flex items-center gap-1 whitespace-nowrap text-emerald-300">
+            <Check size={12} aria-hidden="true" /> {copy.serverUrlCopied}
+          </span>
+        )}
+      </button>
+      {activePairing?.code && (
+        <div className="rounded bg-black/20 p-2 text-[11px] text-white/55">
+          <p>{copy.pairingCode}</p>
+          <button type="button" aria-label={copy.copyPairingCode} className="mt-1 text-left text-sky-200 underline decoration-sky-200/40 underline-offset-2" onClick={() => void copyPairingCode()}>
+            <code>{activePairing.code}</code>
+            {copiedTarget === COPY_TARGET.PAIRING_CODE && (
+              <span role="status" data-copy-feedback-for={COPY_TARGET.PAIRING_CODE} className="ml-2 inline-flex items-center gap-1 whitespace-nowrap text-emerald-300 no-underline">
+                <Check size={12} aria-hidden="true" /> {copy.pairingCodeCopied}
+              </span>
+            )}
+          </button>
+          <p className="mt-1">{copy.pairingCodeWarning}</p>
+          <p>{copy.pairingCodeExpiry}</p>
+        </div>
+      )}
       <p className="text-[11px] text-white/45">{copy.earlyBlock}</p>
       <p className="text-[11px] text-white/45">{copy.reconnect}</p>
     </div>

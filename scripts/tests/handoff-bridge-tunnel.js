@@ -83,7 +83,16 @@ function createSupervisorHarness(overrides = {}) {
     dryRun: async (_binary, args) => { order.push(`dry:${args.at(-1)}`); const configPath = tunnelPaths(userData).config; return { ok: true, output: args.at(-1) === 'validate' ? `Validating rules from ${configPath}\nOK\n` : args.at(-1).includes('not-the-bridge') ? `Using rules from ${configPath}\nMatched rule #1\n\tservice: http_status:404\n` : `Using rules from ${configPath}\nMatched rule #0\n\thostname: ${host}\n\tservice: unix:${userData}/handoff-bridge/b.sock\n` }; },
     verifyPinnedCopy: () => { order.push('verify'); return { ok: true }; },
     recordTunnelIntent: (_root, data) => { order.push(data.pid === null ? 'intent:pre' : 'intent:live'); },
-    spawnCloudflared: args => { order.push('spawn'); const child = spawnCloudflared({ ...args, spawnImpl: fakeSpawn }); if (typeof overrides.rawLine === 'string') args.onLine?.(overrides.rawLine); return child; },
+    spawnCloudflared: args => {
+      order.push('spawn');
+      const child = spawnCloudflared({ ...args, spawnImpl: fakeSpawn });
+      const spawnNumber = fakeSpawn.calls.length;
+      const fixtureLines = typeof overrides.rawLines === 'function'
+        ? overrides.rawLines(spawnNumber)
+        : Array.isArray(overrides.rawLines) ? overrides.rawLines : typeof overrides.rawLine === 'string' ? [overrides.rawLine] : [];
+      for (const line of fixtureLines) args.onLine?.(line);
+      return child;
+    },
     getProcessInfo: async pid => ({ pid, ppid: 500, pgid: pid, lstart: 'Mon Jan  1 00:00:00 2026', command: 'synthetic' }),
     probeReady: async () => ({ ok: true, state: 'ready' }), publicProbeFn: async () => ({ ok: true, code: 'ok' }),
     signalGroup: (pid, signal) => { order.push(`signal:${signal}`); const entry = fakeSpawn.calls.find(call => call.child.pid === pid); if (!entry) return false; if (signal === 'SIGKILL' || !overrides.ignoreTerm) entry.child.__exit(signal === 'SIGKILL' ? null : 0, signal); return true; },
@@ -744,17 +753,32 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     name: 'handoff bridge: tunnel: supervisor diagnostics are bounded, redacted, and never control an orphan',
     async run() {
       const secret = `Ada-${'S'.repeat(48)}`;
-      const harness = createSupervisorHarness({ rawLine: `authorization: ${secret} /tmp/ic-supervisor-matrix ${TUNNEL_ID} b-0123456789abcdef0123.lullascape.com` });
+      const environmentLine = `SUMMARY: Environment is healthy authorization: ${secret} /tmp/ic-supervisor-matrix ${TUNNEL_ID} b-0123456789abcdef0123.lullascape.com`;
+      const registeredLine = `Registered tunnel connection authorization: ${secret} connector-id=private-connector`;
+      const harness = createSupervisorHarness({ rawLines: spawnNumber => spawnNumber === 1
+        ? [environmentLine, ...Array.from({ length: 10 }, () => registeredLine)]
+        : [environmentLine] });
       const before = harness.supervisor.getLog();
       assert(Array.isArray(before) && before.length === 0 && Object.isFrozen(before), 'an off supervisor exposes only an empty immutable diagnostic view');
       await harness.supervisor.start();
       const lines = harness.supervisor.getLog({ limit: 999 });
       assert(Object.isFrozen(lines) && lines.length <= 100 && lines.every(line => typeof line === 'string' && line.length <= 1024), 'diagnostics must be a capped string-only snapshot');
       const joined = lines.join('\n');
-      for (const forbidden of [secret, '/tmp/ic-supervisor-matrix', TUNNEL_ID, 'b-0123456789abcdef0123.lullascape.com']) assert(!joined.includes(forbidden), `diagnostics leaked ${forbidden}`);
+      for (const forbidden of [secret, '/tmp/ic-supervisor-matrix', TUNNEL_ID, 'b-0123456789abcdef0123.lullascape.com', 'private-connector']) assert(!joined.includes(forbidden), `diagnostics leaked ${forbidden}`);
+      const readiness = harness.supervisor.status().readiness;
+      assert(readiness.configurationValidated && readiness.environmentHealthy && readiness.registeredConnectionCount === 8 && !readiness.localReadinessPassed,
+        'the supervisor must recognize separate health and registration lines, retain only closed facts, and cap registrations');
+      await harness.supervisor.probe();
+      assert(harness.supervisor.status().readiness.localReadinessPassed,
+        'a successful local readiness probe must become a closed diagnostic fact');
       assert(typeof harness.supervisor.stopOrphan === 'undefined', 'the supervisor never offers a renderer-selectable PID or orphan kill path');
       await harness.supervisor.stop();
       assert(harness.supervisor.getLog().length === lines.length, 'stopping preserves the in-memory redacted diagnostic snapshot without reading a log file');
+      await harness.supervisor.start();
+      const restartedReadiness = harness.supervisor.status().readiness;
+      assert(restartedReadiness.configurationValidated && restartedReadiness.environmentHealthy && restartedReadiness.registeredConnectionCount === 0 && !restartedReadiness.localReadinessPassed,
+        'each start resets retained readiness facts instead of carrying connector counts across runtimes');
+      await harness.supervisor.stop();
     },
   },
   {

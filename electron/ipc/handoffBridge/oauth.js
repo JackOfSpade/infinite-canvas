@@ -113,6 +113,28 @@ function strictIssuer(value) {
   return parsed.origin;
 }
 
+// Origin normally uses its serialized form, but same-origin callers can
+// preserve an equivalent default port or trailing slash. Parse only a bounded,
+// syntactically origin-shaped HTTPS value for the no-Fetch-Metadata legacy
+// path; document navigations intentionally do not authorize by Origin.
+function strictHttpsOrigin(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return null;
+  let parsed;
+  try { parsed = new URL(value); } catch { return null; }
+  if (parsed.protocol === 'https:'
+    && !parsed.username
+    && !parsed.password
+    && parsed.pathname === '/'
+    && !parsed.search
+    && !parsed.hash) return parsed;
+  return null;
+}
+
+function canonicalSelfOrigin(value, base) {
+  const parsed = strictHttpsOrigin(value);
+  return Boolean(parsed && parsed.origin === base);
+}
+
 function normalizePairingCode(value) {
   if (typeof value !== 'string') return null;
   const compact = value.replace(/-/g, '').toUpperCase();
@@ -640,13 +662,12 @@ export function createOAuthServer({
     return true;
   }
 
-  async function authorizeGet(req, res, serverContext = {}) {
+  async function beginAuthorization(req, res, serverContext, parsed) {
     sweep();
     if (!activePairing() || !gateAllows(req)) {
       noteUnarmedAuthorize(serverContext);
       throw new PageError('No pairing session is open on this Mac. Open pairing, then try again from ChatGPT.', 403);
     }
-    const parsed = authorizationQuery(req);
     const query = parsed.values;
     if (!query.client_id || !query.redirect_uri || parsed.dups.has('client_id') || parsed.dups.has('redirect_uri')) {
       throw new PageError('The request is missing a client or a redirect address.');
@@ -691,29 +712,73 @@ export function createOAuthServer({
     return sendHtml(res, 200, consentHtml(transaction), consentCsp(transaction));
   }
 
-  async function authorizePost(req, res) {
+  async function authorizeGet(req, res, serverContext = {}) {
+    return beginAuthorization(req, res, serverContext, authorizationQuery(req));
+  }
+
+  async function authorizePost(req, res, serverContext = {}) {
     sweep();
-    if (!activePairing() || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
     const body = await readBodyImpl(req, {
       capBytes: CONSTANTS.OAUTH_BODY_CAP_BYTES,
       timeoutMs: CONSTANTS.ANONYMOUS_OAUTH_BODY_DEADLINE_MS,
       response: res,
     });
-    const currentPairing = activePairing();
-    if (!currentPairing || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
     if (mimeOf(req) !== 'application/x-www-form-urlencoded') throw new PageError('Unsupported form encoding.');
     let parsed;
     try { parsed = parseForm(body.toString('utf8')); } catch { throw new PageError('The form could not be read.'); }
+    // A top-level cross-site navigation can carry a standards-compliant
+    // authorization request as form data. It has no transaction identifier;
+    // a transaction-bearing request is necessarily a consent decision and is
+    // checked below against the narrow capability-bound consent policy.
+    if (!Object.hasOwn(parsed.values, 'txn')) return beginAuthorization(req, res, serverContext, parsed);
+    // Browser popup and tunnel layers do not preserve a stable Origin or
+    // Sec-Fetch-Site value for a document form submission.  They are therefore
+    // transport hints, not authorization credentials.  A complete document
+    // navigation may submit a decision regardless of those serializations.
+    // The decision is instead capability-bound to the 144-bit transaction,
+    // active short-lived pairing window, and local pairing code for either
+    // terminal decision. The transaction is not exposed cross-origin: responses have
+    // no-referrer, no-store, frame denial, and a pinned form-action allowlist.
+    //
+    // Also admit a caller whose Origin provably serializes to this very origin,
+    // whatever the Fetch-Metadata tuple looks like. A partial tuple is what an
+    // intermediary produces when it drops a Sec-Fetch-* field in transit, and
+    // refusing our own consent page over a dropped transport hint is exactly
+    // the failure this policy exists to stop. It is also strictly narrower
+    // than the document-navigation path above, which accepts any Origin: no
+    // cross-site caller can set Origin to this origin. A caller with no Origin
+    // and no metadata is the remaining non-browser legacy shape. Anything else
+    // is rejected before touching the transaction or wrong-code counters.
+    const origin = req.headers?.origin;
+    const fetchSite = String(req.headers?.['sec-fetch-site'] || '').toLowerCase();
+    const fetchMode = String(req.headers?.['sec-fetch-mode'] || '').toLowerCase();
+    const fetchDest = String(req.headers?.['sec-fetch-dest'] || '').toLowerCase();
+    const documentNavigation = fetchMode === 'navigate' && fetchDest === 'document';
+    const hasFetchMetadata = Boolean(fetchSite || fetchMode || fetchDest);
+    const ownOriginConsent = origin ? canonicalSelfOrigin(origin, base) : !hasFetchMetadata;
+    if (!documentNavigation && !ownOriginConsent) {
+      // http.js captures request headers and reduces them into closed
+      // classifications. Do not pass a header, body, OAuth value, pairing
+      // value, or transaction identifier across this boundary.
+      const reason = origin && !canonicalSelfOrigin(origin, base)
+        ? 'origin-mismatch' : 'fetch-site';
+      const rawAction = parsed.values.action;
+      const consentAction = rawAction === 'approve' ? 'approve' : rawAction === 'deny' ? 'deny' : 'other';
+      safeCall(serverContext?.recordOAuthRejection, { reason, consentAction, hasTxn: 'yes' });
+      throw new PageError('Cross-origin request refused.', 403);
+    }
+    const currentPairing = activePairing();
+    if (!currentPairing || !gateAllows(req)) throw new PageError('This pairing window is closed.', 403);
     const transaction = parsed.dups.size === 0 && typeof parsed.values.txn === 'string' ? transactions.get(parsed.values.txn) : null;
     if (!transaction || transaction.expiresAt <= now()) {
       if (transaction) transactions.delete(transaction.id);
       throw new PageError('This approval request expired or was already used. Start again from ChatGPT.');
     }
-    if (parsed.values.action === 'deny') {
-      endPairing('denied');
-      return redirectError(res, transaction.redirectUri, transaction.state, base, 'access_denied', 'The operator denied the request');
-    }
-    if (parsed.values.action !== 'approve') throw new PageError('Unknown action.');
+    // Browsers normally include the clicked submit button's name.  Normalize
+    // the implicit Enter submission only when it contains a pairing code, so
+    // it is an approval attempt rather than an unlabelled terminal action.
+    const action = parsed.values.action === undefined && parsed.values.pairing_code ? 'approve' : parsed.values.action;
+    if (action !== 'approve' && action !== 'deny') throw new PageError('Unknown action.');
     const compact = normalizePairingCode(parsed.values.pairing_code);
     const matched = compact && hexEqual(currentPairing.hash, shaHex(compact));
     if (!matched) {
@@ -728,6 +793,11 @@ export function createOAuthServer({
       }
       const left = CONSTANTS.PAIRING_WRONG_TRIES_PER_REQUEST - transaction.wrong;
       return sendHtml(res, 200, consentHtml(transaction, `That pairing code did not match. ${left} ${left === 1 ? 'try' : 'tries'} left.`), consentCsp(transaction));
+    }
+
+    if (action === 'deny') {
+      endPairing('denied');
+      return redirectError(res, transaction.redirectUri, transaction.state, base, 'access_denied', 'The operator denied the request');
     }
 
     endPairing();
@@ -1098,7 +1168,7 @@ export function createOAuthServer({
       if (pathname.startsWith('/.well-known/')) { wellKnownRoute(req, res, pathname); return true; }
       if (pathname === AUTHORIZATION_PATH) {
         if (req.method === 'GET') await authorizeGet(req, res, serverContext);
-        else if (req.method === 'POST') await authorizePost(req, res);
+        else if (req.method === 'POST') await authorizePost(req, res, serverContext);
         else methodNotAllowed(res, 'GET, POST');
         return true;
       }

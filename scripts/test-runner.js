@@ -65,6 +65,7 @@ import handoff_bridge_hostile from './tests/handoff-bridge-hostile.js';
 import handoff_bridge_source_scan from './tests/handoff-bridge-source-scan.js';
 import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
 import handoff_bridge_render from './tests/handoff-bridge-render.js';
+import issue_reporter from './tests/issue-reporter.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -135,6 +136,7 @@ const testGroups = [
   ['handoff-bridge-source-scan.js', handoff_bridge_source_scan],
   ['handoff-bridge-ui.js', handoff_bridge_ui],
   ['handoff-bridge-render.js', handoff_bridge_render],
+  ['issue-reporter.js', issue_reporter],
 ];
 
 function validateTestRegistry(groups) {

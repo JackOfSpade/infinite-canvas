@@ -38,7 +38,7 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
   const ipc = providedIpc || fakeIpc(); const sender = { id: 9, __isCanvasRenderer: true, sent: [], send(channel, value) { this.sent.push({ channel, value }); } };
   const window = { __canvasFilePath: PATH, webContents: sender, isDestroyed: () => false };
   const canvasWindows = getCanvasWindows || (() => windows === null ? [window] : windows);
-  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1 }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
+  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1, pairingCode: '23456-789AB' }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
   return { ipc, sender, window, api, event: { sender } };
 }
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
@@ -628,9 +628,15 @@ export default [
     assert(result.code === 'INVALID' && asked === 0 && writes === 0, 'a non-boolean validator result must not reach consent or persistence');
   } },
   { name: 'handoff bridge: ipc: pairing gets the persisted enforce-or-off network policy', async run() {
-    const calls = []; const h = setup({ controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: false }, limits: {}, autoRelease: false }) }, oauth: { openPairing: async value => { calls.push(value); return { ok: true, expiresAt: 1 }; } } });
+    const calls = []; const h = setup({ controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, pluginName: 'infinite_canvas' }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: false }, limits: {}, autoRelease: false }) }, oauth: { openPairing: async value => { calls.push(value); return { ok: true, expiresAt: 1, pairingCode: '23456-789AB' }; } } });
     const result = await invoke(h, IPC_CHANNELS.OPEN_PAIRING);
-    assert(result.success && calls[0].networkCheck === 'off' && calls[0].hostname === 'bridge.example.com', 'pairing must receive the persisted network check as an enum');
+    assert(result.success && result.pairingCode === '23456-789AB' && result.expiresAt === 1 && calls[0].networkCheck === 'off' && calls[0].hostname === 'bridge.example.com', 'pairing must receive the persisted network check as an enum and return its validated formatted code only to the opening call');
+    assert(h.sender.sent.length === 0 && !JSON.stringify(h.api).includes('23456-789AB'), 'a direct pairing-code reply must not become a renderer event or retained UI registry state');
+    let malformedCancelled = 0;
+    const malformed = setup({ oauth: { openPairing: async () => ({ ok: true, expiresAt: 2, pairingCode: 'not-a-pairing-code' }), cancelPairing: async () => { malformedCancelled += 1; return { ok: true }; } } });
+    const malformedResult = await invoke(malformed, IPC_CHANNELS.OPEN_PAIRING);
+    assert(malformedResult.success === false && malformedResult.code === 'INTERNAL' && malformedCancelled === 1 && !Object.hasOwn(malformedResult, 'pairingCode'),
+      'a malformed direct pairing capability is cancelled and never crosses IPC as a partial success');
   } },
   { name: 'handoff bridge: ipc: pairing needs readiness but has no routine pre-confirmation', async run() {
     let asks = 0; let opened = 0;
@@ -665,6 +671,23 @@ export default [
     windows = [h.window];
     assert((await invoke(h, IPC_CHANNELS.OPEN_PAIRING)).code === 'NO_WINDOW' && opened === 0,
       'a canvas removed by the second readiness read cannot open an OAuth pairing flow');
+  } },
+  { name: 'handoff bridge: ipc: a canvas that closes while pairing opens receives no code and cancels pairing', async run() {
+    let cancellations = 0; let windows = [];
+    const h = setup({
+      getCanvasWindows: () => windows,
+      oauth: {
+        openPairing: async () => {
+          windows = [];
+          return { ok: true, expiresAt: 1, pairingCode: '23456-789AB' };
+        },
+        cancelPairing: async () => { cancellations += 1; return { ok: true }; },
+      },
+    });
+    windows = [h.window];
+    const result = await invoke(h, IPC_CHANNELS.OPEN_PAIRING);
+    assert(result.code === 'NO_WINDOW' && cancellations === 1 && !Object.hasOwn(result, 'pairingCode'),
+      'the post-await window guard clears a late pairing and never returns its code to a closed canvas');
   } },
   { name: 'handoff bridge: ipc: outstanding-work disable has one main-owned critical confirmation', async run() {
     let asks = 0; let disables = 0;
@@ -748,6 +771,23 @@ export default [
     const h = setup({ tunnel: { getLog: async () => ['redacted ok', 7, 'x'.repeat(1025), 'bad\u202etext', ...Array.from({ length: 101 }, () => 'line')] } });
     const result = await invoke(h, IPC_CHANNELS.GET_TUNNEL_LOG);
     assert(result.success && result.lines[0] === 'redacted ok' && result.lines.length === 97 && result.lines.every(line => typeof line === 'string' && line.length <= 1024), 'IPC relays only bounded trusted redacted strings');
+  } },
+  { name: 'handoff bridge: ipc: only a closed tunnel-not-serving startup diagnosis receives actionable renderer feedback', async run() {
+    const actionable = setup({
+      controller: {
+        enable: async () => ({ success: false, code: 'tunnel_failed', diagnostic: { cause: 'readiness-timeout', tunnel: { probe: { reason: 'tunnel-not-serving' } } } }),
+      },
+      enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: false }) },
+    });
+    const generic = setup({
+      controller: {
+        enable: async () => ({ success: false, code: 'tunnel_failed', diagnostic: { cause: 'hostile internal detail', tunnel: { probe: { reason: 'hostile internal detail' } } } }),
+      },
+      enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: false }) },
+    });
+    assert((await invoke(actionable, IPC_CHANNELS.SET_ENABLED, { enabled: true })).code === 'TUNNEL_NOT_SERVING'
+      && (await invoke(generic, IPC_CHANNELS.SET_ENABLED, { enabled: true })).code === 'UNAVAILABLE',
+    'only the fixed Cloudflare tunnel-not-serving diagnostic crosses the startup IPC boundary');
   } },
   { name: 'handoff bridge: ipc: long enable consent persists after enable and fails closed on persistence error', async run() {
     const calls = []; const good = setup({ controller: { enable: async value => { calls.push(value); return { success: true }; } }, enableConsent: { accept: async details => { calls.push(details.long ? 'accept-long' : 'accept-short'); return { ok: true }; } } });

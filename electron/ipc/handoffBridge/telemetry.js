@@ -22,8 +22,27 @@ const CAUSES = new Set([
 const STATES = new Set(['off', 'blocked', 'needs-setup', 'needs-trust', 'starting', 'connecting', 'checking-public', 'online', 'degraded', 'backoff', 'paused', 'stopping', 'failed']);
 const PROBE_STATES = new Set(['unknown', 'ok', 'failing']);
 const PROBE_REASONS = new Set(['wrong-origin', 'unexpected-redirect', 'tunnel-not-serving', 'origin-unreachable', 'ingress-mismatch', 'edge-blocked', 'edge-unreachable', 'dns-not-found', 'hostname-not-public', 'offline', 'timeout', 'too_large', 'refused', 'other']);
+const OAUTH_REJECTION_ROUTES = new Set(['authorize', 'token', 'revoke', 'mcp']);
+const OAUTH_REJECTION_METHODS = new Set(['GET', 'POST']);
+const OAUTH_REJECTION_REASONS = new Set(['origin-mismatch', 'fetch-site']);
+const FETCH_SITES = new Set(['none', 'same-origin', 'same-site', 'cross-site', 'other']);
+const OAUTH_REJECTION_STAGES = new Set(['http', 'consent']);
+const FETCH_MODES = new Set(['navigate', 'other', 'absent']);
+const FETCH_DESTINATIONS = new Set(['document', 'other', 'absent']);
+const ORIGIN_SHAPES = new Set(['absent', 'self-exact', 'self-canonical', 'chatgpt-exact', 'opaque-null', 'https-other', 'invalid']);
+const CONSENT_ACTIONS = new Set(['approve', 'deny', 'other', 'uninspected']);
+const TRANSACTION_PRESENCE = new Set(['yes', 'no', 'uninspected']);
+const CONSENT_POLICY_VERSIONS = new Set(['document-navigation-v2']);
+const SOURCE_REJECTION_ROUTES = new Set(['mcp', 'token', 'revoke']);
+const SOURCE_REJECTION_MODES = new Set(['enforce', 'alert']);
+// The caller's network, placed in a closed class. A source prefix is sensitive
+// link metadata, so the prefix itself never reaches this sink.
+const SOURCE_CLASSES = new Set(['link-family', 'connector-range', 'other-public', 'private', 'unknown']);
+const LINK_PRESENCE = new Set(['none', 'one', 'many', 'unreadable']);
 
 let latest = null;
+let latestOAuthRejection = null;
+let latestSourceRejection = null;
 const finite = value => Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? Math.round(value) : null;
 const enumOr = (value, allowed, fallback = 'unknown') => allowed.has(value) ? value : fallback;
 
@@ -34,6 +53,7 @@ export function recordFailedStartDiagnostic({ telemetry = false, phase, cause, t
   const stamp = finite(at) ?? Date.now();
   const began = finite(startedAt);
   const probe = rawTunnel.probe && typeof rawTunnel.probe === 'object' ? rawTunnel.probe : {};
+  const readiness = rawTunnel.readiness && typeof rawTunnel.readiness === 'object' ? rawTunnel.readiness : {};
   latest = Object.freeze({
     telemetry: telemetry === true,
     phase: enumOr(phase, PHASES),
@@ -46,6 +66,12 @@ export function recordFailedStartDiagnostic({ telemetry = false, phase, cause, t
         reason: enumOr(probe.reason, PROBE_REASONS),
         consecutiveFailures: Math.max(0, Math.min(999, finite(probe.consecutiveFailures) ?? 0)),
       }),
+      readiness: Object.freeze({
+        configurationValidated: readiness.configurationValidated === true,
+        environmentHealthy: readiness.environmentHealthy === true,
+        localReadinessPassed: readiness.localReadinessPassed === true,
+        registeredConnectionCount: Math.max(0, Math.min(8, finite(readiness.registeredConnectionCount) ?? 0)),
+      }),
     }),
     at: stamp,
     elapsedMs: began === null ? null : Math.max(0, Math.min(10 * 60_000, stamp - began)),
@@ -54,3 +80,87 @@ export function recordFailedStartDiagnostic({ telemetry = false, phase, cause, t
 }
 
 export function getFailedStartDiagnostic() { return latest; }
+
+// A rejected browser-origin check is useful support evidence, but its raw
+// request data is never safe to retain. Keep one bounded, opt-in aggregate of
+// fixed policy categories instead. In particular, this accepts no URL,
+// hostname, Origin value, header, body, OAuth state, code, pairing value, or
+// credential. Header values are classified inside http.js before this sink.
+export function clearOAuthRejectionDiagnostic() { latestOAuthRejection = null; }
+
+export function recordOAuthRejectionDiagnostic({ telemetry = false, route, method, reason, stage, fetchSite, fetchMode, fetchDest, originShape, consentAction, hasTxn, consentPolicyVersion, at = Date.now() } = {}) {
+  if (telemetry !== true) return null;
+  const stamp = finite(at) ?? Date.now();
+  latestOAuthRejection = Object.freeze({
+    telemetry: true,
+    count: Math.min(999, (latestOAuthRejection?.telemetry === true ? latestOAuthRejection.count : 0) + 1),
+    at: stamp,
+    last: Object.freeze({
+      route: enumOr(route, OAUTH_REJECTION_ROUTES),
+      method: enumOr(method, OAUTH_REJECTION_METHODS),
+      reason: enumOr(reason, OAUTH_REJECTION_REASONS),
+      stage: enumOr(stage, OAUTH_REJECTION_STAGES),
+      fetchSite: enumOr(fetchSite, FETCH_SITES),
+      fetchMode: enumOr(fetchMode, FETCH_MODES),
+      fetchDest: enumOr(fetchDest, FETCH_DESTINATIONS),
+      originShape: enumOr(originShape, ORIGIN_SHAPES),
+      consentAction: enumOr(consentAction, CONSENT_ACTIONS),
+      hasTxn: enumOr(hasTxn, TRANSACTION_PRESENCE),
+      consentPolicyVersion: enumOr(consentPolicyVersion, CONSENT_POLICY_VERSIONS),
+      status: 403,
+    }),
+  });
+  return latestOAuthRejection;
+}
+
+export function getOAuthRejectionDiagnostic() { return latestOAuthRejection; }
+
+// A refused source answers ONE question a generic 401 cannot: the caller
+// authenticated fine but reached us from a network this link was not paired
+// from. Without it the failure reads as an expired token and the real cause --
+// the connector's egress moving outside the pinned prefixes -- is invisible.
+// Closed classes only: no address, prefix, hostname, header, or credential.
+export function clearSourceRejectionDiagnostic() { latestSourceRejection = null; }
+
+export function recordSourceRejectionDiagnostic({ telemetry = false, route, mode, sourceClass, links, at = Date.now() } = {}) {
+  if (telemetry !== true) return null;
+  const stamp = finite(at) ?? Date.now();
+  latestSourceRejection = Object.freeze({
+    telemetry: true,
+    count: Math.min(999, (latestSourceRejection?.telemetry === true ? latestSourceRejection.count : 0) + 1),
+    at: stamp,
+    last: Object.freeze({
+      route: enumOr(route, SOURCE_REJECTION_ROUTES),
+      mode: enumOr(mode, SOURCE_REJECTION_MODES),
+      sourceClass: enumOr(sourceClass, SOURCE_CLASSES),
+      links: enumOr(links, LINK_PRESENCE),
+    }),
+  });
+  return latestSourceRejection;
+}
+
+export function getSourceRejectionDiagnostic() { return latestSourceRejection; }
+
+// The live supervisor owns a redacted output ring, but a failed startup tears
+// that owner down before the renderer can ask for it.  Preserve a short
+// *structured* substitute rather than copying arbitrary child output into a
+// longer-lived store.  Every interpolated value below has already passed a
+// closed enum gate in recordFailedStartDiagnostic(), so this cannot disclose a
+// path, hostname, tunnel/connector id, credential, or secret.
+export function getFailedStartDiagnosticLines() {
+  if (latest?.telemetry !== true) return Object.freeze([]);
+  const tunnel = latest.tunnel || {};
+  const probe = tunnel.probe || {};
+  const readiness = tunnel.readiness || {};
+  const lines = [
+    `Bridge startup failed: ${latest.phase}.`,
+    `Startup cause: ${latest.cause}.`,
+    `Tunnel state: ${tunnel.state}; last exit: ${tunnel.lastExit || 'none'}.`,
+    `Configuration validation: ${readiness.configurationValidated === true ? 'passed' : 'not completed'}; environment check: ${readiness.environmentHealthy === true ? 'healthy' : 'not observed'}; local readiness: ${readiness.localReadinessPassed === true ? 'passed' : 'not confirmed'}.`,
+    `Observed registered tunnel connections: ${readiness.registeredConnectionCount || 0}.`,
+  ];
+  if (probe.state === 'failing') {
+    lines.push(`Public probe: ${probe.reason}; consecutive failures: ${probe.consecutiveFailures}.`);
+  }
+  return Object.freeze(lines);
+}

@@ -30,11 +30,20 @@ export function createTunnelSupervisor(options = {}) {
   let crashTimes = []; let unrequestedTimes = []; let lastManualRestartAt = -Infinity;
   let stopping = false; let attemptedPorts = new Set(); let lastExit = null; let handledExitToken = null; let backoffAttempts = 0; let lastProbeRestartAt = -Infinity;
   let currentExitLines = [];
+  // These facts are deliberately scalar and closed. They describe the local
+  // launch lifecycle without retaining cloudflared's connection ids, edge
+  // locations, paths, or output text after the supervisor is disposed.
+  let configurationValidated = false; let environmentHealthy = false; let localReadinessPassed = false; let registeredConnectionCount = 0;
   const notices = new Set();
   let publicProbeStatus = { state: 'unknown', okAt: null, failingSince: null, consecutiveFailures: 0, reason: null };
 
   const snapshotProbe = () => Object.freeze({ ...publicProbeStatus });
-  const status = () => Object.freeze({ state, metricsPort, restarts: crashTimes.length, lastExit, notices: Object.freeze([...notices]), probe: snapshotProbe() });
+  const status = () => Object.freeze({ state, metricsPort, restarts: crashTimes.length, lastExit, notices: Object.freeze([...notices]), probe: snapshotProbe(), readiness: Object.freeze({
+    configurationValidated,
+    environmentHealthy,
+    localReadinessPassed,
+    registeredConnectionCount,
+  }) });
   // This is a diagnostic view, not a file reader.  The ring is populated
   // before the supervisor exposes it, and a second redaction pass means an
   // injected/spawn implementation cannot make a raw line observable later.
@@ -167,7 +176,7 @@ export function createTunnelSupervisor(options = {}) {
     // has established a later authority (online/degraded/backoff/etc.), a
     // recurring /ready success must not make that state look provisional.
     const canAdvanceReadiness = state === 'connecting' || state === 'checking-public';
-    if (canAdvanceReadiness && ready.ok) { if (readySince === null) readySince = now(); state = 'checking-public'; }
+    if (canAdvanceReadiness && ready.ok) { localReadinessPassed = true; if (readySince === null) readySince = now(); state = 'checking-public'; }
     else if (canAdvanceReadiness && now() - readyStartedAt >= 30_000) { readySince = 'fallback'; state = 'checking-public'; }
     setTimer('ready', () => runReadyProbe(token), TUNNEL_CONSTANTS.READY_POLL_MS);
   };
@@ -221,6 +230,7 @@ export function createTunnelSupervisor(options = {}) {
   const startInternal = async () => {
     if (child || state === 'starting' || state === 'connecting' || state === 'online' || state === 'checking-public') return result(true);
     const token = ++generation; stopping = false; state = 'starting';
+    configurationValidated = false; environmentHealthy = false; localReadinessPassed = false; registeredConnectionCount = 0;
     const userData = options.userData;
     if (typeof userData !== 'string' || !userData.startsWith('/') || userData.includes('\u0000') || userData.includes('/../')) return fail('config-rejected');
     try { await (options.ensureTunnelDirectory || ensureTunnelDirectory)(userData, options); } catch { return fail('config-rejected'); }
@@ -269,11 +279,19 @@ export function createTunnelSupervisor(options = {}) {
     }
     if (!validateDryRunOutput({ configPath: paths.config, hostname: options.hostname, socketPath: options.socketPath, validationOutput: outputs[0], matchingRuleOutput: outputs[1], fallbackRuleOutput: outputs[2] })) return fail('config-rejected');
     if (!(options.verifyPinnedCopy || verifyPinnedCopy)(binary.copyPath, options.pin, options).ok) return fail('binary-changed');
+    configurationValidated = true;
     try { (options.recordTunnelIntent || recordTunnelIntent)(userData, { pid: null, configPath: paths.config, createdAt: now() }, options); } catch { return fail('spawn-failed'); }
     const args = buildRunArgv({ configPath: paths.config, tunnelId: credentials.tunnelId, metricsPort });
     currentExitLines = [];
     const onLine = line => {
       log.add(line);
+      // cloudflared emits this fixed lifecycle phrase after registering a
+      // connector. Count only the phrase, cap it, and discard the rest of the
+      // line; connector ids and edge locations never enter status/telemetry.
+      if (/\bregistered tunnel connection\b/i.test(String(line))) {
+        registeredConnectionCount = Math.min(8, registeredConnectionCount + 1);
+      }
+      if (/\bsummary:\s*environment is healthy\b/i.test(String(line))) environmentHealthy = true;
       currentExitLines.push(line);
       if (currentExitLines.length > 30) currentExitLines.shift();
     };

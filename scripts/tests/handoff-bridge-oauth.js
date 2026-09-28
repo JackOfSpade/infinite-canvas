@@ -1428,6 +1428,94 @@ const verify = (instance, token, extra = {}) => instance.verify({ assertion: tok
 
 const assertionTests = [
   {
+    name: 'handoff bridge: oauth: consent decisions use document transport plus the local pairing capability, not popup Origin serialization',
+    run: async () => {
+      const navigation = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+      for (const origin of ['null', 'not an origin', 'http://origin-rewritten.example', 'https://origin-rewritten.example/not-an-origin', 'https://foreign.example']) {
+        for (const fetchSite of ['cross-site', 'same-site', undefined]) {
+          const env = boot();
+          const started = await consentStart(env);
+          const headers = { origin, ...navigation };
+          if (fetchSite) headers['sec-fetch-site'] = fetchSite;
+          const approved = await postForm(env, '/oauth/authorize', {
+            txn: started.txn, action: 'approve', pairing_code: started.pairing,
+          }, { headers });
+          assert.equal(approved.status, 302, `document navigation must not depend on Origin ${origin} or fetch site ${fetchSite || 'absent'}: ${approved.text}`);
+        }
+      }
+
+      const html = (await consentStart(boot())).page.text;
+      assert.match(html, /<form[^>]*>[\s\S]*name="txn"[^>]*>[\s\S]*name="pairing_code"[^>]*required[\s\S]*name="action" value="approve"[\s\S]*Approve<\/button>[\s\S]*name="action" value="deny"[\s\S]*Deny<\/button><\/form>/,
+        'one consent form must require the local code and explicitly label both terminal actions');
+      assert.ok(!html.includes('formnovalidate'), 'the denial action must not bypass the required local pairing code');
+
+      const incompleteEnv = boot();
+      const incomplete = await consentStart(incompleteEnv);
+      const consentReceipt = [];
+      const privateOrigin = 'https://foreign.example/secret?state=PRIVATE_STATE&code=PRIVATE_CODE';
+      const refused = await postForm(incompleteEnv, '/oauth/authorize', {
+        txn: incomplete.txn, action: 'approve', pairing_code: incomplete.pairing,
+      }, {
+        headers: { origin: privateOrigin, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' },
+        serverContext: { recordOAuthRejection: value => consentReceipt.push(value) },
+      });
+      assert.equal(refused.status, 403, refused.text);
+      assert.equal(incompleteEnv.oauth.stats().pendingTransactions, 1, 'incomplete non-self navigation must retain the transaction');
+      assert.deepEqual(consentReceipt, [{ reason: 'origin-mismatch', consentAction: 'approve', hasTxn: 'yes' }],
+        'the standalone OAuth callback exports only its fixed parsed-consent receipt');
+      assert(!JSON.stringify(consentReceipt).includes('foreign.example') && !JSON.stringify(consentReceipt).includes('PRIVATE_STATE') && !JSON.stringify(consentReceipt).includes('PRIVATE_CODE'),
+        'the standalone OAuth callback cannot export a raw header, URL, or OAuth value');
+
+      const wrongEnv = boot();
+      const wrong = await consentStart(wrongEnv);
+      const wrongCode = await postForm(wrongEnv, '/oauth/authorize', {
+        txn: wrong.txn, action: 'approve', pairing_code: '22222-22222',
+      }, { headers: { origin: 'null', ...navigation } });
+      assert.equal(wrongCode.status, 200, wrongCode.text);
+      assert.equal(wrongEnv.oauth.stats().codes, 0, 'wrong pairing code cannot issue a code');
+      const missingCode = await postForm(wrongEnv, '/oauth/authorize', {
+        txn: wrong.txn, action: 'approve',
+      }, { headers: { origin: 'null', ...navigation } });
+      assert.equal(missingCode.status, 200, missingCode.text);
+      assert.equal(wrongEnv.oauth.stats().codes, 0, 'missing pairing code cannot issue a code');
+      const recovered = await postForm(wrongEnv, '/oauth/authorize', {
+        txn: wrong.txn, action: 'approve', pairing_code: wrong.pairing,
+      }, { headers: { origin: 'null', ...navigation } });
+      assert.equal(recovered.status, 302, recovered.text);
+
+      const implicitEnv = boot();
+      const implicit = await consentStart(implicitEnv);
+      const implicitApproval = await postForm(implicitEnv, '/oauth/authorize', {
+        txn: implicit.txn, pairing_code: implicit.pairing,
+      }, { headers: { origin: 'https://foreign.example', ...navigation } });
+      assert.equal(implicitApproval.status, 302, implicitApproval.text);
+
+      const unknownEnv = boot();
+      const unknown = await consentStart(unknownEnv);
+      const unknownAction = await postForm(unknownEnv, '/oauth/authorize', {
+        txn: unknown.txn, action: 'unknown', pairing_code: unknown.pairing,
+      }, { headers: { origin: 'https://foreign.example', ...navigation } });
+      assert.equal(unknownAction.status, 400, unknownAction.text);
+      assert.equal(unknownEnv.oauth.stats().pendingTransactions, 1, 'unknown action must retain the transaction');
+
+      const denyEnv = boot();
+      const denied = await consentStart(denyEnv, { state: 'document-deny' });
+      for (const pairingCode of [undefined, '22222-22222']) {
+        const rejected = await postForm(denyEnv, '/oauth/authorize', {
+          txn: denied.txn, action: 'deny', pairing_code: pairingCode,
+        }, { headers: { origin: 'null', 'sec-fetch-site': 'cross-site', ...navigation } });
+        assert.equal(rejected.status, 200, rejected.text);
+        assert.equal(denyEnv.oauth.stats().pendingTransactions, 1, 'a missing or wrong denial code cannot consume the transaction');
+        assert.equal(denyEnv.oauth.pendingPairings(), 1, 'a missing or wrong denial code cannot close pairing');
+      }
+      const denial = await postForm(denyEnv, '/oauth/authorize', {
+        txn: denied.txn, action: 'deny', pairing_code: denied.pairing,
+      }, { headers: { origin: 'null', 'sec-fetch-site': 'cross-site', ...navigation } });
+      assert.equal(denial.status, 302, denial.text);
+      assert.equal(locationParams(denial).get('error'), 'access_denied');
+    },
+  },
+  {
     name: 'handoff bridge: oauth: assertion outcomes are a closed privacy-safe enumeration',
     run: () => assert.deepEqual(ASSERTION_OUTCOMES, ['none', 'assertion_ok', 'assertion_bad_signature', 'assertion_bad_claims', 'assertion_replay', 'assertion_unknown_kid', 'other']),
   },
@@ -1742,6 +1830,6 @@ const assertionTests = [
 
 assert.equal(LAB_STEP_NAMES.length, 100);
 assert.equal(phaseOneTests.length, 23);
-assert.equal(assertionTests.length, 42);
+assert.equal(assertionTests.length, 43);
 
 export default [...portedLabTests, ...phaseOneTests, ...assertionTests];

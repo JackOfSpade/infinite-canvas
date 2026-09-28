@@ -221,6 +221,13 @@ export function HandoffBridgePanel() {
       if (first) requestApplicationHandoffFocus(first.jobId);
       return;
     }
+    if (id === 'open-pairing') {
+      // Pairing's one direct response contains the short-lived code. Always
+      // enter the setup surface that owns, displays and clears that response;
+      // the generic panel caller deliberately sanitizes action results.
+      openBridgeSetup(3);
+      return;
+    }
     if (id === 'new-chat' || id === 'copy-starter') {
       newChat();
       return;
@@ -234,7 +241,6 @@ export function HandoffBridgePanel() {
       pause: 'handoffBridgePause',
       resume: 'handoffBridgeResume',
       'restart-tunnel': 'handoffBridgeRestartTunnel',
-      'open-pairing': 'handoffBridgeOpenPairing',
     }[id];
     if (method) void call(method, id === 'enable' ? { enabled: true } : undefined);
   }, [call, newChat, status.queue.jobs]);

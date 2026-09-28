@@ -5,6 +5,7 @@ import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugRepor
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../../src/utils/nonApiAiNavigation.js';
+import { STALE_MANUAL_AI_RESUME_MS, isLiveManualAiRecoveryBoardOwner, isStaleOrdinaryManualAiResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../test-dependencies.js';
 
 // A handful of representative marketplace tasks used below to prove routing
 // and dispatch are task-agnostic now that every task shares the one manual
@@ -440,8 +441,89 @@ export default [
         && mainSource.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true }")
         && mainSource.includes('await flushNonApiAiPersistence()')
         && dialogSource.includes("new CustomEvent('non-api-ai-node-pending'")
-        && jobSearchSource.includes('Auto-resuming manual AI run'),
-      'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, and auto-resumes after reload');
+        && jobSearchSource.includes('Auto-resuming manual AI run')
+        && jobSearchSource.includes('isStaleOrdinaryManualAiResume(resume)')
+        && jobSearchSource.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
+        && jobSearchSource.includes('User resumed stale manual AI run'),
+      'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, auto-resumes when recent, and requires an exact user-authorized run id when stale');
+      assert(jobSearchSource.includes("retirementReason: 'discarded-stale-manual-ai-recovery'")
+        && jobSearchSource.includes('marker: resume,')
+        && jobSearchSource.includes('User discarded stale manual AI run')
+        && jobSearchSource.includes('its age could not be verified.')
+        && jobSearchSource.includes('start fresh discards only that saved handoff.'),
+      'discarding an aged manual-AI recovery retires only its exact durable marker, while its explicit Resume control preserves the same run identity');
+      const sliceSource = (start, end) => {
+        const from = jobSearchSource.indexOf(start);
+        const to = jobSearchSource.indexOf(end, from);
+        return from >= 0 && to > from ? jobSearchSource.slice(from, to) : '';
+      };
+      const manualAutoResume = sliceSource(
+        'const [manualAiExplicitResumeRequest, setManualAiExplicitResumeRequest] = useState(null);',
+        'const handleResumeStaleManualAiRecovery = useCallback',
+      );
+      const recoveryNow = 1_800_000_000_000;
+      const ordinaryMarker = (updatedAt) => ({ runId: 'manual-recovery', updatedAt });
+      assert(!isStaleOrdinaryManualAiResume(ordinaryMarker(recoveryNow - STALE_MANUAL_AI_RESUME_MS + 1), recoveryNow)
+        && isStaleOrdinaryManualAiResume(ordinaryMarker(recoveryNow - STALE_MANUAL_AI_RESUME_MS), recoveryNow)
+        && isStaleOrdinaryManualAiResume(ordinaryMarker(undefined), recoveryNow)
+        && isStaleOrdinaryManualAiResume(ordinaryMarker(String(recoveryNow)), recoveryNow)
+        && isStaleOrdinaryManualAiResume(ordinaryMarker(recoveryNow + 1), recoveryNow)
+        && !isStaleOrdinaryManualAiResume({ runId: 'saved', updatedAt: recoveryNow - STALE_MANUAL_AI_RESUME_MS, task: 'job-scoring' }, recoveryNow)
+        && !isStaleOrdinaryManualAiResume({ runId: 'retiring', updatedAt: recoveryNow - STALE_MANUAL_AI_RESUME_MS, retirementPending: true }, recoveryNow),
+      'the executable stale predicate holds exact-24h, missing, malformed, and future ordinary markers while preserving recent, saved-scrape, and retirement recovery semantics');
+      const staleMarker = ordinaryMarker(recoveryNow - STALE_MANUAL_AI_RESUME_MS);
+      const laneCanStart = (marker, options = {}) => !staleOrdinaryManualAiResumeBlocksAdmission(marker, options);
+      assert(!laneCanStart(staleMarker)
+        && !laneCanStart(staleMarker, { manualAiRunId: staleMarker.runId })
+        && laneCanStart(staleMarker, {
+          manualAiRunId: staleMarker.runId,
+          explicitResumeRunId: staleMarker.runId,
+        })
+        && laneCanStart(staleMarker, { boardOwnsRecovery: true }),
+      'a stale marker arriving before any queued manual-AI lane starts blocks every generic matching run id, while only the exact explicit Resume capability or exact Board ownership may admit it');
+      assert(isLiveManualAiRecoveryBoardOwner({ boardRunId: 'live-plan' })
+        && !isLiveManualAiRecoveryBoardOwner({ boardRunId: 'orphan', missingPlan: true })
+        && !isLiveManualAiRecoveryBoardOwner(null),
+      'an orphaned Board-owner diagnostic with missingPlan is never treated as authority to bypass stale manual-AI recovery admission');
+      assert(manualAutoResume.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
+        && manualAutoResume.includes('current?.runId === resume.runId ? null : current')
+        && manualAutoResume.indexOf('current?.runId === resume.runId ? null : current')
+          > manualAutoResume.indexOf('const attemptToken = Symbol(`manual-ai-auto-resume:${resume.runId}`)'),
+      'an explicit stale-recovery authorization is exact-id-bound and consumed when that attempt is admitted, so retries require another click');
+      const staleAdmission = sliceSource(
+        'const staleManualAiRecoveryNeedsDecision',
+        '// Why a drop would bounce right now',
+      );
+      const genericRerun = sliceSource(
+        'const handleRerun = useCallback',
+        'const cancelBoardRun = useCallback',
+      );
+      const pipelineAdmission = sliceSource(
+        'const runPipeline = useCallback',
+        'const resumeScoring = useCallback',
+      );
+      assert(staleAdmission.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;')
+        && jobSearchSource.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;')
+        && genericRerun.includes('Choose Resume or Start fresh for the saved older manual-AI recovery')
+        && pipelineAdmission.includes('staleRecoveryBlockedAtLaneStart')
+        && pipelineAdmission.includes('staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume'),
+      'a pending stale recovery locks normal controls and is rechecked at the shared-lane turn, while the exact user-authorized run id remains admissible');
+      const scoringContinuation = sliceSource('const resumeScoring = useCallback', 'resumeScoringRef.current = resumeScoring;');
+      const interruptedResume = sliceSource('const handleResumeRun = useCallback', 'resumeInterruptedRunRef.current = handleResumeRun;');
+      const savedScrapeResume = sliceSource('const handleResumeSavedScrape = useCallback', 'resumeSavedScrapeRef.current = handleResumeSavedScrape;');
+      const reanalysis = sliceSource('const handleReanalyze = useCallback', 'const cleanupRetirementPending = hasPendingManualAiRetirement(data);');
+      assert(scoringContinuation.includes('staleEmptyContinuationBlockedAtLaneStart')
+        && scoringContinuation.includes('staleContinuationBlockedAtLaneStart')
+        && interruptedResume.includes('staleInterruptedResumeBlockedAtLaneStart')
+        && savedScrapeResume.includes('staleSavedRecoveryBlockedAtLaneStart')
+        && reanalysis.includes('staleRecoveryBlockedAtLaneStart'),
+      'every standalone continuation rechecks stale admission both before and after its queue turn, so a marker that arrives while scoring, interrupted recovery, saved-scrape recovery, or re-analysis waits cannot mint manual AI');
+      assert(jobSearchSource.includes('manualAiStaleRecoveryActionRunIdRef.current')
+        && jobSearchSource.includes('requireCancellationAck: true')
+        && jobSearchSource.includes("cancellationReason: 'discarded-stale-manual-ai-recovery'")
+        && jobSearchSource.includes('className="nodrag px-2 py-0.5')
+        && jobSearchSource.includes('disabled={baseControlsLocked || staleManualAiRecoveryActionBusy'),
+      'Resume and Start fresh are mutually excluded while their exact recovery action is active; discard obtains a cancellation acknowledgement before retiring the marker');
       assert(mainSource.includes('async function flushNonApiAiPersistenceForLifecycle(win, actionType)')
         && mainSource.includes("if (!await flushNonApiAiPersistenceForLifecycle(win, 'close')) return;")
         && mainSource.includes("return flushNonApiAiPersistenceForLifecycle(win, 'quit');")

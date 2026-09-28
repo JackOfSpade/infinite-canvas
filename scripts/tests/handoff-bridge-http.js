@@ -1,4 +1,5 @@
 import { assert } from './testHelpers.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { EventEmitter } from 'node:events';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { exchange, parseContentLength } from './fixtures/handoff-bridge/fakeHttp.js';
@@ -9,6 +10,10 @@ import { wrapRequestHandlerWithEgressObservation } from '../../electron/ipc/hand
 import { createSocketFsNet } from './fixtures/handoff-bridge/bridgeFixtures.js';
 import { methodNotAllowed, notFound, sendHtml, sendJson, sendRedirect } from '../../electron/ipc/handoffBridge/respond.js';
 import { KeyedBuckets, WireError, jsonToParams, makeBucket, mimeOf, parseForm, parseJsonObject, readBody } from '../../electron/ipc/handoffBridge/wire.js';
+import { createOAuthServer } from '../../electron/ipc/handoffBridge/oauth.js';
+import { validateClientMetadata } from '../../electron/ipc/handoffBridge/cimd.js';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 export default [
   {
@@ -153,8 +158,10 @@ export default [
       assert(absolute.status === 400 && absolute.readBytes === 0, 'absolute-form request targets must fail URL sanity before routing');
       const wrongMethod = await exchange(handler, { method: 'GET', path: '/mcp', body: '' });
       assert(wrongMethod.status === 405 && authenticates === 1, 'MCP must authenticate before rejecting its method');
-      const observed = await exchange(handler, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://foreign.example', 'sec-fetch-site': 'cross-site' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
-      assert(observed.status === 200 && audit.length === 1 && audit[0].ev === 'origin_seen' && audit[0].origin === 'foreign.example', 'authenticated server metadata is observed, not blocked, before the production policy switch');
+      const foreign = await exchange(handler, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://foreign.example', 'sec-fetch-site': 'cross-site' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      assert(foreign.status === 403 && audit.length === 0, 'a foreign browser origin on an authenticated server route is refused, not merely observed, once the production policy is enforced');
+      const connector = await exchange(handler, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://chatgpt.com' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      assert(connector.status === 200, 'the connector\'s own origin stays allowed on the authenticated server routes, so enforcement cannot strand a live link');
       assert(sourceKey({ headers: { 'cf-connecting-ip': '999.999.999.999' } }) === 'unknown', 'invalid IPv4 must not create an unbounded bucket key');
       assert(sourceKey({ headers: { 'cf-connecting-ip': '2001:db8:0:0:7::1' } }) === '2001:db8:0:0::/64', 'IPv6 keys must reduce exactly to their first /64');
       const disabled = createRequestHandler({ hostname: 'bridge.example.com', accepting: () => false, mcp: async () => ({ status: 200, body: {} }) });
@@ -399,6 +406,255 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: http: cross-origin refusals expose only closed diagnostics categories',
+    async run() {
+      const diagnosticEvents = [];
+      const privateOrigin = 'https://private-origin.example.test:8443/secret?state=PRIVATE_STATE&code=PRIVATE_CODE';
+      const privateFetchSite = 'PRIVATE_FETCH_SITE';
+      const handler = createRequestHandler({
+        hostname: 'bridge.example.com', originServerRoutes: 'enforce', mcp: async () => ({ status: 200, body: {} }),
+        diagnostics: { recordOAuthRejection: event => diagnosticEvents.push(event) },
+        oauth: { handle: async (_req, res) => { res.writeHead(200); res.end(); } },
+      });
+      const authorize = await exchange(handler, { method: 'POST', path: '/oauth/authorize', headers: { origin: privateOrigin, 'sec-fetch-site': privateFetchSite, 'content-type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
+      const token = await exchange(handler, { method: 'POST', path: '/oauth/token', headers: { 'sec-fetch-site': 'cross-site', 'content-type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
+      assert(authorize.status === 403 && token.status === 403
+        && JSON.stringify(diagnosticEvents) === JSON.stringify([
+          { route: 'authorize', method: 'POST', reason: 'origin-mismatch', stage: 'http', fetchSite: 'other', fetchMode: 'absent', fetchDest: 'absent', originShape: 'invalid', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' },
+          { route: 'token', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'absent', fetchDest: 'absent', originShape: 'absent', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' },
+        ]),
+      'the report hook receives fixed route/method/reason categories only, never an Origin or request payload');
+      assert(!JSON.stringify(diagnosticEvents).includes('private-origin.example.test') && !JSON.stringify(diagnosticEvents).includes('PRIVATE_STATE') && !JSON.stringify(diagnosticEvents).includes('PRIVATE_CODE') && !JSON.stringify(diagnosticEvents).includes(privateFetchSite),
+        'private Origin and Sec-Fetch-Site values cannot cross the HTTP diagnostics boundary');
+    },
+  },
+  {
+    name: 'handoff bridge: http: parsed OAuth consent refusal is labelled as the consent policy stage',
+    async run() {
+      const diagnosticEvents = [];
+      const handler = createRequestHandler({
+        hostname: 'bridge.example.com', mcp: async () => ({ status: 200, body: {} }),
+        diagnostics: { recordOAuthRejection: event => diagnosticEvents.push(event) },
+        oauth: { handle: async (_req, res, _pathname, context) => {
+          context.recordOAuthRejection({ reason: 'origin-mismatch', consentAction: 'approve', hasTxn: 'yes', stage: 'http', privateValue: 'PRIVATE_CODE' });
+          res.writeHead(403); res.end();
+        } },
+      });
+      const response = await exchange(handler, {
+        method: 'POST', path: '/oauth/authorize',
+        headers: { origin: 'https://foreign.example', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'txn=PRIVATE_TXN&pairing_code=PRIVATE_CODE',
+      });
+      assert(response.status === 403, `the inner refusal must preserve its 403 result (received ${response.status})`);
+      assert(JSON.stringify(diagnosticEvents) === JSON.stringify([{
+        route: 'authorize', method: 'POST', reason: 'origin-mismatch', stage: 'consent', fetchSite: 'same-origin', fetchMode: 'navigate', fetchDest: 'document', originShape: 'https-other', consentAction: 'approve', hasTxn: 'yes', consentPolicyVersion: 'document-navigation-v2',
+      }]), 'the HTTP closure must force the consent stage and derive only closed request categories');
+      assert(!JSON.stringify(diagnosticEvents).includes('foreign.example') && !JSON.stringify(diagnosticEvents).includes('PRIVATE_TXN') && !JSON.stringify(diagnosticEvents).includes('PRIVATE_CODE'),
+        'a consent callback cannot smuggle raw request/body values through diagnostics');
+    },
+  },
+  {
+    name: 'handoff bridge: http: a top-level ChatGPT authorization form navigation is allowed without opening a cross-site fetch exception',
+    async run() {
+      let calls = 0;
+      const handler = createRequestHandler({ hostname: 'bridge.example.com', mcp: async () => ({ status: 200, body: {} }), oauth: { handle: async (_req, res) => { calls += 1; res.writeHead(200, { 'content-length': '0' }); res.end(); } } });
+      const navigation = await exchange(handler, {
+        method: 'POST', path: '/oauth/authorize',
+        headers: { origin: 'https://chatgpt.com', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'response_type=code',
+      });
+      const fetch = await exchange(handler, {
+        method: 'POST', path: '/oauth/authorize',
+        headers: { origin: 'https://chatgpt.com', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'response_type=code',
+      });
+      assert(navigation.status === 200 && fetch.status === 403 && calls === 1,
+        `only a top-level cross-site authorization-request navigation may pass; received navigation=${navigation.status}, fetch=${fetch.status}, calls=${calls}`);
+    },
+  },
+  {
+    // The two layers were previously only ever tested apart: HTTP with a stub
+    // OAuth, OAuth with no HTTP. Two consecutive consent fixes passed both
+    // suites and still refused every real ChatGPT approval, because the
+    // refusal lived in how the layers composed. This drives the real pair.
+    name: 'handoff bridge: http: a real consent submission survives every transport shape the composed HTTP and OAuth stack can see',
+    async run() {
+      const hostname = 'bridge.example.com';
+      const issuer = `https://${hostname}`;
+      const clientId = 'https://chatgpt.com/oauth/client.json';
+      const metadata = validateClientMetadata(JSON.parse(fs.readFileSync(new URL('./fixtures/handoff-bridge/chatgpt-client-metadata.json', import.meta.url), 'utf8')), clientId);
+      const encode = values => Object.entries(values).filter(([, value]) => value !== undefined)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('&');
+      const boot = () => {
+        const diagnostics = [];
+        const oauth = createOAuthServer({
+          issuer,
+          store: { read: () => ({}), commit: () => true, flush: () => true },
+          fetchClientMetadata: async id => (id === clientId ? metadata : null),
+          fetchJwks: async () => null,
+          pairingGate: () => true,
+          readBody: async request => { const chunks = []; for await (const chunk of request) chunks.push(chunk); return Buffer.concat(chunks); },
+          tokenAuthMode: 'observe-both',
+          asAuthMethods: ['private_key_jwt', 'none'],
+        });
+        const handler = createRequestHandler({
+          hostname, oauth, authenticate: oauth.authenticate,
+          mcp: async () => ({ status: 200, body: {} }),
+          diagnostics: { recordOAuthRejection: event => diagnostics.push(event) },
+        });
+        return { oauth, handler, diagnostics };
+      };
+      const consent = async env => {
+        const pairing = env.oauth.openPairing();
+        const verifier = crypto.randomBytes(32).toString('base64url');
+        const page = await exchange(env.handler, {
+          method: 'GET', body: '',
+          path: `/oauth/authorize?${encode({
+            response_type: 'code', client_id: clientId, redirect_uri: metadata.redirectUris[0], state: 'state-Ada',
+            code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'),
+            code_challenge_method: 'S256', resource: `${issuer}/mcp`,
+          })}`,
+          headers: { host: hostname, origin: 'https://chatgpt.com', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' },
+        });
+        const html = page.body.toString('utf8');
+        assert(page.status === 200, `the consent page must render for a top-level ChatGPT navigation (received ${page.status})`);
+        return { pairing, txn: (html.match(/name="txn" value="([^"]+)"/) || [])[1] };
+      };
+      const submit = (env, { txn, code, headers, action = 'approve' }) => exchange(env.handler, {
+        method: 'POST', path: '/oauth/authorize',
+        headers: { host: hostname, 'content-type': 'application/x-www-form-urlencoded', ...headers },
+        body: encode({ txn, action, pairing_code: code }),
+      });
+
+      const self = `https://${hostname}`;
+      const navigation = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+      // An intermediary that drops one Sec-Fetch-* field must not be able to
+      // refuse our own consent page: Origin already proves this origin, and no
+      // cross-site caller can set it.
+      const admitted = [
+        ['Chrome same-origin form POST', { origin: self, 'sec-fetch-site': 'same-origin', ...navigation }],
+        ['same-origin with Sec-Fetch-Dest dropped in transit', { origin: self, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' }],
+        ['same-origin with Sec-Fetch-Mode dropped in transit', { origin: self, 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'document' }],
+        ['same-origin with every Sec-Fetch-* dropped', { origin: self }],
+        ['self Origin serialized with a trailing slash', { origin: `${self}/`, 'sec-fetch-site': 'same-origin', ...navigation }],
+        // These three reach the outer HTTP Origin gate, because a partial
+        // tuple forfeits the navigation carve-out. They are the same origin
+        // spelled three legal ways.
+        ['self Origin with a trailing slash and a dropped Sec-Fetch-Dest', { origin: `${self}/`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' }],
+        ['self Origin with an explicit default port', { origin: `${self}:443`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' }],
+        ['self Origin in a different host case', { origin: `https://${hostname.toUpperCase()}`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' }],
+        ['Origin rewritten to an opaque null by the popup', { origin: 'null', 'sec-fetch-site': 'cross-site', ...navigation }],
+        ['no Origin at all on a document navigation', { 'sec-fetch-site': 'same-origin', ...navigation }],
+        ['neither Origin nor Fetch Metadata', {}],
+      ];
+      for (const [label, headers] of admitted) {
+        const env = boot();
+        const started = await consent(env);
+        const approved = await submit(env, { txn: started.txn, code: started.pairing, headers });
+        assert(approved.status === 302,
+          `${label}: a locally authorized consent decision must issue a code (received ${approved.status}, diagnostics ${JSON.stringify(env.diagnostics)})`);
+      }
+
+      const refused = [
+        ['cross-site cors fetch', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }],
+        ['foreign Origin on a partial non-navigation tuple', { origin: 'https://evil.example', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }],
+        // Canonicalization must not turn a look-alike into this origin.
+        ['a host that merely contains this origin', { origin: `https://${hostname}.evil.example`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }],
+        ['an opaque null Origin outside a navigation', { origin: 'null', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }],
+        ['a credentialed URL that parses to this origin', { origin: `https://user:pass@${hostname}`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }],
+      ];
+      for (const [label, headers] of refused) {
+        const env = boot();
+        const started = await consent(env);
+        const blocked = await submit(env, { txn: started.txn, code: started.pairing, headers });
+        assert(blocked.status === 403, `${label}: a non-navigation foreign request must stay refused (received ${blocked.status})`);
+        assert(env.oauth.stats().codes === 0, `${label}: a refused request must not issue a code`);
+      }
+
+      // The capability binding, not the transport, is what authorizes.
+      for (const code of ['22222-22222', undefined]) {
+        const env = boot();
+        const started = await consent(env);
+        const attempt = await submit(env, { txn: started.txn, code, headers: { origin: self, 'sec-fetch-site': 'same-origin', ...navigation } });
+        assert(attempt.status === 200 && env.oauth.stats().codes === 0,
+          `a ${code ? 'wrong' : 'missing'} pairing code must re-prompt without issuing a code (received ${attempt.status}, codes ${env.oauth.stats().codes})`);
+      }
+    },
+  },
+  {
+    // The pin was one /28 -- the single block a real link happened to arrive
+    // from -- so any other OpenAI egress block refused the connector with a
+    // generic 401. Guard the shape of the published list, not a byte copy:
+    // OpenAI changes it, and a stale list must fail loudly here, not silently
+    // in production.
+    name: 'handoff bridge: http: the pinned connector ranges cover OpenAI\'s published egress, not one observed block',
+    run() {
+      const ranges = CONSTANTS.OPENAI_CONNECTOR_RANGES;
+      assert(Array.isArray(ranges) && Object.isFrozen(ranges), 'the connector ranges must be a frozen list');
+      assert(ranges.length >= 200, `the pin must hold OpenAI's published connector list, not a single observed block (${ranges.length} entries)`);
+      assert(ranges.includes('52.255.111.0/28'), 'the one real-world block this link was measured from must stay covered');
+      assert(new Set(ranges).size === ranges.length, 'the published list must not contain duplicates');
+      for (const range of ranges) {
+        assert(/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(range), `every pinned range must be a CIDR (${range})`);
+        const bits = Number(range.split('/')[1]);
+        assert(bits >= 8 && bits <= 32, `a pinned prefix length must be sane (${range})`);
+      }
+      // A representative address from several distinct published blocks must
+      // be admitted, so a truncated or mis-parsed list cannot pass.
+      const probe = address => isConnectorSource({ headers: { 'cf-connecting-ip': address } }, ranges);
+      for (const address of ['52.255.111.9', '52.255.109.145', '20.102.212.150', '4.19.160.3', '9.129.0.1']) {
+        assert(probe(address), `a published connector address must be admitted (${address})`);
+      }
+      for (const address of ['203.0.113.7', '198.51.100.9', '8.8.8.8']) {
+        assert(!probe(address), `an unpublished address must not be admitted (${address})`);
+      }
+    },
+  },
+  {
+    // The wire answer for a refused network is a generic 401 invalid_token,
+    // identical to an expired credential. The local classification is the only
+    // thing that can tell those apart later, so prove it is actually emitted.
+    name: 'handoff bridge: http: a refused caller network is classified for diagnostics while the wire answer stays generic',
+    async run() {
+      const events = [];
+      const linked = [{ linkId: 'L', sources: ['198.51.100.0/24'], revoked: false }];
+      const build = () => createRequestHandler({
+        hostname: 'bridge.example.com', sourcePolicy: 'enforce',
+        connectorRanges: ['52.255.111.0/28'],
+        oauth: { linkStatus: () => linked },
+        mcp: async () => ({ status: 200, body: {} }),
+        diagnostics: { recordSourceRejection: event => events.push(event) },
+      });
+      const call = (handler, ip) => exchange(handler, {
+        path: '/mcp', headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip },
+        body: '{"jsonrpc":"2.0","id":1,"method":"ping"}',
+      });
+
+      const foreign = await call(build(), '203.0.113.77');
+      assert(foreign.status === 401, `a source outside the link and the pinned ranges must be refused (received ${foreign.status})`);
+      const body = foreign.body.toString('utf8');
+      assert(body.includes('invalid_token') && !body.includes('203.0.113'),
+        'the wire answer must stay a generic invalid_token and never echo the caller address');
+      assert(JSON.stringify(events) === JSON.stringify([{ route: 'mcp', mode: 'enforce', sourceClass: 'other-public', links: 'one' }]),
+        `the refusal must be reduced to closed classes (received ${JSON.stringify(events)})`);
+      assert(!JSON.stringify(events).includes('203.0.113'), 'a caller address cannot cross the diagnostics boundary');
+
+      // The pinned connector range is still admitted, so this cannot fire for
+      // the connector itself while its egress stays inside the pin.
+      events.length = 0;
+      // An unauthenticated /mcp answers 401 regardless, so the source verdict
+      // is read from the diagnostic, not the status line.
+      await call(build(), '52.255.111.9');
+      assert(events.length === 0, `a source inside the pinned connector range must not be refused (received ${JSON.stringify(events)})`);
+
+      // A private address is classed apart, so a local probe is never mistaken
+      // for the connector's egress having moved.
+      events.length = 0;
+      await call(build(), '192.168.1.40');
+      assert(events[0]?.sourceClass === 'private', `a private caller must be classed as private (received ${events[0]?.sourceClass})`);
+    },
+  },
+  {
     name: 'handoff bridge: http: authenticated MCP body reaches only the authenticated dispatcher',
     async run() {
       let grant;
@@ -485,7 +741,7 @@ export default [
       const gateFailure = await exchange(throwingGate, { method: 'GET', path: '/.well-known/openid-configuration', body: '' });
       assert(gateFailure.status === 500 && !gateFailure.body.toString('utf8').includes('gate'), 'outer handler errors must become fixed non-leaking 500 responses');
       const throwingAudit = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', audit: { write() { throw new Error('audit'); } }, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
-      const result = await exchange(throwingAudit, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://foreign.example' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
+      const result = await exchange(throwingAudit, { path: '/mcp', headers: { 'content-type': 'application/json', origin: 'https://chatgpt.com' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
       assert(result.status === 200, 'best-effort audit failures must not affect an authenticated wire response');
       const partial = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }) });
       const req = new EventEmitter(); Object.assign(req, { url: '/mcp', method: 'POST', headers: { host: 'bridge.example.com', 'content-type': 'application/json' }, rawHeaders: ['host', 'bridge.example.com'], complete: true, destroy() {} });

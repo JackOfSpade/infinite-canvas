@@ -744,9 +744,15 @@ try {
 
   const opened = await page.evaluate(() => window.electronAPI.handoffBridgeOpenPairing());
   assert.equal(opened.success, true, `pairing must be opened by real IPC: ${JSON.stringify(opened)}`);
+  assert.match(opened.pairingCode || '', /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{5}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{5}$/,
+    'the exact renderer that opened pairing receives its formatted copyable code');
+  assert(Number.isFinite(opened.expiresAt) && opened.expiresAt > Date.now(),
+    'the direct pairing-code response carries a future expiry');
   const pairingCode = await app.evaluate(() => globalThis.__icHandoffBridgeTest?.readPairingCode?.() || null);
   assert.match(pairingCode || '', /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{10}$/,
     'only the TEST-only main hook may expose the raw compact pairing code while its sheet is open');
+  assert.equal(opened.pairingCode.replace('-', ''), pairingCode,
+    'the direct formatted code and main-only smoke hook must identify the same live pairing');
   const accessToken = await linkOAuth(pairingCode);
   const listed = await socketRequest('/mcp', 'POST', JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }), {
     'content-type': 'application/json', authorization: `Bearer ${accessToken}`,

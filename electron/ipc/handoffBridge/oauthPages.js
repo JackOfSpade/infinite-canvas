@@ -25,9 +25,9 @@ export function consentHtml(txn, message = '') {
   return pageShell('Approve access', `<h1>Approve access</h1>
 <p class="who">${esc(txn.clientName)}</p><p>${esc(consentSentence(txn))}</p>
 <p>Returns to <span class="uri">${esc(txn.redirectUri)}</span></p>${problem}<form method="post" action="/oauth/authorize" autocomplete="off">
-<input type="hidden" name="txn" value="${esc(txn.id)}"><label for="pairing_code">Pairing code shown on this Mac</label>
-<input type="text" id="pairing_code" name="pairing_code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16">
-<button type="submit" name="action" value="approve" class="go">Approve</button><button type="submit" name="action" value="deny" formnovalidate>Deny</button></form>`);
+<input type="hidden" name="txn" value="${esc(txn.id)}"><label for="pairing_code">Pairing code shown on this Mac — needed to approve or deny</label>
+<input type="text" id="pairing_code" name="pairing_code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
+<button type="submit" name="action" value="approve" class="go">Approve</button><button type="submit" name="action" value="deny">Deny</button></form>`);
 }
 
 export const consentCsp = txn => `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${new URL(txn.redirectUri).origin}; frame-ancestors 'none'; base-uri 'none'`;

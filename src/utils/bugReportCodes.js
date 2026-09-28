@@ -350,6 +350,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState', 'jobAuditDetail'],
   },
 
+  BRIDGE: {
+    label: 'ChatGPT Bridge & OAuth',
+    description: 'ChatGPT bridge setup, tunnel, pairing, and OAuth diagnostics — including closed cross-origin refusal receipts in the main-process report. Use after plugin pairing, authorization, or tunnel failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
+    logFilter: line =>
+      /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   MARKET: {
     label: 'Marketplace Pricing Pipeline',
     description: 'Sell-hub pricing audit — photo analysis, multi-source comp scrape (per-source counts, warnings, blocks), captcha resolve outcomes, AI synthesis (FMV, match quality), and platform-fit results. Drops heavy node/edge/media dumps and narrows the event log to marketplace pipeline events (the marketplaceTelemetry section is always kept).',

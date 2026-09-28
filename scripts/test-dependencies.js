@@ -16,6 +16,7 @@ export { createSourceProgressRunGuard, mergeSourceProgress, isTerminalSourceStat
 export { buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../src/utils/jobSearchQueries.js';
 export { canAttemptJobSourceResolve, descriptionRecoveryCheckpointWriteFailureWarning, filterHandledJobSourceWarnings, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceResolveBusyHubState, isJobSourceWarningGating, jobSourceWarningAction, reconcileJobSourceWarnings } from '../src/utils/jobSourceWarningPolicy.js';
 export { createRunOwnershipGuard } from '../src/utils/runOwnership.js';
+export { STALE_MANUAL_AI_RESUME_MS, isLiveManualAiRecoveryBoardOwner, isSavedScrapeManualAiResume, isStaleOrdinaryManualAiResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../src/utils/manualAiRecovery.js';
 export { applyManualAiRetirementReceiptsToNodes, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, isSafeJobAnalysisCleanupNoop } from '../src/utils/canvasInteractions.js';
 export { isJobCardVisible } from '../src/utils/jobCardFilters.js';
 export { explicitSalaryCurrency, inferSalaryCurrency, formatSalaryCurrencyLabel } from '../src/utils/salaryCurrency.js';

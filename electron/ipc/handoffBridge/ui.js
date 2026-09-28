@@ -29,6 +29,7 @@ const fallbackHostname = value => typeof value === 'string'
   && value.length <= 253 && value === value.toLowerCase() && !value.endsWith('.')
   && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){2,}$/.test(value);
 const isValidPluginName = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/.test(value) && /^[\x20-\x7e]+$/.test(value);
+const PAIRING_CODE = /^[2-9A-HJ-NP-Z]{5}-[2-9A-HJ-NP-Z]{5}$/i;
 const noOp = () => undefined;
 const safeCall = async (port, method, ...args) => {
   try { return typeof port?.[method] === 'function' ? await port[method](...args) : undefined; } catch { return undefined; }
@@ -42,7 +43,7 @@ const plain = value => value && typeof value === 'object' && !Array.isArray(valu
 // failures: an optimistic renderer reply would make a failed Disable, revoke,
 // or setup write indistinguishable from success.
 const acknowledged = (value, { allowTrue = false } = {}) => value?.success === true || value?.ok === true || (allowTrue && value === true);
-const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'NOT_READY', 'TUNNEL_NOT_READY', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'CLIPBOARD_FAILED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'INTERNAL']);
+const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'NOT_READY', 'TUNNEL_NOT_READY', 'TUNNEL_NOT_SERVING', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'CLIPBOARD_FAILED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'INTERNAL']);
 const INTERNAL_CODES = Object.freeze({
   cancelled: 'DECLINED', declined: 'DECLINED', invalid: 'INVALID', invalid_arguments: 'INVALID',
   unknown_job: 'UNKNOWN_JOB', not_found: 'NOT_FOUND', lane_limit: 'LIMIT_REACHED',
@@ -294,8 +295,16 @@ export function registerHandoffBridgeUi({
   // internal refusal ladder. Do not relay a refusal detail (which can describe
   // a local socket, file, or platform failure) across IPC.
   const startupEnableFailure = result => {
-    let code;
-    try { code = result?.code; } catch { return fixed('UNAVAILABLE'); }
+    let code; let cause; let probeReason;
+    try {
+      code = result?.code;
+      cause = result?.diagnostic?.cause;
+      probeReason = result?.diagnostic?.tunnel?.probe?.reason;
+    } catch { return fixed('UNAVAILABLE'); }
+    // This is the one startup detail that earns renderer copy: both values
+    // are closed supervisor enums and identify a user-actionable Cloudflare
+    // routing mismatch. All other internal failures remain UNAVAILABLE.
+    if (cause === 'tunnel-not-serving' || probeReason === 'tunnel-not-serving') return fixed('TUNNEL_NOT_SERVING');
     switch (typeof code === 'string' ? code.toUpperCase() : '') {
       case 'CANCELLED':
       case 'DECLINED': return fixed('DECLINED');
@@ -489,7 +498,31 @@ export function registerHandoffBridgeUi({
         hostname: status?.config?.hostname,
         networkCheck: status?.prefs?.pairingNetworkCheck === false ? 'off' : 'enforce',
       });
-      return acknowledged(result) ? success({ expiresAt: result?.expiresAt ?? null }) : resultFailure(result, 'TUNNEL_NOT_READY');
+      // OAuth can await probe and native-sheet work. A renderer that closed in
+      // that interval must not receive the code or leave a live pairing behind.
+      if (!stillOwnsWindow(sender, window)) {
+        await safeCall(oauth, 'cancelPairing');
+        return fixed('NO_WINDOW');
+      }
+      // The pairing code is allowed only on this direct reply to the click
+      // that opened it. It must never become status, an event, audit data, or
+      // durable state. Pairing validates and formats it; validate again at the
+      // IPC boundary before exposing the narrow renderer capability.
+      const pairingCode = typeof result?.pairingCode === 'string' && PAIRING_CODE.test(result.pairingCode)
+        ? result.pairingCode.toUpperCase()
+        : null;
+      if (!acknowledged(result)) return resultFailure(result, 'TUNNEL_NOT_READY');
+      const expiresAt = Number.isFinite(result?.expiresAt) && result.expiresAt >= 0
+        ? result.expiresAt
+        : null;
+      if (!pairingCode || expiresAt === null) {
+        // A success without its complete ephemeral display capability would
+        // leave an armed code that this exact renderer cannot show. Fail
+        // closed and consume that malformed main-process session.
+        await safeCall(oauth, 'cancelPairing');
+        return fixed('INTERNAL');
+      }
+      return success({ expiresAt, pairingCode });
     }),
     [IPC_CHANNELS.CANCEL_PAIRING]: invoke(async () => {
       const result = await safeCall(oauth, 'cancelPairing'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');

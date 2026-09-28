@@ -44,7 +44,8 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getFailedStartDiagnostic } from './handoffBridge/telemetry.js';
+import { getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -2068,6 +2069,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 }
 
 const AIHANDOFF_MAIN_PROCESS_LOG_PATTERN = /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation|jsonrepair/i;
+const BRIDGE_MAIN_PROCESS_LOG_PATTERN = /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i;
 
 function buildRecentMainProcessLogLines({ filter } = {}) {
   let mainProcessLogLines = [];
@@ -2116,17 +2118,49 @@ function buildAIConfigurationMarkdown() {
 
 function buildHandoffBridgeDiagnosticsMarkdown() {
   const diagnostic = getFailedStartDiagnostic();
-  if (diagnostic?.telemetry !== true) return '';
-  const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
-  const at = Number.isFinite(diagnostic.at) ? new Date(diagnostic.at).toISOString() : 'not recorded';
-  const tunnel = diagnostic.tunnel && typeof diagnostic.tunnel === 'object' ? diagnostic.tunnel : {};
-  const probe = tunnel.probe && typeof tunnel.probe === 'object' ? tunnel.probe : {};
-  return `
-## Handoff Bridge Diagnostics
+  const oauthRejection = getOAuthRejectionDiagnostic();
+  const sourceRejection = getSourceRejectionDiagnostic();
+  const failedStart = diagnostic?.telemetry === true;
+  const rejectedOrigin = oauthRejection?.telemetry === true;
+  const rejectedSource = sourceRejection?.telemetry === true;
+  if (!failedStart && !rejectedOrigin && !rejectedSource) return '';
+  let failedStartMarkdown = '';
+  if (failedStart) {
+    const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
+    const at = Number.isFinite(diagnostic.at) ? new Date(diagnostic.at).toISOString() : 'not recorded';
+    const tunnel = diagnostic.tunnel && typeof diagnostic.tunnel === 'object' ? diagnostic.tunnel : {};
+    const probe = tunnel.probe && typeof tunnel.probe === 'object' ? tunnel.probe : {};
+    const readiness = tunnel.readiness && typeof tunnel.readiness === 'object' ? tunnel.readiness : {};
+    failedStartMarkdown = `
 - Failed start: phase \`${diagnostic.phase || 'unknown'}\` · cause \`${diagnostic.cause || 'unknown'}\`
 - Tunnel: state \`${tunnel.state || 'unknown'}\` · last exit \`${tunnel.lastExit || 'none'}\`
+- Configuration validation: ${readiness.configurationValidated === true ? 'passed' : 'not completed'} · environment check: ${readiness.environmentHealthy === true ? 'healthy' : 'not observed'} · local readiness: ${readiness.localReadinessPassed === true ? 'passed' : 'not confirmed'} · observed registered tunnel connections: ${Number.isFinite(readiness.registeredConnectionCount) ? Math.max(0, Math.min(8, readiness.registeredConnectionCount)) : 0}
 - Public probe: state \`${probe.state || 'unknown'}\` · reason \`${probe.reason || 'unknown'}\` · consecutive failures ${Number.isFinite(probe.consecutiveFailures) ? probe.consecutiveFailures : 0}
-- Recorded: ${at} · elapsed ${elapsed}
+- Recorded: ${at} · elapsed ${elapsed}`;
+  }
+  let oauthRejectionMarkdown = '';
+  if (rejectedOrigin) {
+    const last = oauthRejection.last && typeof oauthRejection.last === 'object' ? oauthRejection.last : {};
+    const count = Number.isFinite(oauthRejection.count) ? Math.max(1, Math.min(999, Math.floor(oauthRejection.count))) : 1;
+    const at = Number.isFinite(oauthRejection.at) ? new Date(oauthRejection.at).toISOString() : 'not recorded';
+    oauthRejectionMarkdown = `
+- OAuth cross-origin refusals: ${count} · last route \`${last.route || 'unknown'}\` · method \`${last.method || 'unknown'}\` · stage \`${last.stage || 'unknown'}\` · reason \`${last.reason || 'unknown'}\` · fetch site \`${last.fetchSite || 'unknown'}\` · fetch mode \`${last.fetchMode || 'unknown'}\` · fetch destination \`${last.fetchDest || 'unknown'}\` · Origin shape \`${last.originShape || 'unknown'}\` · consent action \`${last.consentAction || 'unknown'}\` · transaction \`${last.hasTxn || 'unknown'}\` · consent policy \`${last.consentPolicyVersion || 'unknown'}\` · status ${last.status === 403 ? 403 : 'unknown'} · recorded ${at}`;
+  }
+  let sourceRejectionMarkdown = '';
+  if (rejectedSource) {
+    const last = sourceRejection.last && typeof sourceRejection.last === 'object' ? sourceRejection.last : {};
+    const count = Number.isFinite(sourceRejection.count) ? Math.max(1, Math.min(999, Math.floor(sourceRejection.count))) : 1;
+    const at = Number.isFinite(sourceRejection.at) ? new Date(sourceRejection.at).toISOString() : 'not recorded';
+    // The wire answer for these is a generic 401 invalid_token, so state the
+    // real cause plainly here; otherwise this reads as an expired credential.
+    sourceRejectionMarkdown = `
+- Refused caller networks: ${count} · last route \`${last.route || 'unknown'}\` · policy \`${last.mode || 'unknown'}\` · caller network class \`${last.sourceClass || 'unknown'}\` · active links \`${last.links || 'unknown'}\` · answered 401 \`invalid_token\` · recorded ${at}
+  - The caller was refused for its NETWORK, not its token: the request came from a network this link was not paired from and outside the pinned connector ranges. A token that is otherwise valid still gets a generic 401 here.
+  - Recovery: Disconnect the existing link FIRST, then pair again. Re-pairing without disconnecting fails, because the token exchange is itself checked against the old link's pinned network.`;
+  }
+  return `
+## Handoff Bridge Diagnostics
+${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}
 `;
 }
 
@@ -2234,7 +2268,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   catch { /* never break the report on diagnostic failure */ }
 
   let handoffBridgeDiagnosticsMarkdown = '';
-  if (isFullReport) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
+  if (isFullReport || reportCodes.has('BRIDGE')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
   catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
@@ -2400,12 +2434,16 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // hit stdout (which users never see) are surfaced here. Skip lines older
   // than this process start so we don't drag in stale logs from a previous
   // run that happened to share the ring buffer state.
-  // AIHANDOFF is intentionally a focused lens. Its renderer Event History is
+  // AIHANDOFF and BRIDGE are intentionally focused lenses. Their renderer Event History is
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
-  // global even when combined with AIHANDOFF.
-  const mainProcessLogFilter = !isFullReport && reportCodes.has('AIHANDOFF')
-    ? entry => AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(String(entry?.message || ''))
+  // global even when combined with either code.
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE'))
+    ? entry => {
+      const message = String(entry?.message || '');
+      return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
+        || (reportCodes.has('BRIDGE') && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
+    }
     : null;
   let mainProcessLogLines = [];
   try { mainProcessLogLines = buildRecentMainProcessLogLines({ filter: mainProcessLogFilter }); }
@@ -2804,7 +2842,10 @@ export function registerBugReportHandlers() {
   // same generateMarkdown function.
   handleSafe('export-bug-report', async (event, payload) => {
     if (isBackgroundE2E()) return { success: false, canceled: true };
-    const { markdown: markdownContent } = generateMarkdown(payload, event.sender?.id ?? null);
+    const descriptionValidation = validateIssueReportDescription(payload?.description);
+    if (!descriptionValidation.ok) throw new TypeError(descriptionValidation.error);
+    const safePayload = { ...payload, description: descriptionValidation.value };
+    const { markdown: markdownContent } = generateMarkdown(safePayload, event.sender?.id ?? null);
 
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: 'Save Bug Report',
@@ -2827,16 +2868,19 @@ export function registerBugReportHandlers() {
   // instead. See electron/ipc/bugReport/reportFile.js for the file lifecycle
   // (retained across app starts, then pruned by age and count retention).
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
-    const full = generateMarkdown(payload, event.sender?.id ?? null); // UNCAPPED — the file is the artifact
+    const descriptionValidation = validateIssueReportDescription(payload?.description);
+    if (!descriptionValidation.ok) throw new TypeError(descriptionValidation.error);
+    const safePayload = { ...payload, description: descriptionValidation.value };
+    const full = generateMarkdown(safePayload, event.sender?.id ?? null); // UNCAPPED — the file is the artifact
 
     // Mirror filterSummary.js's own read of these two payload fields (see
     // buildFilterSummaryMarkdown) instead of re-deriving them from inside
     // generateMarkdown, which doesn't expose its internal event-line count.
-    const filterCode = String(payload?.filterCode || '').trim();
-    const statsEventsShown = Number(payload?.filterStats?.eventsShown);
+    const filterCode = String(safePayload.filterCode || '').trim();
+    const statsEventsShown = Number(safePayload.filterStats?.eventsShown);
     const eventLines = Number.isFinite(statsEventsShown) ? statsEventsShown : null;
     const generatedAt = new Date().toISOString();
-    const description = typeof payload?.description === 'string' ? payload.description : '';
+    const description = safePayload.description;
 
     try {
       const saved = await writeSavedBugReport(full.markdown, { reportWindowId: event.sender?.id ?? null });
@@ -2865,7 +2909,7 @@ export function registerBugReportHandlers() {
       // (full disk, permissions, unwritable userData, ...), so fall back to
       // the old capped-inline clipboard content rather than surfacing a bare
       // error with no report at all.
-      const capped = generateMarkdown(payload, event.sender?.id ?? null, { maxChars: CLIPBOARD_BUG_REPORT_MAX_CHARS });
+      const capped = generateMarkdown(safePayload, event.sender?.id ?? null, { maxChars: CLIPBOARD_BUG_REPORT_MAX_CHARS });
       // Whether the fallback ACTUALLY lost anything is a measurement, not an
       // assumption: passing maxChars also switches on routine node-row sampling
       // inside buildNodeDiagnosticsMarkdown, which `truncated`/`hardTruncated`

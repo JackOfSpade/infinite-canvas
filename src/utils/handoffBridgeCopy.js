@@ -257,18 +257,28 @@ export const BRIDGE_SETUP_COPY = Object.freeze({
   includeDiagnostics: 'Include bridge diagnostics in FULL bug reports',
   status: 'Tunnel status',
   tunnelStates: Object.freeze({ off: 'Off', blocked: 'Blocked', 'needs-setup': 'Setup needed', 'needs-trust': 'Needs approval', starting: 'Starting', connecting: 'Connecting', 'checking-public': 'Checking public address', up: 'Online', degraded: 'Degraded', backoff: 'Waiting to retry', paused: 'Paused', stopping: 'Stopping', failed: 'Failed', unknown: 'Unknown' }),
-  defaultPluginName: 'Infinite Canvas',
+  defaultPluginName: 'infinite_canvas',
+  suggestedPluginName: 'infinite_canvas',
+  suggestedPluginNameLead: 'Use this exact plugin name in ChatGPT:',
+  copyPluginName: 'Copy plugin name',
+  pluginNameCopied: 'Copied plugin name.',
   commandPreview: 'The app runs the approved cloudflared copy with private settings. This is not a command to copy.',
   pairingLead: 'Press Open pairing here before creating or reconnecting the ChatGPT plugin.',
   openPairing: 'Open pairing',
   cancelPairing: 'Cancel pairing',
   openChatGpt: 'Open ChatGPT plugin settings',
   copyServerUrl: 'Copy server URL',
+  serverUrlCopied: 'Copied server URL.',
+  copyPairingCode: 'Copy pairing code',
+  pairingCodeCopied: 'Copied pairing code.',
+  pairingCode: 'Pairing code',
+  pairingCodeWarning: 'Enter this code only in the ChatGPT pairing page you opened yourself. Never share it.',
+  pairingCodeExpiry: 'This code expires automatically within 10 minutes and disappears here when it expires.',
   progress: 'Link progress',
   progressItems: Object.freeze(['Plugin discovery opened', 'Permission requested', 'Pairing approved', 'Link issued', 'Tools listed']),
   pluginSteps: Object.freeze([
     'In ChatGPT, open Apps and create an MCP app.',
-    'Enter the name and server address shown here, then choose OAuth.',
+    'Enter the exact plugin name and server address shown here, then choose OAuth.',
     'Leave all Advanced OAuth fields blank. Before creating or reconnecting, press Open pairing here.',
     'Finish browser pairing. When ChatGPT first asks, choose Always allow.',
   ]),
@@ -293,6 +303,6 @@ export const IPC_ERROR_COPY = Object.freeze({
   // This is action feedback, including an incomplete preload surface and a
   // failed bridge start. The authoritative status card alone may say that a
   // build is unavailable.
-  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Start a new chat.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', NOT_FOUND: 'That item is no longer there.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
+  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', TUNNEL_NOT_SERVING: 'This public hostname is not serving the selected tunnel. In Cloudflare DNS, make sure its tunnel target matches the credentials file you chose.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Start a new chat.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', NOT_FOUND: 'That item is no longer available.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
 });
 export function ipcErrorMessage(code) { return IPC_ERROR_COPY[code] || IPC_ERROR_COPY.INTERNAL; }

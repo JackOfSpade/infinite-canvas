@@ -47,7 +47,7 @@ export default [
     assert(isValidHostname('b-0123456789abcdef0123.lullascape.com'), 'the production hostname shape must be accepted');
     for (const hostile of ['example.com', 'Bridge.example.com', 'bridge.example.com.', '127.0.0.1', 'bridge..example.com', 'bridge:443.example.com', 'bridge\n.example.com', 'bráce.example.com', 'xn--brce-6pa.example.com']) assert(!isValidHostname(hostile), `hostname validator must reject ${JSON.stringify(hostile)}`);
     for (const hostile of ['bad\nplugin', 'bad{plugin}', 'bad"plugin', '..']) assert(!isValidPluginName(hostile), `plugin validator must reject ${JSON.stringify(hostile)}`);
-    assert(isValidPluginName('Infinite Canvas'), 'safe plugin names must remain accepted');
+    assert(isValidPluginName('Infinite Canvas') && isValidPluginName('infinite_canvas'), 'safe plugin names must remain accepted');
     assert(isValidSocketPath('/Users/ada/Library/Application Support/infinite-canvas/handoff-bridge/b.sock'), 'real Application Support socket paths with a space must be accepted');
     for (const hostile of ['relative/b.sock', '/tmp/../b.sock', '/tmp/a\n.sock', '/tmp/a:1.sock', '/tmp/a{b}.sock', '/tmp/a"b.sock', '/tmp/é.sock', `/tmp/${'x'.repeat(96)}.sock`]) assert(!isValidSocketPath(hostile), `socket validator must reject ${JSON.stringify(hostile)}`);
     const source = fs.readFileSync(configUrl, 'utf8'); assert(IMPORT_SYNTAX.test("import/* split */ { readFile } from 'node:fs';"), 'zero-import scan must recognize comment-separated import syntax'); assert(!IMPORT_SYNTAX.test(source), 'shared configuration must have zero imports');
@@ -71,6 +71,9 @@ export default [
     for (const reason of JOB_REASONS) assert(normalizeBridgeStatus(rawStatus(1, { queue: { jobs: [{ jobId, phase: 'held', reason }] } })).queue.jobs[0]?.reason === reason, `job reason ${reason} must be preserved`);
     assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { state: 'online' } })).tunnel.state === 'unknown', 'a raw supervisor online state is not a public renderer enum');
     assert(normalizeBridgeStatus(rawStatus(1, { tunnel: { state: 'made-up' } })).tunnel.state === 'unknown', 'unknown enum must fail closed');
+    assert(normalizeBridgeStatus(rawStatus(1, { config: { pluginName: '' } })).config.pluginName === 'infinite_canvas'
+      && normalizeBridgeStatus(rawStatus(1, { config: { pluginName: 'My Bridge 2' } })).config.pluginName === 'My Bridge 2',
+    'blank legacy status names must become the default while custom names remain unchanged');
     assert(normalizeBridgeStatus(rawStatus(1, { prefs: { sourcePolicy: 'off' } })).prefs.sourcePolicy === 'off', 'the accepted source-policy off value must survive normalization');
   } },
   { name: 'handoff bridge: ui: job row states retain their intended neutral and dock copy', run: () => {

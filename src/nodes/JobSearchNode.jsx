@@ -27,6 +27,7 @@ import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropU
 import { canAttemptJobSourceResolve, descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
 import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
+import { isLiveManualAiRecoveryBoardOwner, isSavedScrapeManualAiResume, isStaleOrdinaryManualAiResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../utils/manualAiRecovery';
 import { isTerminalSourceStatus } from '../utils/sourceProgress';
 import { detectQueryOperators } from '../utils/jobTitleMatch';
 
@@ -104,7 +105,6 @@ const STATE_LABELS = {
 
 const PROCESSING_STATES = ['queued', 'parsing', 'interpreting-preferences', 'querying', 'searching', 'evaluating-preferences', 'scoring'];
 const BOARD_BUSY_SEARCH_STATES = new Set(PROCESSING_STATES);
-const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set(['resume-saved-scrape', 'append-scored-jobs']);
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
 
 function serializedJobSearchWindow(window, anchorSource) {
@@ -580,11 +580,6 @@ function boardCancellationCleanupError(error, fallback) {
     : new Error(error?.message || fallback || String(error || 'Job Search cancellation cleanup failed.'));
   tagged.code = 'BOARD_CANCELLATION_CLEANUP_FAILED';
   return tagged;
-}
-
-function isSavedScrapeManualAiResume(resume) {
-  return resume?.task === 'job-scoring'
-    || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode);
 }
 
 /**
@@ -1064,6 +1059,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // published request identity so a late cancellation for an older standalone
   // run cannot reset whichever workflow now owns this hub.
   const activeManualAiRunIdRef = useRef(data.manualAiResume?.runId || null);
+  // A stale standalone recovery owns admission until the person either starts
+  // or discards that exact marker. Keep both React-visible and synchronous
+  // ownership so two rapid clicks cannot race a resume against a discard.
+  const [manualAiExplicitResumeRequest, setManualAiExplicitResumeRequest] = useState(null);
+  const [manualAiStaleRecoveryActionRunId, setManualAiStaleRecoveryActionRunId] = useState(null);
+  const manualAiStaleRecoveryActionRunIdRef = useRef(null);
+  useEffect(() => {
+    const activeRunId = manualAiStaleRecoveryActionRunIdRef.current;
+    if (!activeRunId || data.manualAiResume?.runId === activeRunId) return;
+    // The durable marker changed while an action was pending. Its exact-id
+    // authorization cannot transfer to the replacement (or an already-retired
+    // marker), so release only the local UI latch and require a fresh choice.
+    manualAiStaleRecoveryActionRunIdRef.current = null;
+    setManualAiStaleRecoveryActionRunId(current => current === activeRunId ? null : current);
+    setManualAiExplicitResumeRequest(current => current?.runId === activeRunId ? null : current);
+  }, [data.manualAiResume?.runId]);
   // A prompt notification can already be queued in the renderer when normal
   // completion or cancellation retires its durable manual run. Remember those
   // exact run ids so a late notification cannot recreate `manualAiResume`.
@@ -3638,6 +3649,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
     }
     const liveData = getNode(id)?.data || data;
+    const boardOwnsStaleRecovery = queueManagedByBoard
+      && isLiveManualAiRecoveryBoardOwner(
+        findJobSearchBoardRecoveryOwner(id, liveData.manualAiResume?.runId, getNodes(), getEdges()),
+      );
+    if (staleOrdinaryManualAiResumeBlocksAdmission(liveData.manualAiResume, {
+      manualAiRunId,
+      explicitResumeRunId: manualAiStaleRecoveryActionRunIdRef.current,
+      boardOwnsRecovery: boardOwnsStaleRecovery,
+    })) {
+      return searchRunOutcome('not-ready', {
+        error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before starting another search.',
+      });
+    }
     if (hasPendingManualAiRetirement(liveData)) {
       return searchRunOutcome('not-ready', {
         error: 'Finish the older manual-AI cancellation cleanup before starting another search.',
@@ -3694,6 +3718,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || (typeof parentCancelled === 'function' && parentCancelled());
     let lease = null;
     let standaloneBecameBoardRecoveryManaged = false;
+    let staleRecoveryBlockedAtLaneStart = false;
     let deletionBlockedAtLaneStart = false;
     try {
       if (!queueManagedByBoard) {
@@ -3723,6 +3748,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               standaloneBecameBoardRecoveryManaged = true;
               return;
             }
+            const laneData = getNode(currentId)?.data || {};
+            if (staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume, {
+              manualAiRunId: effectiveManualAiRunId,
+              explicitResumeRunId: manualAiStaleRecoveryActionRunIdRef.current,
+              boardOwnsRecovery: queueManagedByBoard
+                && isLiveManualAiRecoveryBoardOwner(
+                  findJobSearchBoardRecoveryOwner(currentId, laneData.manualAiResume?.runId, getNodes(), getEdges()),
+                ),
+            })) {
+              staleRecoveryBlockedAtLaneStart = true;
+              return;
+            }
             updateGlobal(currentId, { queuedModuleRun: null });
           },
         });
@@ -3746,6 +3783,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           type: 'info',
         });
         return searchRunOutcome('paused', { error: 'This Job Search is reserved by an interrupted Job Board run.' });
+      }
+
+      if (staleRecoveryBlockedAtLaneStart) {
+        updateGlobal(currentId, { queuedModuleRun: null });
+        return searchRunOutcome('not-ready', {
+          error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before starting another search.',
+        });
       }
 
       if (
@@ -3776,6 +3820,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // otherwise the stale queued callback can start provider work while
         // the UI correctly says "Checking Connections".
         || hasPendingManualAiRetirement(laneTurnData)
+        || staleOrdinaryManualAiResumeBlocksAdmission(laneTurnData.manualAiResume, {
+          manualAiRunId: effectiveManualAiRunId,
+          explicitResumeRunId: manualAiStaleRecoveryActionRunIdRef.current,
+          boardOwnsRecovery: queueManagedByBoard
+            && isLiveManualAiRecoveryBoardOwner(
+              findJobSearchBoardRecoveryOwner(currentId, laneTurnData.manualAiResume?.runId, getNodes(), getEdges()),
+            ),
+        })
       ) {
         return searchRunOutcome('not-ready', {
           error: 'This Job Search became unavailable while it was queued.',
@@ -4706,6 +4758,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const boardConnectedAtContinuationAdmission = !queueManagedExternally
       && isJobSearchConnectedToBoard(id, getNodes(), getEdges());
     const requestedData = getNode(id)?.data || data;
+    const requestedStaleRecoveryBoardOwner = findJobSearchBoardRecoveryOwner(
+      id,
+      requestedData.manualAiResume?.runId,
+      getNodes(),
+      getEdges(),
+    );
+    if (staleOrdinaryManualAiResumeBlocksAdmission(requestedData.manualAiResume, {
+      boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(requestedStaleRecoveryBoardOwner),
+    })) {
+      return searchRunOutcome('not-ready', {
+        error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before scoring current results.',
+      });
+    }
     const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null;
     if (
       findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
@@ -4772,6 +4837,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const cancelled = epoch.start();
       let emptyContinuationLease = null;
       let standaloneEmptyContinuationClaimedByBoard = false;
+      let staleEmptyContinuationBlockedAtLaneStart = false;
       try {
         if (!queueManagedExternally) {
           emptyContinuationLease = await moduleRunQueue.acquireModuleRun({
@@ -4800,6 +4866,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 standaloneEmptyContinuationClaimedByBoard = true;
                 return;
               }
+              const laneData = getNode(id)?.data || {};
+              if (staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume, {
+                boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(
+                  findJobSearchBoardRecoveryOwner(
+                    id,
+                    laneData.manualAiResume?.runId,
+                    getNodes(),
+                    getEdges(),
+                  ),
+                ),
+              })) {
+                staleEmptyContinuationBlockedAtLaneStart = true;
+                return;
+              }
               updateGlobal(id, { queuedModuleRun: null });
             },
           });
@@ -4819,6 +4899,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             error: 'This scoring continuation is now managed by a connected Job Board.',
           });
         }
+        if (staleEmptyContinuationBlockedAtLaneStart) {
+          clearContinuationQueueMarker();
+          return searchRunOutcome('not-ready', {
+            runId: requestedJobRunId,
+            error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before scoring current results.',
+          });
+        }
         if (
           findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())
           && !findJobSearchBoardPausedContinuationOwner(id, requestedJobRunId, getNodes(), getEdges())
@@ -4835,6 +4922,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (
         cancelled()
         || isJobWorkflowDeletionPending(id)
+        || staleOrdinaryManualAiResumeBlocksAdmission(continuationData?.manualAiResume, {
+          boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(
+            findJobSearchBoardRecoveryOwner(
+              id,
+              continuationData?.manualAiResume?.runId,
+              getNodes(),
+              getEdges(),
+            ),
+          ),
+        })
         || continuationData?.hubState !== 'sources-ready'
         || continuationRunId !== requestedJobRunId
         || (Array.isArray(continuationPending) && continuationPending.length > 0)
@@ -4966,6 +5063,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const manualAiRunId = createManualAiRunId(currentId);
     let lease = null;
     let standaloneContinuationClaimedByBoard = false;
+    let staleContinuationBlockedAtLaneStart = false;
     try {
       if (!queueManagedExternally) {
         lease = await moduleRunQueue.acquireModuleRun({
@@ -4998,6 +5096,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               standaloneContinuationClaimedByBoard = true;
               return;
             }
+            const laneData = getNode(currentId)?.data || {};
+            if (staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume, {
+              boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(
+                findJobSearchBoardRecoveryOwner(
+                  currentId,
+                  laneData.manualAiResume?.runId,
+                  getNodes(),
+                  getEdges(),
+                ),
+              ),
+            })) {
+              staleContinuationBlockedAtLaneStart = true;
+              return;
+            }
             updateGlobal(currentId, { queuedModuleRun: null });
           },
         });
@@ -5019,6 +5131,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           error: 'This scoring continuation is now managed by a connected Job Board.',
         });
       }
+      if (staleContinuationBlockedAtLaneStart) {
+        clearContinuationQueueMarker();
+        return searchRunOutcome('not-ready', {
+          runId: requestedJobRunId,
+          error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before scoring current results.',
+        });
+      }
       if (
         findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
         && !findJobSearchBoardPausedContinuationOwner(currentId, requestedJobRunId, getNodes(), getEdges())
@@ -5035,6 +5154,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (
         cancelled()
         || isJobWorkflowDeletionPending(currentId)
+        || staleOrdinaryManualAiResumeBlocksAdmission(continuationData?.manualAiResume, {
+          boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(
+            findJobSearchBoardRecoveryOwner(
+              currentId,
+              continuationData?.manualAiResume?.runId,
+              getNodes(),
+              getEdges(),
+            ),
+          ),
+        })
         || continuationData?.hubState !== 'sources-ready'
         || continuationRunId !== requestedJobRunId
         || !Array.isArray(continuationPending)
@@ -5357,6 +5486,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       return searchRunOutcome(processingRunsRef.current.active ? 'busy' : 'not-found');
     }
     let liveData = getNode(id)?.data || data;
+    if (staleOrdinaryManualAiResumeBlocksAdmission(liveData.manualAiResume, {
+      boardOwnsRecovery: queueManagedByBoard
+        && isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+          id, liveData.manualAiResume?.runId, getNodes(), getEdges(),
+        )),
+    })) {
+      return searchRunOutcome('not-ready', {
+        error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before resuming an interrupted search.',
+      });
+    }
     const currentResumeLocation = normalizeLocationInput(
       liveData.canonicalLocation || liveData.preferredLocation || '',
     ).boardReady;
@@ -5421,6 +5560,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     let lease = null;
     let processingToken = null;
     let standaloneBecameBoardManaged = false;
+    let staleInterruptedResumeBlockedAtLaneStart = false;
     try {
       if (!queueManagedByBoard) {
         lease = await moduleRunQueue.acquireModuleRun({
@@ -5447,6 +5587,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               standaloneBecameBoardManaged = true;
               return;
             }
+            if (staleOrdinaryManualAiResumeBlocksAdmission(getNode(currentId)?.data?.manualAiResume)) {
+              staleInterruptedResumeBlockedAtLaneStart = true;
+              return;
+            }
             updateGlobal(currentId, { queuedModuleRun: null });
           },
         });
@@ -5459,6 +5603,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
           return searchRunOutcome('not-ready', {
             error: 'This interrupted search is now managed by a connected Job Board.',
+          });
+        }
+        if (staleInterruptedResumeBlockedAtLaneStart) {
+          updateGlobal(currentId, { queuedModuleRun: null });
+          return searchRunOutcome('not-ready', {
+            runId: offer.runId || null,
+            error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before resuming an interrupted search.',
           });
         }
         if (
@@ -5513,6 +5664,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       liveData = getNode(currentId)?.data || null;
+      if (staleOrdinaryManualAiResumeBlocksAdmission(liveData?.manualAiResume, {
+        boardOwnsRecovery: queueManagedByBoard
+          && isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+            currentId, liveData?.manualAiResume?.runId, getNodes(), getEdges(),
+          )),
+      })) {
+        return searchRunOutcome('not-ready', {
+          runId: offer.runId || null,
+          error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before resuming an interrupted search.',
+        });
+      }
       const laneResumeLocation = normalizeLocationInput(
         liveData?.canonicalLocation || liveData?.preferredLocation || '',
       ).boardReady;
@@ -6215,6 +6377,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (hasPendingManualAiRetirement(liveData)) return;
     const liveNodes = getNodes();
     const liveEdges = getEdges();
+    if (staleOrdinaryManualAiResumeBlocksAdmission(liveData.manualAiResume, {
+      boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+        id, liveData.manualAiResume?.runId, liveNodes, liveEdges,
+      )),
+    })) {
+      addToast({
+        title: 'Choose Saved Recovery First',
+        description: 'Resume or start fresh for the older saved AI handoff before scoring current results.',
+        type: 'info',
+      });
+      return;
+    }
     const liveBoardRecoveryOwner = findJobSearchBoardActiveRecoveryOwner(
       id,
       liveNodes,
@@ -7182,6 +7356,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (isJobWorkflowDeletionPending(id)) {
       return searchRunOutcome('cancelled', { error: 'This Job Search is pending deletion.' });
     }
+    const liveDataAtAdmission = getNode(id)?.data || {};
+    if (staleOrdinaryManualAiResumeBlocksAdmission(liveDataAtAdmission.manualAiResume, {
+      manualAiRunId,
+      explicitResumeRunId: manualAiStaleRecoveryActionRunIdRef.current,
+      boardOwnsRecovery: queueManagedByBoard
+        && isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+          id, liveDataAtAdmission.manualAiResume?.runId, getNodes(), getEdges(),
+        )),
+    })) {
+      return searchRunOutcome('not-ready', {
+        error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before starting another search.',
+      });
+    }
     if (hasPendingManualAiRetirement(getNode(id)?.data || {})) {
       return searchRunOutcome('not-ready', {
         error: 'Finish the older manual-AI cancellation cleanup before starting another search.',
@@ -7274,7 +7461,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         freshImportCapability,
       });
     }
-  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getNode, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, platformsVerifying]);
+  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getEdges, getNode, getNodes, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, platformsVerifying]);
 
   const cancelBoardRun = useCallback(async ({
     orchestratorNodeId,
@@ -8488,6 +8675,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       return;
     }
+    if (staleOrdinaryManualAiResumeBlocksAdmission(getNode(id)?.data?.manualAiResume)) {
+      addToast({
+        title: 'Choose Saved Recovery First',
+        description: 'Resume or start fresh for the older saved AI handoff before re-evaluating jobs.',
+        type: 'info',
+      });
+      return;
+    }
     if (getNode(id)?.data?.terminalFinalizationRecovery) {
       addToast({
         title: 'Finish Job Search Recovery First',
@@ -8566,6 +8761,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     let runData = requestedData;
     let restorePatch = null;
     let lease = null;
+    let staleRecoveryBlockedAtLaneStart = false;
 
     try {
       lease = await moduleRunQueue.acquireModuleRun({
@@ -8583,6 +8779,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         },
         onStart: () => {
           if (cancelled() || isJobWorkflowDeletionPending(currentId)) throw new Error('Node deleted');
+          if (staleOrdinaryManualAiResumeBlocksAdmission(getNode(currentId)?.data?.manualAiResume)) {
+            staleRecoveryBlockedAtLaneStart = true;
+            return;
+          }
           updateGlobal(currentId, { queuedModuleRun: null });
         },
       });
@@ -8592,6 +8792,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         cancelled()
         || isJobWorkflowDeletionPending(currentId)
         || !getNode(currentId)
+        || staleRecoveryBlockedAtLaneStart
+        || staleOrdinaryManualAiResumeBlocksAdmission(runData.manualAiResume)
       ) return;
       if (runData.locked) {
         addToast({
@@ -9040,7 +9242,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // clearing its files would otherwise make the eventual live-turn validation
   // silently reject work the UI still claimed was queued.
   const cleanupRetirementPending = hasPendingManualAiRetirement(data);
-  const controlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;
+  const staleManualAiRecovery = data.manualAiResume;
+  const staleManualAiRecoveryNeedsDecision = isStaleOrdinaryManualAiResume(staleManualAiRecovery)
+    && !boardRecoveryOwnsActions;
+  const staleManualAiRecoveryActionBusy = staleManualAiRecoveryNeedsDecision
+    && manualAiStaleRecoveryActionRunId === staleManualAiRecovery?.runId;
+  // A stale ordinary marker is itself an admission boundary. Letting Re-scan,
+  // Retry, drops, or settings actions through it would create a fresh run id
+  // beside the durable handoff the person has not decided to resume/discard.
+  const staleManualAiRecoveryAdmissionLocked = staleManualAiRecoveryNeedsDecision;
+  const baseControlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;
+  const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;
   // Why a drop would bounce right now, in the same order dropsBlocked ORs its
   // three inputs, so the chip names the reason that actually wins. Without it a
   // Finder drag over a blocked hub shows nothing at all — the file-drag lane
@@ -9050,7 +9262,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     : getHubDropRejectLabel({ type: 'jobhub', data })
       || (data.queuedModuleRun ? 'Queued' : null)
       || (controlsLocked ? 'Busy' : null);
-  const errorControlsLocked = !!data.locked || !!data.queuedModuleRun;
+  const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;
   // SETTINGS LOCKING: PERMANENT freeze of every user-configurable setting
   // (Search Brief, location, remote residences, jobs/pages depth, and enabled
   // platforms) once roles have been resolved — distinct
@@ -9160,6 +9372,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
     }
     const admissionData = getNode(id)?.data || data;
+    // The saved-scrape marker itself is exempt from stale ordinary recovery,
+    // but a different ordinary marker may arrive while this replay is queued.
+    // It must own admission unless the exact marker belongs to this Board run.
+    if (staleOrdinaryManualAiResumeBlocksAdmission(admissionData.manualAiResume, {
+      boardOwnsRecovery: queueManagedByBoard
+        && isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+          id, admissionData.manualAiResume?.runId, getNodes(), getEdges(),
+        )),
+    })) {
+      return searchRunOutcome('not-ready', {
+        error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before resuming this saved scrape.',
+      });
+    }
     if (
       admissionData.locked
       || !admissionData.resumeProfile
@@ -9189,6 +9414,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || (typeof parentCancelled === 'function' && parentCancelled());
     let lease = null;
     let standaloneRecoveryClaimedByBoard = false;
+    let staleSavedRecoveryBlockedAtLaneStart = false;
 
     try {
       if (!queueManagedByBoard) {
@@ -9224,6 +9450,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               standaloneRecoveryClaimedByBoard = true;
               return;
             }
+            if (staleOrdinaryManualAiResumeBlocksAdmission(getNode(currentId)?.data?.manualAiResume)) {
+              staleSavedRecoveryBlockedAtLaneStart = true;
+              return;
+            }
             updateGlobal(currentId, { queuedModuleRun: null });
           },
         });
@@ -9241,11 +9471,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           error: 'This saved recovery is managed by its connected Job Board.',
         });
       }
+      if (staleSavedRecoveryBlockedAtLaneStart) {
+        updateGlobal(currentId, { queuedModuleRun: null });
+        return searchRunOutcome('not-ready', {
+          error: 'Choose Resume or Start fresh for the saved older manual-AI recovery before resuming this saved scrape.',
+        });
+      }
       const laneTurnData = getNode(currentId)?.data || null;
       if (
         !laneTurnData
         || laneTurnData.locked
         || isJobWorkflowDeletionPending(currentId)
+        || staleOrdinaryManualAiResumeBlocksAdmission(laneTurnData.manualAiResume, {
+          boardOwnsRecovery: queueManagedByBoard
+            && isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+              currentId, laneTurnData.manualAiResume?.runId, getNodes(), getEdges(),
+            )),
+        })
         || (!queueManagedByBoard && platformsVerifyingRef.current)
         || (
           !queueManagedByBoard
@@ -9737,12 +9979,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     ) return;
     if (!['empty', 'done', 'sources-ready'].includes(hubState)) return;
     if (
+      isStaleOrdinaryManualAiResume(resume)
+      && manualAiExplicitResumeRequest?.runId !== resume.runId
+    ) return;
+    if (
       autoResumedManualAiRunRef.current === resume.runId
       || manualAiAutoResumeAttemptRef.current?.runId === resume.runId
     ) return;
     const attemptToken = Symbol(`manual-ai-auto-resume:${resume.runId}`);
     manualAiAutoResumeAttemptRef.current = { runId: resume.runId, token: attemptToken };
     autoResumedManualAiRunRef.current = resume.runId;
+    // Consent is one-shot. Once the attempt has claimed this exact marker, a
+    // rejected/throwing provider attempt cannot turn the old click into a
+    // later implicit retry.
+    setManualAiExplicitResumeRequest(current => (
+      current?.runId === resume.runId ? null : current
+    ));
 
     const start = async () => {
       EventLogger.log(`[JobSearch][${id}] Auto-resuming manual AI run ${resume.runId} at ${resume.task || 'pending step'}`);
@@ -9791,10 +10043,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             || liveData.locked
             || platformsVerifying
           )
-        );
+      );
       if (retryableTransient) {
         autoResumedManualAiRunRef.current = null;
-        setManualAiAutoResumeRetryRevision(revision => revision + 1);
+        if (isMountedRef.current) {
+          setManualAiAutoResumeRetryRevision(revision => revision + 1);
+        }
       }
     }).catch((error) => {
       autoResumedManualAiRunRef.current = null;
@@ -9803,8 +10057,90 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (manualAiAutoResumeAttemptRef.current?.token === attemptToken) {
         manualAiAutoResumeAttemptRef.current = null;
       }
+      if (manualAiStaleRecoveryActionRunIdRef.current === resume.runId) {
+        manualAiStaleRecoveryActionRunIdRef.current = null;
+        if (isMountedRef.current) {
+          setManualAiStaleRecoveryActionRunId(current => (
+            current === resume.runId ? null : current
+          ));
+        }
+      }
     });
-  }, [activeBoardRecoveryOwnerKey, boardRecoveryOwnsActions, canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, deletionLifecycleRevision, getEdges, getNode, getNodes, handleResumeSavedScrape, hubState, id, manualAiAutoResumeRetryRevision, platformsVerifying, runPipeline, settleManualAiRetirement, updateGlobal]);
+  }, [activeBoardRecoveryOwnerKey, boardRecoveryOwnsActions, canvasFilePath, data.manualAiCleanupReceipts, data.manualAiResume, data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, deletionLifecycleRevision, getEdges, getNode, getNodes, handleResumeSavedScrape, hubState, id, isMountedRef, manualAiAutoResumeRetryRevision, manualAiExplicitResumeRequest, platformsVerifying, runPipeline, settleManualAiRetirement, updateGlobal]);
+
+  const handleResumeStaleManualAiRecovery = useCallback(() => {
+    const liveData = getNode(id)?.data || {};
+    const resume = liveData.manualAiResume;
+    if (
+      !isStaleOrdinaryManualAiResume(resume)
+      || isJobWorkflowDeletionPending(id)
+      || !canvasFilePath
+      || liveData.locked
+      || liveData.queuedModuleRun
+      || hasPendingManualAiRetirement(liveData)
+      || findJobSearchBoardRecoveryOwner(id, resume?.runId, getNodes(), getEdges())
+      || manualAiStaleRecoveryActionRunIdRef.current
+    ) return;
+    // Resetting the one-shot latch is intentional: each button press is a new,
+    // explicit request to run this exact durable marker, never an automatic
+    // retry after a failed provider/auth preflight.
+    autoResumedManualAiRunRef.current = null;
+    manualAiAutoResumeAttemptRef.current = null;
+    manualAiStaleRecoveryActionRunIdRef.current = resume.runId;
+    setManualAiStaleRecoveryActionRunId(resume.runId);
+    setManualAiExplicitResumeRequest({ runId: resume.runId, requestedAt: Date.now() });
+    EventLogger.log(`[JobSearch][${id}] User resumed stale manual AI run ${resume.runId}`);
+  }, [canvasFilePath, getEdges, getNode, getNodes, id]);
+
+  const handleDiscardStaleManualAiRecovery = useCallback(async () => {
+    const liveData = getNode(id)?.data || {};
+    const resume = liveData.manualAiResume;
+    if (
+      !isStaleOrdinaryManualAiResume(resume)
+      || isJobWorkflowDeletionPending(id)
+      || liveData.locked
+      || liveData.queuedModuleRun
+      || hasPendingManualAiRetirement(liveData)
+      || findJobSearchBoardRecoveryOwner(id, resume?.runId, getNodes(), getEdges())
+      || manualAiStaleRecoveryActionRunIdRef.current
+    ) return;
+    // Do not clear node state generically. settleManualAiRetirement removes
+    // only the marker with this immutable run id and leaves every other
+    // recovery receipt untouched.
+    manualAiStaleRecoveryActionRunIdRef.current = resume.runId;
+    setManualAiStaleRecoveryActionRunId(resume.runId);
+    autoResumedManualAiRunRef.current = resume.runId;
+    try {
+      await settleManualAiRetirement({
+        runId: resume.runId,
+        marker: resume,
+        retirementReason: 'discarded-stale-manual-ai-recovery',
+        requireCancellationAck: true,
+        cancellationReason: 'discarded-stale-manual-ai-recovery',
+      });
+      const liveMarker = getNode(id)?.data?.manualAiResume;
+      if (isMountedRef.current && liveMarker?.runId !== resume.runId) {
+        setManualAiExplicitResumeRequest(current => current?.runId === resume.runId ? null : current);
+        EventLogger.log(`[JobSearch][${id}] User discarded stale manual AI run ${resume.runId}`);
+      }
+    } catch (error) {
+      EventLogger.error(`[JobSearch][${id}] Stale manual-AI recovery discard failed:`, error);
+      if (isMountedRef.current && getNode(id)?.data?.manualAiResume?.runId === resume.runId) {
+        updateGlobal(id, {
+          errorMessage: error?.message || 'The saved manual-AI recovery could not be discarded.',
+        });
+      }
+    } finally {
+      if (isMountedRef.current && manualAiStaleRecoveryActionRunIdRef.current === resume.runId) {
+        manualAiStaleRecoveryActionRunIdRef.current = null;
+        setManualAiStaleRecoveryActionRunId(current => (
+          current === resume.runId ? null : current
+        ));
+      } else if (manualAiStaleRecoveryActionRunIdRef.current === resume.runId) {
+        manualAiStaleRecoveryActionRunIdRef.current = null;
+      }
+    }
+  }, [getEdges, getNode, getNodes, id, isMountedRef, settleManualAiRetirement, updateGlobal]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);
@@ -9826,6 +10162,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (isJobWorkflowDeletionPending(id)) return;
     if (data.locked) return;
     const liveData = getNode(id)?.data || {};
+    if (staleOrdinaryManualAiResumeBlocksAdmission(liveData.manualAiResume, {
+      boardOwnsRecovery: isLiveManualAiRecoveryBoardOwner(findJobSearchBoardRecoveryOwner(
+        id, liveData.manualAiResume?.runId, getNodes(), getEdges(),
+      )),
+    })) {
+      EventLogger.log(`[JobSearch][${id}] Try Again deferred pending stale manual-AI recovery decision`);
+      return;
+    }
     const supersededCleanupReceipts = normalizeManualAiCleanupReceipts(
       liveData.manualAiCleanupReceipts,
     );
@@ -10022,10 +10366,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // run priority so this module never presents competing recovery cards.
   const showUnfinishedRunBanner = Boolean(
     resumeOffer
+    && !staleManualAiRecoveryNeedsDecision
     && !data.queuedModuleRun
     && !data.terminalFinalizationRecovery
     && !activeBoardRecoveryOwnerKey
     && (hubState === 'empty' || hubState === 'done')
+  );
+  // Reuse the established idle recovery affordance for aged manual handoffs.
+  // Board-owned, retirement, and saved-scrape markers intentionally remain on
+  // their separate exact-recovery paths above.
+  const showStaleManualAiRecoveryBanner = Boolean(
+    staleManualAiRecoveryNeedsDecision
+    && !data.queuedModuleRun
+    && !data.terminalFinalizationRecovery
+    && !activeBoardRecoveryOwnerKey
+    && !boardRecoveryOwnsActions
+    && (hubState === 'empty' || hubState === 'done' || hubState === 'sources-ready')
   );
   const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;
   // A current completed run already has the Done-state “Re-evaluate Saved
@@ -10158,6 +10514,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     </div>
   ) : null;
 
+  const staleManualAiRecoveryBanner = showStaleManualAiRecoveryBanner ? (
+    <div className="m-2 p-2 rounded-md bg-amber-500/10 border border-amber-500/30" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="text-amber-200/90 text-[11px] font-medium leading-snug">Older job search recovery found</div>
+      <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
+        This saved AI handoff is older than 24 hours or its age could not be verified. Resume uses its original saved run; start fresh discards only that saved handoff.
+      </div>
+      <div className="flex gap-1.5 mt-1.5">
+        <button
+          className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:cursor-default disabled:opacity-50"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={handleResumeStaleManualAiRecovery}
+          disabled={baseControlsLocked || staleManualAiRecoveryActionBusy || !canvasFilePath}
+        >Resume</button>
+        <button
+          className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-white/5 text-white/60 hover:bg-white/10 disabled:cursor-default disabled:opacity-50"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={handleDiscardStaleManualAiRecovery}
+          disabled={baseControlsLocked || staleManualAiRecoveryActionBusy}
+        >Start fresh</button>
+      </div>
+    </div>
+  ) : null;
+
   const banner = (
     <>
       {data.queuedModuleRun && !isProcessing && (
@@ -10172,6 +10551,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         </div>
       )}
       {resumeBanner}
+      {staleManualAiRecoveryBanner}
       {(data.errorMessage || data.terminalFinalizationRecovery) ? (
         <HubErrorBanner
           errorMessage={data.errorMessage || terminalFinalizationError(

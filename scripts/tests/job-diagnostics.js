@@ -19,6 +19,7 @@ import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } 
 // which the live auth-window ring offers no seam for.
 import { buildAuthLifecycleTableMarkdown, buildNativeChallengeSessionMarkdown, formatAuthHistoryTruncationNote, selectAuthHistoryForReport } from '../../electron/ipc/bugReport.js';
 import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
+import { ISSUE_REPORT_DESCRIPTION_MAX_LENGTH, validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 // Imported directly rather than through test-dependencies.js (a file this
@@ -4255,6 +4256,39 @@ export default [
 
       fs.rmSync(viaIpc.savedPath, { force: true });
       return { directLength: direct.markdown.length, pointerLength: viaIpc.clipboardText.length };
+    },
+  },
+{
+    name: 'issue reports accept an intentionally blank description while enforcing its IPC text contract',
+    run: async () => {
+      const empty = validateIssueReportDescription('');
+      assert(empty.ok && empty.value === '', 'an intentionally blank issue description must be valid');
+      for (const invalid of [null, 42, {}, 'x'.repeat(ISSUE_REPORT_DESCRIPTION_MAX_LENGTH + 1), 'bad\u0000control']) {
+        assert(!validateIssueReportDescription(invalid).ok,
+          `non-text, oversized, and control-character descriptions must be rejected: ${JSON.stringify(invalid)}`);
+      }
+
+      const payload = {
+        description: '', filterCode: 'FULL',
+        filterStats: { eventsShown: 0, eventsTotal: 0, omittedSections: [] },
+        nodes: [], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      };
+      __resetSavedBugReportPruneForTests();
+      registerBugReportHandlers();
+      const invoke = ipcMain.__getInvokeHandler('generate-bug-report-markdown');
+      const sender = { id: 42_503, isDestroyed: () => false, once: () => {}, removeListener: () => {} };
+      const accepted = await invoke({ sender }, payload);
+      assert(accepted.success && accepted.delivery === 'file-pointer' && accepted.savedPath,
+        `a blank description must still produce a report, got ${JSON.stringify(accepted)}`);
+      assert(!accepted.clipboardText.includes('## Issue Description'),
+        'a blank description should not add an empty issue-description block to the handoff pointer');
+      fs.rmSync(accepted.savedPath, { force: true });
+
+      const rejected = await invoke({ sender }, { ...payload, description: 'bad\u0000control' });
+      assert(!rejected.success && /unsupported control character/i.test(rejected.error || ''),
+        `the IPC boundary must reject unsafe descriptions, got ${JSON.stringify(rejected)}`);
+      return { maxDescriptionLength: ISSUE_REPORT_DESCRIPTION_MAX_LENGTH };
     },
   },
 {

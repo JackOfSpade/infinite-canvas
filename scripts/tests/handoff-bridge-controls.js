@@ -204,6 +204,13 @@ function scriptedProbeRequest(script, capture = []) {
 }
 
 export default [
+  { name: 'handoff bridge: controls: blank plugin names become the starter-safe default without changing custom names', run() {
+    const blank = controllerHarness({ config: { hostname: HOST, pluginName: '' } });
+    const custom = controllerHarness({ config: { hostname: HOST, pluginName: 'My Bridge 2' } });
+    assert(blank.controller.snapshot(false).config.pluginName === 'infinite_canvas'
+      && custom.controller.snapshot(false).config.pluginName === 'My Bridge 2',
+    'controller snapshots must repair only blank legacy plugin names');
+  } },
   { name: 'handoff bridge: controls: failed starts retain closed supervisor causes internally', async run() {
     const configRejected = controllerHarness({
       tunnel: { async start() { return { ok: false, code: 'config-rejected' }; }, async stop() {}, status: () => ({ state: 'failed', lastExit: 'config-rejected', probe: { state: 'failing', reason: 'hostile private detail', consecutiveFailures: 7 } }) },
@@ -372,6 +379,47 @@ export default [
         '[HandoffBridge] pairing_opened cause=user', '[HandoffBridge] pairing_closed cause=linked',
       ]), 'composition writes exactly one closed pairing lifecycle pair to its security ledger and app logger');
       assert(!JSON.stringify({ lifecycle, lines, activity: graph.log.getRecent() }).includes('23456'), 'the composition lifecycle path cannot retain or log the pairing code');
+    } finally { graph.pairing.cancel(); graph.power.dispose?.(); graph.tray.destroy?.(); }
+  } },
+  { name: 'handoff bridge: controls: composed pairing republishes fresh code-free state on open and cancel', async run() {
+    const parent = { isDestroyed: () => false }; const sheet = deferred(); let nextTimer = 0; const scheduled = new Map();
+    const timers = {
+      setTimeout(fn, delay = 0) { const id = ++nextTimer; scheduled.set(id, { fn, delay }); return { id, unref: NOOP }; },
+      clearTimeout(timer) { scheduled.delete(timer?.id ?? timer); },
+      setInterval: NOOP, clearInterval: NOOP,
+      fireStatus() { for (const [id, timer] of [...scheduled]) if (timer.delay === 0) { scheduled.delete(id); timer.fn(); } },
+    };
+    const graph = composeHandoffBridge({
+      userData: '/tmp/ic-b6-pairing-state-publication',
+      config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } },
+      tunnelState: { binaryPath: '/tmp/fake-cloudflared', binaryTrusted: true, credentialsPath: '/tmp/fake-credentials' },
+      deps: {
+        timers, oauth: { openPairing: () => '23456-789AB', closePairing: NOOP, linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => null },
+        probeOwnEgress: async () => ({ ok: true }), engine: enginePort(), laneStore: { loadLanes: () => [] },
+        application: { describeForConfirm: async () => ({ items: [] }) }, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }) },
+        listener: { start: async () => ({ ok: true }), stop: async () => undefined, status: () => ({}) },
+        tunnel: { start: async () => ({ ok: true }), stop: async () => undefined, status: () => ({ state: 'online' }) },
+        dialog: { showMessageBox: () => sheet.promise }, power: { dispose: NOOP }, tray: { destroy: NOOP }, getCanvasWindows: () => [parent],
+      },
+    });
+    try {
+      const probe = graph.pairing.probeAuthenticator.issue();
+      assert(probe && graph.pairing.recordOwnEgress({ header: probe.header, address: '203.0.113.9' }), 'fixture must establish an authenticated own-egress observation before subscribing');
+      timers.fireStatus();
+      const published = []; const unsubscribe = graph.controller.subscribe(status => published.push(status));
+      const beforeOpen = graph.controller.snapshot(false).seq;
+      assert((await graph.pairing.open({ hostname: HOST, parentWindow: parent })).ok, 'the composed pairing orchestrator must open a live native sheet');
+      timers.fireStatus();
+      const opened = published[0];
+      assert(published.length === 1 && opened.seq > beforeOpen && opened.link.pairing.open === true && Number.isFinite(opened.link.pairing.expiresAt),
+        'the composition onState wiring must promptly publish a fresh open pairing projection');
+      graph.pairing.cancel('cancelled'); timers.fireStatus();
+      const closed = published[1];
+      assert(published.length === 2 && closed.seq > opened.seq && closed.link.pairing.open === false && closed.link.pairing.expiresAt === null,
+        'the same onState wiring must publish a new closed projection when pairing is cancelled');
+      assert(!JSON.stringify(published).includes('23456') && published.every(status => !Object.hasOwn(status.link.pairing, 'pairingCode')),
+        'published pairing status remains code-free across both state transitions');
+      unsubscribe(); sheet.resolve({ response: 0 }); await settle();
     } finally { graph.pairing.cancel(); graph.power.dispose?.(); graph.tray.destroy?.(); }
   } },
   { name: 'handoff bridge: controls: E1 cancel, start order and failure leave no serving transport', async run() {
@@ -1093,6 +1141,40 @@ export default [
     assert(pairing.pairingGate({ source: '2001:db8:1:2::42' }) && !pairing.pairingGate({ source: '2001:db8:1:3::42' }), 'IPv6 pairing compares /64'); pairing.onDisconnected({ reason: 'refresh_expired' });
     assert(pairing.maybeHint({ source: '2001:db8:1:2::/64', linkState: 'needs-renewal', knownFamily: true }) && !pairing.maybeHint({ source: '2001:db8:1:2::42', linkState: 'needs-renewal', knownFamily: true }) && hints === 1, 'the HTTP IPv6 /64 source key is hintable and rate limited');
     now += 15 * 60_000 + 1; assert(!pairing.networkMatches('2001:db8:1:2::42'), 'egress expires after 15 minutes'); assert(ownEgressMatches('2001:db8::1', '2001:db8:0:0::2') && !ownEgressMatches('2001:db8::1', '2001:db9::2'), 'IPv6 comparison is /64');
+  } },
+  { name: 'handoff bridge: controls: Continue in setup dismisses only the native pairing sheet', async run() {
+    const sheet = deferred(); let pairing;
+    pairing = createPairingOrchestrator({
+      timers: fakeTimers(),
+      oauth: { openPairing: () => '23456-789AB', closePairing: NOOP },
+      egressProbe: async ({ authenticator }) => {
+        const token = authenticator.issue();
+        pairing.recordOwnEgress({ header: token.header, address: '203.0.113.9' });
+        return { ok: true };
+      },
+      showCode: ({ onShown }) => { onShown?.(); return sheet.promise; },
+    });
+    const result = await pairing.open({ hostname: HOST, parentWindow: { isDestroyed: () => false } });
+    assert(result.ok && result.pairingCode === '23456-789AB' && pairing.status().open, 'a live pairing returns its formatted code only to its direct opener');
+    sheet.resolve({ ok: true, keepOpen: true }); await settle();
+    assert(pairing.status().open, 'an explicit trusted Continue in setup result dismisses the sheet without cancelling the pairing');
+    pairing.cancel();
+    assert(!pairing.status().open, 'an explicit pairing cancellation still closes an armed pairing after Continue in setup');
+
+    const cancelledSheet = deferred(); let cancelled;
+    cancelled = createPairingOrchestrator({
+      timers: fakeTimers(),
+      oauth: { openPairing: () => '23456-789AB', closePairing: NOOP },
+      egressProbe: async ({ authenticator }) => {
+        const token = authenticator.issue();
+        cancelled.recordOwnEgress({ header: token.header, address: '203.0.113.10' });
+        return { ok: true };
+      },
+      showCode: ({ onShown }) => { onShown?.(); return cancelledSheet.promise; },
+    });
+    await cancelled.open({ hostname: HOST, parentWindow: { isDestroyed: () => false } });
+    cancelledSheet.resolve({ ok: true, keepOpen: false }); await settle();
+    assert(!cancelled.status().open, 'the native Cancel pairing outcome closes the armed pairing rather than leaving it available in setup');
   } },
   { name: 'handoff bridge: controls: pairing rejects an absent parent before probe or OAuth and expires without a request', async run() {
     let probes = 0; let opens = 0; let closes = 0; let aborted = 0; let expiry;

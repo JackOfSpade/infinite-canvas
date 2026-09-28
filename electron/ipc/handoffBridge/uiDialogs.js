@@ -180,7 +180,7 @@ export function createHandoffBridgeDialogs({
     busy = true;
     try {
       const pending = dialog.showMessageBox(parentWindow, {
-        type: 'info', buttons: ['Cancel pairing'], defaultId: 0, cancelId: 0,
+        type: 'info', buttons: ['Continue in setup', 'Cancel pairing'], defaultId: 0, cancelId: 1,
         title: 'ChatGPT pairing code', message: `Pairing code: ${formatPairingCode(code)}`, detail: `Expires at ${expiryClock(expiresAt)}.\nOnly approve if you just started linking from ChatGPT.\nNever share this code.`,
         signal,
       });
@@ -189,7 +189,10 @@ export function createHandoffBridgeDialogs({
       // open/close ledger pair only for a sheet that actually became live.
       try { onShown?.(); } catch { /* diagnostics cannot affect the sheet */ }
       const result = await pending;
-      return { ok: true, response: result?.response ?? 0 };
+      // This is an adapter-local capability, not a renderer value. Pairing
+      // recognizes only literal true, so a missing or unfamiliar response
+      // remains the safe cancellation path.
+      return { ok: true, keepOpen: result?.response === 0 };
     } catch { return { ok: false, code: 'DECLINED' }; } finally { busy = false; }
   }
   function showNotice({ parentWindow, kind, clientKind } = {}) {

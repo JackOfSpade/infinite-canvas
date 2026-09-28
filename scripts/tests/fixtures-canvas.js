@@ -6602,6 +6602,22 @@ export default [
         && manualAi.filteredLogs.some(line => line.includes('JOB_COMPENSATION_RESPONSE_INVALID'))
         && manualAi.sectionExclusions.has('nodeInternals'),
       'Bug report code filtering: AIHANDOFF retains privacy-safe manual prompt-queue navigation and validation evidence');
+      const bridge = applyBugReportCode([
+        ...logs,
+        '[HandoffBridge] pairing_opened cause=user',
+        '[HandoffBridge] listener_started state=live',
+      ], {}, 'BRIDGE');
+      assert(bridge.matchedCodes.includes('BRIDGE')
+        && bridge.filteredLogs.some(line => line.includes('pairing_opened'))
+        && bridge.filteredLogs.some(line => line.includes('listener_started'))
+        && bridge.sectionExclusions.has('nodes')
+        && bridge.sectionExclusions.has('nodeInternals')
+        && bridge.sectionExclusions.has('mediaState'),
+      'Bug report code filtering: BRIDGE retains the bridge timeline while omitting heavy canvas/media payloads');
+      const bridgeReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
+      assert(bridgeReportSource.includes("reportCodes.has('BRIDGE')")
+        && bridgeReportSource.includes('BRIDGE_MAIN_PROCESS_LOG_PATTERN'),
+      'Bug report code filtering: BRIDGE requests bridge diagnostics and scopes main-process logs');
       const bugReportSource = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
       assert(bugReportSource.includes("reportCodes.has('AIHANDOFF')")
         && bugReportSource.includes("isFullReport || reportCodes.has('AIHANDOFF')"),

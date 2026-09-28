@@ -188,6 +188,7 @@ export function createPairingOrchestrator({
         return Object.freeze({ ok: false, code: 'NOT_READY' });
       }
       code = code.replace('-', '').toUpperCase();
+      const pairingCode = `${code.slice(0, 5)}-${code.slice(5)}`;
       const expiresAt = safeTime(now) + CONSTANTS.PAIRING_TTL_MS;
       const abort = typeof AbortController === 'function' ? new AbortController() : null;
       // Do not start the expiry clock merely because an adapter accepted a
@@ -198,11 +199,12 @@ export function createPairingOrchestrator({
       windowState = { expiresAt, networkCheck: networkCheck === 'off' ? 'off' : 'enforce', abort, parentWindow, live: false };
       let shownResult;
       try {
-        // Code may travel only to this main-owned dialog port. It is deliberately
-        // absent from the return value, state snapshots, logger and activity.
-        // A native sheet stays open until cancelled, expired or linked.  Do not
-        // wait for that promise here: OAuth must be able to receive the browser
-        // request while the sheet is visible.
+        // Code travels to the main-owned dialog port and back to the direct,
+        // user-initiated open call only. It is deliberately absent from state
+        // snapshots, logger, activity and every other publication channel.
+        // The native sheet can explicitly hand this live pairing back to setup;
+        // do not wait for its promise here, because OAuth must receive browser
+        // requests while the sheet is visible or after it continues in setup.
         shownResult = showCode({ parentWindow, code, expiresAt, signal: abort?.signal, onShown: () => markLive(expiresAt) });
       } catch {
         clear('cancelled', { announce: false });
@@ -226,11 +228,15 @@ export function createPairingOrchestrator({
         return Object.freeze({ ok: false, code: 'NOT_READY' });
       }
       Promise.resolve(shownResult).then(
-        () => { if (fresh()) clear('cancelled'); },
+        // Only the trusted native dialog adapter can explicitly dismiss its
+        // sheet while keeping the code armed for the setup panel. Any older,
+        // failed, cancelled, or otherwise ambiguous adapter result fails
+        // closed by cancelling the pairing.
+        result => { if (fresh() && result?.keepOpen !== true) clear('cancelled'); },
         () => { if (fresh()) clear('cancelled'); },
       );
       emit();
-      return Object.freeze({ ok: true, expiresAt });
+      return Object.freeze({ ok: true, expiresAt, pairingCode });
     } catch {
       return Object.freeze({ ok: false, code: 'TUNNEL_NOT_READY' });
     } finally {

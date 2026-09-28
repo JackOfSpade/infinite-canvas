@@ -4,6 +4,7 @@ import { Clipboard, Save, Sparkles, Copy, AlertTriangle } from 'lucide-react';
 import { EventLogger } from '../utils/EventLogger';
 import { previewBugReportCode, buildAiPrompt } from '../utils/bugReportCodes';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { ISSUE_REPORT_DESCRIPTION_MAX_LENGTH, validateIssueReportDescription } from '../utils/issueReportDescription';
 
 // Persist the in-progress description across dialog open/close cycles but NOT
 // across app restarts/exit.
@@ -57,7 +58,8 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   // ── Copy AI prompt to clipboard ───────────────────────────────────────────
   const copyAIPrompt = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(buildAiPrompt(description));
+      const descriptionValidation = validateIssueReportDescription(description);
+      await navigator.clipboard.writeText(buildAiPrompt(descriptionValidation.ok ? descriptionValidation.value : ''));
       setPromptCopied(true);
       if (promptCopiedTimerRef.current) clearTimeout(promptCopiedTimerRef.current);
       promptCopiedTimerRef.current = setTimeout(() => {
@@ -73,11 +75,12 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const submit = useCallback(async (mode) => {
-    if (!description.trim() || isSubmitting) return;
+    const descriptionValidation = validateIssueReportDescription(description);
+    if (!descriptionValidation.ok || isSubmitting) return;
     setIsSubmitting(true);
     setActiveMode(mode);
     try {
-      await onSubmit(description, filterCode, mode);
+      await onSubmit(descriptionValidation.value, filterCode, mode);
       if (!isMountedRef.current) return;
       setIsSubmitting(false);
       setActiveMode(null);
@@ -91,7 +94,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
 
   if (!isOpen) return null;
 
-  const noDesc = !description.trim();
+  const descriptionValidation = validateIssueReportDescription(description);
 
   return (
     <Dialog onClose={handleClose} title="Report an Issue">
@@ -103,17 +106,21 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
         {/* ── Description ─────────────────────────────────────────────────── */}
         <div className="flex flex-col gap-1">
           <label className="text-xs font-medium text-white/60 uppercase tracking-wider">
-            What went wrong?
+            What went wrong? <span className="text-white/30 font-normal normal-case tracking-normal">(optional)</span>
           </label>
           <textarea
             autoFocus
             className="w-full h-28 bg-black/40 border border-white/10 rounded-md p-3 text-sm
                        text-white placeholder-white/40 focus:border-blue-500/60 focus:outline-none
                        resize-none transition-colors"
-            placeholder="Describe the bug and steps to reproduce…"
+            placeholder="Optional: describe the bug and steps to reproduce…"
             value={description}
             onChange={e => setDescription(e.target.value)}
+            maxLength={ISSUE_REPORT_DESCRIPTION_MAX_LENGTH}
           />
+          {!descriptionValidation.ok && (
+            <p className="text-xs text-amber-300 px-0.5">{descriptionValidation.error}</p>
+          )}
         </div>
 
         {/* ── AI Filter Code ───────────────────────────────────────────────── */}
@@ -138,7 +145,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
             {promptCopied ? 'Copied — paste it to any AI assistant' : 'Copy AI Prompt to Clipboard'}
           </button>
           <p className="text-[11px] text-white/35 px-0.5 leading-snug">
-            Describe the bug above, copy this prompt to any AI assistant, then paste the code it replies with below.
+            Optionally describe the bug above, copy this prompt to any AI assistant, then paste the code it replies with below.
           </p>
 
           {/* ── Code input ────────────────────────────────────────────────── */}
@@ -227,7 +234,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
           {/* Save to file — secondary action */}
           <button
             type="button"
-            disabled={noDesc || isSubmitting}
+            disabled={!descriptionValidation.ok || isSubmitting}
             onClick={() => submit('file')}
             className="flex items-center gap-1.5 px-4 py-2 text-sm
                        bg-white/8 hover:bg-white/14 disabled:opacity-50
@@ -242,7 +249,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
               reads the file from disk instead of receiving a giant paste. */}
           <button
             type="submit"
-            disabled={noDesc || isSubmitting}
+            disabled={!descriptionValidation.ok || isSubmitting}
             title="Saves the full report to a file and copies its file path — not the report text — to your clipboard."
             className="flex items-center gap-1.5 px-4 py-2 text-sm
                        bg-blue-600 hover:bg-blue-500 disabled:opacity-50

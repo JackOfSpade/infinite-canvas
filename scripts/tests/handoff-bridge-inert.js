@@ -11,7 +11,7 @@ import { runBackgroundE2EShutdownCleanup } from '../../electron/utils/background
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contracts.js';
 import { readTunnelState } from '../../electron/ipc/handoffBridge/tunnel/files.js';
-import { clearFailedStartDiagnostic, getFailedStartDiagnostic, recordFailedStartDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 import {
   appendClosedHandoffAudit,
   composeHandoffBridge,
@@ -1383,7 +1383,9 @@ export default [
         }) })).success, 'the old root can attach a synthetic live graph');
 
         recordFailedStartDiagnostic({ telemetry: true, phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' } });
-        assert(getFailedStartDiagnostic()?.telemetry === true, 'the old root fixture must seed a retained opted-in receipt');
+        recordOAuthRejectionDiagnostic({ telemetry: true, route: 'authorize', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'other', fetchDest: 'other', originShape: 'chatgpt-exact', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' });
+        assert(getFailedStartDiagnostic()?.telemetry === true && getOAuthRejectionDiagnostic()?.last?.consentPolicyVersion === 'document-navigation-v2',
+          'the old root fixture must seed its retained opted-in bridge receipts');
         assert(registerHandoffBridgeHandlers({ ipcMain: newIpc, deps: {
           isPackaged: true, userData: newUserData, getCanvasWindows: () => [canvas],
           dialogs: { ask: async () => ({ ok: true }) },
@@ -1407,10 +1409,10 @@ export default [
           'a late callback from the detached old controller cannot republish old-root state');
         assert((await save({ sender: canvas.webContents }, { patch: { autoStart: true } })).success && writeTarget === newUserData,
           'the replacement registry saves only to its new user-data root');
-        assert(getFailedStartDiagnostic() === null,
-          'cross-root IPC registration must discard the prior root\'s optional failed-start receipt');
+        assert(getFailedStartDiagnostic() === null && getOAuthRejectionDiagnostic() === null,
+          'cross-root IPC registration must discard the prior root\'s optional bridge receipts');
       } finally {
-        clearFailedStartDiagnostic(); await stopHandoffBridge();
+        clearFailedStartDiagnostic(); clearOAuthRejectionDiagnostic(); await stopHandoffBridge();
         fs.rmSync(oldUserData, { recursive: true, force: true });
         fs.rmSync(newUserData, { recursive: true, force: true });
       }
@@ -1419,7 +1421,7 @@ export default [
   {
     name: 'handoff bridge: inert: a direct cross-root start cannot retain another root\'s failed-start receipt',
     async run() {
-      await stopHandoffBridge(); clearFailedStartDiagnostic();
+      await stopHandoffBridge(); clearFailedStartDiagnostic(); clearOAuthRejectionDiagnostic();
       const oldUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-start-old-root-'));
       const newUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-bridge-start-new-root-'));
       const graph = userData => ({
@@ -1435,11 +1437,12 @@ export default [
           'the old root graph must attach before testing a direct root switch');
         await stopHandoffBridge();
         recordFailedStartDiagnostic({ telemetry: true, phase: 'tunnel-start', cause: 'config-rejected', tunnel: { state: 'failed', lastExit: 'config-rejected' } });
+        recordOAuthRejectionDiagnostic({ telemetry: true, route: 'authorize', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'other', fetchDest: 'other', originShape: 'chatgpt-exact', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' });
         assert((await startHandoffBridge({ deps: completeStartDeps({ userData: newUserData, compose: () => graph(newUserData) }) })).success
-          && getFailedStartDiagnostic() === null,
-        'direct start with a new user-data root must clear the old root\'s optional receipt before composing');
+          && getFailedStartDiagnostic() === null && getOAuthRejectionDiagnostic() === null,
+        'direct start with a new user-data root must clear the old root\'s optional receipts before composing');
       } finally {
-        clearFailedStartDiagnostic(); await stopHandoffBridge();
+        clearFailedStartDiagnostic(); clearOAuthRejectionDiagnostic(); await stopHandoffBridge();
         fs.rmSync(oldUserData, { recursive: true, force: true });
         fs.rmSync(newUserData, { recursive: true, force: true });
       }
@@ -1640,7 +1643,7 @@ export default [
   {
     name: 'handoff bridge: inert: hostname and acknowledged setup mutations hard-invalidate the captured graph',
     async run() {
-      await stopHandoffBridge();
+      await stopHandoffBridge(); clearOAuthRejectionDiagnostic();
       const ipc = bridgeIpc(); const canvas = liveCanvas(72); const nextHostname = 'c-0123456789abcdef0123.lullascape.com';
       let persisted = { ...READY_CONFIG, scope: { applications: true, scoring: false }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } };
       let composed = 0; let disabled = 0; let reloads = 0;
@@ -1682,9 +1685,11 @@ export default [
         };
       };
       assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success, 'the initial graph starts');
+      recordOAuthRejectionDiagnostic({ telemetry: true, route: 'authorize', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'other', fetchDest: 'other', originShape: 'chatgpt-exact', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' });
+      assert(getOAuthRejectionDiagnostic()?.last?.consentPolicyVersion === 'document-navigation-v2', 'the pre-mutation root can hold the expanded opted-in OAuth receipt');
       const event = { sender: canvas.webContents };
       const saved = await ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)(event, { patch: { hostname: nextHostname } });
-      assert(saved.success && disabled === 1 && reloads === 0 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().config.hostname === nextHostname, 'hostname save detaches first and reloads only the fresh bootstrap state');
+      assert(saved.success && disabled === 1 && reloads === 0 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().config.hostname === nextHostname && getOAuthRejectionDiagnostic() === null, 'hostname save detaches first, clears the old-host OAuth receipt, and reloads only the fresh bootstrap state');
       assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success, 'a later explicit enable creates the post-hostname graph');
       assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_BINARY)(event)).success
         && setup.pin === replacementPin && setup.approvedAt === null && setup.binaryTrusted === false
@@ -1703,7 +1708,7 @@ export default [
       assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_CREDENTIALS)(event)).success
         && disabled === 3 && getHandoffBridgeStatus().enabled === false && composed === 3,
       'acknowledged credentials detach the approved replacement graph and never auto-restart');
-      await stopHandoffBridge();
+      await stopHandoffBridge(); clearOAuthRejectionDiagnostic();
     },
   },
   {

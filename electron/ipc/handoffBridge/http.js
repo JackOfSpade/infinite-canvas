@@ -12,6 +12,7 @@ const PUBLIC_ROUTES = new Map([
 const WELL_KNOWN = new Set([...PUBLIC_ROUTES].filter(([p]) => p.startsWith('/.well-known/')).map(([p]) => p));
 const SERVER_ROUTES = new Set(['/mcp', '/oauth/token', '/oauth/revoke']);
 const unread = req => Number(req.headers?.['content-length'] || 0) > 0 || Boolean(req.headers?.['transfer-encoding']);
+const OAUTH_CONSENT_POLICY_VERSION = 'document-navigation-v2';
 
 function hostMatches(req, hostname) {
   const raw = req.headers?.host;
@@ -113,6 +114,58 @@ function sendMcp(res, result) {
 const publicOrigin = hostname => `https://${hostname.toLowerCase().replace(/\.$/, '')}`;
 const originHost = value => { try { return new URL(value).host.toLowerCase(); } catch { return 'invalid'; } };
 const bearerPresented = req => typeof req.headers?.authorization === 'string' && /^bearer\b/i.test(req.headers.authorization);
+const classifiedMethod = value => value === 'GET' || value === 'POST' ? value : 'unknown';
+const classifiedRejectionReason = value => value === 'origin-mismatch' || value === 'fetch-site' ? value : 'unknown';
+const classifiedRejectionStage = value => value === 'http' || value === 'consent' ? value : 'unknown';
+const classifiedConsentAction = value => value === 'approve' || value === 'deny' || value === 'other' || value === 'uninspected' ? value : 'unknown';
+const classifiedTransactionPresence = value => value === 'yes' || value === 'no' || value === 'uninspected' ? value : 'unknown';
+const classifiedFetchSite = value => {
+  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
+  return normalized === 'same-origin' || normalized === 'same-site' || normalized === 'cross-site' || normalized === 'none'
+    ? normalized : normalized ? 'other' : 'none';
+};
+// Place the caller's network in a closed class. The prefix itself is link
+// metadata and never leaves this scope.
+const classifiedSourceClass = (address, ranges) => {
+  if (!address) return 'unknown';
+  if (Array.isArray(ranges) && ranges.some(range => cidrContains(address, range))) return 'connector-range';
+  if (net.isIP(address) === 4) {
+    const [a, b] = address.split('.').map(Number);
+    if (a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254)) return 'private';
+  } else if (/^(?:::1|f[cd])/i.test(address) || /^fe80:/i.test(address)) return 'private';
+  return 'other-public';
+};
+const classifiedFetchHeader = (value, expected) => {
+  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
+  if (!normalized) return 'absent';
+  return normalized === expected ? expected : 'other';
+};
+// A browser may serialize an equivalent origin with an explicit default port,
+// a trailing slash, or a different host case, and an intermediary may
+// re-serialize it again on the way here. Compare what an Origin MEANS rather
+// than how it was spelled: a raw string comparison refuses genuine same-origin
+// consent submissions. A value that is not a bare https origin -- `null`,
+// a credentialed or pathful URL, anything unparseable -- has no canonical form
+// and therefore never compares equal to this origin.
+const canonicalOrigin = value => {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null;
+    return parsed.origin;
+  } catch { return null; }
+};
+function classifiedOriginShape(value, self) {
+  if (value === undefined) return 'absent';
+  if (value === 'null') return 'opaque-null';
+  if (value === self) return 'self-exact';
+  if (value === 'https://chatgpt.com') return 'chatgpt-exact';
+  // Inspect a bounded origin-shaped value only to place it in a closed
+  // category. Its value never leaves this request scope.
+  const canonical = canonicalOrigin(value);
+  if (!canonical) return 'invalid';
+  return canonical === self ? 'self-canonical' : 'https-other';
+}
 function rawHeaderCount(req, name) {
   const rawHeaders = req?.rawHeaders;
   if (!Array.isArray(rawHeaders)) return Object.hasOwn(req?.headers || {}, name.toLowerCase()) ? 1 : 0;
@@ -183,11 +236,36 @@ const mcpFailure = (res, status, message, headers = undefined) => sendJson(res, 
 }, headers);
 const mcpBodyFailure = (res, status) => mcpFailure(res, status, status === 413 ? 'Request body too large' : 'Request body timed out');
 
-export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, sourcePolicy = CONSTANTS.SOURCE_POLICY, connectorRanges = CONSTANTS.OPENAI_CONNECTOR_RANGES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, accepting = () => true } = {}) {
+export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, connectorOriginList = CONSTANTS.OPENAI_CONNECTOR_ORIGINS, sourcePolicy = CONSTANTS.SOURCE_POLICY, connectorRanges = CONSTANTS.OPENAI_CONNECTOR_RANGES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, diagnostics = { recordOAuthRejection() {}, recordSourceRejection() {} }, accepting = () => true } = {}) {
   if (typeof hostname !== 'string' || !hostname) throw new TypeError('public hostname is required');
   if (typeof mcp !== 'function') throw new TypeError('MCP handler is required');
+  const connectorOrigins = new Set(Array.isArray(connectorOriginList) ? connectorOriginList : []);
   const increment = (...args) => { try { counters.increment?.(...args); } catch { /* anonymous accounting is best effort */ } };
   const writeAudit = entry => { try { audit.write?.(entry); } catch { /* audit failure must not strand a request */ } };
+  const recordOAuthRejection = (pathname, req, { stage = 'http', reason, consentAction = 'uninspected', hasTxn = 'uninspected' } = {}) => {
+    // This boundary intentionally translates before it records: no raw target,
+    // Origin value, hostname, header, body, OAuth parameter, or credential can
+    // reach the optional diagnostic sink.
+    const route = pathname === '/oauth/authorize' ? 'authorize'
+      : pathname === '/oauth/token' ? 'token'
+        : pathname === '/oauth/revoke' ? 'revoke'
+          : pathname === '/mcp' ? 'mcp' : 'unknown';
+    try {
+      diagnostics.recordOAuthRejection?.({
+        route,
+        method: classifiedMethod(req?.method),
+        reason: classifiedRejectionReason(reason),
+        stage: classifiedRejectionStage(stage),
+        fetchSite: classifiedFetchSite(req?.headers?.['sec-fetch-site']),
+        fetchMode: classifiedFetchHeader(req?.headers?.['sec-fetch-mode'], 'navigate'),
+        fetchDest: classifiedFetchHeader(req?.headers?.['sec-fetch-dest'], 'document'),
+        originShape: classifiedOriginShape(req?.headers?.origin, publicOrigin(hostname)),
+        consentAction: classifiedConsentAction(consentAction),
+        hasTxn: classifiedTransactionPresence(hasTxn),
+        consentPolicyVersion: OAUTH_CONSENT_POLICY_VERSION,
+      });
+    } catch { /* diagnostics are never a request dependency */ }
+  };
   const policyMode = async (req, route, source) => {
     let value = sourcePolicy;
     try { if (typeof value === 'function') value = await value({ request: req, route, source }); } catch { return 'enforce'; }
@@ -228,6 +306,18 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
     // A source prefix is sensitive link metadata. The ledger deliberately
     // records only the closed event, route, and response-class vocabulary.
     writeAudit({ ev: 'source_mismatch', route, statusClass: mode === 'alert' ? '2xx' : '4xx' });
+    // The wire answer below is a deliberately generic 401, so nothing in it
+    // distinguishes a refused network from an expired token. Record the closed
+    // classification locally, or this failure is undiagnosable from a report.
+    const families = activeFamilies();
+    try {
+      diagnostics.recordSourceRejection?.({
+        route: route === 'mcp' || route === 'token' || route === 'revoke' ? route : 'mcp',
+        mode: mode === 'alert' ? 'alert' : 'enforce',
+        sourceClass: classifiedSourceClass(sourceAddress(req), connectorRanges),
+        links: families === null ? 'unreadable' : families.length === 0 ? 'none' : families.length === 1 ? 'one' : 'many',
+      });
+    } catch { /* diagnostics are never a request dependency */ }
     if (mode === 'alert') return true;
     closeEarly(req, res);
     if (route === 'mcp') {
@@ -291,9 +381,29 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
     const knownRoute = PUBLIC_ROUTES.has(pathname);
     const allowed = knownRoute ? PUBLIC_ROUTES.get(pathname).split(',') : [];
     const origin = req.headers?.origin; const fetchSite = String(req.headers?.['sec-fetch-site'] || '').toLowerCase();
-    const browserPost = knownRoute && pathname === '/oauth/authorize' && req.method === 'POST'; const serverEnforce = knownRoute && SERVER_ROUTES.has(pathname) && originServerRoutes === 'enforce';
-    if ((browserPost || serverEnforce) && origin && origin !== publicOrigin(hostname)) { closeEarly(req, res); sendJson(res, 403, { error: 'invalid_request', error_description: 'Cross-origin request refused.' }); return null; }
-    if ((browserPost || serverEnforce) && (fetchSite === 'cross-site' || fetchSite === 'same-site')) { closeEarly(req, res); sendJson(res, 403, { error: 'invalid_request', error_description: 'Cross-origin request refused.' }); return null; }
+    // OAuth clients may use a browser form POST for an authorization request
+    // or the resulting consent decision.  The top-level navigation tuple is
+    // allowed through to OAuth, where a transaction-bearing decision is
+    // restricted to the exact ChatGPT navigation capability (or same-origin)
+    // before it can issue a code. Keep the Origin/Fetch-Metadata guard on
+    // every other POST.
+    // Require the complete Chromium navigation tuple so an ordinary cross-site
+    // fetch cannot use this exception.  Older or non-browser callers that do
+    // not send it continue to use GET for authorization requests.
+    const topLevelAuthorizeNavigation = knownRoute && pathname === '/oauth/authorize' && req.method === 'POST'
+      && String(req.headers?.['sec-fetch-mode'] || '').toLowerCase() === 'navigate'
+      && String(req.headers?.['sec-fetch-dest'] || '').toLowerCase() === 'document';
+    const browserPost = knownRoute && pathname === '/oauth/authorize' && req.method === 'POST' && !topLevelAuthorizeNavigation;
+    const serverEnforce = knownRoute && SERVER_ROUTES.has(pathname) && originServerRoutes === 'enforce';
+    // The consent POST is authorized by this origin alone. The authenticated
+    // server routes additionally accept the connector's own origin, because
+    // whether it sends one at all is not settled and a 403 there would strand
+    // a live link mid-drain.
+    const canonical = origin ? canonicalOrigin(origin) : null;
+    const originAllowed = canonical === publicOrigin(hostname)
+      || (serverEnforce && !browserPost && canonical !== null && connectorOrigins.has(canonical));
+    if ((browserPost || serverEnforce) && origin && !originAllowed) { recordOAuthRejection(pathname, req, { reason: 'origin-mismatch' }); closeEarly(req, res); sendJson(res, 403, { error: 'invalid_request', error_description: 'Cross-origin request refused.' }); return null; }
+    if ((browserPost || serverEnforce) && (fetchSite === 'cross-site' || fetchSite === 'same-site')) { recordOAuthRejection(pathname, req, { reason: 'fetch-site' }); closeEarly(req, res); sendJson(res, 403, { error: 'invalid_request', error_description: 'Cross-origin request refused.' }); return null; }
     if (!accepting()) { closeEarly(req, res); sendJson(res, 503, { error: 'temporarily_unavailable', error_description: 'The handoff bridge is unavailable.' }, { 'Retry-After': '5' }); return null; }
     if (!knownRoute) { closeEarly(req, res); notFound(res); return null; }
     // Node exposes a coalesced `headers.authorization` value, which cannot
@@ -331,7 +441,10 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
       // relevant. Anonymous or malformed credentials must take the ordinary
       // challenge/limiter path and never create a source-policy ledger event.
       if (!await enforceSourcePolicy(req, res, 'mcp', grant)) return null;
-      if ((origin || fetchSite) && originServerRoutes === 'observe') writeAudit({ ev: 'origin_seen', origin: origin ? originHost(origin) : undefined, secFetchSite: fetchSite || undefined, route: 'mcp' });
+      // Recorded under enforcement too: a request that reaches here was allowed,
+      // and which Origin the connector actually sends is the open MG5 question.
+      // Silence is itself the finding. The ledger rotates, so this is bounded.
+      if (origin || fetchSite) writeAudit({ ev: 'origin_seen', origin: origin ? originHost(origin) : undefined, secFetchSite: fetchSite || undefined, route: 'mcp' });
       const wait = grantBuckets.take(grant.linkId); if (wait) { closeEarly(req, res); mcpFailure(res, 429, 'Request rate is limited', { 'Retry-After': String(wait) }); return null; }
       if (!allowed.includes(req.method)) { closeEarly(req, res); methodNotAllowed(res, 'POST'); return null; }
       if (mimeOf(req) !== 'application/json') { closeEarly(req, res); mcpFailure(res, 415, 'application/json is required'); return null; }
@@ -382,7 +495,21 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
           return true;
         },
         observeAuthenticatedServerRoute: () => {
-          if ((state.pathname === '/oauth/token' || state.pathname === '/oauth/revoke') && (req.headers?.origin || req.headers?.['sec-fetch-site']) && originServerRoutes === 'observe') writeAudit({ ev: 'origin_seen', origin: req.headers?.origin ? originHost(req.headers.origin) : undefined, secFetchSite: String(req.headers?.['sec-fetch-site'] || '').toLowerCase() || undefined, route: state.pathname.slice(1) });
+          if ((state.pathname === '/oauth/token' || state.pathname === '/oauth/revoke') && (req.headers?.origin || req.headers?.['sec-fetch-site'])) writeAudit({ ev: 'origin_seen', origin: req.headers?.origin ? originHost(req.headers.origin) : undefined, secFetchSite: String(req.headers?.['sec-fetch-site'] || '').toLowerCase() || undefined, route: state.pathname.slice(1) });
+        },
+        // OAuth may reject a transaction-bearing consent POST after the outer
+        // HTTP navigation exception has admitted it. Accept only its fixed
+        // reason vocabulary; request data stays in this private HTTP scope.
+        recordOAuthRejection: event => {
+          // OAuth passes its parsed decision through only as fixed literals.
+          // This closure captures the request and adds header classifications;
+          // no raw header, body, or OAuth value crosses the module boundary.
+          if (!event || typeof event !== 'object') return;
+          if ((event.reason === 'origin-mismatch' || event.reason === 'fetch-site')
+            && ['approve', 'deny', 'other'].includes(event.consentAction)
+            && event.hasTxn === 'yes') {
+            recordOAuthRejection(state.pathname, req, { ...event, stage: 'consent' });
+          }
         },
       };
       if (typeof oauth.handle === 'function') result = await oauth.handle(req, res, state.pathname, serverContext);

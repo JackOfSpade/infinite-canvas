@@ -49,7 +49,8 @@ export default [
         assert(reads === 1 && result.state === fixture.state, `${fixture.name} config must be tolerated without a write`);
         assert(result.config.autoStart === false, `${fixture.name} config must resolve to safe defaults`);
       }
-      assert(emptyConfig().autoStart === false, 'fresh config must preserve auto-start opt-in');
+      assert(emptyConfig().autoStart === false && emptyConfig().pluginName === 'infinite_canvas',
+        'fresh config must preserve auto-start opt-in and a starter-safe plugin name');
     },
   },
   {
@@ -70,6 +71,11 @@ export default [
   {
     name: 'handoff bridge: store: pluginName is validated and persisted',
     run: () => withStore(async userData => {
+      const legacy = { ...emptyConfig(), pluginName: '' };
+      fs.mkdirSync(path.dirname(configPathFor(userData)), { recursive: true });
+      fs.writeFileSync(configPathFor(userData), JSON.stringify(legacy));
+      assert(readConfig(userData).config.pluginName === 'infinite_canvas',
+        'a legacy blank plugin name must resolve to the starter-safe default without rewriting the config');
       const invalid = await save(userData, { pluginName: '<bridge>' });
       assert(invalid.code === 'INVALID' && invalid.fieldErrors.pluginName, 'invalid plugin name must be rejected');
       const accepted = await save(userData, { pluginName: 'My Bridge 2' });

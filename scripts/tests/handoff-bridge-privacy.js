@@ -11,13 +11,13 @@ import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contr
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
-import { composeHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import { composeHandoffBridge, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
 import {
   redactReportUrl,
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearFailedStartDiagnostic, recordFailedStartDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -95,7 +95,7 @@ function syntheticTimers(start = 0) {
 
 export default [{
   name: 'handoff bridge: privacy: FULL reports retain only opted-in closed failed-start diagnostics',
-  run: () => {
+  async run() {
     const base = {
       description: 'Bridge enable failed.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
     };
@@ -105,20 +105,117 @@ export default [{
         tunnel: {
           state: 'failed', lastExit: 'config-rejected', binaryPath: '/private/secret', hostname: 'private.example.test',
           probe: { state: 'failing', reason: 'hostile injected value', consecutiveFailures: 4, rawLog: 'PRIVATE_BRIDGE_LOG' },
+          readiness: { configurationValidated: true, environmentHealthy: true, localReadinessPassed: true, registeredConnectionCount: 999, connectorId: 'PRIVATE_CONNECTOR_ID' },
         },
       });
       const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
       const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
       assert(full.includes('## Handoff Bridge Diagnostics') && full.includes('phase `tunnel-start`') && full.includes('cause `config-rejected`')
-        && full.includes('reason `unknown`') && full.includes('elapsed 1500 ms') && !focused.includes('## Handoff Bridge Diagnostics'),
+        && full.includes('reason `unknown`') && full.includes('Configuration validation: passed · environment check: healthy · local readiness: passed · observed registered tunnel connections: 8')
+        && full.includes('elapsed 1500 ms') && !focused.includes('## Handoff Bridge Diagnostics'),
       'only FULL reports render the opted-in failed-start receipt');
-      for (const privateValue of ['/private/secret', 'private.example.test', 'PRIVATE_BRIDGE_LOG', 'hostile injected value']) {
+      for (const privateValue of ['/private/secret', 'private.example.test', 'PRIVATE_BRIDGE_LOG', 'PRIVATE_CONNECTOR_ID', 'hostile injected value']) {
         assert(!full.includes(privateValue), `handoff diagnostics must drop hostile/private value ${privateValue}`);
       }
+      const retained = getFailedStartDiagnosticLines();
+      const afterDisposal = await tunnelLogLinesForUi(null);
+      assert(JSON.stringify(retained) === JSON.stringify(afterDisposal)
+        && retained.includes('Bridge startup failed: tunnel-start.')
+        && retained.includes('Startup cause: config-rejected.')
+        && retained.includes('Configuration validation: passed; environment check: healthy; local readiness: passed.')
+        && retained.includes('Observed registered tunnel connections: 8.')
+        && retained.every(line => !['/private/secret', 'private.example.test', 'PRIVATE_BRIDGE_LOG', 'PRIVATE_CONNECTOR_ID', 'hostile injected value'].some(secret => line.includes(secret))),
+      'the disposed tunnel-log fallback must retain only bounded closed diagnostic facts');
+      const liveEmpty = await tunnelLogLinesForUi({ getLog: async () => [] });
+      const liveThrow = await tunnelLogLinesForUi({ getLog: async () => { throw new Error('unavailable'); } });
+      assert(liveEmpty.length === 0 && liveThrow.length === 0,
+        'a live supervisor owns its empty or failed log view and must never receive an older failed-start receipt');
       recordFailedStartDiagnostic({ telemetry: false, phase: 'tunnel-readiness', cause: 'readiness-timeout', tunnel: { state: 'connecting' } });
       assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('## Handoff Bridge Diagnostics'),
         'telemetry opt-out must omit the failed-start receipt entirely');
+      assert(getFailedStartDiagnosticLines().length === 0 && (await tunnelLogLinesForUi(null)).length === 0,
+        'the post-disposal tunnel-log fallback must respect diagnostics opt-out');
     } finally { clearFailedStartDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL reports render only closed opted-in OAuth origin-refusal facts',
+  run: () => {
+    const privateOrigin = 'https://private-origin.example.test:8443/with?state=PRIVATE_STATE&code=PRIVATE_CODE';
+    const privateTarget = '/oauth/authorize?redirect_uri=https%3A%2F%2Fprivate-client.example.test%2Fcallback&state=PRIVATE_STATE';
+    const base = {
+      description: 'The OAuth authorization page was refused.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      // A hostile caller cannot smuggle a raw request string through the
+      // recorder: every field is closed to an enum before retention.
+      recordOAuthRejectionDiagnostic({ telemetry: true, route: privateTarget, method: 'DELETE', reason: privateOrigin, stage: privateOrigin, fetchSite: 'PRIVATE_STATE', fetchMode: privateTarget, fetchDest: privateOrigin, originShape: 'PRIVATE_CODE', consentAction: privateTarget, hasTxn: privateOrigin, consentPolicyVersion: privateTarget, at: 2_000 });
+      recordOAuthRejectionDiagnostic({ telemetry: true, route: 'authorize', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'other', fetchDest: 'other', originShape: 'chatgpt-exact', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2', at: 2_500 });
+      recordOAuthRejectionDiagnostic({ telemetry: true, route: 'authorize', method: 'POST', reason: 'origin-mismatch', stage: 'consent', fetchSite: 'same-origin', fetchMode: 'navigate', fetchDest: 'other', originShape: 'https-other', consentAction: 'approve', hasTxn: 'yes', consentPolicyVersion: 'document-navigation-v2', at: 3_000 });
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      assert(full.includes('## Handoff Bridge Diagnostics')
+        && full.includes('OAuth cross-origin refusals: 3')
+        && full.includes('route `authorize`')
+        && full.includes('method `POST`')
+        && full.includes('stage `consent`')
+        && full.includes('reason `origin-mismatch`')
+        && full.includes('fetch site `same-origin`')
+        && full.includes('fetch mode `navigate`')
+        && full.includes('fetch destination `other`')
+        && full.includes('Origin shape `https-other`')
+        && full.includes('consent action `approve`')
+        && full.includes('transaction `yes`')
+        && full.includes('consent policy `document-navigation-v2`')
+        && full.includes('status 403')
+        && bridge.includes('OAuth cross-origin refusals: 3')
+        && !focused.includes('OAuth cross-origin refusals'),
+      'FULL and the focused BRIDGE code make the closed last refusal actionable');
+      for (const secret of [privateOrigin, privateTarget, 'PRIVATE_STATE', 'PRIVATE_CODE', 'private-origin.example.test', 'private-client.example.test']) {
+        assert(!full.includes(secret), `OAuth refusal diagnostics must not retain raw request data (${secret})`);
+      }
+      clearOAuthRejectionDiagnostic();
+      recordOAuthRejectionDiagnostic({ telemetry: false, route: 'authorize', method: 'POST', reason: 'fetch-site', stage: 'http', fetchSite: 'cross-site', fetchMode: 'other', fetchDest: 'other', originShape: 'chatgpt-exact', consentAction: 'uninspected', hasTxn: 'uninspected', consentPolicyVersion: 'document-navigation-v2' });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('OAuth cross-origin refusals'),
+        'the diagnostics opt-out cannot retain a later OAuth refusal');
+    } finally { clearOAuthRejectionDiagnostic(); }
+  },
+}, {
+  // A refused source answers a 401 that is deliberately identical to an
+  // expired-token 401. Without this line the real cause -- the connector's
+  // egress leaving the pinned prefixes -- is invisible in a report.
+  name: 'handoff bridge: privacy: FULL reports name a refused caller network without retaining its address',
+  run: () => {
+    const privateAddress = '203.0.113.77';
+    const privatePrefix = '203.0.113.0/24';
+    const base = {
+      description: 'The bridge refused a caller network.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      recordSourceRejectionDiagnostic({ telemetry: true, route: privateAddress, mode: privatePrefix, sourceClass: privateAddress, links: privatePrefix, at: 4_000 });
+      recordSourceRejectionDiagnostic({ telemetry: true, route: 'mcp', mode: 'enforce', sourceClass: 'other-public', links: 'one', at: 4_500 });
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      assert(full.includes('Refused caller networks: 2')
+        && full.includes('last route `mcp`')
+        && full.includes('policy `enforce`')
+        && full.includes('caller network class `other-public`')
+        && full.includes('active links `one`')
+        && full.includes('refused for its NETWORK, not its token')
+        && full.includes('Disconnect the existing link FIRST')
+        && bridge.includes('Refused caller networks: 2')
+        && !focused.includes('Refused caller networks'),
+      'FULL and BRIDGE must state the refused-network cause and its recovery');
+      // A hostile or buggy caller cannot push an address through the closed enums.
+      for (const secret of [privateAddress, privatePrefix, '203.0.113']) {
+        assert(!full.includes(secret), `source-refusal diagnostics must not retain a caller address (${secret})`);
+      }
+      clearSourceRejectionDiagnostic();
+      recordSourceRejectionDiagnostic({ telemetry: false, route: 'mcp', mode: 'enforce', sourceClass: 'other-public', links: 'one' });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Refused caller networks'),
+        'the diagnostics opt-out cannot retain a later source refusal');
+    } finally { clearSourceRejectionDiagnostic(); }
   },
 }, {
   name: 'handoff bridge: privacy: FULL issue-reporter draft diagnostics retain only closed state and bounded length',
@@ -285,13 +382,16 @@ export default [{
     assert(specs.length === 0, 'linked and pairing-closed progress stays in the bridge UI, not native dialogs');
   },
 }, {
-  name: 'handoff bridge: privacy: pairing codes are formatted only in the native sheet',
+  name: 'handoff bridge: privacy: pairing codes use fixed native-sheet controls and never persist in the dialog adapter',
   async run() {
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     const specs = []; const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 0 }; } } });
-    await dialogs.showCode({ parentWindow: window, code: '23456789AB' });
-    assert(specs.length === 1 && specs[0].message === 'Pairing code: 23456-789AB', 'the native pairing sheet alone receives the formatted XXXXX-XXXXX code');
+    const continued = await dialogs.showCode({ parentWindow: window, code: '23456789AB' });
+    assert(specs.length === 1 && specs[0].message === 'Pairing code: 23456-789AB' && JSON.stringify(specs[0].buttons) === JSON.stringify(['Continue in setup', 'Cancel pairing']), 'the native pairing sheet receives the formatted XXXXX-XXXXX code with its fixed continue-or-cancel controls');
+    assert(continued.keepOpen === true, 'the native primary action is the sole trusted signal that setup may retain pairing');
     assert(!JSON.stringify(dialogs).includes('23456789AB'), 'dialog API never retains the raw pairing code');
+    const cancelled = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async () => ({ response: 1 }) } });
+    assert((await cancelled.showCode({ parentWindow: window, code: '23456789AB' })).keepOpen === false, 'the native Cancel pairing response is never treated as a keep-open signal');
   },
 }, {
   name: 'handoff bridge: privacy: binary approval only serializes validated main-owned version and hash',
@@ -379,7 +479,7 @@ export default [{
     const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 0 }; } } });
     await dialogs.showCode({ parentWindow: window, code: '23456789AB', expiresAt: 1 });
     await dialogs.ask(sender, 'binaryApproval', { sourcePath: '/tmp/cloudflared', version: '2026.9.3', size: 123, sha256: 'a'.repeat(64), signature: 'ad-hoc signed' });
-    assert(JSON.stringify(specs[0].buttons) === JSON.stringify(['Cancel pairing']) && specs[0].message.includes('Pairing code: 23456-789AB') && specs[0].detail.includes('Expires at') && specs[0].detail.includes('Only approve if you just started linking from ChatGPT.') && specs[0].detail.includes('Never share this code.'), 'pairing sheet has only the fixed code, expiry and warnings');
+    assert(JSON.stringify(specs[0].buttons) === JSON.stringify(['Continue in setup', 'Cancel pairing']) && specs[0].defaultId === 0 && specs[0].cancelId === 1 && specs[0].message.includes('Pairing code: 23456-789AB') && specs[0].detail.includes('Expires at') && specs[0].detail.includes('Only approve if you just started linking from ChatGPT.') && specs[0].detail.includes('Never share this code.'), 'pairing sheet has only the fixed continue-or-cancel controls, code, expiry and warnings');
     for (const detail of ['Source: /tmp/cloudflared', 'Version: 2026.9.3', 'Size: 123 bytes', 'SHA-256: aaaaaaaaaaaa', 'Signature: ad-hoc signed', 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID']) assert(specs[1].detail.includes(detail), `binary approval retains: ${detail}`);
     assert(JSON.stringify(specs[1].buttons) === JSON.stringify(['Cancel', 'Approve']), 'binary approval keeps its fixed safe buttons');
   },
