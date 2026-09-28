@@ -59,7 +59,10 @@ export function createHandoffBridgeTray({
   let last = null;
   let glyph = null;
   let expiryNudged = false;
-  const canvas = () => { try { return (getCanvasWindows() || []).find(window => !window?.isDestroyed?.()) || null; } catch { return null; } };
+  const canvasWindows = () => {
+    try { return (getCanvasWindows() || []).filter(window => !window?.isDestroyed?.()); } catch { return []; }
+  };
+  const canvas = () => canvasWindows()[0] || null;
   const icon = nextGlyph => {
     const dataUri = TRAY_ICON_DATA_URIS[nextGlyph] || TRAY_ICON_DATA_URIS.idle;
     try { return nativeImage?.createFromDataURL?.(dataUri); } catch { return null; }
@@ -71,6 +74,17 @@ export function createHandoffBridgeTray({
     try { parent?.show?.(); parent?.focus?.(); } catch { /* the panel callback remains useful */ }
     try { onOpenPanel({ panel: 'bridge', ...(Number.isInteger(step) ? { step } : {}) }); } catch { /* renderer delivery is optional */ }
   };
+  // A tray click is main-process initiated, but an outstanding handoff still
+  // deserves the same interruption acknowledgement as the renderer controls.
+  // Read the controller's current projection where available instead of
+  // relying only on the last paint, and never move a pending sheet to another
+  // canvas if its original parent disappears.
+  const currentStatus = () => {
+    try { return controller.snapshot?.(false) || last; } catch { return last; }
+  };
+  const stillOwnsCanvas = window => {
+    try { return Boolean(window && !window.isDestroyed?.() && canvasWindows().some(candidate => candidate === window)); } catch { return false; }
+  };
   async function resume() {
     const parent = canvas();
     if (last?.pauseCause === 'anomaly') {
@@ -79,9 +93,19 @@ export function createHandoffBridgeTray({
       const details = anomalyResumeDetails(last);
       if (!details) return;
       const answer = await dialogs.ask?.(parent.webContents, 'resume', details);
-      if (!answer?.ok) return;
+      if (!answer?.ok || !stillOwnsCanvas(parent)) return;
     }
     await controller.resume?.();
+  }
+  async function disable() {
+    const status = currentStatus();
+    if (status?.chat?.outstanding) {
+      const parent = canvas();
+      if (!parent) return;
+      const answer = await dialogs.ask?.(parent.webContents, 'disable');
+      if (!answer?.ok || !stillOwnsCanvas(parent)) return;
+    }
+    await controller.disable?.();
   }
   function ensure(nextGlyph) {
     if (tray || typeof Tray !== 'function') return tray;
@@ -124,7 +148,7 @@ export function createHandoffBridgeTray({
     if (status?.link?.state === 'unlinked') menu.splice(1, 0, { label: 'Connect ChatGPT', click: () => openPanel({ step: 3 }) });
     if (status.link?.expiresSoon) menu.push({ label: 'ChatGPT link expires soon', enabled: false });
     menu.push({ label: 'Revoke all', click: () => controller.revokeAll?.() });
-    menu.push({ label: 'Turn off', click: () => controller.disable?.() });
+    menu.push({ label: 'Turn off', click: disable });
     try { item.setContextMenu?.(Menu?.buildFromTemplate?.(menu)); item.setToolTip?.('Infinite Canvas Handoff bridge'); } catch { /* optional */ }
     setDockBadge(view.badge);
     return view;

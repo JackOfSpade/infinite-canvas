@@ -22,7 +22,7 @@ import {
   describeChat,
   describeJobRow,
 } from '../utils/handoffBridgeView';
-import { BRIDGE_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
+import { BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import {
   getApplicationHandoffs,
   requestApplicationHandoffFocus,
@@ -284,20 +284,6 @@ export function HandoffBridgePanel() {
         onCancel={() => setConfirm(null)}
       />
     );
-  } else if (confirm === 'off') {
-    dialog = (
-      <ConfirmDialog
-        title={BRIDGE_UI_COPY.confirmOffTitle}
-        message={BRIDGE_UI_COPY.confirmOffMessage}
-        confirmLabel={BRIDGE_UI_COPY.turnOff}
-        cancelLabel={BRIDGE_UI_COPY.keepOn}
-        onConfirm={() => {
-          setConfirm(null);
-          void call('handoffBridgeSetEnabled', { enabled: false });
-        }}
-        onCancel={() => setConfirm(null)}
-      />
-    );
   }
 
   return (
@@ -485,14 +471,6 @@ export function HandoffBridgePanel() {
             </div>
           </section>
 
-          <section className="mt-4 space-y-2 border-t border-white/10 pt-3 text-[11px] leading-relaxed text-white/45">
-            {BRIDGE_COPY.hygiene.map(paragraph => <p key={paragraph}>{paragraph}</p>)}
-          </section>
-          <p className="mt-2 text-[11px] leading-relaxed text-white/45">{BRIDGE_COPY.dockNote}</p>
-          <p className="mt-2 text-[11px] leading-relaxed text-white/45">
-            {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
-          </p>
-
           {status.enabled && <footer className="mt-4 flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-3">
             <span className="flex min-w-0 items-center gap-1 text-[11px] text-white/35">
               <Cable size={12} /> {health.headline}
@@ -507,10 +485,7 @@ export function HandoffBridgePanel() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (status.chat.outstanding) setConfirm('off');
-                  else void call('handoffBridgeSetEnabled', { enabled: false });
-                }}
+                onClick={() => void call('handoffBridgeSetEnabled', { enabled: false })}
                 className="bridge-button-danger"
               >
                 {BRIDGE_UI_COPY.turnOff}

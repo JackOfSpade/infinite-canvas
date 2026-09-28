@@ -92,37 +92,19 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
     });
   };
 
-  let dialog = null;
-  if (confirm === 'revoke') {
-    dialog = (
-      <ConfirmDialog
-        title={BRIDGE_UI_COPY.confirmRevokeTitle}
-        message={BRIDGE_UI_COPY.confirmRevokeMessage}
-        confirmLabel={BRIDGE_UI_COPY.confirmRevoke}
-        cancelLabel={BRIDGE_UI_COPY.cancel}
-        onConfirm={() => {
-          setConfirm(null);
-          void call('handoffBridgeRevokeAll');
-        }}
-        onCancel={() => setConfirm(null)}
-      />
-    );
-  } else if (confirm === 'forget') {
-    dialog = (
-      <ConfirmDialog
-        title={BRIDGE_UI_COPY.confirmForgetTitle}
-        message={BRIDGE_UI_COPY.confirmForgetMessage}
-        confirmLabel={BRIDGE_UI_COPY.confirmForget}
-        cancelLabel={BRIDGE_UI_COPY.cancel}
-        onConfirm={() => {
-          setConfirm(null);
-          void call('handoffBridgeForgetSetup');
-        }}
-        onCancel={() => setConfirm(null)}
-      />
-    );
-  }
-
+  const dialog = confirm === 'revoke' ? (
+    <ConfirmDialog
+      title={BRIDGE_UI_COPY.confirmRevokeTitle}
+      message={BRIDGE_UI_COPY.confirmRevokeMessage}
+      confirmLabel={BRIDGE_UI_COPY.confirmRevoke}
+      cancelLabel={BRIDGE_UI_COPY.cancel}
+      onConfirm={() => {
+        setConfirm(null);
+        void call('handoffBridgeRevokeAll');
+      }}
+      onCancel={() => setConfirm(null)}
+    />
+  ) : null;
   return (
     <>
       <section
@@ -147,7 +129,9 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               type="checkbox"
               checked={status.enabled}
               disabled={controlsDisabled}
-              onChange={event => void call('handoffBridgeSetEnabled', { enabled: event.target.checked })}
+              onChange={event => {
+                void call('handoffBridgeSetEnabled', { enabled: event.target.checked });
+              }}
             />
           </label>
           {checking && (
@@ -251,7 +235,7 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             <button
               type="button"
               disabled={controlsDisabled}
-              onClick={() => setConfirm('forget')}
+              onClick={() => void call('handoffBridgeForgetSetup')}
               className="bridge-button-danger"
             >
               {BRIDGE_UI_COPY.forget}

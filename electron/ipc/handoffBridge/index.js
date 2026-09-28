@@ -107,6 +107,17 @@ function userDataFor(deps, app) { return deps.userData ?? app?.getPath?.('userDa
 function packagedFor(deps, app) { return deps.isPackaged ?? app?.isPackaged ?? false; }
 function socketPathFor(userData) { return path.join(userData, CONSTANTS.SOCKET_RELATIVE_PATH); }
 const noOp = () => undefined;
+// `restartConfirmed: false` is meaningful: a routine repeat enable must leave
+// the first New chat/Continue restart gate in place.  Preserve the presence of
+// that boolean through bootstrap composition rather than collapsing it to the
+// ordinary manual-enable default.
+function startEnableArgs(reason, deps = {}) {
+  const args = { reason, confirmed: deps?.confirmed === true, autoStart: reason === 'auto-start' };
+  if (deps && typeof deps === 'object' && Object.hasOwn(deps, 'restartConfirmed')) {
+    args.restartConfirmed = deps.restartConfirmed === true;
+  }
+  return args;
+}
 
 function syncReportRedactedHosts(loaded) {
   // An unreadable config does not prove that its previous hostname stopped
@@ -566,7 +577,11 @@ function createControllerBridge() {
       const attached = activeRuntimeForController(active);
       if (attached) return enableAttachedRuntime(attached, args);
       if (active?.enable) return active.enable(args);
-      return startHandoffBridge({ reason: 'manual', deps: { ...(bootstrapContext?.deps || {}), enabled: true, activate: true, confirmed: args?.confirmed === true } });
+      const startDeps = { ...(bootstrapContext?.deps || {}), enabled: true, activate: true, confirmed: args?.confirmed === true };
+      if (args && typeof args === 'object' && Object.hasOwn(args, 'restartConfirmed')) {
+        startDeps.restartConfirmed = args.restartConfirmed === true;
+      }
+      return startHandoffBridge({ reason: 'manual', deps: startDeps });
     },
     disable: async () => disposeCurrentRuntime(),
     revokeAll: async (...args) => revokeActiveRuntime(activeRuntimeForController(current), args, status),
@@ -835,15 +850,32 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     if (result?.ok === true) controller?.notePairingAction?.();
     return result;
   };
-  const dialogConfirm = kind => async details => {
-    const parent = (getCanvasWindows() || []).find(window => !window?.isDestroyed?.());
-    return dialogs.ask?.(parent?.webContents, kind, details);
+  const dialogConfirm = kind => async (details, dialogContext = null) => {
+    const windows = () => {
+      try { return (getCanvasWindows() || []).filter(window => !window?.isDestroyed?.()); } catch { return []; }
+    };
+    // A New/Continue IPC can defer its restart warning until after a short
+    // enable. If it supplied an exact guarded sender, never silently move
+    // that warning to a different canvas when the original closes. Direct
+    // controller/tray calls have no context and retain the first-window
+    // fallback for their existing main-process-only path.
+    const requested = dialogContext?.sender;
+    const parent = requested
+      ? windows().find(window => window?.webContents === requested) || null
+      : windows()[0] || null;
+    const answer = await dialogs.ask?.(parent?.webContents, kind, details);
+    // A deferred restart sheet belongs to its initiating renderer, not merely
+    // whichever canvas happens to be open when the sheet resolves. Do not let
+    // an accepted response from a closed canvas acknowledge that restart hold.
+    if (requested && !windows().some(window => window?.webContents === requested)) {
+      return { ok: false, code: 'NO_WINDOW' };
+    }
+    return answer;
   };
   let tray = null;
   const showFixedNotification = kind => {
     const body = {
       paused: 'Handoff bridge paused. Review it in Infinite Canvas.',
-      'bridge-on': 'Handoff bridge is still on. Review it in Infinite Canvas.',
       'served-after-idle': 'Handoff bridge served after a long idle period. Review it in Infinite Canvas.',
       'link-expiring': 'ChatGPT link expires soon. Review it in Infinite Canvas.',
     }[kind];
@@ -1407,7 +1439,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
   if (deps.activate === true) clearFailedStartDiagnostic();
   const existing = runtime;
   if (existing?.controller) {
-    if (deps.activate === true) return enableAttachedRuntime(existing, { reason, confirmed: deps.confirmed === true, autoStart: reason === 'auto-start' });
+    if (deps.activate === true) return enableAttachedRuntime(existing, startEnableArgs(reason, deps));
     return Promise.resolve({ success: true, status: getHandoffBridgeStatus(), reason, testMode: existing.testMode === true });
   }
   if (startPromise) return startPromise;
@@ -1467,7 +1499,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     if (testMode) installPairingTestHook(candidate);
     if (deps.activate === true) {
       let result;
-      try { result = await enableAttachedRuntime(candidate, { reason, confirmed: deps.confirmed === true, autoStart: reason === 'auto-start' }); }
+      try { result = await enableAttachedRuntime(candidate, startEnableArgs(reason, deps)); }
       catch { result = { success: false, code: 'tunnel_failed' }; }
       if (lifecycleTicket !== lifecycle || runtime !== candidate) {
         if (runtime === candidate) detachRuntime(candidate, { advanceLifecycle: false });

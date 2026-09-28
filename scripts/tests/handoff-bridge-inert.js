@@ -170,7 +170,7 @@ function compositionEngine() {
   };
 }
 
-function createCompositionGraph({ testMode = false, now = () => 0, pairingOpen = async () => ({ ok: false, code: 'TUNNEL_NOT_READY' }) } = {}) {
+function createCompositionGraph({ testMode = false, now = () => 0, pairingOpen = async () => ({ ok: false, code: 'TUNNEL_NOT_READY' }), canvasWindows = null, dialogs: injectedDialogs = null } = {}) {
   const hostname = READY_CONFIG.hostname;
   const config = {
     ...READY_CONFIG,
@@ -204,8 +204,8 @@ function createCompositionGraph({ testMode = false, now = () => 0, pairingOpen =
     deps: {
       now, timers, engine, listener, tunnelSupervisor, oauth, pairing,
       audit: { append: () => Promise.resolve(true), flush: async () => true }, laneStore: {}, application: {}, push: {},
-      dialogs: { ask: async () => ({ ok: true }) }, power: { update() {}, dispose() {} }, tray: { apply() {}, destroy() {} },
-      getCanvasWindows: () => [parent], requestHandler: () => undefined,
+      dialogs: injectedDialogs || { ask: async () => ({ ok: true }) }, power: { update() {}, dispose() {} }, tray: { apply() {}, destroy() {} },
+      getCanvasWindows: canvasWindows || (() => [parent]), requestHandler: () => undefined,
       readConfig: () => ({ state: 'ok', config }), writeEnabled: async () => true,
       publicRequest: successfulProbeRequest(publicCalls, hostname), socketRequest: successfulProbeRequest(socketCalls, hostname),
     },
@@ -221,6 +221,45 @@ async function disposeCompositionGraph(graph) {
 }
 
 export default [
+  {
+    name: 'handoff bridge: inert: deferred restart dialog stays on the requesting canvas in a multi-window app',
+    async run() {
+      const first = liveCanvas(901); const second = liveCanvas(902); const asks = [];
+      const { graph } = createCompositionGraph({
+        canvasWindows: () => [first, second],
+        dialogs: { ask: async (parent, kind) => { asks.push({ parent, kind }); return { ok: true }; } },
+      });
+      try {
+        assert((await graph.controller.enable({ confirmed: true, restartConfirmed: false, startContext: COMPOSITION_START_CONTEXT })).success,
+          'the composed bridge must reach its restart-held repeat-enable state');
+        await graph.controller.prepareChat({ kind: 'new', restartContext: Object.freeze({ sender: second.webContents }) });
+        assert(asks.length === 1 && asks[0].kind === 'restart' && asks[0].parent === second.webContents,
+          'the restart sheet must parent to the exact requesting canvas, never the first canvas');
+      } finally { await disposeCompositionGraph(graph); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: a closed restart-sheet canvas cannot acknowledge New or Continue',
+    async run() {
+      for (const kind of ['new', 'continue']) {
+        const first = liveCanvas(910); const second = liveCanvas(911); const sheet = deferred(); let windows = [first, second]; let asks = 0;
+        const { graph } = createCompositionGraph({
+          canvasWindows: () => windows,
+          dialogs: { ask: async (_parent, askedKind) => { asks += 1; assert(askedKind === 'restart', 'only the deferred restart sheet may be requested'); return sheet.promise; } },
+        });
+        try {
+          assert((await graph.controller.enable({ confirmed: true, restartConfirmed: false, startContext: COMPOSITION_START_CONTEXT })).success,
+            'the graph must begin restart-held');
+          const pending = graph.controller.prepareChat({ kind, restartContext: Object.freeze({ sender: second.webContents }) });
+          await Promise.resolve(); await Promise.resolve();
+          windows = [first]; sheet.resolve({ ok: true });
+          const result = await pending;
+          assert(asks === 1 && result?.copied === false && graph.controller.snapshot().hold === 'restart',
+            `${kind} keeps the restart hold when its accepted sheet loses the originating canvas`);
+        } finally { await disposeCompositionGraph(graph); }
+      }
+    },
+  },
   {
     name: 'handoff bridge: inert: a failed composed enable retains its closed receipt after runtime detach',
     async run() {
@@ -533,6 +572,41 @@ export default [
         const refused = await devIpc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
         assert(refused.success === false && refused.code === 'UNAVAILABLE' && devCompositions === 0,
           'explicit development state refuses before consent or graph composition despite an ambient packaged fallback');
+      } finally { await stopHandoffBridge(); }
+    },
+  },
+  {
+    name: 'handoff bridge: inert: fresh repeat enable preserves the restart hold through bootstrap composition',
+    async run() {
+      await stopHandoffBridge();
+      const ipc = bridgeIpc(); const canvas = liveCanvas(89); const enableArgs = [];
+      const repeatConfig = {
+        ...READY_CONFIG,
+        consentVersion: 1,
+        scope: { applications: true, scoring: false },
+        limits: { idlePauseMinutes: 1440 },
+        prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
+      };
+      const graph = () => ({
+        controller: {
+          snapshot: () => ({ ...liveStatus(), config: repeatConfig }),
+          subscribe: () => () => undefined,
+          enable: async args => { enableArgs.push(args); return { success: true }; },
+          disable: async () => ({ success: true }),
+        },
+        listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
+      });
+      try {
+        assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: {
+          env: {}, isPackaged: true, userData: SAFE_PATHS.userData, getCanvasWindows: () => [canvas],
+          readConfig: () => ({ state: 'ok', config: repeatConfig }), readTunnelState: () => READY_SETUP,
+          compose: graph,
+          dialogs: { ask: async () => { throw new Error('routine repeat enable must not open a dialog'); } },
+        } }), 'the fresh repeat-enable fixture registers the bootstrap UI route');
+        const result = await ipc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: canvas.webContents }, { enabled: true });
+        assert(result.success && JSON.stringify(enableArgs) === JSON.stringify([{
+          reason: 'manual', confirmed: true, autoStart: false, restartConfirmed: false,
+        }]), 'a fresh routine repeat enable must defer the restart acknowledgement to first New chat or Continue');
       } finally { await stopHandoffBridge(); }
     },
   },

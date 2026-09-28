@@ -195,14 +195,58 @@ export default [
       assert(settings.includes('max-w-[calc(100vw-2rem)]') && settings.includes('min-w-0') && !settings.includes('overflow-x-hidden'), 'Settings must remain inside a narrow viewport without clipping other Settings content');
       assert(setup.includes('flex-wrap') && setup.includes('min-w-0') && setup.includes('bridge-button-danger'), 'bridge Settings controls must wrap long labels and actions instead of overflowing');
       assert(panel.includes('max-w-[calc(100vw-2rem)]') && panel.includes('left-3') && panel.includes('sm:left-14'), 'bridge popover must remain within a narrow viewport');
+      assert(!panel.includes('<details') && !panel.includes('safetyDetails') && !panel.includes('BRIDGE_COPY.hygiene') && !panel.includes('BRIDGE_COPY.dockNote') && !panel.includes('BRIDGE_COPY.keepAwake'), 'panel must not render or reference the removed safety and privacy notes');
       for (const className of ['bridge-button-primary', 'bridge-button-secondary', 'bridge-button-danger']) assert(new RegExp(`\\.${className}(?:,|\\s*\\{)`).test(styles), `${className} must have a shared CSS definition`);
       for (const rule of ['display: inline-flex', 'max-width: 100%', 'min-height: 2.25rem', 'overflow-wrap: anywhere', ':disabled']) assert(styles.includes(rule), `bridge buttons must retain the compact responsive rule ${rule}`);
       assert(trigger.includes("health.badge > 9 ? '9+'"), 'the trigger badge must cap visibly at 9+');
       assert(!panel.includes('now || Date.now()'), 'new-chat confirmation must use state time, never a wall-clock fallback');
       assert(!dialog.includes('${BRIDGE_SETUP_COPY.stepComplete}') && !dialog.includes('${BRIDGE_SETUP_COPY.stepPending}'), 'setup progress must use icons or CSS, not visible glyph text');
-      assert(dialog.includes('LINK_WOULD_BREAK') && dialog.includes('confirmBreak'), 'hostname changes that would break a link must offer an explicit confirm-and-retry flow');
+      assert(!dialog.includes('ConfirmDialog') && !dialog.includes('LINK_WOULD_BREAK') && !dialog.includes('confirmBreak') && !dialog.includes('pendingAddress'), 'the renderer must leave linked-address confirmation to one authoritative main-process dialog');
+      assert(!setup.includes("confirm === 'off'") && !panel.includes("confirm === 'off'")
+        && setup.includes("void call('handoffBridgeSetEnabled', { enabled: event.target.checked });")
+        && panel.includes("onClick={() => void call('handoffBridgeSetEnabled', { enabled: false })}"), 'renderer controls must leave the one critical outstanding-work stop confirmation to main');
+      assert(setup.includes("onClick={() => void call('handoffBridgeForgetSetup')}") && !setup.includes("confirm === 'forget'"), 'Forget setup must use the single authoritative main-process confirmation');
       for (const count of ['getServed', 'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'stallNotices', 'tunnelRestarts']) assert(panel.includes(`status.counts.${count}`), `panel counts must include ${count}`);
       for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
+    },
+  },
+  {
+    name: 'handoff bridge: render: active critical confirmation has stable accessible name and description links',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-confirm-dialog-'));
+      const entry = path.join(directory, 'ConfirmDialogProbe.jsx');
+      const confirmDialog = path.resolve('src/components/ConfirmDialog.jsx');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { ConfirmDialog } from ${JSON.stringify(confirmDialog)};\nexport function ConfirmDialogProbe() { return <ConfirmDialog title="Turn off bridge?" message="Pending work will no longer be available to ChatGPT." confirmLabel="Turn off" cancelLabel="Keep on" onConfirm={() => {}} onCancel={() => {}} variant="warning" />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => rootNode.render(bundle.module.React.createElement(bundle.module.ConfirmDialogProbe)));
+            const dialog = window.document.querySelector('[role="dialog"]');
+            const titleId = dialog?.getAttribute('aria-labelledby');
+            const messageId = dialog?.getAttribute('aria-describedby');
+            const title = titleId && window.document.getElementById(titleId);
+            const message = messageId && window.document.getElementById(messageId);
+            assert(titleId && messageId && title && message, 'an active critical dialog must point to real title and description elements');
+            assert(title.textContent === 'Turn off bridge?' && message.textContent === 'Pending work will no longer be available to ChatGPT.', 'the accessible dialog links must resolve its active critical warning text');
+            await bundle.module.act(async () => rootNode.render(bundle.module.React.createElement(bundle.module.ConfirmDialogProbe)));
+            assert(dialog.getAttribute('aria-labelledby') === titleId && dialog.getAttribute('aria-describedby') === messageId, 'accessible title and description IDs must remain stable while the dialog stays active');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent);
+            else delete globalThis.CustomEvent;
+          }
+          assert(entries.length === 0, 'critical confirmation accessibility must mount without console output');
+        }));
+      } finally {
+        controller.abort();
+        await bundle?.dispose();
+        await fsPromises.rm(directory, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -615,6 +659,8 @@ export default [
       try {
         bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
         await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
           const saves = []; const enables = []; const statusListeners = [];
           const emit = value => statusListeners.forEach(listener => listener(value));
           const persisted = {
@@ -699,13 +745,29 @@ export default [
               && bundle.module.getHandoffBridgeStatus().seq === 5 && enabled.checked,
             'the master switch must call its dedicated port and wait for the newer main status');
 
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(snapshot(6, {
+                enabled: true,
+                autoStart: true,
+                autoRelease: true,
+                config: { scope: { applications: false, scoring: true } },
+                chat: { state: 'working', outstanding: { stage: 'resume' } },
+              }));
+            });
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(enables) === JSON.stringify([true, false])
+              && !window.document.body.textContent.includes('ChatGPT has an unanswered handoff.'),
+            'Settings must send an outstanding-work stop directly to the one authoritative main-process confirmation');
+
             await bundle.module.act(async () => { autoRelease.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(JSON.stringify(saves[4]) === JSON.stringify({ autoRelease: false }), 'the controlled failure must request the auto-release value the user selected');
-            assert(bundle.module.getHandoffBridgeStatus().seq === 5 && autoRelease.checked, 'a failed config save must not optimistically change a controlled checkbox');
+            assert(bundle.module.getHandoffBridgeStatus().seq === 6 && autoRelease.checked, 'a failed config save must not optimistically change a controlled checkbox');
             assert(window.document.body.textContent.includes('Something went wrong in the bridge. Try again; if it repeats, copy a bug report.'), 'a failed checkbox save must provide fixed feedback instead of pretending it was saved');
             assert(entries.length === 0, 'checkbox status transitions must emit no console warnings or errors');
           } finally {
             await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent);
+            else delete globalThis.CustomEvent;
           }
         }));
       } finally { __resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
@@ -757,7 +819,7 @@ export default [
     },
   },
   {
-    name: 'handoff bridge: render: each keep-awake value renders exactly one note in both bridge surfaces',
+    name: 'handoff bridge: render: each keep-awake value renders once in Settings, never the panel',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-awake-'));
       const entry = path.join(directory, 'AwakeProbe.jsx'); const panel = path.resolve('src/components/HandoffBridgePanel.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js'); const uiStore = path.resolve('src/utils/handoffBridgeUiStore.js');
@@ -769,8 +831,9 @@ export default [
           window.electronAPI = { handoffBridgeGetStatus: async () => ({ status: status(1, { power: { keepAwake } }) }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined };
           bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetBridgeUiForTests(); const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
           await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.AwakeProbe)); bundle.module.applyHandoffBridgeStatus(status(2, { power: { keepAwake } })); bundle.module.openBridgePopover(); });
-          const selected = keepAwake ? 'During bridge work, the app asks macOS to stay awake' : 'During bridge work, your Mac may sleep'; const other = keepAwake ? 'During bridge work, your Mac may sleep' : 'During bridge work, the app asks macOS to stay awake'; const text = window.document.body.textContent;
-          assert(text.split(selected).length - 1 === 2 && !text.includes(other), 'the selected keep-awake sentence must appear once in panel and once in Settings only');
+          const selected = keepAwake ? 'During bridge work, the app asks macOS to keep your Mac awake' : 'During bridge work, your Mac may sleep'; const other = keepAwake ? 'During bridge work, your Mac may sleep' : 'During bridge work, the app asks macOS to keep your Mac awake'; const text = window.document.body.textContent;
+          assert(!window.document.querySelector('details') && !text.includes('Safety and privacy') && !text.includes('Use a dedicated ChatGPT Project') && !text.includes('Copy/paste still works') && !text.includes('Review every resume and cover letter'), 'the panel must not render the removed safety or privacy disclosure and notes');
+          assert(text.split(selected).length - 1 === 1 && !text.includes(other), 'the selected keep-awake sentence must appear in Settings only');
           await bundle.module.act(async () => rootNode.unmount()); assert(entries.length === 0, 'keep-awake render must have no console output');
         }));
       } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }

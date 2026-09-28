@@ -251,12 +251,12 @@ export default [{
     let release; let parent = null;
     const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: (value, spec) => { parent = value; void spec; return new Promise(resolve => { release = resolve; }); } } });
     const first = dialogs.ask(sender, 'enable', { hostname: 'bridge.example.com', idlePauseMinutes: 0, long: true });
-    const busy = await dialogs.ask(sender, 'pairing');
+    const busy = await dialogs.ask(sender, 'linkBreak', { hostname: 'bridge.example.com' });
     assert(busy.code === 'BUSY' && parent === window, 'one native sheet at a time and always attached to canvas parent');
     release({ response: 0 }); await first;
   },
 }, {
-  name: 'handoff bridge: privacy: pairing notices queue behind code sheet instead of being dropped',
+  name: 'handoff bridge: privacy: pairing progress never stacks behind the code sheet',
   async run() {
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     const specs = []; let releaseCode;
@@ -266,10 +266,23 @@ export default [{
       return Promise.resolve({ response: 0 });
     } } });
     const showing = dialogs.showCode({ parentWindow: window, code: '23456789AB' });
-    assert(dialogs.showNotice({ parentWindow: window, kind: 'link-requested' }).ok, 'notice should queue while code sheet is busy');
+    assert(dialogs.showNotice({ parentWindow: window, kind: 'link-requested' }).ok, 'pairing progress port remains accepted while the code sheet is busy');
     releaseCode({ response: 0 }); await showing;
     await new Promise(resolve => setImmediate(resolve));
-    assert(specs.length === 2 && specs[1].message === 'ChatGPT is requesting access to the Handoff bridge.', 'queued notice uses fixed text after code sheet closes');
+    assert(specs.length === 1 && specs[0].title === 'ChatGPT pairing code', 'closing the code sheet must not reveal a queued informational popup');
+  },
+}, {
+  name: 'handoff bridge: privacy: routine pairing progress never opens a native sheet',
+  async run() {
+    const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
+    const specs = [];
+    const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 0 }; } } });
+    assert(dialogs.showNotice({ parentWindow: window, kind: 'link-requested' }).ok
+      && dialogs.showNotice({ parentWindow: window, kind: 'linked' }).ok
+      && dialogs.showNotice({ parentWindow: window, kind: 'pairing-closed' }).ok,
+    'routine pairing state accepts the optional notice port without requesting a sheet');
+    await new Promise(resolve => setImmediate(resolve));
+    assert(specs.length === 0, 'linked and pairing-closed progress stays in the bridge UI, not native dialogs');
   },
 }, {
   name: 'handoff bridge: privacy: pairing codes are formatted only in the native sheet',
@@ -291,15 +304,15 @@ export default [{
     assert(!serialized.includes(hostile) && serialized.includes('unavailable'), 'hostile binary details cannot cross into native dialog text');
   },
 }, {
-  name: 'handoff bridge: privacy: every confirmation kind is parented and renderer/client sentinels never reach it',
+  name: 'handoff bridge: privacy: every remaining native confirmation is parented and renderer/client sentinels never reach it',
   async run() {
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     const hostile = sentinel('all-dialog-kinds'); const specs = [];
     const make = () => createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (parent, spec) => { assert(parent === window, 'every native sheet must receive the canvas parent'); specs.push(spec); return { response: 1 }; } } });
     const values = [
       ['enable', { hostname: 'bridge.example.com', idlePauseMinutes: 60, long: true, client_name: hostile }],
-      ['enable', { long: false, client_name: hostile }],
-      ['hostname', { hostname: 'bridge.example.com', client_name: hostile }], ['linkBreak', { hostname: 'bridge.example.com', redirect: hostile }],
+      ['disable', { client_name: hostile }],
+      ['linkBreak', { hostname: 'bridge.example.com', redirect: hostile }],
       ['restart', { releasedCount: 1, items: [{ title: 'Disk title', company: 'Disk company' }], client_name: hostile }],
       ['resume', { reason: 'anomaly', count: 5, minutes: 10, at: 1, client_name: hostile }],
       ['release', { hostname: 'bridge.example.com', canvasFilePath: '/tmp/Disk.canvas', items: [{ title: 'Disk title', company: 'Disk company' }], label: hostile }],
@@ -308,9 +321,56 @@ export default [{
       ['binaryApproval', { sourcePath: hostile, version: hostile, sha256: hostile, signature: hostile }],
     ];
     for (const [kind, details] of values) await make().ask(sender, kind, details);
+    for (const [kind, details] of [
+      ['hostname', { hostname: 'bridge.example.com' }],
+      ['pairing', {}],
+      ['revoke', {}],
+      ['enable', { long: false }],
+    ]) assert((await make().ask(sender, kind, details)).code === 'INVALID', `${kind} must not restore a routine native confirmation`);
     const serialized = JSON.stringify(specs);
     assert(!serialized.includes(hostile) && !serialized.includes('client_name') && !serialized.includes('redirect'), 'native dialog text cannot serialize renderer, remote-client, or redirect values');
-    assert(specs.some(spec => spec.message === 'Let ChatGPT fetch your AI handoffs while this app is open?') && specs.some(spec => spec.message === 'Turn on the ChatGPT bridge?'), 'long and short enable copy must both be reachable');
+    assert(specs.filter(spec => spec.message === 'Allow ChatGPT to fetch released handoffs?').length === 1, 'only the long critical enable consent may reach a native sheet');
+    const longEnable = specs.find(spec => spec.title === 'Turn on ChatGPT bridge' && spec.detail.includes('bridge.example.com'));
+    for (const disclosure of [
+      'Only ChatGPT chats you start', 'Job listings, your career data, and drafts', 'Cloudflare and ChatGPT can read this data',
+      'ChatGPT stores the chat', 'Pause or Revoke anytime', 'Quitting ends active chats',
+      'After a restart, confirm released jobs again', 'After 1 hour without action, serving pauses until Resume; the tunnel and link stay up',
+    ]) assert(longEnable?.detail.includes(disclosure), `long enable consent retains: ${disclosure}`);
+    assert(!longEnable?.detail.includes('Delete the chat when done.') && !longEnable?.detail.includes('Copy/paste still works.'), 'long enable consent excludes noncritical follow-up advice');
+    assert(longEnable.detail.trim().split(/\s+/).length <= 70, 'long enable consent must stay under the native-sheet readability budget');
+    const buttonsFor = title => specs.find(spec => spec.title === title)?.buttons;
+    for (const [title, label] of [
+      ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'], ['Start a new ChatGPT chat', 'Start new chat'],
+      ['Resume bridge serving', 'Resume'], ['Release work to ChatGPT', 'Release'], ['Release scoring work', 'Release'], ['Forget bridge setup', 'Forget setup'],
+    ]) assert(JSON.stringify(buttonsFor(title)) === JSON.stringify(['Cancel', label]), `${title} uses its specific affirmative label with Cancel as the safe default`);
+    const releaseSpec = specs.find(spec => spec.title === 'Release work to ChatGPT');
+    for (const disclosure of ['1 released job:', 'Disk title — Disk company', 'Canvas: Disk.canvas', 'Destination: bridge.example.com', 'career data, job listings, and drafts through Cloudflare']) assert(releaseSpec?.detail.includes(disclosure), `release consent retains: ${disclosure}`);
+    const restartSpec = specs.find(spec => spec.title === 'Start a new ChatGPT chat');
+    for (const disclosure of ['1 released job will be available to the new chat', 'Disk title — Disk company', 'Chats from before the restart have ended']) assert(restartSpec?.detail.includes(disclosure), `restart consent retains: ${disclosure}`);
+    const linkBreakSpec = specs.find(spec => spec.title === 'Change bridge address');
+    assert(linkBreakSpec?.detail.includes('bridge.example.com') && linkBreakSpec.detail.includes('breaks the current ChatGPT link'), 'linked address consent must name the new host and reconnection consequence');
+    const forgetSpec = specs.find(spec => spec.title === 'Forget bridge setup');
+    assert(forgetSpec?.detail.includes('revokes ChatGPT access') && forgetSpec.detail.includes('Cloudflare tunnel') && forgetSpec.detail.includes('ChatGPT plugin') && forgetSpec.detail.includes('history are not deleted'), 'forget consent must state its local, access and external-data scope');
+  },
+}, {
+  name: 'handoff bridge: privacy: long consent describes the exact configured idle-pause duration',
+  async run() {
+    const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
+    const cases = [
+      [0, null],
+      [30, 'After 30 minutes without action'],
+      [90, 'After 1 hour 30 minutes without action'],
+      [1440, 'After 1 day without action'],
+      [1500, 'After 1 day 1 hour without action'],
+      [2881, 'After 2 days 1 minute without action'],
+    ];
+    for (const [idlePauseMinutes, expected] of cases) {
+      let spec;
+      const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, value) => { spec = value; return { response: 0 }; } } });
+      await dialogs.ask(sender, 'enable', { hostname: 'bridge.example.com', idlePauseMinutes, long: true });
+      if (expected) assert(spec.detail.includes(expected), `idle pause ${idlePauseMinutes} must be stated exactly`);
+      else assert(!spec.detail.includes('without action'), 'disabled idle pause must not claim that a timer is active');
+    }
   },
 }, {
   name: 'handoff bridge: privacy: pairing and binary sheets use the fixed restricted controls and copy',
@@ -319,8 +379,9 @@ export default [{
     const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 0 }; } } });
     await dialogs.showCode({ parentWindow: window, code: '23456789AB', expiresAt: 1 });
     await dialogs.ask(sender, 'binaryApproval', { sourcePath: '/tmp/cloudflared', version: '2026.9.3', size: 123, sha256: 'a'.repeat(64), signature: 'ad-hoc signed' });
-    assert(JSON.stringify(specs[0].buttons) === JSON.stringify(['Cancel pairing']) && specs[0].message.includes('Pairing code: 23456-789AB') && specs[0].detail.includes('Only approve if you just started linking from ChatGPT.') && specs[0].detail.includes('Never share this code.'), 'pairing sheet has only the fixed code, expiry and warnings');
-    assert(JSON.stringify(specs[1].buttons) === JSON.stringify(['Cancel', 'Approve']) && specs[1].detail.includes('Source: /tmp/cloudflared') && specs[1].detail.includes('This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID'), 'binary approval is limited to typed trust details and the required pin-limit sentence');
+    assert(JSON.stringify(specs[0].buttons) === JSON.stringify(['Cancel pairing']) && specs[0].message.includes('Pairing code: 23456-789AB') && specs[0].detail.includes('Expires at') && specs[0].detail.includes('Only approve if you just started linking from ChatGPT.') && specs[0].detail.includes('Never share this code.'), 'pairing sheet has only the fixed code, expiry and warnings');
+    for (const detail of ['Source: /tmp/cloudflared', 'Version: 2026.9.3', 'Size: 123 bytes', 'SHA-256: aaaaaaaaaaaa', 'Signature: ad-hoc signed', 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID']) assert(specs[1].detail.includes(detail), `binary approval retains: ${detail}`);
+    assert(JSON.stringify(specs[1].buttons) === JSON.stringify(['Cancel', 'Approve']), 'binary approval keeps its fixed safe buttons');
   },
 }, {
   name: 'handoff bridge: privacy: composed authenticated session and 500 hostile anonymous requests preserve every protected sink',

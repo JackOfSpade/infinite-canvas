@@ -157,7 +157,6 @@ export function registerHandoffBridgeUi({
   application = {},
   dialogs = {},
   clipboard = electronPkg.clipboard,
-  Notification = electronPkg.Notification,
   getCanvasWindows = () => [],
   now = Date.now,
   timers = globalThis,
@@ -311,25 +310,18 @@ export function registerHandoffBridgeUi({
     const result = await safeCall({ onSetupMutation }, 'onSetupMutation', kind);
     return acknowledged(result, { allowTrue: true });
   };
-  const notifyEnable = () => {
-    // Electron has no dependable requestPermission API. Showing this fixed,
-    // content-free notification is the permission request on macOS; a denial
-    // must not affect the tray or Dock alarm signals.
-    try {
-      const notification = typeof Notification === 'function'
-        ? new Notification({ title: 'Infinite Canvas', body: 'Handoff bridge is on.' })
-        : null;
-      notification?.show?.();
-    } catch { /* notification permission is optional */ }
-  };
   const handlers = {
     [IPC_CHANNELS.GET_STATUS]: invoke(async () => {
       const status = currentStatus(); return status ? success({ status }) : fixed('UNAVAILABLE');
     }),
     [IPC_CHANNELS.SET_ENABLED]: invoke(async ({ sender, window }, payload) => {
       if (!plain(payload) || typeof payload.enabled !== 'boolean') return fixed('UNAVAILABLE');
+      // Both directions change the live bridge graph. A canvas-marked
+      // WebContents that no longer belongs to a live BrowserWindow must not
+      // be able to start or stop it (even when stopping would not need a
+      // native confirmation).
+      if (!window) return fixed('NO_WINDOW');
       if (payload.enabled) {
-        if (!window) return fixed('NO_WINDOW');
         const status = currentStatus();
         // Availability is a main-owned refusal ladder (for example ordinary
         // E2E, packaged/platform, or the hard-off environment switch).  Do
@@ -345,11 +337,20 @@ export function registerHandoffBridgeUi({
           items: Array.isArray(details.items) ? details.items : [],
           long,
         };
+        // describe() is asynchronous even for a repeat enable. Losing the
+        // originating canvas while it runs must not turn a closed window into
+        // an authority to start the bridge without a sheet.
         if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
-        const answer = await confirm(sender, 'enable', enableDetails);
-        if (!answer.ok) return startupEnableFailure(answer);
-        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
-        const result = await safeCall(controller, 'enable', { confirmed: true });
+        // A first/material enable has the one long consent sheet. A repeat
+        // enable is still deliberate (the renderer toggle) but leaves the
+        // launch restart hold in place until the first New chat/Continue.
+        if (long) {
+          if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+          const answer = await confirm(sender, 'enable', enableDetails);
+          if (!answer.ok) return startupEnableFailure(answer);
+          if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+        }
+        const result = await safeCall(controller, 'enable', { confirmed: true, restartConfirmed: long });
         if (!acknowledged(result)) return startupEnableFailure(result);
         if (long) {
           const persisted = await safeCall(enableConsent, 'accept', enableDetails);
@@ -358,8 +359,19 @@ export function registerHandoffBridgeUi({
             return fixed('UNAVAILABLE');
           }
         }
-        notifyEnable();
         return success({ enabled: true });
+      }
+      // A hard stop normally takes effect immediately.  When released work is
+      // still outstanding, however, it is the one stop action that needs a
+      // main-owned acknowledgement.  Never accept a renderer-side "already
+      // confirmed" flag: the exact canvas that requested the stop owns this
+      // sheet and nothing else does.
+      const status = currentStatus();
+      if (status?.chat?.outstanding) {
+        if (!window) return fixed('NO_WINDOW');
+        const answer = await confirm(sender, 'disable');
+        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+        if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
       }
       const result = await safeCall(controller, 'disable');
       return acknowledged(result) ? success({ enabled: false }) : startupEnableFailure(result);
@@ -368,7 +380,6 @@ export function registerHandoffBridgeUi({
       if (!window) return fixed('NO_WINDOW');
       const patch = validPatch(payload, isValidHostname); if (!patch) return fixed('INVALID');
       const status = currentStatus();
-      const hostnameChanged = Object.hasOwn(patch, 'hostname') && patch.hostname !== status?.config?.hostname;
       const raisesScoring = patch.scope?.scoring === true && status?.config?.scope?.scoring !== true;
       const raisesAutoStart = patch.autoStart === true && status?.autoStart !== true;
       const raisesAutoRelease = patch.autoRelease === true && status?.autoRelease !== true;
@@ -377,7 +388,6 @@ export function registerHandoffBridgeUi({
       const weakensNetwork = patch.prefs?.pairingNetworkCheck === false && status?.prefs?.pairingNetworkCheck !== false;
       const raisesLimits = expandsLimits(status?.limits, patch);
       const confirmations = [];
-      if (hostnameChanged) confirmations.push(payload?.confirmBreak ? 'linkBreak' : 'hostname');
       if (raisesScoring) confirmations.push('scoring');
       if (raisesAutoStart) confirmations.push('autoStart');
       if (raisesAutoRelease) confirmations.push('autoRelease');
@@ -385,17 +395,23 @@ export function registerHandoffBridgeUi({
       if (weakensNetwork) confirmations.push('networkCheck');
       if (raisesLimits) confirmations.push('limits');
       for (const kind of confirmations) {
-        const answer = await confirm(sender, kind, kind === 'hostname' || kind === 'linkBreak'
-          ? { hostname: patch.hostname }
-          : undefined);
+        const answer = await confirm(sender, kind);
         if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
         if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
       }
-      // confirmBreak is part of the same atomic patch the store validates;
-      // passing it as a second argument silently bypasses its link-break gate.
+      // The renderer cannot authorize a hostname change. First let the
+      // serialized store decide whether a currently linked bridge would be
+      // broken. Only that result earns one main-owned native confirmation;
+      // retrying with confirmBreak is therefore tied to this exact sheet.
       if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
-      const result = await safeCall(store, 'writeConfig', { ...patch, confirmBreak: payload?.confirmBreak === true });
-      if (fixedCode(result?.code) === 'LINK_WOULD_BREAK') return fixed('LINK_WOULD_BREAK');
+      let result = await safeCall(store, 'writeConfig', { ...patch, confirmBreak: false });
+      if (fixedCode(result?.code) === 'LINK_WOULD_BREAK') {
+        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+        const answer = await confirm(sender, 'linkBreak', { hostname: patch.hostname });
+        if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+        if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
+        result = await safeCall(store, 'writeConfig', { ...patch, confirmBreak: true });
+      }
       if (!acknowledged(result)) {
         const fieldErrors = safeFieldErrors(result?.fieldErrors);
         return fieldErrors ? { ...fixed(fixedCode(result?.code, 'INVALID')), fieldErrors } : resultFailure(result, 'INTERNAL');
@@ -458,11 +474,16 @@ export function registerHandoffBridgeUi({
       if (!window) return fixed('NO_WINDOW');
       let status = currentStatus();
       if (status?.enabled !== true || status?.setup?.tunnelReachable !== true) return fixed('TUNNEL_NOT_READY');
-      { const answer = await confirm(sender, 'pairing'); if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW'); if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED')); }
-      // Disable can detach the runtime while the parented confirmation is open.
-      // Re-read the closed status before the pairing port is reachable.
+      // Opening pairing itself shows the code sheet. Do not stack a routine
+      // pre-confirmation ahead of it, but re-read status just before OAuth in
+      // case Disable detached the runtime between this IPC turn and the port.
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       status = currentStatus();
       if (status?.enabled !== true || status?.setup?.tunnelReachable !== true) return fixed('TUNNEL_NOT_READY');
+      // `snapshot()` can synchronously cause a canvas teardown in production
+      // adapters/tests. Recheck after the final read, not only before it: an
+      // old renderer must never turn its now-closed window into OAuth authority.
+      if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
       const result = await safeCall(oauth, 'openPairing', {
         parentWindow: window,
         hostname: status?.config?.hostname,
@@ -473,8 +494,8 @@ export function registerHandoffBridgeUi({
     [IPC_CHANNELS.CANCEL_PAIRING]: invoke(async () => {
       const result = await safeCall(oauth, 'cancelPairing'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
     }),
-    [IPC_CHANNELS.NEW_CHAT]: invoke(async ({ window }) => chatWithClipboard('newChat', window)),
-    [IPC_CHANNELS.CONTINUE_CHAT]: invoke(async ({ window }) => chatWithClipboard('continueChat', window)),
+    [IPC_CHANNELS.NEW_CHAT]: invoke(async ({ sender, window }) => chatWithClipboard('newChat', window, sender)),
+    [IPC_CHANNELS.CONTINUE_CHAT]: invoke(async ({ sender, window }) => chatWithClipboard('continueChat', window, sender)),
     [IPC_CHANNELS.PAUSE]: invoke(async () => {
       const result = await safeCall(controller, 'pause'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
     }),
@@ -525,11 +546,26 @@ export function registerHandoffBridgeUi({
     if (!acknowledged(result)) return resultFailure(result, 'NOT_FOUND');
     return success(result?.released !== undefined ? { released: result.released } : undefined);
   }
-  async function chatWithClipboard(method, window) {
+  async function chatWithClipboard(method, window, sender) {
     if (!window) return fixed('NO_WINDOW');
+    if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
     // The engine's prepare/commit split is the safety boundary: no successful
     // epoch rotation is allowed before the main-owned clipboard write works.
-    const prepared = await safeCall(controller, 'prepareChat', { kind: method === 'newChat' ? 'new' : 'continue' });
+    // This opaque context is created only after the IPC sender has passed the
+    // canvas guard. It stays in main process memory: it is neither status nor
+    // an IPC value, and lets a deferred restart sheet remain on this canvas.
+    const restartContext = Object.freeze({ sender });
+    const prepared = await safeCall(controller, 'prepareChat', {
+      kind: method === 'newChat' ? 'new' : 'continue',
+      restartContext,
+    });
+    // prepareChat can wait on the deferred restart sheet or engine work. If
+    // its originating canvas disappears meanwhile, discard the opaque
+    // capability before it can touch the clipboard or rotate the chat epoch.
+    if (!stillOwnsWindow(sender, window)) {
+      await safeCall(controller, 'abandonChat', prepared?.commitToken);
+      return fixed('NO_WINDOW');
+    }
     // Never fall back to the legacy combined call: it rotates the epoch before
     // the clipboard write and turns a clipboard failure into a lost old chat.
     if (!prepared || typeof prepared !== 'object') return fixed('NOT_READY');

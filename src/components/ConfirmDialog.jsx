@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, X } from 'lucide-react';
 import { updateModalCount } from './modalStack';
@@ -47,6 +47,8 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
   const previousFocusRef = useRef(null);
   const resolvingRef = useRef(false);
   const resolveTimerRef = useRef(null);
+  const titleId = useId();
+  const messageId = useId();
 
   const focusableElements = useCallback(() => {
     if (!dialogRef.current) return [];
@@ -129,7 +131,8 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
         tabIndex={-1}
         className="w-[360px] max-w-full min-w-0 bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel relative"
         onClick={(e) => e.stopPropagation()}
@@ -152,8 +155,8 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
             <AlertTriangle size={24} className={style.icon} />
           </div>
           <div className="text-center">
-            <h3 className="text-white text-sm font-semibold mb-1">{title}</h3>
-            <p className="text-white/50 text-xs leading-relaxed whitespace-pre-line">{message}</p>
+            <h3 id={titleId} className="text-white text-sm font-semibold mb-1">{title}</h3>
+            <p id={messageId} className="text-white/50 text-xs leading-relaxed whitespace-pre-line">{message}</p>
           </div>
         </div>
 

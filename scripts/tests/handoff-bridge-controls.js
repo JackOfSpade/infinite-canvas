@@ -924,11 +924,33 @@ export default [
     await h.controller.enable();
     assert(await h.controller.confirmRestart() && enableConfirms === 1 && restartConfirms === 0, 'manual enable must not prompt a second restart confirmation');
   } },
+  { name: 'handoff bridge: controls: a UI-confirmed repeat enable defers restart acknowledgement to chat', async run() {
+    let enableConfirms = 0; let restartConfirms = 0;
+    const h = controllerHarness({ ui: {
+      confirmEnable: async () => { enableConfirms += 1; return { response: 1 }; },
+      confirmRestart: async () => { restartConfirms += 1; return { response: 1 }; },
+    } });
+    assert((await h.controller.enable({ confirmed: true, restartConfirmed: false })).success
+      && h.controller.snapshot().hold === 'restart' && enableConfirms === 0,
+    'the IPC repeat-enable path must not let its skipped sheet silently satisfy the restart hold');
+    assert(await h.controller.confirmRestart() && restartConfirms === 1 && h.controller.snapshot().hold === null,
+      'the first chat-side restart confirmation is still required and releases the hold only when accepted');
+  } },
+  { name: 'handoff bridge: controls: deferred restart keeps the requesting main-only canvas context', async run() {
+    let seen = null;
+    const h = controllerHarness({ ui: { confirmRestart: async (_details, context) => { seen = context; return { response: 1 }; } } });
+    const first = { id: 91, __isCanvasRenderer: true }; const second = { id: 92, __isCanvasRenderer: true };
+    const context = Object.freeze({ sender: second });
+    assert((await h.controller.enable({ confirmed: true, restartConfirmed: false })).success
+      && (await h.controller.prepareChat({ kind: 'new', restartContext: context })).copied === false
+      && seen === context && seen.sender === second && seen.sender !== first,
+    'the controller forwards the exact opaque requester to the restart confirmation instead of selecting another canvas');
+  } },
   { name: 'handoff bridge: controls: 2,000 authenticated calls cannot reset the human idle deadline', async run() {
     const h = controllerHarness(); await h.controller.enable();
     for (let index = 0; index < 2_000; index += 1) await h.controller.get({ sourceAllowed: true, grant: { linkId: 'synthetic' } });
     h.setNow(h.now() + 30 * 60 * 60_000); assert((await h.controller.tick()).success && h.controller.snapshot(false).pauseCause === 'idle', 'first tick after jump applies idle pause');
-    assert(h.notifications.includes('bridge-on'), 'bridge-on nudge uses last human action, not RPC activity'); await h.controller.resume(); assert(h.controller.snapshot().serving === 'live', 'Resume lifts a soft idle pause');
+    assert(!h.notifications.includes('bridge-on'), 'a long-running but routine bridge state must never create an OS notification'); await h.controller.resume(); assert(h.controller.snapshot().serving === 'live', 'Resume lifts a soft idle pause');
   } },
   { name: 'handoff bridge: controls: a 30h first tick applies release lapse and advances the engine clock', async run() {
     const calls = []; const engine = enginePort({ async hold(...args) { calls.push(['hold', ...args]); return { ok: true }; }, async tick(stamp) { calls.push(['tick', stamp]); return { ok: true }; } });
@@ -1176,7 +1198,7 @@ export default [
     assert(authenticator.verify(live.header) === true,
       'an inactive nonce observation must not consume the separately live one-shot nonce');
   } },
-  { name: 'handoff bridge: controls: a 500-request consent flood coalesces native notices', async run() {
+  { name: 'handoff bridge: controls: pairing progress flood never creates informational sheets', async run() {
     const sender = { id: 17, __isCanvasRenderer: true }; const parent = { webContents: sender, isDestroyed: () => false };
     const specs = []; let releaseCode;
     const dialogs = createHandoffBridgeDialogs({
@@ -1193,11 +1215,10 @@ export default [
     releaseCode({ response: 0 });
     await showing;
     await new Promise(resolve => setImmediate(resolve));
-    const notices = specs.filter(spec => spec.title === 'Handoff bridge');
-    assert(notices.filter(spec => spec.message === 'ChatGPT is requesting access to the Handoff bridge.').length === 1 && notices.length <= 3,
-      'a valid authorize flood retains one fixed consent notice and bounds every queued notice kind');
+    assert(specs.length === 1 && specs[0].title === 'ChatGPT pairing code',
+      'pairing progress must remain non-modal even under a valid authorize flood');
   } },
-  { name: 'handoff bridge: controls: native hostname sheets reject non-boolean validator results', async run() {
+  { name: 'handoff bridge: controls: removed routine hostname sheet stays unreachable', async run() {
     const sender = { id: 21, __isCanvasRenderer: true }; const parent = { webContents: sender, isDestroyed: () => false };
     let shown = 0;
     const dialogs = createHandoffBridgeDialogs({
@@ -1205,7 +1226,7 @@ export default [
       dialog: { showMessageBox: async () => { shown += 1; return { response: 1 }; } },
     });
     const result = await dialogs.ask(sender, 'hostname', { hostname: 'hostile.example.com' });
-    assert(result.code === 'INVALID' && shown === 0, 'a string validator result must not become native hostname copy');
+    assert(result.code === 'INVALID' && shown === 0, 'the removed routine hostname kind must not reach a native sheet');
   } },
   { name: 'handoff bridge: controls: public probes are bounded dual-family and socket-only in test mode', async run() {
     const requests = []; const own = await probeOwnEgress({ hostname: HOST, request: fakeRequest({ capture: requests }), authenticator: { issue: () => ({ nonce: 'n', header: 'n.m' }) }, lookup: (_h, _o, cb) => cb(null, '203.0.113.5', 4) });
@@ -1405,6 +1426,36 @@ export default [
     await resumeItem.click();
     const ask = calls.find(value => value[0] === 'ask');
     assert(resumes === 1 && ask?.[1] === sender && JSON.stringify(ask.slice(2)) === JSON.stringify(['resume', { reason: 'anomaly', count: 3, minutes: 60, at: 20 }]), 'Tray must focus a canvas parent and issue one bounded native confirmation before resuming');
+  } },
+  { name: 'handoff bridge: controls: tray interruption paths keep the exact parent and only warn for outstanding work', async run() {
+    const sender = { id: 8 }; const window = { webContents: sender, isDestroyed: () => false };
+    let windows = [window]; let status = { enabled: true, serving: 'live', tunnel: { state: 'up' }, chat: { state: 'working', outstanding: { stage: 'resume' } } };
+    const asks = []; let disables = 0; let resumes = 0; const resumeSheet = deferred(); let disableSheet = null;
+    const fakeTray = class { on() {} setContextMenu(menu) { this.menu = menu; } setToolTip() {} destroy() {} };
+    let instance = null;
+    class CapturingTray extends fakeTray { constructor(...args) { super(...args); instance = this; } }
+    const tray = createHandoffBridgeTray({
+      Tray: CapturingTray,
+      Menu: { buildFromTemplate: value => value }, nativeImage: { createFromDataURL: () => ({}) }, app: { dock: { setBadge: NOOP } },
+      getCanvasWindows: () => windows,
+      controller: { snapshot: () => status, disable: async () => { disables += 1; }, resume: async () => { resumes += 1; } },
+      dialogs: { ask: async (parent, kind) => { asks.push([parent, kind]); return kind === 'resume' ? resumeSheet.promise : (kind === 'disable' && disableSheet ? disableSheet.promise : { ok: true }); } },
+    });
+    tray.apply(status);
+    await instance.menu.find(item => item.label === 'Turn off').click();
+    assert(disables === 1 && JSON.stringify(asks) === JSON.stringify([[sender, 'disable']]), 'an outstanding tray stop gets exactly one parented interruption warning');
+    asks.length = 0; status = { ...status, chat: { state: 'none' } }; tray.apply(status);
+    await instance.menu.find(item => item.label === 'Turn off').click();
+    assert(disables === 2 && asks.length === 0, 'an ordinary tray stop remains direct');
+    status = { ...status, chat: { state: 'working', outstanding: { stage: 'resume' } } }; disableSheet = deferred(); tray.apply(status);
+    const pendingDisable = instance.menu.find(item => item.label === 'Turn off').click();
+    await settle(); windows = []; disableSheet.resolve({ ok: true }); await pendingDisable;
+    assert(disables === 2 && JSON.stringify(asks) === JSON.stringify([[sender, 'disable']]), 'a closed tray-stop parent cannot authorize a later interruption');
+    asks.length = 0; windows = [window]; disableSheet = null;
+    status = { ...status, serving: 'paused', pauseCause: 'anomaly', alarms: [{ kind: 'rate_limited', at: 1, acknowledged: false }] }; tray.apply(status);
+    const pending = instance.menu.find(item => item.label === 'Resume').click();
+    await settle(); windows = []; resumeSheet.resolve({ ok: true }); await pending;
+    assert(resumes === 0 && JSON.stringify(asks) === JSON.stringify([[sender, 'resume']]), 'a closed tray-resume parent cannot authorize a later security resume');
   } },
   { name: 'handoff bridge: controls: idle chat preparation resumes only the idle soft pause', async run() {
     const engine = enginePort({

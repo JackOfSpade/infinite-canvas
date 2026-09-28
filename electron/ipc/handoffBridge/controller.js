@@ -222,7 +222,6 @@ export function createHandoffBridgeController(options = {}) {
   let restartConfirmed = options.restartConfirmed === true;
   let lastHumanActionAt = safeNow(now);
   let serveIdleNoticeAt = 0;
-  const nudgeAt = new Set();
   const counters = copy(STATUS_SNAPSHOT_EXAMPLE.counts);
   const lapsePending = new Set();
   const alarms = [];
@@ -272,7 +271,6 @@ export function createHandoffBridgeController(options = {}) {
   function humanAction() {
     lastHumanActionAt = safeNow(now);
     serveIdleNoticeAt = 0;
-    nudgeAt.clear();
   }
   function schedule() {
     if (notifyTimer !== null) return;
@@ -399,9 +397,6 @@ export function createHandoffBridgeController(options = {}) {
     if (enabled && serving !== 'off') {
       const idleMs = config.limits.idlePauseMinutes * 60_000;
       if (idleMs > 0 && age >= idleMs && serving !== 'paused') pauseInternal('idle');
-      for (const hours of CONSTANTS.BRIDGE_ON_NUDGE_HOURS) if (age >= hours * 3_600_000 && !nudgeAt.has(hours)) {
-        nudgeAt.add(hours); notify('bridge-on');
-      }
     }
     return { stamp, pending };
   }
@@ -609,7 +604,7 @@ export function createHandoffBridgeController(options = {}) {
       return stillCurrent() && isObject(value) ? value : { items: [] };
     } catch { return { items: [] }; }
   }
-  async function confirm(kind, details = {}) {
+  async function confirm(kind, details = {}, dialogContext = null) {
     const fn = kind === 'enable' ? (ui.confirmEnable || ui.confirm) : (ui.confirmRestart || ui.confirm);
     const answer = await call(fn, null, {
       kind,
@@ -619,15 +614,19 @@ export function createHandoffBridgeController(options = {}) {
       items: arrayOf(details.items, 50).flatMap(item => isObject(item) ? [{
         title: shortText(item.title, ''), company: shortText(item.company, ''),
       }] : []),
-    });
+    }, dialogContext);
     return boolConfirm(answer);
   }
-  async function confirmRestart(laneOrds = [], { generation = lifecycleGeneration, activeEngine = engine } = {}) {
+  async function confirmRestart(laneOrds = [], {
+    generation = lifecycleGeneration,
+    activeEngine = engine,
+    dialogContext = null,
+  } = {}) {
     if (!currentRuntime(generation, activeEngine)) return false;
     if (restartConfirmed) return true;
     const details = await restartDetails(laneOrds, { generation, activeEngine });
     if (!currentRuntime(generation, activeEngine)) return false;
-    const accepted = await confirm('restart', details);
+    const accepted = await confirm('restart', details, dialogContext);
     if (!currentRuntime(generation, activeEngine)) return false;
     if (accepted) {
       restartConfirmed = true;
@@ -838,9 +837,11 @@ export function createHandoffBridgeController(options = {}) {
         if (!await confirm('enable', { hostname: config.hostname, ...details })) return { success: false, code: 'CANCELLED', status: snapshot(false) };
       }
       if (!startCurrent(generation)) return cancelledStart(generation);
-      // The manual-enable confirmation is also this launch's one restart
-      // confirmation.  Auto-start leaves this false for engine's chat confirm.
-      restartConfirmed = args.autoStart !== true;
+      // A direct manual caller still receives the controller's fallback
+      // confirmation above and earns this launch's restart acknowledgement.
+      // The IPC UI can deliberately skip its repeat-enable sheet, in which
+      // case the first New chat/Continue remains the required restart gate.
+      restartConfirmed = args.autoStart !== true && args.restartConfirmed !== false;
       enabled = true; serving = 'starting'; pauseCause = null; markFault(null); change();
       // `enabled` is launch-local by design.  An injected setEnabled hook is
       // only an ordering/test port; config.json has no enabled field.
@@ -1336,6 +1337,11 @@ export function createHandoffBridgeController(options = {}) {
   }
   async function prepareChat(args = {}) {
     const kind = args?.kind === 'continue' ? 'continue' : 'new';
+    // `restartContext` is an opaque main-process capability created by ui.js
+    // after its sender/window guard. It is never copied into an engine call,
+    // status, audit record, or IPC result.
+    const dialogContext = args?.restartContext && typeof args.restartContext === 'object'
+      ? args.restartContext : null;
     const generation = lifecycleGeneration;
     const activeEngine = engine;
     if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'app_unavailable' };
@@ -1352,7 +1358,7 @@ export function createHandoffBridgeController(options = {}) {
     // here makes the controller boundary explicit and leaves older injected
     // engine fakes unable to bypass the once-per-launch restart confirmation.
     if (!restartConfirmed) {
-      const restarted = await confirmRestart(undefined, { generation, activeEngine });
+      const restarted = await confirmRestart(undefined, { generation, activeEngine, dialogContext });
       if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'app_unavailable' };
       if (!restarted) return { copied: false, status: 'paused', reason: 'restart', code: 'DECLINED' };
     }

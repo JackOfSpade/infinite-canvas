@@ -7,7 +7,6 @@ import React, {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronLeft, ChevronRight, X } from 'lucide-react';
-import { ConfirmDialog } from './ConfirmDialog';
 import { updateModalCount } from './modalStack';
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import {
@@ -97,7 +96,6 @@ export function HandoffBridgeSetupDialog() {
   const status = useHandoffBridgeStatus();
   const ui = useSyncExternalStore(subscribeBridgeUi, getBridgeUiState, getBridgeUiState);
   const [notice, setNotice] = useState('');
-  const [pendingAddress, setPendingAddress] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [enabling, setEnabling] = useState(false);
   const [enableError, setEnableError] = useState(null);
@@ -187,14 +185,14 @@ export function HandoffBridgeSetupDialog() {
   useEffect(() => {
     if (!visible) return undefined;
     const onKey = event => {
-      if (event.key === 'Escape' && !pendingAddress) {
+      if (event.key === 'Escape') {
         event.preventDefault();
         dismissSetup();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [dismissSetup, pendingAddress, visible]);
+  }, [dismissSetup, visible]);
 
   const trapFocus = useCallback(event => {
     if (event.key !== 'Tab') return;
@@ -238,10 +236,7 @@ export function HandoffBridgeSetupDialog() {
       return;
     }
     const patch = { hostname, pluginName };
-    const result = await mutateSetup('handoffBridgeSaveConfig', { patch });
-    if (result?.success === false && result.code === 'LINK_WOULD_BREAK' && mountedRef.current) {
-      setPendingAddress(patch);
-    }
+    await mutateSetup('handoffBridgeSaveConfig', { patch });
   }, [mutateSetup]);
 
   const enableBridge = useCallback(async () => {
@@ -409,27 +404,12 @@ export function HandoffBridgeSetupDialog() {
     : step === 2 ? tunnel
       : step === 3 ? plugin
         : firstChat;
-  const addressConfirm = pendingAddress ? (
-    <ConfirmDialog
-      title={BRIDGE_UI_COPY.confirmAddressTitle}
-      message={BRIDGE_UI_COPY.confirmAddressMessage}
-      confirmLabel={BRIDGE_UI_COPY.confirmAddress}
-      cancelLabel={BRIDGE_UI_COPY.keepAddress}
-      onConfirm={() => {
-        const patch = pendingAddress;
-        setPendingAddress(null);
-        void mutateSetup('handoffBridgeSaveConfig', { patch, confirmBreak: true });
-      }}
-      onCancel={() => setPendingAddress(null)}
-    />
-  ) : null;
-
   return createPortal(
     <>
       <div
         className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
         onMouseDown={event => {
-          if (!pendingAddress && event.target === event.currentTarget) dismissSetup();
+          if (event.target === event.currentTarget) dismissSetup();
         }}
       >
         <section
@@ -480,7 +460,6 @@ export function HandoffBridgeSetupDialog() {
           </footer>
         </section>
       </div>
-      {addressConfirm}
     </>,
     document.body,
   );

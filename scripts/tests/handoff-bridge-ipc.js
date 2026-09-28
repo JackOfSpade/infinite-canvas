@@ -245,6 +245,39 @@ export default [
     const badCalls = []; const bad = setup({ controller: { prepareChat: async () => ({ commitToken: 't', starter: 'synthetic' }), commitChat: async () => { badCalls.push('commit'); }, abandonChat: async () => { badCalls.push('abandon'); } }, clipboard: { writeText() { throw new Error('denied'); } } });
     assert((await invoke(bad, IPC_CHANNELS.NEW_CHAT)).code === 'CLIPBOARD_FAILED' && JSON.stringify(badCalls) === JSON.stringify(['abandon']), 'clipboard failure abandons prepared chat and never commits');
   } },
+  { name: 'handoff bridge: ipc: a closed chat canvas abandons prepared work before clipboard or commit', async run() {
+    for (const channel of [IPC_CHANNELS.NEW_CHAT, IPC_CHANNELS.CONTINUE_CHAT]) {
+      const prepared = deferred(); let windows = []; const calls = [];
+      const h = setup({
+        getCanvasWindows: () => windows,
+        controller: {
+          prepareChat: async () => prepared.promise,
+          abandonChat: async token => { calls.push(['abandon', token]); return { success: true }; },
+          commitChat: async token => { calls.push(['commit', token]); return { success: true }; },
+        },
+        clipboard: { writeText: text => calls.push(['write', text]), readText: () => '', clear() {} },
+      });
+      windows = [h.window];
+      const pending = invoke(h, channel); await settle();
+      windows = [];
+      prepared.resolve({ commitToken: 'opaque-token', starter: 'synthetic', chatOrdinal: 1 });
+      const result = await pending;
+      assert(result.code === 'NO_WINDOW' && JSON.stringify(calls) === JSON.stringify([['abandon', 'opaque-token']]),
+        `${channel} must abandon a late preparation without writing the clipboard or committing the chat`);
+    }
+  } },
+  { name: 'handoff bridge: ipc: New chat passes only an opaque guarded sender for deferred restart confirmation', async run() {
+    let received = null;
+    const h = setup({ controller: {
+      prepareChat: async value => { received = value; return { commitToken: 't', starter: 'synthetic', chatOrdinal: 1 }; },
+      commitChat: async () => ({ success: true }),
+    }, clipboard: { writeText() {}, readText: () => '', clear() {} } });
+    assert((await invoke(h, IPC_CHANNELS.NEW_CHAT)).success
+      && received?.kind === 'new' && received.restartContext?.sender === h.sender
+      && Object.isFrozen(received.restartContext)
+      && !JSON.stringify(received).includes(PATH),
+    'New chat provides the controller only a guarded sender context, never renderer path data');
+  } },
   { name: 'handoff bridge: ipc: starter clipboard clear is 120 seconds, conditional, and never erases a replacement', async run() {
     const matchingClock = fakeClock(); let matchingClipboard = ''; let matchingClears = 0;
     const matching = setup({ now: matchingClock.now, timers: matchingClock.timers,
@@ -271,7 +304,7 @@ export default [
     const h = setup({ dialogs: { ask: async (_sender, kind) => { asked.push(kind); return { ok: true }; } }, controller: { snapshot: () => ({ config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, autoRelease: false }) } });
     const handler = h.ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG);
     const result = await handler(h.event, { patch: { hostname: 'next.example.com', scope: { scoring: true }, autoStart: true, autoRelease: true, prefs: { sourcePolicy: 'alert', pairingNetworkCheck: false } } });
-    assert(result.success && JSON.stringify(asked) === JSON.stringify(['hostname', 'scoring', 'autoStart', 'autoRelease', 'sourcePolicy', 'networkCheck']), 'main must confirm every setting that expands exposure');
+    assert(result.success && JSON.stringify(asked) === JSON.stringify(['scoring', 'autoStart', 'autoRelease', 'sourcePolicy', 'networkCheck']), 'main must confirm every setting that expands exposure while an unlinked address saves directly');
     const cancelled = setup({ dialogs: { ask: async () => ({ ok: false, code: 'DECLINED' }) }, controller: { snapshot: () => ({ config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, autoRelease: false }) }, store: { async writeConfig() { writes++; return { ok: true }; } } });
     const declined = await cancelled.ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)(cancelled.event, { patch: { scope: { scoring: true } } });
     assert(declined.code === 'DECLINED' && writes === 0, 'cancelled fixed consent must leave config unchanged');
@@ -301,7 +334,7 @@ export default [
     assert((await invoke(anomaly, IPC_CHANNELS.RESUME)).code === 'NO_WINDOW' && resumes === 2 && asks === 0,
       'anomaly Resume must neither invoke the controller nor open an unparented native acknowledgement');
   } },
-  { name: 'handoff bridge: ipc: headless controls keep only safe mutations and every confirmation route fails NO_WINDOW', async run() {
+  { name: 'handoff bridge: ipc: headless controls keep only non-lifecycle recovery mutations and every parented route fails NO_WINDOW', async run() {
     const calls = { pause: 0, resume: 0, revoke: 0, disable: 0, enable: 0, release: 0 }; let dialogCalls = 0; let pauseCause = 'user';
     const h = setup({ windows: [], dialogs: { ask: async () => { dialogCalls += 1; return { ok: true }; }, choose: async () => { dialogCalls += 1; return { ok: true, filePath: '/tmp/never-chosen' }; } }, controller: {
       snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, limits: {}, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, autoRelease: false, pauseCause, alarms: [{ kind: 'rate_limited', at: 1, acknowledged: false }] }),
@@ -316,8 +349,8 @@ export default [
     assert((await invoke(h, IPC_CHANNELS.RESUME)).success, 'user Resume remains available while no window is open');
     pauseCause = 'idle';
     assert((await invoke(h, IPC_CHANNELS.RESUME)).success, 'idle Resume remains available while no window is open');
-    assert((await invoke(h, IPC_CHANNELS.REVOKE_ALL)).success && (await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: false })).success,
-      'revoke and Disable remain safe headless recovery controls');
+    assert((await invoke(h, IPC_CHANNELS.REVOKE_ALL)).success && (await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: false })).code === 'NO_WINDOW',
+      'revoke remains available headlessly, but an exact live canvas window owns every bridge lifecycle mutation');
     pauseCause = 'anomaly';
     assert((await invoke(h, IPC_CHANNELS.RESUME)).code === 'NO_WINDOW' && calls.resume === 2,
       'anomaly Resume stays blocked before both the controller and a parentless security acknowledgement');
@@ -331,7 +364,7 @@ export default [
       const result = await invoke(h, channel, payload);
       assert(result.code === 'NO_WINDOW', `${channel} must fail closed without a canvas parent`);
     }
-    assert(dialogCalls === 0 && calls.enable === 0 && calls.release === 0 && calls.pause === 1 && calls.revoke === 1 && calls.disable === 1,
+    assert(dialogCalls === 0 && calls.enable === 0 && calls.release === 0 && calls.pause === 1 && calls.revoke === 1 && calls.disable === 0,
       'no-window confirmation routes neither open a native sheet nor reach an exposure-raising port');
   } },
   { name: 'handoff bridge: ipc: alarm acknowledgement accepts only a bounded identifier and a positive controller acknowledgement', async run() {
@@ -434,7 +467,7 @@ export default [
     assert(firstStatus.every(item => firstStatus.filter(other => other.at >= item.at && other.at < item.at + 1_000).length <= 4), 'no canvas receives more than four status messages per rolling second');
     assert(firstStatus.at(-1).seq === 100 && secondStatus.at(-1).seq === 100, 'bursts coalesce to the newest snapshot rather than replaying stale status');
   } },
-  { name: 'handoff bridge: ipc: first enable requests a generic notification but a denial cannot suppress tray or Dock alarms', async run() {
+  { name: 'handoff bridge: ipc: enable skips routine notifications while tray and Dock alarms remain independent', async run() {
     const notificationSpecs = []; let shown = 0; let enabled = 0;
     class DeniedNotification {
       constructor(spec) { notificationSpecs.push(spec); }
@@ -442,8 +475,8 @@ export default [
     }
     const h = setup({ Notification: DeniedNotification, controller: { enable: async () => { enabled += 1; return { success: true }; } } });
     const result = await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: true });
-    assert(result.success && enabled === 1 && shown === 1 && JSON.stringify(notificationSpecs) === JSON.stringify([{ title: 'Infinite Canvas', body: 'Handoff bridge is on.' }]),
-      'first enable attempts only the fixed, content-free macOS notification permission flow');
+    assert(result.success && enabled === 1 && shown === 0 && notificationSpecs.length === 0,
+      'enabling is an explicitly initiated routine action and must not create an OS permission prompt');
 
     const badges = []; let menu = null;
     class FakeTray { on() {} setContextMenu(value) { menu = value; } setToolTip() {} destroy() {} }
@@ -514,7 +547,6 @@ export default [
       ['choose binary', IPC_CHANNELS.CHOOSE_BINARY, undefined, 'choose', hit => ({ tunnel: { chooseBinary: async () => { hit(); return { ok: true }; } } })],
       ['approve binary', IPC_CHANNELS.APPROVE_BINARY, undefined, 'ask', hit => ({ tunnel: { approveBinary: async () => { hit(); return { ok: true }; } } })],
       ['choose credentials', IPC_CHANNELS.CHOOSE_CREDENTIALS, undefined, 'choose', hit => ({ tunnel: { chooseCredentials: async () => { hit(); return { ok: true }; } } })],
-      ['open pairing', IPC_CHANNELS.OPEN_PAIRING, undefined, 'ask', hit => ({ oauth: { openPairing: async () => { hit(); return { ok: true }; } } })],
       ['anomaly resume', IPC_CHANNELS.RESUME, undefined, 'ask', hit => ({ controller: { snapshot: () => anomalyStatus, resume: async () => { hit(); return { success: true }; } } })],
       ['forget setup', IPC_CHANNELS.FORGET_SETUP, undefined, 'ask', hit => ({ controller: { forget: async () => { hit(); return { success: true }; } } })],
       ['release push', IPC_CHANNELS.RELEASE_PUSH, { hubs: ['a'.repeat(64)] }, 'ask', hit => ({ push: { release: async () => { hit(); return { ok: true }; } } })],
@@ -600,16 +632,112 @@ export default [
     const result = await invoke(h, IPC_CHANNELS.OPEN_PAIRING);
     assert(result.success && calls[0].networkCheck === 'off' && calls[0].hostname === 'bridge.example.com', 'pairing must receive the persisted network check as an enum');
   } },
-  { name: 'handoff bridge: ipc: pairing is impossible while off or after Disable races its native confirm', async run() {
+  { name: 'handoff bridge: ipc: pairing needs readiness but has no routine pre-confirmation', async run() {
     let asks = 0; let opened = 0;
     const off = setup({ controller: { snapshot: () => ({ enabled: false, setup: { tunnelReachable: true } }) }, dialogs: { ask: async () => { asks += 1; return { ok: true }; } }, oauth: { openPairing: async () => { opened += 1; return { ok: true }; } } });
     assert((await invoke(off, IPC_CHANNELS.OPEN_PAIRING)).code === 'TUNNEL_NOT_READY' && asks === 0 && opened === 0, 'off status reaches neither a native pairing sheet nor OAuth');
-    let resolveConfirm; const confirm = new Promise(resolve => { resolveConfirm = resolve; });
     const status = { enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, limits: {}, autoRelease: false };
-    const raced = setup({ controller: { snapshot: () => status }, dialogs: { ask: async () => confirm }, oauth: { openPairing: async () => { opened += 1; return { ok: true }; } } });
-    const pending = invoke(raced, IPC_CHANNELS.OPEN_PAIRING);
-    await Promise.resolve(); status.enabled = false; resolveConfirm({ ok: true });
-    assert((await pending).code === 'TUNNEL_NOT_READY' && opened === 0, 'the status is rechecked after the parented confirm before pairing can open');
+    let reads = 0;
+    const raced = setup({ controller: { snapshot: () => { reads += 1; return reads === 1 ? status : { ...status, enabled: false }; } }, dialogs: { ask: async () => { asks += 1; return { ok: true }; } }, oauth: { openPairing: async () => { opened += 1; return { ok: true }; } } });
+    assert((await invoke(raced, IPC_CHANNELS.OPEN_PAIRING)).code === 'TUNNEL_NOT_READY' && asks === 0 && opened === 0,
+      'the status is rechecked immediately before OAuth without adding a routine native sheet');
+  } },
+  { name: 'handoff bridge: ipc: pairing rechecks the exact canvas before opening OAuth', async run() {
+    let opened = 0; let reads = 0; let windows = [];
+    const status = { enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, limits: {}, autoRelease: false };
+    const h = setup({
+      getCanvasWindows: () => windows,
+      controller: { snapshot: () => { reads += 1; if (reads === 1) windows = []; return status; } },
+      oauth: { openPairing: async () => { opened += 1; return { ok: true }; } },
+    });
+    windows = [h.window];
+    assert((await invoke(h, IPC_CHANNELS.OPEN_PAIRING)).code === 'NO_WINDOW' && opened === 0,
+      'removing the requesting canvas between readiness and OAuth cannot borrow a different window');
+  } },
+  { name: 'handoff bridge: ipc: pairing rechecks the canvas after its final status read', async run() {
+    let opened = 0; let reads = 0; let windows = [];
+    const status = { enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, limits: {}, autoRelease: false };
+    const h = setup({
+      getCanvasWindows: () => windows,
+      controller: { snapshot: () => { reads += 1; if (reads === 2) windows = []; return status; } },
+      oauth: { openPairing: async () => { opened += 1; return { ok: true }; } },
+    });
+    windows = [h.window];
+    assert((await invoke(h, IPC_CHANNELS.OPEN_PAIRING)).code === 'NO_WINDOW' && opened === 0,
+      'a canvas removed by the second readiness read cannot open an OAuth pairing flow');
+  } },
+  { name: 'handoff bridge: ipc: outstanding-work disable has one main-owned critical confirmation', async run() {
+    let asks = 0; let disables = 0;
+    const status = { enabled: true, chat: { outstanding: { stage: 'resume' } }, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false } }, limits: {}, prefs: {}, autoRelease: false };
+    const h = setup({ controller: { snapshot: () => status, disable: async () => { disables += 1; return { success: true }; } }, dialogs: { ask: async (_sender, kind) => { asks += 1; return kind === 'disable' ? { ok: true } : { ok: false }; } } });
+    assert((await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: false, confirmed: true })).success && asks === 1 && disables === 1,
+      'hostile renderer acknowledgement fields cannot bypass the one native disable sheet');
+    const ordinary = setup({ controller: { snapshot: () => ({ ...status, chat: { outstanding: false } }), disable: async () => { disables += 1; return { success: true }; } }, dialogs: { ask: async () => { asks += 1; return { ok: true }; } } });
+    assert((await invoke(ordinary, IPC_CHANNELS.SET_ENABLED, { enabled: false })).success && asks === 1 && disables === 2,
+      'a normal stop remains immediate and never opens a routine popup');
+    let windowlessAsks = 0; let windowlessDisables = 0;
+    const windowlessOrdinary = setup({
+      windows: [],
+      controller: { snapshot: () => ({ ...status, chat: { outstanding: null } }), disable: async () => { windowlessDisables += 1; return { success: true }; } },
+      dialogs: { ask: async () => { windowlessAsks += 1; return { ok: true }; } },
+    });
+    assert((await invoke(windowlessOrdinary, IPC_CHANNELS.SET_ENABLED, { enabled: false })).code === 'NO_WINDOW'
+      && windowlessAsks === 0 && windowlessDisables === 0,
+    'a canvas without its exact live window cannot perform even an ordinary popup-free hard stop');
+    const declined = setup({ controller: { snapshot: () => status, disable: async () => { disables += 1; return { success: true }; } }, dialogs: { ask: async () => ({ ok: false, code: 'DECLINED' }) } });
+    assert((await invoke(declined, IPC_CHANNELS.SET_ENABLED, { enabled: false })).code === 'DECLINED' && disables === 2,
+      'declining the one critical stop sheet leaves serving untouched');
+    const absent = setup({ windows: [], controller: { snapshot: () => status, disable: async () => { disables += 1; return { success: true }; } }, dialogs: { ask: async () => { asks += 1; return { ok: true }; } } });
+    assert((await invoke(absent, IPC_CHANNELS.SET_ENABLED, { enabled: false })).code === 'NO_WINDOW' && asks === 1 && disables === 2,
+      'outstanding work with no live requesting canvas shows no sheet and does not disable');
+    const sheet = deferred(); let windows = [];
+    const raced = setup({
+      getCanvasWindows: () => windows,
+      controller: { snapshot: () => status, disable: async () => { disables += 1; return { success: true }; } },
+      dialogs: { ask: async () => sheet.promise },
+    });
+    windows = [raced.window];
+    const pending = invoke(raced, IPC_CHANNELS.SET_ENABLED, { enabled: false }); await settle();
+    windows = []; sheet.resolve({ ok: true });
+    assert((await pending).code === 'NO_WINDOW' && disables === 2,
+      'closing the canvas while the critical stop sheet is pending leaves the bridge running');
+  } },
+  { name: 'handoff bridge: ipc: repeat enable skips the native sheet and defers restart acknowledgement', async run() {
+    const calls = []; let asks = 0; let accepts = 0;
+    const h = setup({
+      enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: false }), accept: async () => { accepts += 1; return { ok: true }; } },
+      dialogs: { ask: async () => { asks += 1; return { ok: true }; } },
+      controller: { enable: async value => { calls.push(value); return { success: true }; } },
+    });
+    assert((await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success
+      && asks === 0 && accepts === 0
+      && JSON.stringify(calls) === JSON.stringify([{ confirmed: true, restartConfirmed: false }]),
+    'a repeat enable starts directly but leaves the first New chat/Continue restart acknowledgement intact');
+  } },
+  { name: 'handoff bridge: ipc: a repeat enable loses authority if its consent lookup outlives its canvas', async run() {
+    const describe = deferred(); let windows = []; let enabled = 0;
+    const h = setup({
+      getCanvasWindows: () => windows,
+      enableConsent: { describe: () => describe.promise },
+      controller: { enable: async () => { enabled += 1; return { success: true }; } },
+    });
+    windows = [h.window];
+    const pending = invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: true });
+    windows = [];
+    describe.resolve({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: false });
+    assert((await pending).code === 'NO_WINDOW' && enabled === 0,
+      'skipping a routine sheet never lets a stale sender start the bridge after its async consent lookup');
+  } },
+  { name: 'handoff bridge: ipc: linked hostname changes use one main-owned link-break confirmation', async run() {
+    const asks = []; const writes = [];
+    const h = setup({
+      dialogs: { ask: async (_sender, kind, details) => { asks.push([kind, details]); return { ok: true }; } },
+      store: { writeConfig: async patch => { writes.push(patch); return writes.length === 1 ? { ok: false, code: 'LINK_WOULD_BREAK' } : { ok: true }; } },
+    });
+    const result = await invoke(h, IPC_CHANNELS.SAVE_CONFIG, { patch: { hostname: 'next.example.com' }, confirmBreak: true });
+    assert(result.success && JSON.stringify(asks) === JSON.stringify([['linkBreak', { hostname: 'next.example.com' }]])
+      && writes.length === 2 && writes[0].confirmBreak === false && writes[1].confirmBreak === true,
+    'a renderer confirmBreak flag is ignored; the serialized link-break result earns exactly one main-owned confirmation and retry');
   } },
   { name: 'handoff bridge: ipc: a concurrent pairing open preserves the fixed BUSY result', async run() {
     const h = setup({ oauth: { openPairing: async () => ({ ok: false, code: 'BUSY' }) } });
@@ -622,8 +750,8 @@ export default [
     assert(result.success && result.lines[0] === 'redacted ok' && result.lines.length === 97 && result.lines.every(line => typeof line === 'string' && line.length <= 1024), 'IPC relays only bounded trusted redacted strings');
   } },
   { name: 'handoff bridge: ipc: long enable consent persists after enable and fails closed on persistence error', async run() {
-    const calls = []; const good = setup({ controller: { enable: async () => { calls.push('enable'); return { success: true }; } }, enableConsent: { accept: async details => { calls.push(details.long ? 'accept-long' : 'accept-short'); return { ok: true }; } } });
-    assert((await invoke(good, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success && JSON.stringify(calls) === JSON.stringify(['enable', 'accept-long']), 'a successful long enable records internal consent after transport enablement');
+    const calls = []; const good = setup({ controller: { enable: async value => { calls.push(value); return { success: true }; } }, enableConsent: { accept: async details => { calls.push(details.long ? 'accept-long' : 'accept-short'); return { ok: true }; } } });
+    assert((await invoke(good, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success && JSON.stringify(calls) === JSON.stringify([{ confirmed: true, restartConfirmed: true }, 'accept-long']), 'a successful long enable records internal consent after transport enablement and satisfies this launch restart acknowledgement');
     const failed = []; const bad = setup({ controller: { enable: async () => ({ success: true }), disable: async () => { failed.push('disable'); return { success: true }; } }, enableConsent: { accept: async () => ({ ok: false }) } });
     const result = await invoke(bad, IPC_CHANNELS.SET_ENABLED, { enabled: true });
     assert(result.code === 'UNAVAILABLE' && JSON.stringify(failed) === JSON.stringify(['disable']), 'unpersisted long consent immediately disables the bridge and exposes no consent state');
