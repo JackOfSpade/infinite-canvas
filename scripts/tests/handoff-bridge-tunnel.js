@@ -792,6 +792,36 @@ stopc`, 'watchdog program bytes drifted from the measured interruptible TERM TER
     },
   },
   {
+    name: 'handoff bridge: tunnel: recurring readiness polls cannot clobber public-probe authority',
+    async run() {
+      const online = createSupervisorHarness();
+      await online.supervisor.start();
+      await online.supervisor.probe();
+      assert(online.supervisor.status().state === 'online', 'the initial successful public probe must establish online state');
+      online.clock.advance(1_000); await flush();
+      assert(online.supervisor.status().state === 'online', 'a later ready poll must preserve online state');
+      await online.supervisor.stop();
+
+      const replies = [
+        { ok: false, code: 'edge-unreachable' },
+        { ok: false, code: 'edge-unreachable' },
+        { ok: false, code: 'edge-unreachable' },
+        { ok: true, code: 'ok' },
+      ];
+      const recovered = createSupervisorHarness({ publicProbeFn: async () => replies.shift() });
+      await recovered.supervisor.start();
+      await recovered.supervisor.probe(); await recovered.supervisor.probe(); await recovered.supervisor.probe();
+      assert(recovered.supervisor.status().state === 'degraded', 'three failed public probes must establish degraded state');
+      recovered.clock.advance(1_000); await flush();
+      assert(recovered.supervisor.status().state === 'degraded', 'a later ready poll must preserve degraded state');
+      await recovered.supervisor.probe();
+      assert(recovered.supervisor.status().state === 'online', 'the next successful public probe must recover online state');
+      recovered.clock.advance(1_000); await flush();
+      assert(recovered.supervisor.status().state === 'online', 'readiness polling must not undo recovered online state');
+      await recovered.supervisor.stop();
+    },
+  },
+  {
     name: 'handoff bridge: tunnel: transient network exits follow the full 1 2 4 8 16 30 backoff ladder',
     async run() {
       const harness = createSupervisorHarness(); await harness.supervisor.start();

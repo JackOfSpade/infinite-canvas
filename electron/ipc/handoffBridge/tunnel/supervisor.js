@@ -163,8 +163,12 @@ export function createTunnelSupervisor(options = {}) {
     try { ready = await (options.probeReady || probeReady)(metricsPort, options); } catch { ready = { ok: false, state: 'waiting' }; }
     if (!ready || typeof ready !== 'object') ready = { ok: false, state: 'waiting' };
     if (token !== generation || !child || stopping) return;
-    if (ready.ok) { if (readySince === null) readySince = now(); state = 'checking-public'; }
-    else if (now() - readyStartedAt >= 30_000) { readySince = 'fallback'; state = 'checking-public'; }
+    // Readiness is an initial discovery signal only.  Once the public probe
+    // has established a later authority (online/degraded/backoff/etc.), a
+    // recurring /ready success must not make that state look provisional.
+    const canAdvanceReadiness = state === 'connecting' || state === 'checking-public';
+    if (canAdvanceReadiness && ready.ok) { if (readySince === null) readySince = now(); state = 'checking-public'; }
+    else if (canAdvanceReadiness && now() - readyStartedAt >= 30_000) { readySince = 'fallback'; state = 'checking-public'; }
     setTimer('ready', () => runReadyProbe(token), TUNNEL_CONSTANTS.READY_POLL_MS);
   };
   const runPublicProbe = async token => {

@@ -189,6 +189,23 @@ export default [
     assert(result.success === false && result.code === 'UNAVAILABLE', 'the authoritative availability ladder must keep its fixed IPC code');
     assert(described === 0 && dialogCalls === 0 && enabled === 0, 'an unavailable enable must have no consent, dialog, or controller side effect');
   } },
+  { name: 'handoff bridge: ipc: enable maps closed startup failures without relaying details', async run() {
+    const expected = new Map([
+      ['env_disabled', 'UNAVAILABLE'], ['e2e', 'UNAVAILABLE'], ['unpackaged', 'UNAVAILABLE'],
+      ['no_hostname', 'UNAVAILABLE'], ['no_binary', 'UNAVAILABLE'], ['binary_untrusted', 'UNAVAILABLE'], ['no_credentials', 'UNAVAILABLE'], ['config_invalid', 'UNAVAILABLE'],
+      ['socket_unavailable', 'UNAVAILABLE'], ['tunnel_failed', 'UNAVAILABLE'], ['not_enabled', 'UNAVAILABLE'],
+      ['CANCELLED', 'DECLINED'], ['DECLINED', 'DECLINED'], ['BUSY', 'BUSY'], ['busy', 'BUSY'], ['NO_WINDOW', 'NO_WINDOW'], ['no_window', 'NO_WINDOW'], ['UNAVAILABLE', 'UNAVAILABLE'],
+      ['state_unreadable', 'UNAVAILABLE'], ['persist_failed', 'UNAVAILABLE'], ['unexpected_platform_fault', 'UNAVAILABLE'],
+    ]);
+    for (const [startupCode, fixedCode] of expected) {
+      const h = setup({ controller: { enable: async () => ({ success: false, code: startupCode, detail: '/private/synthetic-secret.sock', message: 'synthetic internal message' }) } });
+      const result = await invoke(h, IPC_CHANNELS.SET_ENABLED, { enabled: true });
+      assert(result.success === false && result.code === fixedCode,
+        `${startupCode} must map to its fixed enable category`);
+      assert(JSON.stringify(result) === JSON.stringify({ success: false, code: fixedCode }),
+        'enable failure must not relay a refusal detail or message');
+    }
+  } },
   { name: 'handoff bridge: ipc: release resolves canonical main path and ignores hostile renderer text', async run() {
     const seen = []; const h = setup({ controller: { release: async value => { seen.push(value); return { success: true, released: 1 }; } } });
     h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS)(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 's' }] });
@@ -609,7 +626,7 @@ export default [
     assert((await invoke(good, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success && JSON.stringify(calls) === JSON.stringify(['enable', 'accept-long']), 'a successful long enable records internal consent after transport enablement');
     const failed = []; const bad = setup({ controller: { enable: async () => ({ success: true }), disable: async () => { failed.push('disable'); return { success: true }; } }, enableConsent: { accept: async () => ({ ok: false }) } });
     const result = await invoke(bad, IPC_CHANNELS.SET_ENABLED, { enabled: true });
-    assert(result.code === 'INTERNAL' && JSON.stringify(failed) === JSON.stringify(['disable']), 'unpersisted long consent immediately disables the bridge and exposes no consent state');
+    assert(result.code === 'UNAVAILABLE' && JSON.stringify(failed) === JSON.stringify(['disable']), 'unpersisted long consent immediately disables the bridge and exposes no consent state');
   } },
   { name: 'handoff bridge: ipc: unrelease-push accepts only a canonical hub key', async run() {
     let called = 0; const h = setup({ push: { unrelease: async () => { called++; return { ok: true }; } } });

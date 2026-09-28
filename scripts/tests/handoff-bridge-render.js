@@ -12,6 +12,7 @@ import { __resetHandoffBridgeStoreForTests, applyHandoffBridgeStatus, getHandoff
 import { EMPTY_BRIDGE_STATUS, normalizeBridgeStatus } from '../../src/utils/handoffBridgeStatus.js';
 import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { __resetBridgeUiForTests } from '../../src/utils/handoffBridgeUiStore.js';
+import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
 
 const NOW = 1_700_000_000_000;
 const root = path.resolve('.');
@@ -480,6 +481,43 @@ export default [
             await bundle.module.act(async () => rootNode.unmount());
           }
           assert(entries.length === 0, 'manual availability retry must not emit console output');
+        }));
+      } finally { bundle?.module.__resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: render: an unavailable enable action cannot relabel an available build',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-enable-feedback-'));
+      const entry = path.join(directory, 'EnableFeedbackProbe.jsx'); const setup = path.resolve('src/components/HandoffBridgeSetup.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgeSetup } from ${JSON.stringify(setup)};\nexport { __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport function EnableFeedbackProbe() { return <HandoffBridgeSetup />; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const off = status(1, { enabled: false, serving: 'off', paused: false });
+          let setterCalls = 0;
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: off }),
+            onHandoffBridgeStatus: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.EnableFeedbackProbe)); await Promise.resolve(); await Promise.resolve(); });
+            const enabled = window.document.querySelector('input[type="checkbox"]');
+            assert(enabled && !enabled.disabled && window.document.body.textContent.includes('Bridge off'), 'an authoritative available off snapshot must keep Settings controls enabled');
+
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(window.document.body.textContent.includes(IPC_ERROR_COPY.UNAVAILABLE) && !window.document.body.textContent.includes('The bridge is not available in this build.') && !enabled.disabled && window.document.body.textContent.includes('Bridge off'), 'a missing enable action must retain the authoritative off state and show neutral action feedback instead of a false build verdict');
+
+            window.electronAPI.handoffBridgeSetEnabled = async () => { setterCalls += 1; return { success: false, code: 'UNAVAILABLE' }; };
+            await bundle.module.act(async () => { enabled.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(setterCalls === 1 && window.document.body.textContent.includes(IPC_ERROR_COPY.UNAVAILABLE) && !window.document.body.textContent.includes('The bridge is not available in this build.') && !enabled.disabled && window.document.body.textContent.includes('Bridge off'), 'an unavailable enable response must remain action feedback and never override the available status card');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+          }
+          assert(entries.length === 0, 'contradictory enable feedback must emit no console output');
         }));
       } finally { bundle?.module.__resetHandoffBridgeStoreForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
     },

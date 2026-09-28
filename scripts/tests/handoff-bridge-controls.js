@@ -10,11 +10,15 @@ import { createHandoffBridgeTray, snapshotToTray } from '../../electron/ipc/hand
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
 import { composeHandoffBridge, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import { createTunnelSupervisor } from '../../electron/ipc/handoffBridge/tunnel/supervisor.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
+import { createFakeProcessTable } from './fixtures/handoff-bridge/fakeProcessTable.js';
+import { createFakeSpawn } from './fixtures/handoff-bridge/fakeSpawn.js';
 import { faultAt, withLeakCheck } from './fixtures/handoff-bridge/harness.js';
 
 const HOST = 'bridge.example.com';
 const JOB = '550e8400-e29b-41d4-a716-446655440000';
+const TUNNEL_ID = '123e4567-e89b-42d3-a456-426614174000';
 const NOOP = () => undefined;
 
 function fakeTimers() {
@@ -343,6 +347,150 @@ export default [
     const order = []; const live = controllerHarness({ listener: { async start() { order.push('listener'); return { ok: true }; }, async quiesce() {}, async drain() {}, async stop() { order.push('listener-stop'); } }, tunnel: { async start() { order.push('tunnel'); return { ok: true }; }, async stop() { order.push('tunnel-stop'); }, status: () => ({ state: 'online' }) }, selfProbe: async () => { order.push('self'); return { ok: true }; }, publicProbe: async () => { order.push('public'); return { ok: true }; } });
     assert((await live.controller.enable()).success && order.join(',') === 'listener,self,tunnel,public', 'listener must self-probe before tunnel/public probe');
     await live.controller.disable(); assert(order.includes('tunnel-stop') && order.includes('listener-stop'), 'hard stop must stop both transport owners');
+  } },
+  { name: 'handoff bridge: controls: app-owned supervisor readiness waits for its closed state without a second public probe', async run() {
+    const clock = createFakeClock(1_000_000); let state = 'connecting'; let publicCalls = 0;
+    const tunnel = { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state }) };
+    const h = controllerHarness({ now: clock.now, timers: clock, tunnel, waitForTunnelOnline: true,
+      publicProbe: async () => { publicCalls += 1; return { ok: true }; } });
+    assert(clock.pendingCount() === 0, 'an off bridge must not schedule a readiness timer');
+    const enabling = h.controller.enable(); await settle(20);
+    assert(h.controller.snapshot(false).serving === 'starting' && publicCalls === 0,
+      'connecting must remain non-serving and must not race the supervisor with a controller-owned public probe');
+    // A first tunnel-not-serving probe makes the supervisor stop and restart
+    // its child. It intentionally exposes stopping/off between those serial
+    // steps, so neither is a terminal readiness result.
+    state = 'stopping'; clock.advance(250); await settle();
+    assert(h.controller.snapshot(false).serving === 'starting', 'an internal probe-restart stopping state must remain pending');
+    state = 'off'; clock.advance(250); await settle();
+    assert(h.controller.snapshot(false).serving === 'starting', 'an internal probe-restart off state must remain pending');
+    state = 'connecting'; clock.advance(250); await settle();
+    state = 'checking-public'; clock.advance(250); await settle();
+    assert(h.controller.snapshot(false).serving === 'starting', 'checking-public remains non-serving until the supervisor reports online');
+    state = 'online'; clock.advance(250); await settle();
+    if (h.controller.snapshot(false).serving === 'starting') { clock.advance(30_000); await settle(); }
+    assert((await enabling).success && h.controller.snapshot(false).serving === 'live' && publicCalls === 0,
+      'only the supervisor online state may complete an app-owned enable');
+    await h.controller.disable(); assert(clock.pendingCount() === 0, 'a completed readiness wait must leave no controller timer');
+
+    for (const terminalState of ['failed', 'blocked', 'needs-setup', 'needs-trust']) {
+      const terminalClock = createFakeClock(1_000_000); const terminal = controllerHarness({ now: terminalClock.now, timers: terminalClock,
+        tunnel: { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: terminalState }) },
+        waitForTunnelOnline: true, publicProbe: async () => { throw new Error('must not probe after terminal supervisor state'); } });
+      const terminalResult = await terminal.controller.enable();
+      assert(!terminalResult.success && terminalResult.code === 'tunnel_failed' && terminal.controller.snapshot(false).serving === 'error' && terminalClock.pendingCount() === 0,
+        `${terminalState} must fail early and clean up without a readiness timer`);
+    }
+
+    const nearBoundaryClock = createFakeClock(1_000_000); let nearBoundaryState = 'connecting'; const nearBoundary = controllerHarness({ now: nearBoundaryClock.now, timers: nearBoundaryClock,
+      tunnel: { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: nearBoundaryState }) }, waitForTunnelOnline: true });
+    const nearlyReady = nearBoundary.controller.enable(); await settle(20); nearBoundaryClock.advance(29_751); await settle(20);
+    nearBoundaryState = 'online'; nearBoundaryClock.advance(249); await settle(20);
+    assert((await nearlyReady).success && nearBoundaryClock.now() - 1_000_000 === 30_000,
+      'an online supervisor published between the final poll and the exact 30-second deadline must complete Enable');
+    await nearBoundary.controller.disable(); assert(nearBoundaryClock.pendingCount() === 0,
+      'the near-boundary readiness success must leave no timer after Disable');
+
+    const timeoutClock = createFakeClock(1_000_000); const timeout = controllerHarness({ now: timeoutClock.now, timers: timeoutClock,
+      tunnel: { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: 'connecting' }) }, waitForTunnelOnline: true });
+    const timingOut = timeout.controller.enable(); await settle(20); timeoutClock.advance(30_000); await settle(20);
+    const timeoutResult = await timingOut;
+    assert(!timeoutResult.success && timeoutResult.code === 'tunnel_failed' && timeout.controller.snapshot(false).serving === 'error' && timeoutClock.pendingCount() === 0,
+      'a supervisor that never reaches online must expire at the 30-second first-success deadline and leave no timer');
+
+    const cancelClock = createFakeClock(1_000_000); const cancel = controllerHarness({ now: cancelClock.now, timers: cancelClock,
+      tunnel: { async start() { return { ok: true }; }, async stop() {}, status: () => ({ state: 'connecting' }) }, waitForTunnelOnline: true });
+    const cancelledEnable = cancel.controller.enable(); await settle(20);
+    assert(cancelClock.pendingCount() > 0, 'the active readiness wait owns bounded timers only while Enable is in progress');
+    await cancel.controller.disable(); await cancelledEnable; await settle();
+    assert(cancel.controller.snapshot(false).serving === 'off' && cancelClock.pendingCount() === 0,
+      'Disable must cancel an in-flight readiness wait instead of leaving startup work behind');
+  } },
+  { name: 'handoff bridge: controls: composition waits through a real supervisor probe restart before serving', async run() {
+    const clock = createFakeClock(1_000_000); const table = createFakeProcessTable({ parentPid: 500 }); const fakeSpawn = createFakeSpawn({ processTable: table, pidStart: 2200 });
+    const probeResults = [{ ok: false, code: 'tunnel-not-serving' }, { ok: true }]; let configText = ''; let controllerProbeCalls = 0; let supervisorCreates = 0;
+    const userData = '/tmp/ic-controls-supervisor-restart';
+    const graph = composeHandoffBridge({
+      userData,
+      config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } },
+      tunnelState: { binaryPath: '/tmp/synthetic-cloudflared', binaryTrusted: true, credentialsPath: `/tmp/${TUNNEL_ID}.json`, pin: 'f'.repeat(64), approvedAt: 1 },
+      deps: {
+        now: clock.now, timers: clock, engine: enginePort(), laneStore: { loadLanes: () => [] }, audit: { append: async () => true, flush: async () => ({ ok: true }) },
+        readConfig: () => ({ config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } } }),
+        oauth: { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => null, revokeAll: async () => ({ ok: true }), closePairing: async () => ({ ok: true }), flush: async () => ({ ok: true }) },
+        application: { describeForConfirm: async () => ({ items: [] }) }, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }) },
+        listener: { start: async () => ({ ok: true }), stop: async () => undefined, quiesce: async () => undefined, drain: async () => undefined },
+        dialogs: { ask: async () => ({ ok: true }), showCode: async () => ({ ok: false }), showNotice: async () => ({ ok: true }) },
+        power: { dispose: NOOP }, tray: { destroy: NOOP }, getCanvasWindows: () => [],
+        publicRequest: () => { controllerProbeCalls += 1; throw new Error('composition readiness must not use the controller probe'); },
+        createTunnelSupervisor: supplied => {
+          supervisorCreates += 1;
+          return createTunnelSupervisor({ ...supplied,
+            ensureTunnelDirectory: async () => undefined, reapOrphans: async () => ({ ok: true, notices: [] }),
+            inspectCredentials: () => ({ ok: true, tunnelId: TUNNEL_ID, credentialsPath: `/tmp/${TUNNEL_ID}.json` }), legacyCertPresent: () => false,
+            prepareBinary: async () => ({ ok: true, copyPath: '/tmp/synthetic-cloudflared-copy', sha256: 'f'.repeat(64), version: '2026.9.3' }), findBinary: () => '/tmp/synthetic-cloudflared', chooseMetricsPort: () => 50000,
+            atomicWriteText: (_target, text) => { configText = text; }, readConfig: () => configText,
+            dryRun: async (_binary, args) => ({ ok: true, output: args.at(-1) === 'validate'
+              ? `Validating rules from ${userData}/handoff-bridge/tunnel/config.yml\nOK`
+              : args.at(-1).includes('not-the-bridge') ? 'rule #1 http_status:404' : `rule #0 https://${HOST}/mcp unix:${supplied.socketPath}` }),
+            verifyPinnedCopy: () => ({ ok: true }), recordTunnelIntent: NOOP,
+            spawnCloudflared: args => fakeSpawn(args.binaryPath, args.args, { cwd: args.cwd, env: args.env }),
+            getProcessInfo: async pid => ({ pid, pgid: pid, lstart: 'synthetic' }), probeReady: async () => ({ ok: true, state: 'ready' }),
+            publicProbeFn: async () => probeResults.shift() || { ok: true },
+            signalGroup: (pid, signal) => {
+              const call = fakeSpawn.calls.find(entry => entry.child.pid === pid);
+              if (!call) return false;
+              call.child.__exit(signal === 'SIGKILL' ? null : 0, signal);
+              return true;
+            }, wait: async () => undefined,
+          });
+        },
+      },
+    });
+    try {
+      const enabling = graph.controller.enable({ confirmed: true, startContext: { env: {}, isPackaged: true } }); await settle(100);
+      assert(supervisorCreates === 1 && graph.controller.snapshot(false).serving === 'starting' && controllerProbeCalls === 0,
+        'production-owned composition selects supervisor readiness instead of the direct controller probe');
+      clock.advance(2_000); await settle(30);
+      assert(graph.controller.snapshot(false).serving === 'starting' && controllerProbeCalls === 0,
+        'the first tunnel-not-serving probe may stop/off/restart without failing the controller start');
+      clock.advance(2_000); await settle(30);
+      clock.advance(250); await settle(12);
+      assert((await enabling).success && graph.controller.snapshot(false).serving === 'live' && controllerProbeCalls === 0,
+        'the replacement child reaching online completes the same Enable operation');
+      await graph.controller.disable(); await settle(20);
+      assert(clock.pendingCount() === 0, 'the composed supervisor restart regression leaves no timer after Disable');
+
+      const directClock = createFakeClock(1_000_000); const directProbeCalls = [];
+      const direct = composeHandoffBridge({
+        userData: '/tmp/ic-controls-injected-supervisor',
+        config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } },
+        tunnelState: { binaryPath: '/tmp/synthetic-cloudflared', binaryTrusted: true, credentialsPath: `/tmp/${TUNNEL_ID}.json`, pin: 'f'.repeat(64) },
+        deps: {
+          now: directClock.now, timers: directClock, engine: enginePort(), laneStore: { loadLanes: () => [] }, audit: { append: async () => true, flush: async () => ({ ok: true }) },
+          readConfig: () => ({ config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } } }),
+          oauth: { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => null, revokeAll: async () => ({ ok: true }), closePairing: async () => ({ ok: true }), flush: async () => ({ ok: true }) },
+          application: { describeForConfirm: async () => ({ items: [] }) }, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }) },
+          listener: { start: async () => ({ ok: true }), stop: async () => undefined, quiesce: async () => undefined, drain: async () => undefined },
+          tunnelSupervisor: { start: async () => ({ ok: true }), stop: async () => undefined, status: () => ({ state: 'online' }) },
+          publicRequest: fakeRequest({ capture: directProbeCalls }), dialogs: { ask: async () => ({ ok: true }), showCode: async () => ({ ok: false }), showNotice: async () => ({ ok: true }) },
+          power: { dispose: NOOP }, tray: { destroy: NOOP }, getCanvasWindows: () => [],
+        },
+      });
+      try {
+        assert((await direct.controller.enable({ confirmed: true, startContext: { env: {}, isPackaged: true } })).success && directProbeCalls.length === 1,
+          'an explicitly injected supervisor preserves the direct public-probe seam rather than waiting on a closed production supervisor state');
+        await direct.controller.disable(); assert(directClock.pendingCount() === 0, 'the injected direct seam also cleans up its timers');
+      } finally {
+        try { await direct.controller.disable(); } catch { /* fixture cleanup must not hide the assertion */ }
+        direct.power.dispose?.(); direct.tray.destroy?.();
+        assert(directClock.pendingCount() === 0, 'the injected supervisor fixture must leave no fake timer after any assertion path');
+      }
+    } finally {
+      try { await graph.controller.disable(); } catch { /* fixture cleanup must not hide the assertion */ }
+      graph.power.dispose?.(); graph.tray.destroy?.();
+      assert(clock.pendingCount() === 0, 'the real-supervisor fixture must leave no fake timer after any assertion path');
+    }
   } },
   { name: 'handoff bridge: controls: E3 source policy precedes authentication and never pauses', async run() {
     let authenticated = 0; const h = controllerHarness({ sourcePolicy: async () => false, oauth: { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => { authenticated++; return { ok: true }; } } });

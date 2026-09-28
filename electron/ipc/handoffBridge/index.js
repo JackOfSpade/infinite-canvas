@@ -767,8 +767,15 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     : options => publicProbe({ ...options, request: deps.publicRequest, lookup: deps.lookup });
   // `power` below is the one owner of the platform resume listener.  Passing
   // the same monitor to the tunnel wrapper would register a second probe.
+  const makeTunnelSupervisor = typeof deps.createTunnelSupervisor === 'function'
+    ? deps.createTunnelSupervisor
+    : createRealTunnelSupervisor;
   supervisedTunnel = deps.tunnelSupervisor || (isTunnelSupervisor(deps.tunnel) ? deps.tunnel : null)
-    || createRealTunnelSupervisor({ userData, hostname: config.hostname, socketPath, credentialsPath: setup.credentialsPath, binaryPath: setup.binaryPath, pin: setup.pin, approvedAt: setup.approvedAt, testMode, publicProbeFn: hostname => probe({ hostname }), timers, now, fsImpl: deps.fsImpl });
+    || makeTunnelSupervisor({ userData, hostname: config.hostname, socketPath, credentialsPath: setup.credentialsPath, binaryPath: setup.binaryPath, pin: setup.pin, approvedAt: setup.approvedAt, testMode, publicProbeFn: hostname => probe({ hostname }), timers, now, fsImpl: deps.fsImpl });
+  // Only the app-owned production supervisor gets readiness authority. An
+  // injected controller/tunnel port keeps its direct start/probe contract for
+  // deterministic unit tests and narrow integration seams.
+  const waitForOwnedTunnelOnline = !deps.tunnelSupervisor && !isTunnelSupervisor(deps.tunnel);
   // Preserve only setup facts suitable for the status card; supervisor status
   // is still the authority for process state and never exposes child details.
   const tunnel = Object.freeze({
@@ -851,6 +858,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     showFixedNotification(kind);
   };
   controller = deps.controller || createHandoffBridgeController({ now, timers, config, enabled: false, audit, log: bridgeLog, windows, tunnel, engine, listener,
+    waitForTunnelOnline: waitForOwnedTunnelOnline,
     ui: { confirmEnable: dialogConfirm('enable'), confirmRestart: dialogConfirm('restart'), notify: controllerNotification },
     oauth: {
       ...oauth,

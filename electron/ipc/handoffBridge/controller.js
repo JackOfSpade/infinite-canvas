@@ -56,8 +56,22 @@ const HUB_KEY = /^[a-f0-9]{64}$/;
 const CLOUDFLARED_VERSION = /^\d{4}\.\d{1,2}\.\d{1,2}(?:-[0-9A-Za-z.]{1,20})?$/;
 const SHA256_PREFIX = /^[a-f0-9]{12}$/;
 const STARTUP_TIMEOUT_MS = 25_000;
+// The tunnel supervisor permits a 30-second first-success public-probe
+// window before its normal retry/degrade policy takes over. This is distinct
+// from the controller's per-port startup cap above.
+const TUNNEL_READINESS_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+// The supervisor owns the real readiness/public-probe cadence (first public
+// probe at +2s, then every 5s).  This small controller-side poll only observes
+// its closed state while Enable is already in progress; it never probes the
+// network or starts a tunnel itself.
+const TUNNEL_READINESS_POLL_MS = 250;
+// `probe-restart` deliberately presents `stopping` and then `off` while the
+// supervisor serially starts a replacement child. Those are not a user
+// Disable and must remain waitable. A true failed/setup-blocked projection is
+// safe to reject immediately.
+const TERMINAL_TUNNEL_START_STATES = new Set(['blocked', 'needs-setup', 'needs-trust', 'failed']);
 const IPV4_PREFIX = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.0\/24$/;
 const IPV6_HEXTET = '(?:0|[1-9a-f][0-9a-f]{0,3})';
 const IPV6_PREFIX = new RegExp(`^${IPV6_HEXTET}:${IPV6_HEXTET}:${IPV6_HEXTET}::/48$`);
@@ -196,6 +210,7 @@ export function createHandoffBridgeController(options = {}) {
   let notifyTimer = null;
   let operation = null;
   let teardown = null;
+  let tunnelReadiness = null;
   let forgetting = false;
   let startGeneration = 0;
   // A request may cross several async policy ports before it reaches the
@@ -750,6 +765,53 @@ export function createHandoffBridgeController(options = {}) {
     return true;
   }
   function startCurrent(generation) { return generation === startGeneration; }
+  function cancelTunnelReadiness() {
+    // Disable must release the readiness wait immediately. Leaving its timer
+    // live would make an already hard-off bridge retain an otherwise useless
+    // readiness operation.
+    try { tunnelReadiness?.finish?.(false); } catch { /* the hard-off fence still wins */ }
+  }
+  function waitForTunnelOnline(generation) {
+    // Direct controller ports retain their historical start + immediate probe
+    // behavior. Composition opts in only for the app-owned supervisor, whose
+    // own cadence is the authority for edge readiness.
+    if (options.waitForTunnelOnline !== true) return Promise.resolve(true);
+    return new Promise(resolve => {
+      let settled = false; let pollTimer; let deadlineTimer;
+      const pending = {
+        finish(value) {
+          if (settled) return;
+          settled = true;
+          try { if (pollTimer !== undefined) timers.clearTimeout?.(pollTimer); } catch { /* best effort */ }
+          try { if (deadlineTimer !== undefined) timers.clearTimeout?.(deadlineTimer); } catch { /* best effort */ }
+          if (tunnelReadiness === pending) tunnelReadiness = null;
+          resolve(value === true);
+        },
+      };
+      const inspect = () => {
+        if (settled) return;
+        if (!startCurrent(generation)) { pending.finish(false); return; }
+        const state = statusOf(tunnel).state;
+        if (state === 'online') { pending.finish(true); return; }
+        if (TERMINAL_TUNNEL_START_STATES.has(state)) { pending.finish(false); return; }
+        try {
+          pollTimer = timers.setTimeout(inspect, TUNNEL_READINESS_POLL_MS);
+          pollTimer?.unref?.();
+        } catch { pending.finish(false); }
+      };
+      tunnelReadiness = pending;
+      try {
+        deadlineTimer = timers.setTimeout(() => {
+          // A supervisor may publish online between the final 250ms observer
+          // tick and this exact 30-second boundary. Give its closed status one
+          // final read without extending the first-success window.
+          pending.finish(startCurrent(generation) && statusOf(tunnel).state === 'online');
+        }, TUNNEL_READINESS_TIMEOUT_MS);
+        deadlineTimer?.unref?.();
+      } catch { pending.finish(false); return; }
+      inspect();
+    });
+  }
   async function cancelledStart(generation) {
     // Disable may have raced an in-flight durable enable write.  Reassert the
     // hard-off flag without waiting for a stale start, then close any owner
@@ -792,7 +854,11 @@ export function createHandoffBridgeController(options = {}) {
       const started = await boundedCall(tunnel, 'start', [], { timers, code: 'tunnel_failed' });
       if (!startCurrent(generation)) return cancelledStart(generation);
       if (started?.ok === false || started === false) throw failure('tunnel_failed');
-      if (typeof publicProbe === 'function') {
+      if (options.waitForTunnelOnline === true) {
+        const ready = await waitForTunnelOnline(generation);
+        if (!startCurrent(generation)) return cancelledStart(generation);
+        if (ready !== true) throw failure('tunnel_failed');
+      } else if (typeof publicProbe === 'function') {
         const probe = await boundedCall(publicProbe, null, [{ hostname: config.hostname }], { timers, code: 'tunnel_failed' });
         if (!startCurrent(generation)) return cancelledStart(generation);
         if (probe?.ok === false || probe === false) throw failure('tunnel_failed');
@@ -848,6 +914,7 @@ export function createHandoffBridgeController(options = {}) {
     // leaves the already admitted engine work alive until listener.drain has
     // completed (or its fixed sub-cap has elapsed).
     startGeneration += 1;
+    cancelTunnelReadiness();
     lifecycleGeneration += 1;
     enabled = false; serving = 'off'; pauseCause = null; stateBeforeQuit = null; restartConfirmed = false;
     record('listener_stopped', { cause: gracefulQuit ? 'quit' : 'disabled' });

@@ -22,6 +22,9 @@ function safeResult(result) {
 function invoke(api, method, payload) {
   try {
     const fn = api?.[method];
+    // A status method can exist while a stale or incomplete preload lacks an
+    // action method. That is a control-surface problem, not an authoritative
+    // verdict that this is an unavailable build.
     if (typeof fn !== 'function') return Promise.resolve({ success: false, code: 'UNAVAILABLE' });
     return Promise.resolve(payload === undefined ? fn.call(api) : fn.call(api, payload)).then(safeResult, () => ({ success: false, code: 'INTERNAL' }));
   } catch {

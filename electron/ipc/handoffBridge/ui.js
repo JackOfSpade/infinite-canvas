@@ -291,6 +291,21 @@ export function registerHandoffBridgeUi({
       : []);
   };
   const resultFailure = (result, fallback = 'INTERNAL') => fixed(fixedCode(result?.code, fallback));
+  // SET_ENABLED has a deliberately smaller, closed error vocabulary than the
+  // internal refusal ladder. Do not relay a refusal detail (which can describe
+  // a local socket, file, or platform failure) across IPC.
+  const startupEnableFailure = result => {
+    let code;
+    try { code = result?.code; } catch { return fixed('UNAVAILABLE'); }
+    switch (typeof code === 'string' ? code.toUpperCase() : '') {
+      case 'CANCELLED':
+      case 'DECLINED': return fixed('DECLINED');
+      case 'BUSY': return fixed('BUSY');
+      case 'NO_WINDOW': return fixed('NO_WINDOW');
+      case 'UNAVAILABLE': return fixed('UNAVAILABLE');
+      default: return fixed('UNAVAILABLE');
+    }
+  };
   const invalidateAfterSetupMutation = async kind => {
     if (typeof onSetupMutation !== 'function') return true;
     const result = await safeCall({ onSetupMutation }, 'onSetupMutation', kind);
@@ -312,7 +327,7 @@ export function registerHandoffBridgeUi({
       const status = currentStatus(); return status ? success({ status }) : fixed('UNAVAILABLE');
     }),
     [IPC_CHANNELS.SET_ENABLED]: invoke(async ({ sender, window }, payload) => {
-      if (!plain(payload) || typeof payload.enabled !== 'boolean') return fixed('INVALID');
+      if (!plain(payload) || typeof payload.enabled !== 'boolean') return fixed('UNAVAILABLE');
       if (payload.enabled) {
         if (!window) return fixed('NO_WINDOW');
         const status = currentStatus();
@@ -332,22 +347,22 @@ export function registerHandoffBridgeUi({
         };
         if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
         const answer = await confirm(sender, 'enable', enableDetails);
-        if (!answer.ok) return fixed(fixedCode(answer.code, 'DECLINED'));
+        if (!answer.ok) return startupEnableFailure(answer);
         if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
         const result = await safeCall(controller, 'enable', { confirmed: true });
-        if (!acknowledged(result)) return resultFailure(result, 'UNAVAILABLE');
+        if (!acknowledged(result)) return startupEnableFailure(result);
         if (long) {
           const persisted = await safeCall(enableConsent, 'accept', enableDetails);
           if (!acknowledged(persisted, { allowTrue: true })) {
             await safeCall(controller, 'disable');
-            return fixed('INTERNAL');
+            return fixed('UNAVAILABLE');
           }
         }
         notifyEnable();
         return success({ enabled: true });
       }
       const result = await safeCall(controller, 'disable');
-      return acknowledged(result) ? success({ enabled: false }) : resultFailure(result, 'UNAVAILABLE');
+      return acknowledged(result) ? success({ enabled: false }) : startupEnableFailure(result);
     }),
     [IPC_CHANNELS.SAVE_CONFIG]: invoke(async ({ sender, window }, payload) => {
       if (!window) return fixed('NO_WINDOW');
