@@ -276,6 +276,14 @@ export default [{
 
     const fixtureFiles = filesRecursively(fixtureDirectory);
     assert(fixtureFiles.length > 0, 'fixture directory must not be empty');
+    // The tracking check below needs a readable index. CI runs this from a
+    // detached worktree whose `.git` is a FILE pointing back at the main
+    // repository, and that target is not always mounted alongside it -- there
+    // `git` fails for every path at once, which is an unreadable repository,
+    // not an untracked fixture. Probe once and only assert on a verdict git
+    // can actually give, so a real untracked fixture still fails loudly.
+    const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoRoot, encoding: 'utf8' });
+    const indexReadable = !probe.error && probe.status === 0 && String(probe.stdout).trim() === 'true';
     for (const file of fixtureFiles) {
       const content = fs.readFileSync(file, 'utf8');
       for (const email of content.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []) {
@@ -284,9 +292,13 @@ export default [{
       for (const phone of content.match(PHONE_CANDIDATE) || []) {
         assert(isSyntheticPhone(phone), `${path.basename(file)} contains a non-synthetic phone`);
       }
+      if (!indexReadable) continue;
       const relative = path.relative(repoRoot, file);
       const checked = spawnSync('git', ['ls-files', '--error-unmatch', '--', relative], { cwd: repoRoot, encoding: 'utf8' });
-      assert(checked.status === 0, 'A handoff bridge fixture is not tracked and would disappear from CI.');
+      // Name the file: the previous message said only that "a" fixture was
+      // untracked, which cost a full CI round to localize.
+      assert(!checked.error && checked.status === 0,
+        `${relative} is not tracked and would disappear from CI (git exit ${checked.error ? 'unavailable' : checked.status}).`);
     }
   },
 }, {
