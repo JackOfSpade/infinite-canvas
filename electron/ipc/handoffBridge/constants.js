@@ -84,7 +84,12 @@ export const CONSTANTS = Object.freeze({
   PUSH_TOMBSTONE_RING: 500,
   JOBS_PER_CHAT: 2,
   JOBS_PER_CHAT_MIN: 1,
-  JOBS_PER_CHAT_MAX: 3,
+  // A count cap sitting on top of a byte budget that already adapts to payload
+  // size. The bytes are the real fence -- canAssign() checks both -- so a hard
+  // ceiling of 3 only meant a new chat every three application bundles however
+  // small they were. Raised to the lane ceiling; the default stays 2, so this
+  // widens what can be chosen rather than changing anyone's behaviour.
+  JOBS_PER_CHAT_MAX: 10,
   EPOCH_SOFT_BYTES: 500_000,
   EPOCH_HARD_BYTES: 900_000,
   STALL_NOTICE_MS: 5 * 60_000,

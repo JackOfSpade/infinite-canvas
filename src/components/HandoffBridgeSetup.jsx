@@ -3,6 +3,7 @@ import { Cable, Pause, Play, Settings2 } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { hasHandoffBridgeApi, hasHandoffBridgeStatusSnapshot, retryHandoffBridgeStatusSync, startHandoffBridgeStatusSync } from '../utils/handoffBridgeStore';
+import { JOBS_PER_CHAT_RANGE } from '../utils/handoffBridgeConfig';
 import { openBridgePopover, openBridgeSetup } from '../utils/handoffBridgeUiStore';
 import { deriveBridgeHealth } from '../utils/handoffBridgeView';
 import { BRIDGE_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
@@ -231,6 +232,27 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
               onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoRelease: event.target.checked }})}
             />
             <span className="min-w-0">{BRIDGE_UI_COPY.autoRelease}</span>
+          </label>
+          {/* The byte budget already fences a chat by how much it has actually
+              carried; this only caps how many application bundles may share
+              one, and with no control it could never be raised from its
+              default without hand-editing the config file. */}
+          <label className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-white/65">
+            <span className="min-w-0">{BRIDGE_UI_COPY.jobsPerChat}</span>
+            <input
+              className="w-16 shrink-0 rounded border border-white/15 bg-black/40 px-2 py-1 text-white"
+              type="number"
+              min={JOBS_PER_CHAT_RANGE.min}
+              max={JOBS_PER_CHAT_RANGE.max}
+              step={1}
+              value={status.limits.jobsPerChat}
+              disabled={controlsDisabled}
+              onChange={event => {
+                const next = Number.parseInt(event.target.value, 10);
+                if (!Number.isInteger(next) || next < JOBS_PER_CHAT_RANGE.min || next > JOBS_PER_CHAT_RANGE.max) return;
+                void call('handoffBridgeSaveConfig', { patch: { limits: { ...status.limits, jobsPerChat: next } } });
+              }}
+            />
           </label>
           <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-white/10 pt-1">
             <span className="text-[11px] text-white/35">{BRIDGE_UI_COPY.dangerZone}</span>

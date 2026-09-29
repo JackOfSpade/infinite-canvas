@@ -54,7 +54,10 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'cimd.js': { allow: ['node:https', 'node:dns', 'node:net', 'node:crypto'] },
   'egressProbe.js': { allow: ['node:https', 'node:dns', 'node:crypto', './cimd.js'] },
   'oauthStore.js': { allow: ['node:fs', 'node:path', 'node:crypto'] },
-  'store.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js'] },
+  // constants.js is the inert values module with no imports of its own; the
+  // config validator reads the jobsPerChat range from it rather than repeating
+  // the numbers, which is how a legal value starts being rejected on save.
+  'store.js': { allow: ['node:fs', 'node:path', 'node:crypto', './constants.js', '../../../src/utils/handoffBridgeConfig.js'] },
   'laneStore.js': { allow: ['node:fs', 'node:path', 'node:crypto'] },
   'engine.js': { allow: sibling('node:crypto') },
   'lanes.js': { allow: sibling('node:crypto') },

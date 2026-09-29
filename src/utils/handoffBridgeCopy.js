@@ -191,6 +191,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   marketplaceSetting: 'Let ChatGPT handle marketplace pricing handoffs',
   autoStart: 'Turn on when the app starts',
   autoRelease: 'Automatically release new application handoffs this session',
+  jobsPerChat: 'Application bundles one chat may carry',
   dangerZone: 'Danger zone',
   forget: 'Forget setup…',
   cancel: 'Cancel',

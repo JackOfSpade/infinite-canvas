@@ -9,6 +9,10 @@ const PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
 const SAFE_SOCKET = /^[A-Za-z0-9_./ -]+$/;
 const CONTROL_OR_NON_ASCII = /[^\x20-\x7e]/;
 
+// Shared so the renderer control and the main-process validator cannot offer
+// and then reject different values. constants.js mirrors these for the engine.
+export const JOBS_PER_CHAT_RANGE = Object.freeze({ min: 1, max: 10 });
+
 export const STARTER_MASK = '\u2022'.repeat(26);
 
 export function isValidHostname(value) {

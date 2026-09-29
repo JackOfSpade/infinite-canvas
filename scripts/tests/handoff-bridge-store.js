@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
+import { JOBS_PER_CHAT_RANGE } from '../../src/utils/handoffBridgeConfig.js';
 import { configPathFor, emptyConfig, forgetConfig, readConfig, writeConfig } from '../../electron/ipc/handoffBridge/store.js';
 
 function withStore(run) {
@@ -396,6 +398,26 @@ export default [
       const [saved, forgotten] = await Promise.all([pendingSave, pendingForget]);
       assert(saved.ok && forgotten === true, 'queued save and Forget must both complete');
       assert(readConfig(userData).state === 'missing', 'Forget after a queued save must leave config absent');
+    }),
+  },
+  {
+    // The range was written out twice -- once in constants.js, once as bare
+    // numbers inside the validator -- and a renderer control now offers a third
+    // copy. Any drift shows up as a value the UI lets you pick and the save
+    // path then rejects.
+    name: 'handoff bridge: store: the jobsPerChat range is one value shared by the validator, the engine and the control',
+    run: () => withStore(async (userData) => {
+      assert(CONSTANTS.JOBS_PER_CHAT_MIN === JOBS_PER_CHAT_RANGE.min && CONSTANTS.JOBS_PER_CHAT_MAX === JOBS_PER_CHAT_RANGE.max,
+        'the renderer control and the engine constants must describe the same range');
+      assert(CONSTANTS.JOBS_PER_CHAT >= CONSTANTS.JOBS_PER_CHAT_MIN && CONSTANTS.JOBS_PER_CHAT <= CONSTANTS.JOBS_PER_CHAT_MAX,
+        'the default must sit inside its own range');
+      for (const value of [CONSTANTS.JOBS_PER_CHAT_MIN, CONSTANTS.JOBS_PER_CHAT_MAX]) {
+        const result = await save(userData, { limits: { ...emptyConfig().limits, jobsPerChat: value } });
+        assert(result.ok === true, `the validator must accept ${value}, which the control offers`);
+        assert(persisted(userData).limits.jobsPerChat === value, `${value} must persist`);
+      }
+      const tooHigh = await save(userData, { limits: { ...emptyConfig().limits, jobsPerChat: CONSTANTS.JOBS_PER_CHAT_MAX + 1 } });
+      assert(tooHigh.ok === false, 'a value past the ceiling must still be refused');
     }),
   },
 ];

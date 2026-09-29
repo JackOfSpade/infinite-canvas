@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { CONSTANTS } from './constants.js';
 import { isValidHostname, isValidPluginName } from '../../../src/utils/handoffBridgeConfig.js';
 
 export const CONFIG_VERSION = 1;
@@ -75,7 +76,7 @@ function normalizeLimits(value) {
     if (!Number.isSafeInteger(item) || item < 0) return null;
     limits[key] = item;
   }
-  if (!Number.isInteger(limits.jobsPerChat) || limits.jobsPerChat < 1 || limits.jobsPerChat > 3) return null;
+  if (!Number.isInteger(limits.jobsPerChat) || limits.jobsPerChat < CONSTANTS.JOBS_PER_CHAT_MIN || limits.jobsPerChat > CONSTANTS.JOBS_PER_CHAT_MAX) return null;
   if (limits.epochSoftBytes > limits.epochHardBytes) return null;
   return limits;
 }
@@ -198,8 +199,11 @@ function mergePatch(current, patch) {
         if (!Number.isSafeInteger(value) || value < 0) fieldError(fieldErrors, `limits.${key}`);
         else next.limits[key] = value;
       }
+      // The range lives in constants.js; repeating the numbers here is how the
+      // two drift apart and a legal value starts being rejected on save.
       if (!Number.isInteger(next.limits.jobsPerChat)
-          || next.limits.jobsPerChat < 1 || next.limits.jobsPerChat > 3) fieldError(fieldErrors, 'limits.jobsPerChat');
+          || next.limits.jobsPerChat < CONSTANTS.JOBS_PER_CHAT_MIN
+          || next.limits.jobsPerChat > CONSTANTS.JOBS_PER_CHAT_MAX) fieldError(fieldErrors, 'limits.jobsPerChat');
       if (next.limits.epochSoftBytes > next.limits.epochHardBytes) fieldError(fieldErrors, 'limits');
     }
   }
