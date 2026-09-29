@@ -27,8 +27,8 @@ export default [
         assert(tool.execution?.taskSupport === 'forbidden', `${tool.name} must forbid task support`);
         assert(JSON.stringify(tool._meta?.securitySchemes) === JSON.stringify([{ type: 'oauth2', scopes: ['handoff'] }]), `${tool.name} must use the OAuth handoff scope`);
       }
-      assert(surfaceHash(tools) === '73c80b65180180ad3df73f3f6d79d7885ee1fc597d5e85e659206ee69e91d5a2', 'tool surface drift requires a deliberate plugin Refresh');
-      assert(bridgeSurfaceHash() === SURFACE_PIN && SURFACE_PIN === '73c80b65180180ad3df73f3f6d79d7885ee1fc597d5e85e659206ee69e91d5a2', 'the exported surface pin must require a plugin Refresh on drift');
+      assert(surfaceHash(tools) === 'db265d064e9f0c7df8264b0933050f2abb94358ad67884363ce28436dd5b514a', 'tool surface drift requires a deliberate plugin Refresh');
+      assert(bridgeSurfaceHash() === SURFACE_PIN && SURFACE_PIN === 'db265d064e9f0c7df8264b0933050f2abb94358ad67884363ce28436dd5b514a', 'the exported surface pin must require a plugin Refresh on drift');
     },
   },
   {

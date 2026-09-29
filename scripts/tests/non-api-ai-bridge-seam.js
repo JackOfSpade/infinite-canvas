@@ -223,15 +223,16 @@ const SCENARIOS = [
 
 // The matrix is deliberately explicit: an ineligible record kind must state
 // its refusal for every response scenario rather than silently falling out of
-// a separate eligibility test. K1-K3 reach the shared accept body; K4-K7 do
-// not, by design. R1-R12 are the frozen acceptance rows in the Phase 1 plan.
+// a separate eligibility test. K1-K3 and K6 reach the shared accept body; K4,
+// K5 and K7 do not, by design. R1-R12 are the frozen acceptance rows in the
+// Phase 1 plan.
 const MATRIX_EXPECTATIONS = Object.freeze({
   K1: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K2: Object.freeze(['free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text']),
   K3: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K4: Object.freeze(['attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment']),
   K5: Object.freeze(['person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing']),
-  K6: Object.freeze(['grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded', 'grounded']),
+  K6: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K7: Object.freeze(['task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed']),
 });
 
@@ -247,7 +248,10 @@ const MATRIX_KINDS = Object.freeze([
   { id: 'K3', task: TASK, successor: true, expectedExclusion: null },
   { id: 'K4', task: TASK, attachmentPaths: ['/Users/synthetic/attachment.txt'], expectedExclusion: 'attachment' },
   { id: 'K5', task: TASK, initialResponse: 'A person is editing this synthetic draft.', expectedExclusion: 'person_editing' },
-  { id: 'K6', task: TASK, grounding: true, expectedExclusion: 'grounded' },
+  // Grounding no longer excludes: a structured, schema-answered request that
+  // asked for web research reaches the shared accept body exactly like K1,
+  // proving `grounded` carries no structural weight any more.
+  { id: 'K6', task: TASK, grounding: true, expectedExclusion: null },
   { id: 'K7', task: 'price-synthesis', expectedExclusion: 'task_not_allowed' },
 ]);
 
@@ -576,7 +580,7 @@ export default [
         values: await Promise.all([
           requestNonApiAi({ prompt: 'OK', task: TASK, responseSchema: SCHEMA, batch: 1, batchTotal: 6, signal }),
           requestNonApiAi({ prompt: 'WITH FILE', task: 'vision-product-analysis', responseSchema: SCHEMA, attachmentPaths: ['/Users/private/photo.png'], signal }),
-          requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research', grounding: true, requestKind: 'raw-text', signal }),
+          requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research', responseSchema: SCHEMA, grounding: true, signal }),
           requestNonApiAi({ prompt: 'OTHER TASK', task: 'price-synthesis', responseSchema: SCHEMA, signal }),
           requestNonApiAi({ prompt: 'DRAFTED', task: TASK, responseSchema: SCHEMA, batch: 5, batchTotal: 6, signal }),
           requestNonApiAi({ prompt: 'SCHEMALESS', task: TASK, requestKind: 'raw-text', signal }),
@@ -588,9 +592,9 @@ export default [
       await handler('update-non-api-ai-draft')({ sender }, { requestId: by('DRAFTED').requestId, response: 'PRIVATE_DRAFT_TEXT typed by the person' });
       const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research', 'price-synthesis']), allowNodeIds: new Set([nodeId]) };
       const listed = listBridgeableNonApiAiHandoffs(everything);
-      assert(listed.handoffs.length === 2 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.batch === 1), 'only the plain structured handoffs remain');
-      assert(listed.excluded.attachment === 1 && listed.excluded.grounded === 1 && listed.excluded.free_text === 1 && listed.excluded.person_editing === 1, 'each exclusion counted once under its own reason');
-      assert(listBridgeableNonApiAiHandoffs().handoffs.length === 0 && listBridgeableNonApiAiHandoffs().excluded.task_not_allowed === 3, 'no allowlist offers nothing');
+      assert(listed.handoffs.length === 3 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.task === 'job-compensation-research') && listed.handoffs.some(item => item.batch === 1), 'the plain structured handoffs remain, and a structured grounded one now joins them');
+      assert(listed.excluded.attachment === 1 && listed.excluded.free_text === 1 && listed.excluded.person_editing === 1 && !('grounded' in listed.excluded), 'each exclusion counted once under its own reason, and grounding is no longer one of them');
+      assert(listBridgeableNonApiAiHandoffs().handoffs.length === 0 && listBridgeableNonApiAiHandoffs().excluded.task_not_allowed === 4, 'no allowlist offers nothing');
       const otherHub = listBridgeableNonApiAiHandoffs({ ...ALLOW, allowNodeIds: new Set(['another-hub']) });
       assert(otherHub.handoffs.length === 0 && otherHub.excluded.node_not_allowed === 2, 'an unselected hub offers nothing');
       const serialized = JSON.stringify(listed);

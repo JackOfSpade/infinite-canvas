@@ -33,6 +33,15 @@ import {
 } from './framing.js';
 
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+// Push tasks whose prompt/response carries marketplace listing or pricing
+// data rather than job-scoring content. This is deliberately a literal list
+// rather than an import from a concrete push source: the engine is written
+// against a generic push-shaped port (see the push.get/push.submit shape
+// check below) and must not depend on one source implementation's internal
+// task-policy table to decide which consent boundary a served task needs.
+const MARKETPLACE_PUSH_TASKS = new Set([
+  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+]);
 const STATUS_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
 const STATUS_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 const STATUS_REASONS = new Set([
@@ -138,7 +147,14 @@ function normalizeScope(value = {}) {
   // Standalone engine users predate the persisted scope preference and retain
   // the complete source surface by default. Composition always synchronizes
   // the explicit config (whose scoring default is false) before serving.
-  return Object.freeze({ applications: value?.applications !== false, scoring: value?.scoring !== false });
+  // marketplace has no such legacy: it is a consent boundary that must never
+  // default on, so an unspecified value stays off even for a standalone
+  // engine, unlike applications/scoring.
+  return Object.freeze({
+    applications: value?.applications !== false,
+    scoring: value?.scoring !== false,
+    marketplace: value?.marketplace === true,
+  });
 }
 
 export function createHandoffEngine({
@@ -612,11 +628,27 @@ export function createHandoffEngine({
     };
   }
 
+  // A served push item's task decides which consent boundary applies:
+  // marketplace tasks need scope.marketplace, everything else (job-scoring
+  // and the rest of the release_one table) still needs scope.scoring. Both
+  // families share one push channel/source, so this per-task check is the
+  // only place that can actually keep a marketplace task inert while its
+  // scope is off.
+  function pushTaskInScope(task) {
+    return MARKETPLACE_PUSH_TASKS.has(task) ? scope.marketplace : scope.scoring;
+  }
+
   function framePushGet(raw, generation = sourceGeneration, expectedEpoch = epoch) {
-    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+    if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     const remaining = combinedRemaining(decision.remaining);
     if (decision.status === 'served') {
+      if (!pushTaskInScope(decision.task)) {
+        // The task was actually served by the push source (it is already
+        // marked served there), but this consent scope is off. Hold rather
+        // than leak served content: never expose the prompt to the client.
+        return makeResultBody('held', { reason: 'scope_disabled', remaining });
+      }
       if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
         return makeResultBody('session_full', { remaining });
       }
@@ -657,7 +689,10 @@ export function createHandoffEngine({
   }
 
   async function readPush(generation = sourceGeneration, expectedEpoch = epoch) {
-    if (!scope.scoring || !push) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
+    // Either consent alone is enough to poll: the shared push source can hold
+    // a mix of scoring and marketplace tasks, and framePushGet applies the
+    // exact per-task scope once the served task is known.
+    if ((!scope.scoring && !scope.marketplace) || !push) return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
     if (!expectedEpoch || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
     const expectedEpochId = pushEpochId(expectedEpoch);
     try {
@@ -666,7 +701,7 @@ export function createHandoffEngine({
       // A synchronous Disable/resume/scope downgrade therefore cannot launch
       // a new push poll from an already obsolete GET continuation.
       await Promise.resolve();
-      if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
+      if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
       const result = await push.get({ epoch: expectedEpochId });
       if (epochCurrent(expectedEpoch, generation)) return result;
       // `push.get` owns per-epoch bookkeeping.  It can finish after Close or
@@ -798,13 +833,14 @@ export function createHandoffEngine({
     let lane = scope.applications ? chooseApplicationContinuation() : null;
     if (lane) return serveLane(lane, generation, expectedEpoch);
 
-    // Scoring handoffs are preferred only at application job boundaries. A
-    // focused, outstanding, or correction application lane has already won.
-    let pushDecision = scope.scoring
+    // Push handoffs (scoring and marketplace) are preferred only at
+    // application job boundaries. A focused, outstanding, or correction
+    // application lane has already won.
+    let pushDecision = (scope.scoring || scope.marketplace)
       ? await readPush(generation, expectedEpoch)
       : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
     if (resumedDuringGet()) return makeResultBody('retry');
-    if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
+    if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
 
     // A lazy read can reveal a correction or a newly-open continuation after
     // the push poll; give it another chance before starting fresh work.
@@ -815,8 +851,8 @@ export function createHandoffEngine({
     lane = scope.applications ? chooseFreshApplication() : null;
     if (lane) return serveLane(lane, generation, expectedEpoch);
 
-    const pushWorking = scope.scoring && pushDecision?.status === 'waiting';
-    const pushNeedsUser = scope.scoring && pushDecision?.status === 'needs_user';
+    const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
+    const pushNeedsUser = (scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user';
     const working = pushWorking || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
     if (working) {
       const wakeReason = await waitForWake(holdMs, args.signal);
@@ -829,14 +865,14 @@ export function createHandoffEngine({
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
       // fresh application lane.
-      pushDecision = scope.scoring
+      pushDecision = (scope.scoring || scope.marketplace)
         ? await readPush(generation, expectedEpoch)
         : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
       if (resumedDuringGet()) return makeResultBody('retry');
-      if (scope.scoring && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
+      if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
       lane = scope.applications ? chooseFreshApplication() : null;
       if (lane) return serveLane(lane, generation, expectedEpoch);
-      const stillWorking = (scope.scoring && pushDecision?.status === 'waiting')
+      const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
         || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
       if (!stillWorking) {
         if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
@@ -846,10 +882,10 @@ export function createHandoffEngine({
         if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
           return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if (scope.scoring && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation, expectedEpoch);
+        if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation, expectedEpoch);
         if (pushDecision?.status === 'retry') return makeResultBody('retry');
         counts.getEmpty++;
-        const drained = scope.scoring
+        const drained = (scope.scoring || scope.marketplace)
           ? framePushGet(pushDecision, generation, expectedEpoch)
           : makeResultBody('queue_empty', { remaining: combinedRemaining() });
         if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
@@ -874,7 +910,7 @@ export function createHandoffEngine({
     if (pushNeedsUser) return framePushGet(pushDecision, generation, expectedEpoch);
     if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
-    const result = scope.scoring
+    const result = (scope.scoring || scope.marketplace)
       ? framePushGet(pushDecision, generation, expectedEpoch)
       : makeResultBody('queue_empty', { remaining: combinedRemaining() });
     if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
@@ -1079,7 +1115,7 @@ export function createHandoffEngine({
   }
 
   async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration, expectedEpoch = epoch } = {}) {
-    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+    if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     if (decision.status === 'rejected') {
       const body = {
@@ -1137,7 +1173,7 @@ export function createHandoffEngine({
   }
 
   function runPushSubmit(code, text, generation = sourceGeneration, expectedEpoch = epoch) {
-    if (!scope.scoring || !epochCurrent(expectedEpoch, generation)) return null;
+    if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return null;
     const epochId = pushEpochId(expectedEpoch);
     const key = verdictKey(`push\n${epochId ?? ''}\n${codeGuard.key(code)}`, text);
     const cached = pushVerdicts.get(key);
@@ -1185,9 +1221,9 @@ export function createHandoffEngine({
     expectedEpoch.lastSubmitAt = safeNow(now);
     const code = trimHandoffCode(args.handoffCode);
     // Push owns its served-code/tombstone namespace. It has to be consulted
-    // before the application unknown-code path so an accepted scoring retry is
-    // never reported as an application unknown handoff.
-    if (push && scope.scoring) {
+    // before the application unknown-code path so an accepted scoring or
+    // marketplace retry is never reported as an application unknown handoff.
+    if (push && (scope.scoring || scope.marketplace)) {
       const pushStartedAt = safeNow(now);
       const pushRecord = runPushSubmit(code, text, generation, expectedEpoch);
       if (!pushRecord) return makeResultBody('retry');
@@ -1708,13 +1744,14 @@ export function createHandoffEngine({
 
   function setScope(next) {
     const updated = normalizeScope(next);
-    if (updated.applications === scope.applications && updated.scoring === scope.scoring) return { ...scope };
+    if (updated.applications === scope.applications && updated.scoring === scope.scoring
+        && updated.marketplace === scope.marketplace) return { ...scope };
     scope = updated;
     // Scope changes are an exposure boundary just like sleep/Disable. Discard
     // every pre-change result before it can populate a cache or frame a push
     // successor under the newly lowered scope.
     invalidateSourceWork();
-    if (!scope.scoring) {
+    if (!scope.scoring && !scope.marketplace) {
       try { push?.closeEpoch?.(pushEpochId()); } catch { /* selected hubs remain process-local */ }
     }
     wake();
@@ -1722,13 +1759,13 @@ export function createHandoffEngine({
   }
 
   function selectPushHub(value) {
-    if (!scope.scoring) return false;
+    if (!scope.scoring && !scope.marketplace) return false;
     try { return push?.selectHub?.(value) === true; } catch { return false; }
   }
 
   async function selectPushHubKey(value) {
     const generation = sourceGeneration;
-    if (!scope.scoring || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
+    if ((!scope.scoring && !scope.marketplace) || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
     try {
       // The production source is synchronous today, but keep this boundary
       // safe for a delayed seam implementation too. A selection that finishes
@@ -1749,7 +1786,7 @@ export function createHandoffEngine({
 
   async function refreshPushHubs() {
     const generation = sourceGeneration;
-    if (!scope.scoring || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
+    if ((!scope.scoring && !scope.marketplace) || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
     try {
       const refreshed = await push?.refreshHubs?.();
       if (!sourceCurrent(generation) || !ownsPushDiscovery()) {

@@ -93,7 +93,7 @@ function validPatch(payload, hostnameValid = fallbackHostname) {
   if (Object.hasOwn(patch, 'autoStart') && typeof patch.autoStart !== 'boolean') return null;
   if (Object.hasOwn(patch, 'autoRelease') && typeof patch.autoRelease !== 'boolean') return null;
   if (Object.hasOwn(patch, 'telemetryInBugReports') && typeof patch.telemetryInBugReports !== 'boolean') return null;
-  if (Object.hasOwn(patch, 'scope') && (!plain(patch.scope) || Object.keys(patch.scope).some(key => !['applications', 'scoring'].includes(key) || typeof patch.scope[key] !== 'boolean'))) return null;
+  if (Object.hasOwn(patch, 'scope') && (!plain(patch.scope) || Object.keys(patch.scope).some(key => !['applications', 'scoring', 'marketplace'].includes(key) || typeof patch.scope[key] !== 'boolean'))) return null;
   if (Object.hasOwn(patch, 'limits') && (!plain(patch.limits) || Object.keys(patch.limits).some(key => !['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes'].includes(key) || !Number.isSafeInteger(patch.limits[key]) || patch.limits[key] < 0))) return null;
   if (Object.hasOwn(patch, 'prefs') && (!plain(patch.prefs) || Object.keys(patch.prefs).some(key => !['sourcePolicy', 'pairingNetworkCheck'].includes(key)) || (Object.hasOwn(patch.prefs, 'sourcePolicy') && !['enforce', 'alert', 'off'].includes(patch.prefs.sourcePolicy)) || (Object.hasOwn(patch.prefs, 'pairingNetworkCheck') && typeof patch.prefs.pairingNetworkCheck !== 'boolean'))) return null;
   return patch;
@@ -390,6 +390,7 @@ export function registerHandoffBridgeUi({
       const patch = validPatch(payload, isValidHostname); if (!patch) return fixed('INVALID');
       const status = currentStatus();
       const raisesScoring = patch.scope?.scoring === true && status?.config?.scope?.scoring !== true;
+      const raisesMarketplace = patch.scope?.marketplace === true && status?.config?.scope?.marketplace !== true;
       const raisesAutoStart = patch.autoStart === true && status?.autoStart !== true;
       const raisesAutoRelease = patch.autoRelease === true && status?.autoRelease !== true;
       const weakensSource = typeof patch.prefs?.sourcePolicy === 'string'
@@ -398,6 +399,7 @@ export function registerHandoffBridgeUi({
       const raisesLimits = expandsLimits(status?.limits, patch);
       const confirmations = [];
       if (raisesScoring) confirmations.push('scoring');
+      if (raisesMarketplace) confirmations.push('marketplace');
       if (raisesAutoStart) confirmations.push('autoStart');
       if (raisesAutoRelease) confirmations.push('autoRelease');
       if (weakensSource) confirmations.push('sourcePolicy');

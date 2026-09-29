@@ -2197,8 +2197,6 @@ export async function requestNonApiAi({
     attemptKind: cleanAttemptKind(attemptKind),
     rootBatchSize: cleanBatchNumber(rootBatchSize),
     task,
-    // Recorded so the in-process bridge can prove a handoff never asked the chat for web research.
-    grounded: grounding === true,
     responseSchema: effectiveResponseSchema,
     responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
     attachmentPaths: normalizedAttachmentPaths,
@@ -2468,14 +2466,16 @@ async function acceptNonApiAiResponse(record, args) {
 // through acceptNonApiAiResponse above, the same body the dock's paste uses.
 //
 // Default-deny on purpose. A handoff is offered only when it needs nothing a
-// text-only tool connection cannot supply (no attachment, no web research, a
-// structured answer), its task id is on the caller's allowlist, and nobody is
-// typing an answer for it in the dock. The three structural checks run before
-// the allowlist so a wrong allowlist can never unblock them.
+// text-only tool connection cannot supply (no attachment, a structured
+// answer), its task id is on the caller's allowlist, and nobody is typing an
+// answer for it in the dock. Grounded (web-research) handoffs are eligible
+// too: the tool framing permits the chat's own web research and forbids only
+// acting on instructions the untrusted prompt text contains. The structural
+// checks run before the allowlist so a wrong allowlist can never unblock them.
 
 /** Why a pending handoff is not offered to an external session, in precedence order. */
 export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
-  'ending', 'settling', 'attachment', 'grounded', 'free_text',
+  'ending', 'settling', 'attachment', 'free_text',
   'task_not_allowed', 'node_not_allowed', 'person_editing',
 ]);
 
@@ -2484,7 +2484,6 @@ function bridgeExclusionReason(record, { allowTasks, allowNodeIds } = {}) {
   if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
   if (record.settling) return 'settling';
   if (record.attachmentPaths.length > 0) return 'attachment';
-  if (record.grounded === true) return 'grounded';
   if (!record.responseSchema) return 'free_text';
   if (!(allowTasks instanceof Set) || !allowTasks.has(record.task)) return 'task_not_allowed';
   if (allowNodeIds != null && !(allowNodeIds instanceof Set && allowNodeIds.has(record.nodeId))) return 'node_not_allowed';

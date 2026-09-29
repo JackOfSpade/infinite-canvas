@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { faultAt, withLeakCheck } from './fixtures/handoff-bridge/harness.js';
@@ -118,25 +119,47 @@ export default [
   { name: 'handoff bridge: push: policy covers every LLM task and only scoring is release-one', run: () => { const known = getKnownTaskIds(); assert(Object.keys(PUSH_TASK_POLICY).length === known.size, 'policy must contain each known task'); assert(assertPushTaskPolicy(known), 'policy must verify exact known set'); for (const task of known) assert(Object.hasOwn(PUSH_TASK_POLICY, task), `missing ${task}`); const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
     // The whole job pipeline rides the bridge; what stays behind is what
     // structurally cannot cross, not what merely has not been reviewed.
-    for (const task of ['job-scoring', 'job-query-generation', 'job-taxonomy-plan', 'job-role-screen', 'job-preference-evaluation', 'job-compensation-assessment', 'resume-parse']) {
+    for (const task of ['job-scoring', 'job-query-generation', 'job-taxonomy-plan', 'job-role-screen', 'job-preference-evaluation', 'job-compensation-assessment', 'resume-parse', 'job-compensation-research', 'job-preference-research']) {
       assert(releaseOne.has(task), `${task} sends text and receives a schema, so it must ride the bridge`);
     }
     // Photos (callLLMVision), the file->text step itself (callLLMDocument) and
     // grounded research (which needs the browsing the tool framing forbids).
-    for (const task of ['vision-product-analysis', 'marketplace-hub-scan', 'career-file-extract', 'job-compensation-research', 'job-preference-research']) {
+    for (const task of ['vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch', 'career-file-extract']) {
       assert(!PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'never', `${task} cannot cross an MCP text tool`);
     }
-    // Marketplace pricing is carriable but no scope consents to it.
-    for (const task of ['price-synthesis', 'platform-fit-assessment']) {
-      assert(PUSH_TASK_POLICY[task].mode === 'paste_only', `${task} needs a consent scope of its own before it can bridge`);
-    } } },
+    // Only photos and the file->text step remain. Nothing else is held back
+    // for want of review -- if a row is not release_one it must name a real
+    // reason, so a future task cannot quietly inherit paste-only status.
+    assert(Object.values(PUSH_TASK_POLICY).filter(row => row.mode === 'never').length === 4,
+      'the never list is exactly the work that cannot cross a text tool');
+    // Marketplace pricing rides the bridge now that scope.marketplace is the
+    // consent boundary for listing data; engine.js fences it on that scope
+    // specifically, never on scope.scoring.
+    for (const task of ['price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment']) {
+      assert(releaseOne.has(task), `${task} must ride the bridge under its own consent scope`);
+    }
+    assert(!Object.values(PUSH_TASK_POLICY).some(row => row.mode === 'paste_only'),
+      'nothing is held back for want of review; only work that cannot cross a text tool stays off'); } },
+  { name: 'handoff bridge: push: the renderer task vocabulary covers every bridgeable task', run: () => {
+    // controller.js may not import sources/push.js (it is not a permitted
+    // sibling), so its closed TASK_IDS vocabulary is spelled out by hand. That
+    // is exactly the kind of list that silently rots: a task the bridge serves
+    // but the vocabulary omits projects to null, and the UI says "this handoff"
+    // instead of naming the work. Fail here instead.
+    const controller = fs.readFileSync(new URL('../../electron/ipc/handoffBridge/controller.js', import.meta.url), 'utf8');
+    const block = controller.slice(controller.indexOf('const TASK_IDS = new Set(['), controller.indexOf(']);', controller.indexOf('const TASK_IDS = new Set([')));
+    const declared = new Set([...block.matchAll(/'([a-z0-9-]+)'/g)].map(match => match[1]));
+    const bridgeable = Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task);
+    for (const task of bridgeable) assert(declared.has(task), `controller TASK_IDS omits bridgeable task ${task}, so its name cannot reach the renderer`);
+    for (const task of declared) assert(PUSH_TASK_POLICY[task]?.mode === 'release_one', `controller TASK_IDS names ${task}, which the bridge never serves`);
+  } },
   { name: 'handoff bridge: push: normalizes ASCII and curly wrapped valid codes only', run: () => { assert(normalizePushHandoffCode(' `handoff-abcdef` ') === CODE && normalizePushHandoffCode('\u201c`handoff-abcdef`\u201d') === CODE, 'ASCII and curly wrappers canonicalize'); assert(normalizePushHandoffCode('wrong') === 'wrong', 'invalid code stays exact'); } },
   { name: 'handoff bridge: push: digest routing accepts lower-case curly wrappers but rejects a same-prefix code', run: async () => { const lower = makeSource().source; await lower.get(); assert((await lower.submit({ handoffCode: '\u201c`handoff-abcdef`\u201d', response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'accepted', 'push code canonicalization remains case-insensitive with curly wrappers'); const prefix = makeSource().source; await prefix.get(); assert((await prefix.submit({ handoffCode: 'HANDOFF-ABCDEG', response: '{"handoffCode":"HANDOFF-ABCDEG"}' })).status === 'unknown_handoff', 'a matching prefix cannot select a served route'); } },
   { name: 'handoff bridge: push: policy is deeply frozen and drift refuses an unknown task', run: () => { assert(Object.isFrozen(PUSH_TASK_POLICY) && Object.isFrozen(PUSH_TASK_POLICY['job-scoring']), 'policy must not be mutable at runtime'); let rejected = false; try { assertPushTaskPolicy(new Set([...getKnownTaskIds(), 'future-task'])); } catch { rejected = true; } assert(rejected, 'new LLM work must default deny'); } },
   { name: 'handoff bridge: push: seam list receives only the release-one task and selected node', run: async () => { let args; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }) }); const original = source.get; assert(typeof original === 'function', 'source get surface exists'); const captured = createPushSource({ seam: { list: async value => { args = value; return { handoffs: [entry], excluded: {} }; }, read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); captured.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }); await captured.get(); assert(args.allowTasks.has('job-scoring') && args.allowNodeIds.has('node-ada'), 'coarse seam gate is defence in depth');
     // The allow-list is the release_one set exactly -- never a task the policy
     // holds back, however the table grows.
-    for (const task of ['vision-product-analysis', 'career-file-extract', 'job-compensation-research', 'price-synthesis']) {
+    for (const task of ['vision-product-analysis', 'career-file-extract', 'marketplace-hub-scan', 'marketplace-hub-scan-batch']) {
       assert(!args.allowTasks.has(task), `${task} must never reach the seam allow-list`);
     }
     assert([...args.allowTasks].every(task => PUSH_TASK_POLICY[task]?.mode === 'release_one'), 'the seam allow-list must be exactly the release-one rows'); } },

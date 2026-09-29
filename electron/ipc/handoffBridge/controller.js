@@ -40,7 +40,21 @@ const LINK_STATES = new Set(['unlinked', 'pairing', 'linked', 'needs-renewal', '
 const CHAT_STATES = new Set(['none', 'awaiting-first-call', 'working', 'idle', 'full', 'ended']);
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
 const APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
-const TASK_IDS = new Set(['job-scoring']);
+// The closed vocabulary of task names that may reach the renderer. It was
+// just 'job-scoring' while that was the only bridgeable task; every other
+// served task projected to null, so the UI said "this handoff" instead of
+// naming the work. sources/push.js is deliberately not a sibling this module
+// may import, so the list is spelled out here and a test fails if it ever
+// drifts from the release_one rows of PUSH_TASK_POLICY.
+const TASK_IDS = new Set([
+  'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
+  'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
+  'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
+  'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
+  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
+  'price-synthesis-batch', 'resume-parse',
+]);
 const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
 const PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
@@ -135,7 +149,7 @@ function statusOf(port) {
 function defaultConfig() {
   return {
     hostname: null, pluginName: 'infinite_canvas', autoStart: false, autoRelease: false,
-    scope: { applications: true, scoring: false },
+    scope: { applications: true, scoring: false, marketplace: false },
     limits: {
       releaseTtlHours: CONSTANTS.RELEASE_TTL_HOURS,
       chatKeyMaxAgeHours: CONSTANTS.CHAT_KEY_MAX_AGE_HOURS,
@@ -159,7 +173,11 @@ function cleanConfig(value) {
     pluginName: typeof value.pluginName === 'string' && value.pluginName ? value.pluginName : fallback.pluginName,
     autoStart: value.autoStart === true,
     autoRelease: value.autoRelease === true,
-    scope: { applications: value.scope?.applications !== false, scoring: value.scope?.scoring === true },
+    scope: {
+      applications: value.scope?.applications !== false,
+      scoring: value.scope?.scoring === true,
+      marketplace: value.scope?.marketplace === true,
+    },
     limits: {
       releaseTtlHours: Number.isFinite(limits.releaseTtlHours) ? Math.max(0, limits.releaseTtlHours) : fallback.limits.releaseTtlHours,
       chatKeyMaxAgeHours: Number.isFinite(limits.chatKeyMaxAgeHours) ? Math.max(0, limits.chatKeyMaxAgeHours) : fallback.limits.chatKeyMaxAgeHours,
@@ -488,7 +506,7 @@ export function createHandoffBridgeController(options = {}) {
     base.serving = serving; base.paused = serving === 'paused'; base.pauseCause = pauseCause;
     base.hold = !canvasOpen() && enabled ? 'no-window' : (!restartConfirmed && enabled ? 'restart' : null);
     base.fault = fault;
-    base.config = { hostname: config.hostname, pluginName: shortText(config.pluginName, '') || 'infinite_canvas', mcpUrl: config.hostname ? `https://${config.hostname}${CONSTANTS.MCP_PATH}` : null, scope: { applications: config.scope.applications, scoring: config.scope.scoring }, telemetryInBugReports: config.telemetryInBugReports };
+    base.config = { hostname: config.hostname, pluginName: shortText(config.pluginName, '') || 'infinite_canvas', mcpUrl: config.hostname ? `https://${config.hostname}${CONSTANTS.MCP_PATH}` : null, scope: { applications: config.scope.applications, scoring: config.scope.scoring, marketplace: config.scope.marketplace }, telemetryInBugReports: config.telemetryInBugReports };
     base.limits = { ...config.limits }; base.prefs = { ...config.prefs };
     base.setup.hostnameOk = Boolean(config.hostname);
     base.setup.binaryApproved = bool(tunnelStatus.binary?.approved ?? tunnelStatus.binaryApproved);
@@ -1275,7 +1293,10 @@ export function createHandoffBridgeController(options = {}) {
   async function releasePushHubs(keys) {
     const generation = lifecycleGeneration;
     if (!servingGeneration(generation)) return { ok: false, code: 'NOT_READY' };
-    if (!config.scope.scoring) return { ok: false, code: 'disabled' };
+    // Hub selection is shared push-channel infrastructure for both scoring
+    // and marketplace tasks; either consent is enough to reach it. The
+    // engine's own per-task scope check still gates what actually serves.
+    if (!config.scope.scoring && !config.scope.marketplace) return { ok: false, code: 'disabled' };
     if (!Array.isArray(keys) || keys.length === 0 || keys.length > 50 || keys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key))) return { ok: false, code: 'invalid_arguments' };
     let activeEngine = null;
     const selected = [];

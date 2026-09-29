@@ -86,6 +86,7 @@ function isAuthoritativeStatus(raw) {
       || typeof raw.autoStart !== 'boolean' || typeof raw.autoRelease !== 'boolean'
       || typeof raw.paused !== 'boolean' || typeof raw.serving !== 'string'
       || typeof raw.config.scope.applications !== 'boolean' || typeof raw.config.scope.scoring !== 'boolean'
+      || typeof raw.config.scope.marketplace !== 'boolean'
       || typeof raw.config.telemetryInBugReports !== 'boolean'
       || typeof raw.windows.canvasOpen !== 'boolean' || typeof raw.power.keepAwake !== 'boolean') return false;
     return normalizeBridgeStatus(raw) !== EMPTY_BRIDGE_STATUS;

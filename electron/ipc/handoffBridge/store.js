@@ -21,7 +21,7 @@ const CONFIG_FIELDS = new Set([
 ]);
 const PERSISTED_CONFIG_FIELDS = new Set(['v', ...CONFIG_FIELDS]);
 const PATCH_FIELDS = new Set([...CONFIG_FIELDS, 'confirmBreak']);
-const SCOPE_FIELDS = new Set(['applications', 'scoring']);
+const SCOPE_FIELDS = new Set(['applications', 'scoring', 'marketplace']);
 const PREFS_FIELDS = new Set(['sourcePolicy', 'pairingNetworkCheck']);
 // Config mutations share one queue per file. Forget must run behind an already
 // accepted save, otherwise a delayed save could recreate setup after Forget.
@@ -43,7 +43,10 @@ export function emptyConfig() {
     v: CONFIG_VERSION,
     hostname: null,
     pluginName: 'infinite_canvas',
-    scope: { applications: true, scoring: false },
+    // marketplace is a consent boundary distinct from scoring: it carries
+    // listing/pricing data rather than job-scoring prompts. It must never
+    // default on, exactly like scoring.
+    scope: { applications: true, scoring: false, marketplace: false },
     autoStart: false,
     // Handing an application to ChatGPT is the point of enabling the bridge;
     // requiring a per-job Release afterwards left every bundle sitting in the
@@ -82,14 +85,27 @@ function normalizeConfig(value) {
   const defaults = emptyConfig();
   const hostname = Object.hasOwn(value, 'hostname') ? value.hostname : defaults.hostname;
   const pluginName = Object.hasOwn(value, 'pluginName') ? value.pluginName : defaults.pluginName;
-  const scope = Object.hasOwn(value, 'scope') ? value.scope : defaults.scope;
+  const rawScope = Object.hasOwn(value, 'scope') ? value.scope : defaults.scope;
   const prefs = Object.hasOwn(value, 'prefs') ? value.prefs : defaults.prefs;
   const limits = normalizeLimits(value.limits);
+  // A real stored config can predate a scope field that was added later (the
+  // way an older v1 config predates consentVersion or telemetryInBugReports
+  // above). ownKeysAre only refuses an *unknown* key; a scope missing
+  // marketplace is not malformed, it is a legacy shape. Fill each missing
+  // sub-field from the default here, the same way every top-level field above
+  // does, so a two-key {applications, scoring} scope survives instead of
+  // rejecting the whole config.
+  const scope = isPlainObject(rawScope) ? {
+    applications: Object.hasOwn(rawScope, 'applications') ? rawScope.applications : defaults.scope.applications,
+    scoring: Object.hasOwn(rawScope, 'scoring') ? rawScope.scoring : defaults.scope.scoring,
+    marketplace: Object.hasOwn(rawScope, 'marketplace') ? rawScope.marketplace : defaults.scope.marketplace,
+  } : rawScope;
   if ((hostname !== null && !isValidHostname(hostname))
       || (pluginName !== '' && !isValidPluginName(pluginName))
-      || !ownKeysAre(scope, SCOPE_FIELDS)
+      || !ownKeysAre(rawScope, SCOPE_FIELDS)
       || typeof scope.applications !== 'boolean'
       || typeof scope.scoring !== 'boolean'
+      || typeof scope.marketplace !== 'boolean'
       || !ownKeysAre(prefs, PREFS_FIELDS)
       || !SOURCE_POLICIES.has(prefs.sourcePolicy)
       || typeof prefs.pairingNetworkCheck !== 'boolean'
@@ -109,7 +125,7 @@ function normalizeConfig(value) {
     // Older v1 configs allowed an empty name. Resolve it on read instead of
     // asking the chat-start path to handle a value the starter rejects.
     pluginName: pluginName || defaults.pluginName,
-    scope: { applications: scope.applications, scoring: scope.scoring },
+    scope: { applications: scope.applications, scoring: scope.scoring, marketplace: scope.marketplace },
     autoStart,
     autoRelease,
     limits,

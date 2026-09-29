@@ -206,6 +206,16 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
             <input
               className="mt-0.5 shrink-0"
               type="checkbox"
+              checked={status.config.scope.marketplace}
+              disabled={controlsDisabled}
+              onChange={event => patchScope('marketplace', event.target.checked)}
+            />
+            <span className="min-w-0">{BRIDGE_UI_COPY.marketplaceSetting}</span>
+          </label>
+          <label className="flex min-w-0 items-start gap-2 text-[11px] text-white/65">
+            <input
+              className="mt-0.5 shrink-0"
+              type="checkbox"
               checked={status.autoStart}
               disabled={controlsDisabled}
               onChange={event => void call('handoffBridgeSaveConfig', { patch: { autoStart: event.target.checked } })}

@@ -188,6 +188,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   manage: 'Manage…',
   openPanel: 'Open panel',
   scoringSetting: 'Let ChatGPT handle scoring handoffs',
+  marketplaceSetting: 'Let ChatGPT handle marketplace pricing handoffs',
   autoStart: 'Turn on when the app starts',
   autoRelease: 'Automatically release new application handoffs this session',
   dangerZone: 'Danger zone',

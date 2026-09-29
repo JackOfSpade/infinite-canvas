@@ -301,6 +301,7 @@ function safeBootstrapConfig(value) {
     scope: {
       applications: value?.scope?.applications !== false,
       scoring: value?.scope?.scoring === true,
+      marketplace: value?.scope?.marketplace === true,
     },
     autoStart: value?.autoStart === true,
     autoRelease: value?.autoRelease === true,

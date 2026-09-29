@@ -68,6 +68,7 @@ export function createHandoffBridgeDialogs({
       releasePush: { title: 'Release scoring work', message: 'Let ChatGPT handle selected scoring work?', detail: 'ChatGPT can receive the selected scoring work.' },
       forget: { title: 'Forget bridge setup', message: 'Turn off the bridge and remove its setup?', detail: 'This clears this app’s bridge setup and revokes ChatGPT access. The Cloudflare tunnel, ChatGPT plugin, and existing ChatGPT history are not deleted.' },
       scoring: { title: 'Add job-scoring handoffs', message: 'Let ChatGPT handle job-scoring work too?', detail: 'One run can contain dozens or hundreds of prompts with job listings and the information used to rate them.' },
+      marketplace: { title: 'Add marketplace pricing handoffs', message: 'Let ChatGPT handle marketplace pricing work too?', detail: 'This can send listing details and the pricing comparisons used to price them.' },
       autoStart: { title: 'Start bridge with the app', message: 'Turn on the bridge when this app opens?', detail: 'The tunnel and ChatGPT link can start, but nothing is served until you confirm the released jobs.' },
       autoRelease: { title: 'Automatically release new handoffs', message: 'Release new application handoffs automatically?', detail: 'Only jobs created by this app after this launch are released automatically.' },
       sourcePolicy: { title: 'Reduce source checks', message: 'Reduce source-network checks?', detail: 'This weakens protection against use from another network.' },
@@ -151,7 +152,7 @@ export function createHandoffBridgeDialogs({
     try {
       const affirmative = {
         enable: 'Turn on', disable: 'Turn off', linkBreak: 'Change address', restart: 'Start new chat', resume: 'Resume',
-        release: 'Release', releasePush: 'Release', forget: 'Forget setup', binaryApproval: 'Approve', scoring: 'Add scoring',
+        release: 'Release', releasePush: 'Release', forget: 'Forget setup', binaryApproval: 'Approve', scoring: 'Add scoring', marketplace: 'Add marketplace',
         autoStart: 'Turn on at launch', autoRelease: 'Release automatically', sourcePolicy: 'Reduce checks', limits: 'Increase limit', networkCheck: 'Turn off check',
       };
       const result = await dialog?.showMessageBox?.(parentWindow, {

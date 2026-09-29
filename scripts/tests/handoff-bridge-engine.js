@@ -1177,6 +1177,29 @@ tests.push(
     },
   },
   {
+    name: 'handoff bridge: engine: a marketplace push task stays held until scope.marketplace is on, even with scoring on',
+    run: async () => {
+      let pushGets = 0;
+      const push = {
+        async get() { pushGets++; return { status: 'served', handoffCode: 'PUSH-MARKET', task: 'price-synthesis', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const chat = await engine.newChat({ linkId: LINK });
+      const held = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(held.status === 'held' && held.reason === 'scope_disabled' && pushGets === 1,
+        'a marketplace task must never be framed as served while scope.marketplace is off, even though the push channel is live for scoring');
+      engine.setScope({ applications: false, scoring: true, marketplace: true });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis' && served.handoffCode === 'PUSH-MARKET',
+        'turning marketplace on must let the same push task serve');
+    },
+  },
+  {
     name: 'handoff bridge: engine: terminal evidence is pruned after one hour and persisted once',
     run: async () => {
       const clock = createFakeClock(); let saves = 0;

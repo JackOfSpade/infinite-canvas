@@ -93,6 +93,35 @@ export default [
     }),
   },
   {
+    name: 'handoff bridge: store: marketplace scope defaults false, accepts a raising patch and rejects an unknown scope key',
+    run: () => withStore(async userData => {
+      assert(emptyConfig().scope.marketplace === false, 'a fresh config must never default marketplace consent on');
+      const unknown = await save(userData, { scope: { applications: true, scoring: false, listings: true } });
+      assert(unknown.code === 'INVALID' && unknown.fieldErrors.scope, 'an unknown scope key must be rejected rather than silently dropped');
+      assert(readConfig(userData).state === 'missing', 'a rejected scope patch must not create config');
+      const accepted = await save(userData, { scope: { marketplace: true } });
+      const config = persisted(userData);
+      assert(accepted.ok && config.scope.marketplace === true && config.scope.applications === true && config.scope.scoring === false,
+        'a patch that raises marketplace alone must persist and preserve the untouched fields');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: a legacy two-key scope on disk survives and fills the marketplace default',
+    run: () => withStore(async userData => {
+      // A real user's stored config predates the marketplace field. Write the
+      // exact legacy shape directly (bypassing writeConfig, which always
+      // persists the current three-key scope) to prove readConfig tolerates
+      // it rather than rejecting the whole config the way an unknown key would.
+      const legacy = { ...emptyConfig(), scope: { applications: true, scoring: false } };
+      fs.mkdirSync(path.dirname(configPathFor(userData)), { recursive: true });
+      fs.writeFileSync(configPathFor(userData), JSON.stringify(legacy));
+      const result = readConfig(userData);
+      assert(result.state === 'ok', 'a legacy two-key scope must not be treated as unreadable');
+      assert(result.config.scope.applications === true && result.config.scope.scoring === false && result.config.scope.marketplace === false,
+        'the missing marketplace field must fill its safe default rather than rejecting the config');
+    }),
+  },
+  {
     name: 'handoff bridge: store: autoStart and autoRelease are validated and persisted',
     run: () => withStore(async userData => {
       const invalid = await save(userData, { autoStart: 1, autoRelease: 'true' });
