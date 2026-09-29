@@ -199,7 +199,7 @@ export { clamp } from '../src/utils/mathUtils.js';
 export { LANGUAGE_LABELS, languageLabel } from '../src/utils/jobLanguageLabels.js';
 export { getEnvValue, parseScopeEnvBoolean } from '../src/utils/sourceScopeShared.js';
 export { pickEdgeHandles, structuralEdge } from '../src/nodes/_shared/edgeHelpers.js';
-export { __readDocxTextForTests, PLAIN_TEXT_EXT, readCareerFileText, readPlainTextDocument } from '../electron/ipc/docUtils.js';
+export { PLAIN_TEXT_EXT, readPlainTextDocument } from '../electron/ipc/docUtils.js';
 export { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
 export { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
 export { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';

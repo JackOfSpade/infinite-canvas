@@ -229,8 +229,22 @@ async function run() {
   }
 
   console.log(`\n[TEST RUNNER] ${passed} passed, ${failed} failed`);
-  if (failed > 0) process.exitCode = 1;
+  summaryPrinted = true;
+  // Only now is a green result earned; until here the exit code stays failing.
+  process.exitCode = failed > 0 ? 1 : 0;
 }
+
+// A test whose promise never settles lets the event loop drain, and Node then
+// exits quietly with the code it already holds. Start failing and clear that
+// only after the summary prints, so an unfinished run can never look green.
+let summaryPrinted = false;
+process.exitCode = 1;
+process.on('exit', () => {
+  if (summaryPrinted) return;
+  process.exitCode = 1;
+  // process.stderr, not console: a hung test never restores the captured console.
+  process.stderr.write('[TEST RUNNER] Exited before the summary: a test never settled (or the runner crashed). Treating the run as FAILED.\n');
+});
 
 run().catch((error) => {
   console.error('[TEST RUNNER] Fatal error:', error);
