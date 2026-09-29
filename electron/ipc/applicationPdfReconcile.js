@@ -788,7 +788,7 @@ function reconcileResumeTextBlocks(main, lines) {
       // genuinely gained or lost. Those have opposite repairs, and without
       // this the message named neither.
       const location = resumeTokenLocation(nodes, Math.max(0, beforeCurrent + 1));
-      const sameWords = [...current].sort().join(' ') === [...incoming].sort().join(' ');
+      const sameWords = [...current].sort().join('\u0000') === [...incoming].sort().join('\u0000');
       return {
         conflict: 'The résumé PDF inserted or removed text; automatic token alignment would be ambiguous.'
           + `${location ? ` The first divergence is in the ${location}.` : ''}`

@@ -1,9 +1,14 @@
-import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
+import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, PDFLib, readRunState, setStage, startRun } from '../test-dependencies.js';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
 import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport } from '../../electron/ipc/jobs.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { structuredResumeRoleEvidenceGaps } from '../../electron/ipc/structuredResume.js';
+import { careerDataRoleLocation } from '../../electron/ipc/jobApplication.js';
+import { __careerDataDocumentsCompletedDegreeForTests } from '../../electron/ipc/localAiApplication.js';
+import { spawnSync } from 'node:child_process';
+import { docxFrom, WORD_NS, wordNumbering, wordPara, wordRun, wordTable } from './testHelpers.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
 
@@ -128,6 +133,168 @@ export default [
       assert(parentAbortCount === 2 && cancellation?.message === 'drop cancelled',
         'cancelling the parent parse task propagates to every issued extraction handoff and waits for their cleanup');
       return { parallelHandoffs: calls.length, maxParallelDocuments: peakWide, orderedSections: extracted.sections.length, siblingAbortObserved, parentAbortCount };
+    },
+  },
+  {
+    name: 'career-file extraction sends every PDF to the AI, reads a plain DOCX locally, and never lets a local read stand in for a failed one',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-career-extract-'));
+      try {
+        const pdf = await PDFLib.PDFDocument.create();
+        const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+        const page = pdf.addPage([612, 792]);
+        page.drawText('Jordan Rivera - Senior Analyst at Northwind Traders', { x: 56, y: 720, size: 11, font });
+        page.drawText('Led a team of twelve analysts and grew revenue to $4.2M', { x: 56, y: 690, size: 11, font });
+        page.drawText('Bachelor of Science in Statistics, graduated in 2014', { x: 56, y: 660, size: 11, font });
+        const textPdf = path.join(dir, 'resume.pdf');
+        fs.writeFileSync(textPdf, Buffer.from(await pdf.save()));
+        const docxPath = path.join(dir, 'career.docx');
+        fs.writeFileSync(docxPath, docxFrom(wordPara('Senior Analyst') + wordPara('Northwind Traders') + wordPara('Led a team of twelve analysts', '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>'),
+          [{ name: 'word/numbering.xml', data: wordNumbering('bullet') }]));
+        const hiddenDocx = path.join(dir, 'hidden.docx');
+        fs.writeFileSync(hiddenDocx, docxFrom(wordPara('Senior Analyst') + wordPara(wordRun('keyword stuffing', '<w:vanish/>'))));
+        const notesPath = path.join(dir, 'notes.md');
+        fs.writeFileSync(notesPath, '## Notes\n* one\n');
+
+        const aiCalls = [];
+        const callDocument = async (filePath, _prompt, options) => {
+          aiCalls.push({ filePath, task: options?.task });
+          return { text: `TRANSCRIBED ${path.basename(filePath)}` };
+        };
+        // No readPlainText injected: the production default reader is exercised.
+        const pdfOnly = await __extractCareerFileSectionsForTests([textPdf], { callDocument });
+        assert(aiCalls.length === 1 && aiCalls[0].filePath === textPdf && aiCalls[0].task === 'career-file-extract'
+          && pdfOnly.directTextFiles === 0 && pdfOnly.transcribedFiles === 1
+          && pdfOnly.sections[0] === '===== FILE: resume.pdf =====\nTRANSCRIBED resume.pdf',
+        'a text-layer PDF is NOT read locally: the AI handoff runs and its text is what enters the corpus');
+
+        aiCalls.length = 0;
+        const mixed = await __extractCareerFileSectionsForTests([docxPath, textPdf, hiddenDocx, notesPath], { callDocument });
+        assert(aiCalls.map(call => path.basename(call.filePath)).join(',') === 'resume.pdf,hidden.docx', `only the PDF and the DOCX with hidden text reach the AI: ${JSON.stringify(aiCalls)}`);
+        assert(mixed.directTextFiles === 2 && mixed.transcribedFiles === 2, 'the plain DOCX and the markdown file are read locally');
+        assert(mixed.sections[0] === '===== FILE: career.docx =====\nSenior Analyst\nNorthwind Traders\n- Led a team of twelve analysts'
+          && mixed.sections[1] === '===== FILE: resume.pdf =====\nTRANSCRIBED resume.pdf'
+          && mixed.sections[2] === '===== FILE: hidden.docx =====\nTRANSCRIBED hidden.docx'
+          && mixed.sections[3] === '===== FILE: notes.md =====\nNotes\n- one', 'sections keep drop order whichever route each file took');
+
+        // The per-file "No text could be read" error is unchanged for a deferred file whose transcription is empty.
+        let emptyError = null;
+        try { await __extractCareerFileSectionsForTests([textPdf], { callDocument: async () => ({ text: '  ' }) }); } catch (error) { emptyError = error; }
+        assert(emptyError && /No text could be read from resume\.pdf/.test(emptyError.message), 'an empty transcription of a deferred file still names the file');
+        // An aborted signal stops the extraction before any reader or handoff runs.
+        const aborted = new AbortController();
+        aborted.abort(new Error('stop now'));
+        let abortError = null;
+        try { await __extractCareerFileSectionsForTests([docxPath], { signal: aborted.signal, callDocument }); } catch (error) { abortError = error; }
+        assert(abortError && /stop now/.test(abortError.message), 'an aborted extraction stops before reading');
+        return { aiCalls: aiCalls.length };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'career-file DOCX read: the chosen field separator recovers role scope, opening-block dates and degree in the real consumers where tab/space do not',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-career-shape-'));
+      try {
+        const ACME = 'Cut fleet downtime by a third across forty sites';
+        const GLOBEX = 'Reduced build times by half across 40 services';
+        const roles = [
+          { id: 'r1', title: 'Senior Software Engineer', company: 'Acme Robotics', location: 'Denver, CO' },
+          { id: 'r2', title: 'Software Engineer', company: 'Globex Inc', location: 'Austin, TX' },
+          { id: 'r3', title: 'Research Intern', company: 'Initech', location: 'Boston, MA' },
+        ];
+        // The same résumé, as the corpus text a reader could produce, for a given field separator. r3 has no bullets and is NOT
+        // the last role, so its section is exactly an opening block (title, dates, employer, city).
+        const corpusFor = (separator, degreeFirst = true) => [
+          'Jane Smith', 'jane@example.com', 'EXPERIENCE',
+          `Senior Software Engineer${separator}May 2023 – Jun 2026`, `Acme Robotics${separator}Denver, CO`, `- ${ACME}`,
+          `Research Intern${separator}Jun 2019 – Aug 2019`, `Initech${separator}Boston, MA`,
+          `Software Engineer${separator}Jan 2020 – Apr 2023`, `Globex Inc${separator}Austin, TX`, `- ${GLOBEX}`,
+          'EDUCATION', degreeFirst ? `B.S. Computer Science, York University${separator}2014` : `York University${separator}B.S. Computer Science`,
+        ].join('\n');
+        const scopeOf = (corpus) => {
+          const unquotedR2 = structuredResumeRoleEvidenceGaps(roles, [ACME], corpus);
+          const all = structuredResumeRoleEvidenceGaps(roles, [ACME, GLOBEX], corpus);
+          return {
+            // r2 is reported as needing its own evidence only if the scoper found its section.
+            scopesRoles: unquotedR2.some(gap => gap.id === 'r2' && gap.reason === 'none'),
+            // r3's section is title/dates/employer/city and nothing else: only if every one of those lines reads as the role's own identity is it "opening block only".
+            openingBlockDates: all.length === 1 && all[0].id === 'r3' && all[0].reason === 'none-opening-block-only',
+            degree: __careerDataDocumentsCompletedDegreeForTests(corpus),
+          };
+        };
+
+        // Rejected alternatives, measured: every whitespace-collapsing consumer treats these identically, and none lets the scoper find a role
+        // whose title shares its line with its dates. (If the scoper learns to read "Title<tab>dates", this fails: re-measure the separator.)
+        for (const [label, separator] of [['a tab', '\t'], ['a single space', ' '], ['two spaces', '  ']]) {
+          const measured = scopeOf(corpusFor(separator));
+          assert(!measured.scopesRoles && !measured.openingBlockDates, `${label} as the separator does not recover role scope or opening-block dates: ${JSON.stringify(measured)}`);
+        }
+        const wanted = scopeOf(corpusFor('\n'));
+        assert(wanted.scopesRoles && wanted.openingBlockDates && wanted.degree, `a newline separator recovers role scope, opening-block dates and the degree: ${JSON.stringify(wanted)}`);
+        assert(scopeOf(corpusFor('\n', false)).degree && !scopeOf(corpusFor('\t', false)).degree, 'an institution-first education row is recognised as a degree only with the newline separator');
+        // No whitespace separator recovers an employer's city: careerDataRoleLocation wants "Employer - City, ST" on one line, which needs an inserted character.
+        const locationByWhitespace = ['\n', '\t', ' '].map(separator => careerDataRoleLocation(corpusFor(separator), 'Acme Robotics')?.text ?? null);
+
+        // Now the real reader, on three real-shaped fixtures, must produce exactly that corpus and score the same.
+        const tab = '<w:r><w:tab/></w:r>';
+        const rightTab = '<w:tabs><w:tab w:val="right" w:pos="10800"/></w:tabs>';
+        const field = (left, right) => wordPara(`${wordRun(left)}${tab}${wordRun(right)}`, rightTab);
+        const bullet = text => wordPara(text, '<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>');
+        const heading = text => wordPara(text, '<w:pStyle w:val="Heading1"/>');
+        const parts = [
+          { name: 'word/styles.xml', data: `<w:styles ${WORD_NS}><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style><w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/></w:style></w:styles>` },
+          { name: 'word/numbering.xml', data: wordNumbering('bullet') },
+        ];
+        const tabbedDocx = path.join(dir, 'tabbed.docx');
+        fs.writeFileSync(tabbedDocx, docxFrom([
+          wordPara('Jane Smith'), wordPara('jane@example.com'), heading('EXPERIENCE'),
+          field('Senior Software Engineer', 'May 2023 – Jun 2026'), field('Acme Robotics', 'Denver, CO'), bullet(ACME),
+          field('Research Intern', 'Jun 2019 – Aug 2019'), field('Initech', 'Boston, MA'),
+          field('Software Engineer', 'Jan 2020 – Apr 2023'), field('Globex Inc', 'Austin, TX'), bullet(GLOBEX),
+          heading('EDUCATION'), field('B.S. Computer Science, York University', '2014'),
+        ].join(''), parts));
+        const row = (left, right) => wordTable([[left, right]]);
+        const tableDocx = path.join(dir, 'table.docx');
+        fs.writeFileSync(tableDocx, docxFrom([
+          wordPara('Jane Smith'), wordPara('jane@example.com'), heading('EXPERIENCE'),
+          row('Senior Software Engineer', 'May 2023 – Jun 2026'), row('Acme Robotics', 'Denver, CO'), bullet(ACME),
+          row('Research Intern', 'Jun 2019 – Aug 2019'), row('Initech', 'Boston, MA'),
+          row('Software Engineer', 'Jan 2020 – Apr 2023'), row('Globex Inc', 'Austin, TX'), bullet(GLOBEX),
+          heading('EDUCATION'), row('B.S. Computer Science, York University', '2014'),
+        ].join(''), parts));
+
+        const noAi = async () => { throw new Error('a locally readable file must not reach the AI'); };
+        const sources = [['hand-built Word tab-stop DOCX', tabbedDocx], ['hand-built Word table DOCX', tableDocx]];
+        for (const [label, file] of sources) {
+          const { sections, directTextFiles } = await __extractCareerFileSectionsForTests([file], { callDocument: noAi });
+          assert(directTextFiles === 1, `${label}: read locally`);
+          assert(sections[0] === `===== FILE: ${path.basename(file)} =====\n${corpusFor('\n')}`, `${label}: the reader emits exactly the newline-separated corpus, with no fences, rewrites or appended text:\n${sections[0]}`);
+          const measured = scopeOf(sections[0].split('\n').slice(1).join('\n'));
+          assert(measured.scopesRoles && measured.openingBlockDates && measured.degree, `${label}: ${JSON.stringify(measured)}`);
+        }
+
+        // A real producer: macOS Cocoa writes the tab-stop lines of an RTF into a DOCX. (Bullets are dropped by that converter, so the bullets here are plain lines.)
+        const rtfPath = path.join(dir, 'career.rtf');
+        const rtfLine = (left, right) => `\\pard\\tx9000 ${left}\\tab ${right}\\par\n`;
+        fs.writeFileSync(rtfPath, `{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}\n\\pard Jane Smith\\par\n\\pard jane@example.com\\par\n\\pard EXPERIENCE\\par\n${rtfLine('Senior Software Engineer', 'May 2023 \\endash  Jun 2026')}${rtfLine('Acme Robotics', 'Denver, CO')}\\pard ${ACME}\\par\n${rtfLine('Research Intern', 'Jun 2019 \\endash  Aug 2019')}${rtfLine('Initech', 'Boston, MA')}${rtfLine('Software Engineer', 'Jan 2020 \\endash  Apr 2023')}${rtfLine('Globex Inc', 'Austin, TX')}\\pard ${GLOBEX}\\par\n\\pard EDUCATION\\par\n${rtfLine('B.S. Computer Science, York University', '2014')}}`);
+        const converted = spawnSync('textutil', ['-convert', 'docx', rtfPath, '-output', path.join(dir, 'career-rtf.docx')], { encoding: 'utf8' });
+        let realProducer = 'textutil unavailable';
+        if (converted.status === 0) {
+          const { sections, directTextFiles } = await __extractCareerFileSectionsForTests([path.join(dir, 'career-rtf.docx')], { callDocument: noAi });
+          assert(directTextFiles === 1, 'a Cocoa-written DOCX is read locally');
+          const corpus = sections[0].split('\n').slice(1).join('\n');
+          assert(corpus === corpusFor('\n').replace(`- ${ACME}`, ACME).replace(`- ${GLOBEX}`, GLOBEX), `a Cocoa-written DOCX yields the same corpus (bullets were plain lines):\n${corpus}`);
+          const measured = scopeOf(corpus);
+          assert(measured.scopesRoles && measured.openingBlockDates && measured.degree, `Cocoa-written DOCX: ${JSON.stringify(measured)}`);
+          realProducer = 'textutil verified';
+        }
+        return { locationByWhitespace, realProducer };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     },
   },
   {

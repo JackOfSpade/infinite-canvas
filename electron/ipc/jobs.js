@@ -9,7 +9,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { callLLMDocument, callLLMText, callLLMRaw, checkPromptFits, exactDurableRawHandoffStatus, hasExactDurableRawHandoff, hasExactDurableTextHandoff } from './llm.js';
 import { NON_API_AI_TRANSPORT, isNonApiAiStepBackError, observedTokensPerUnit, recallRunMigration, recallRunRoundSize, rememberRunMigration, rememberRunRoundSize } from './nonApiAi.js';
-import { readPlainTextDocument } from './docUtils.js';
+import { readCareerFileText } from './docUtils.js';
 import { buildScoredJob } from './jobBatchReconcile.js';
 import { nonScoringJobConstraintKind, validateAndNormalizeFitAssessment } from './jobFitAssessment.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
@@ -7574,7 +7574,7 @@ async function extractCareerFileSections(
   paths,
   {
     signal,
-    readPlainText = readPlainTextDocument,
+    readPlainText = readCareerFileText,
     callDocument = callLLMDocument,
   } = {},
 ) {
@@ -7594,9 +7594,10 @@ async function extractCareerFileSections(
     // read it verbatim instead of spending a transcription round on it. That
     // matters most on the copy/paste transport, where the round trip is a whole
     // manual handoff whose only possible outcome is a less faithful copy of a
-    // file sitting on disk. Returns null for anything not confidently clean
-    // UTF-8 (including a sensitive path, which the extractor below refuses by
-    // name), so an odd file still takes the original route.
+    // file sitting on disk. A plain Word document is read locally too. Returns
+    // null for anything not confidently faithful - every PDF, a DOCX holding
+    // anything but plain flow content, unclean UTF-8, a sensitive path (which the
+    // extractor below refuses by name) - so that file still takes the AI route.
     const verbatim = await readPlainText(fp);
     if (extractionSignal.aborted) throw extractionSignal.reason || new Error('Career-file extraction cancelled');
 

@@ -41,6 +41,12 @@ export function __setLocalAiRenderPdfForTests(renderer) {
   renderPdf = typeof renderer === 'function' ? renderer : productionRenderPdf;
 }
 
+// Test seam (no behaviour): lets the career-file reader's tests run its output
+// through the degree detector that consumes it.
+export function __careerDataDocumentsCompletedDegreeForTests(careerData) {
+  return careerDataDocumentsCompletedDegree(careerData);
+}
+
 export const LOCAL_AI_APPLICATION_VERSION = 1;
 // Version 1 handoffs did not bind each proof paragraph to its explicit
 // claim/proof/relevance link.  Preserve them: a queued job is an immutable

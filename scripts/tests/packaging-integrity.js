@@ -1,7 +1,40 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { assert } from '../test-dependencies.js';
+
+const SCANNED_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.json', '.css', '.md']);
+// Tab (9), LF (10) and CR (13) are the only control bytes source text may hold.
+const isForbiddenControlByte = byte => (byte <= 8) || byte === 11 || byte === 12 || (byte >= 14 && byte <= 31) || byte === 127;
+
+// Returns [{ file, offset, byte }] for every raw control byte in the listed files
+// (offset is the 0-based byte offset, so `head -c` / a hex editor lands on it).
+async function findRawControlBytes(root, files) {
+  const offenders = [];
+  for (const file of files) {
+    if (!SCANNED_EXTENSIONS.has(path.extname(file).toLowerCase())) continue;
+    let data;
+    try { data = await fs.readFile(path.join(root, file)); }
+    catch (cause) { if (cause?.code === 'ENOENT') continue; throw cause; } // listed but deleted in the working tree
+    for (let offset = 0; offset < data.length; offset += 1) {
+      if (isForbiddenControlByte(data[offset])) offenders.push({ file, offset, byte: data[offset] });
+    }
+  }
+  return offenders;
+}
+
+const describeControlBytes = offenders => offenders
+  .map(({ file, offset, byte }) => `${file} @ byte ${offset} (0x${byte.toString(16).padStart(2, '0')})`).join('; ');
+
+// null when git is unusable here (e.g. a detached CI worktree whose .git points at an unmounted repo).
+function listTrackedFiles(root) {
+  const inside = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root, encoding: 'utf8' });
+  if (inside.error || inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
+  const listed = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  if (listed.error || listed.status !== 0) return null;
+  return listed.stdout.split(String.fromCharCode(0)).filter(Boolean);
+}
 
 export default [
   {
@@ -294,6 +327,34 @@ export default [
       assert(verifyApp.includes('codesign --verify --deep --strict "$RELEASE_APP"')
         && !verifyApp.includes('codesign --verify "$RELEASE_APP"'),
       'the launcher must use the same strict deep codesign policy as npm run build before opening an existing bundle');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'repo hygiene: no tracked source file holds a raw control byte (a literal NUL makes grep treat the file as binary)',
+    run: async () => {
+      // The scanner itself: it must flag NUL and other control bytes with file + offset, and pass tab/LF/CR.
+      const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-control-bytes-'));
+      try {
+        await fs.writeFile(path.join(scratch, 'clean.js'), Buffer.from([97, 9, 10, 13, 98]));
+        await fs.writeFile(path.join(scratch, 'nul.js'), Buffer.from([97, 98, 0, 99]));
+        await fs.writeFile(path.join(scratch, 'esc.md'), Buffer.from([10, 10, 27]));
+        await fs.writeFile(path.join(scratch, 'del.json'), Buffer.from([127]));
+        await fs.writeFile(path.join(scratch, 'ignored.bin'), Buffer.from([0]));
+        const found = await findRawControlBytes(scratch, ['clean.js', 'nul.js', 'esc.md', 'del.json', 'ignored.bin', 'missing.js']);
+        const summary = describeControlBytes(found);
+        assert(found.length === 3 && summary === 'nul.js @ byte 2 (0x00); esc.md @ byte 2 (0x1b); del.json @ byte 0 (0x7f)',
+          `the control-byte scanner must flag NUL/ESC/DEL with file and offset while ignoring tab, LF, CR and unscanned extensions (got: ${summary})`);
+      } finally {
+        await fs.rm(scratch, { recursive: true, force: true });
+      }
+
+      const root = process.cwd();
+      const tracked = listTrackedFiles(root);
+      if (!tracked) return { ok: true, skipped: 'git is not usable here (not a work tree)' };
+      const offenders = await findRawControlBytes(root, tracked);
+      assert(offenders.length === 0,
+        `tracked source files must not contain raw control bytes (write escapes such as \\u0000 instead): ${describeControlBytes(offenders)}`);
       return { ok: true };
     },
   },
