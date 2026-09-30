@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
@@ -303,8 +304,8 @@ const tests = [
     run: async () => {
       const { engine, session } = await started();
       assert((await engine.get({ session: 'wrong', linkId: LINK })).status === 'unauthorized', 'live wrong key must be uniform unauthorized');
-      assert((await engine.get({ session, linkId: 'other-link' })).status === 'unauthorized', 'same key under another link must fail');
-      assert(engine.snapshot().chat.state === 'awaiting-first-call' && !JSON.stringify(engine.snapshot()).includes(session), 'snapshot must not contain chat key');
+      assert((await engine.get({ session, linkId: 'other-link' })).status === 'session_ended', 'same key under another link must not authenticate: the relink ended that chat');
+      assert(engine.snapshot().chat.state === 'none' && !JSON.stringify(engine.snapshot()).includes(session), 'the relinked chat is gone from status, and snapshot must not contain chat key');
     },
   },
   {
@@ -338,18 +339,25 @@ const tests = [
       for (let index = 0; index < 7; index++) assert((await engine.get({ session: `old-${index}`, linkId: LINK })).status === 'session_ended', 'no epoch must not count stale key');
       const chat = await engine.newChat({ linkId: LINK }); await engine.continueChat({ linkId: LINK });
       assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_ended', 'rotation must retire old epoch');
-      assert((await engine.get({ session: chat.sessionCode, linkId: 'other-link' })).status === 'unauthorized',
-        'a retired epoch digest must remain bound to its original link identity');
+      assert((await engine.get({ session: chat.sessionCode, linkId: 'other-link' })).status === 'session_ended',
+        'a retired epoch digest is link-free: an ended key reads as ended under any link');
       assert(engine.snapshot().pauseCause === null, 'old/no epoch requests cannot cause anomaly pause');
     },
   },
   {
-    name: 'handoff bridge: engine: five bad live keys trigger anomaly pause',
+    name: 'handoff bridge: engine: twenty unrecognised live keys never pause the engine, the next valid call is served, and the observations are counted',
     run: async () => {
-      const { engine, session } = await started();
-      for (let index = 0; index < 4; index++) assert((await engine.get({ session: `wrong-${index}`, linkId: LINK })).status === 'unauthorized', 'wrong live key must be unauthorized');
-      assert((await engine.get({ session: 'wrong-last', linkId: LINK })).status === 'unauthorized', 'fifth response remains uniform');
-      assert((await engine.get({ session, linkId: LINK })).status === 'paused' && engine.snapshot().pauseCause === 'anomaly', 'burst must pause after its uniform response');
+      const { engine, session, clock } = await started();
+      for (let index = 0; index < 20; index++) assert((await engine.get({ session: `wrong-${index}`, linkId: LINK })).status === 'unauthorized', 'wrong live key must be unauthorized');
+      const snapshot = engine.snapshot();
+      assert(snapshot.paused === false && snapshot.pauseCause === null && snapshot.counts.pauses === 0, 'unrecognised keys never pause the engine');
+      assert(snapshot.keys.unrecognisedRecent === 20 && snapshot.keys.unrecognisedWindowMinutes === 10 && Number.isFinite(snapshot.keys.lastUnrecognisedAt) && snapshot.keys.ended === 0,
+        `the snapshot counts them for diagnostics only: ${JSON.stringify(snapshot.keys)}`);
+      assert((await engine.get({ session, linkId: LINK })).status === 'served', 'the next valid call is served');
+      clock.advance(11 * 60_000);
+      const later = engine.snapshot().keys;
+      assert(later.unrecognisedRecent === 0 && later.lastUnrecognisedAt === snapshot.keys.lastUnrecognisedAt, 'the window forgets old keys but the last time stays observable');
+      assert(!JSON.stringify(engine.snapshot()).includes('wrong-'), 'no key text reaches the snapshot');
     },
   },
   {
@@ -2930,6 +2938,608 @@ tests.push(
       assert(rowOf(engine).stalled !== true && !engine.snapshot().chat.outstanding?.stalled, 'no false stall for a stage never served');
       const next = await engine.get({ session, linkId: LINK });
       assert(next.status === 'served' && next.handoffCode === 'HANDOFF-A2', `the new stage is served, not paused (got ${next.status} ${next.reason ?? ''})`);
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Copy starter re-copy: a chat that has not made a call yet is re-copied, not
+// rotated (2026-09-30: seven presses burned six unused chats and bumped the
+// chat number to 7 while ChatGPT had never called).
+function distinctKeys(start = 0) { let counter = start; return () => Buffer.alloc(26, (counter += 1)); }
+// distinctKeys repeats every 32 keys (a key byte selects one of 32 characters); this one does not.
+function manyKeys(start = 0) { let counter = start; return () => { counter += 1; const bytes = Buffer.alloc(26, 7); bytes[0] = counter % 32; bytes[1] = Math.floor(counter / 32) % 32; bytes[2] = Math.floor(counter / 1024) % 32; return bytes; }; }
+async function press(engine, kind = 'new') {
+  const prepared = await engine.prepareChat({ linkId: LINK, kind });
+  assert(prepared.copied === true, 'a press prepares a copyable starter');
+  assert(prepared.commit() === true, 'a press commits');
+  return prepared;
+}
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: pressing copy starter again before any call re-copies the same starter for the same chat',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), ...rec.port });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'a released job exists');
+      const releasedBefore = JSON.stringify(engine.snapshot().queue);
+      const first = await press(engine);
+      assert(first.recopied !== true && first.chatOrdinal === 1, 'the first press starts chat 1');
+      const presses = [];
+      for (let index = 0; index < 6; index += 1) presses.push(await press(engine));
+      assert(presses.every(item => item.recopied === true && item.chatOrdinal === 1 && item.sessionCode === first.sessionCode),
+        'six more presses with no call return the same ordinal and the identical starter key');
+      const chat = engine.snapshot().chat;
+      assert(chat.ordinal === 1 && chat.state === 'awaiting-first-call' && chat.calls === 0, 'the chat is still chat 1, still waiting for its first call');
+      assert(JSON.stringify(engine.snapshot().queue) === releasedBefore, 'released-job membership is unchanged by a re-copy');
+      assert(rec.logs.filter(entry => entry.code === 'epoch_closed').length === 0, 'no epoch_closed on a re-copy');
+      assert(rec.logs.filter(entry => entry.code === 'new_chat').length === 1, 'exactly one new_chat was logged');
+      const recopies = rec.logs.filter(entry => entry.code === 'starter_recopied');
+      assert(recopies.length === 6 && recopies.every(entry => JSON.stringify(entry.fields) === JSON.stringify({ chatOrdinal: 1 })), 'each re-copy logs starter_recopied with only the ordinal');
+      assert(rec.audit.filter(entry => entry.event === 'new_chat').length === 1 && rec.audit.every(entry => entry.event !== 'epoch_closed' && entry.event !== 'starter_recopied'),
+        'a re-copy is not a security-ledger event');
+      const viaCompat = await engine.newChat({ linkId: LINK });
+      assert(viaCompat.recopied === true && viaCompat.sessionCode === first.sessionCode && viaCompat.chatOrdinal === 1, 'the compatibility newChat re-copies too');
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'served', 'the re-copied key is the live key');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: after the first call a copy starter press rotates and the rotated key is refused',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), ...rec.port });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'a released job exists');
+      const first = await press(engine); await press(engine);
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'served', 'the chat makes its first call');
+      assert(engine.snapshot().chat.state === 'working', 'the chat is working');
+      const second = await press(engine);
+      assert(second.recopied !== true && second.chatOrdinal === 2 && second.sessionCode !== first.sessionCode, 'a press after a call rotates to a new ordinal and a new key');
+      assert(rec.logs.some(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'rotated') && rec.audit.some(entry => entry.event === 'epoch_closed'), 'the rotation closes the epoch as before');
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended', 'the rotated epoch key is refused');
+      const third = await press(engine);
+      assert(third.recopied === true && third.chatOrdinal === 2 && third.sessionCode === second.sessionCode, 'chat 2 has made no call yet, so a further press re-copies chat 2');
+      assert((await engine.get({ session: second.sessionCode, linkId: LINK })).status !== 'session_ended', 'the new key is live');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a submit also counts as the first call, and continue never re-copies',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys() });
+      const first = await press(engine);
+      await engine.submit({ session: first.sessionCode, linkId: LINK, handoffCode: 'UNKNOWN-CODE', response: '{}' });
+      assert(engine.snapshot().chat.calls === 1, 'a submit is a call');
+      const next = await press(engine);
+      assert(next.recopied !== true && next.chatOrdinal === 2, 'a press after a submit rotates');
+      const continued = await press(engine, 'continue');
+      assert(continued.recopied !== true && continued.chatOrdinal === 3 && continued.sessionCode !== next.sessionCode, 'Continue always makes a new key and ordinal');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: no plaintext key survives an app restart, a link change or key expiry, so those presses rotate',
+    run: async () => {
+      const clock = createFakeClock();
+      const options = { source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys() };
+      const before = createHandoffEngine(options);
+      const started = await press(before);
+      assert(started.chatOrdinal === 1, 'chat 1 starts');
+      // A new engine is what an app restart builds: epochs are memory-only.
+      const after = createHandoffEngine({ ...options, random: distinctKeys(50) });
+      assert(after.snapshot().chat.state === 'none', 'a restarted engine has no chat');
+      const restarted = await press(after);
+      assert(restarted.recopied !== true && restarted.chatOrdinal === 1, 'the first press after a restart starts a fresh chat');
+      assert((await after.get({ session: started.sessionCode, linkId: LINK })).status === 'unauthorized', 'the pre-restart key is not accepted after a restart');
+      const relinked = await after.prepareChat({ linkId: 'link-other', kind: 'new' });
+      assert(relinked.copied === true && relinked.recopied !== true && relinked.chatOrdinal === 2, 'a different link cannot reuse the starter, so the press rotates');
+      relinked.commit();
+      const key = engine => engine.snapshot().chat;
+      const aged = createHandoffEngine({ ...options, limits: { chatKeyMaxAgeHours: 1 }, random: distinctKeys(90) });
+      const agedFirst = await press(aged);
+      clock.advance(2 * 3_600_000);
+      const agedNext = await press(aged);
+      assert(agedNext.recopied !== true && agedNext.sessionCode !== agedFirst.sessionCode && key(aged).ordinal === 2, 'an expired uncalled key is replaced, not re-copied');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a re-copy whose chat was replaced meanwhile refuses to commit and cannot resurrect the old key',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys() });
+      const first = await press(engine);
+      const pendingRecopy = await engine.prepareChat({ linkId: LINK, kind: 'new' });
+      assert(pendingRecopy.recopied === true, 'the second preparation is a re-copy');
+      const continued = await engine.prepareChat({ linkId: LINK, kind: 'continue' });
+      assert(continued.commit() === true, 'a continue replaces the chat while the re-copy is still pending');
+      assert(pendingRecopy.commit() === false, 'the pending re-copy is refused once its chat was replaced');
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended', 'the replaced starter key is refused');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: no starter key reaches logs, the ledger or the status snapshot, before or after re-copies',
+    run: async () => {
+      const rec = recorders(); const lines = []; const clock = createFakeClock();
+      const logger = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => 1 });
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), audit: rec.port.audit, logger });
+      const first = await press(engine); await press(engine); await press(engine);
+      await engine.get({ session: first.sessionCode, linkId: LINK });
+      await press(engine);
+      const everything = JSON.stringify({ lines, audit: rec.audit, snapshot: engine.snapshot(), recent: logger.getRecent() });
+      assert(lines.filter(line => line === '[HandoffBridge] starter_recopied chatOrdinal=1').length === 2, 'the closed re-copy line is the only trace of a re-copy');
+      assert(!everything.includes(first.sessionCode) && !everything.includes(first.sessionCode.toLowerCase()), 'the plaintext starter key never appears in logs, audit or status');
+      assert(!Object.keys(engine.snapshot().chat).some(name => /key|session|starter|secret/i.test(name)), 'no status field can carry the key');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: one starter pasted into two chats shares one epoch, so every cap stays epoch-wide',
+    run: async () => {
+      const clock = createFakeClock();
+      const jobs = [[JOB_A, PATH_A], [JOB_B, PATH_B]];
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), limits: { jobsPerChat: 1 } });
+      for (const [jobId, canvasFilePath] of jobs) assert((await engine.release({ jobs: [{ jobId, canvasFilePath }] })).ok, 'released');
+      const shared = await press(engine); await press(engine);
+      const [chatA, chatB] = await Promise.all([
+        engine.get({ session: shared.sessionCode, linkId: LINK }),
+        engine.get({ session: shared.sessionCode, linkId: LINK }),
+      ]);
+      const snapshot = engine.snapshot().chat;
+      assert(chatA.status === 'served' && chatB.status === 'served' && chatA.handoffCode === chatB.handoffCode
+        && snapshot.ordinal === 1 && snapshot.jobsAssigned === 1 && snapshot.jobsAssigned <= snapshot.jobsCap,
+      'two chats holding one key are both handed the same single outstanding handoff, never a second job past the epoch cap');
+      assert(snapshot.servedTwice === true && snapshot.calls === 2, 'the epoch records the duplicate serve, and counts both chats as one epoch');
+    },
+  },
+);
+
+// Re-copy guard rails: which epochs may hand their starter out again.
+tests.push(
+  {
+    name: 'handoff bridge: engine: a new-chat press over an uncalled Continue key rotates and retires the Continue key',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), ...rec.port });
+      await press(engine);
+      const continued = await press(engine, 'continue');
+      assert(continued.chatOrdinal === 2 && engine.snapshot().chat.state === 'awaiting-first-call', 'an uncalled Continue epoch is current');
+      const fresh = await engine.prepareChat({ linkId: LINK, kind: 'new' });
+      assert(fresh.recopied !== true && fresh.sessionCode !== continued.sessionCode && fresh.chatOrdinal === 3,
+        'a new-chat press must mint its own key, never hand out the Continue key as a starter');
+      assert(fresh.commit() === true, 'the rotation commits');
+      assert((await engine.get({ session: continued.sessionCode, linkId: LINK })).status === 'session_ended', 'the Continue key is retired by the press');
+      assert(rec.logs.filter(entry => entry.code === 'epoch_closed').length >= 2 && rec.logs.every(entry => entry.code !== 'starter_recopied'), 'the Continue epoch closed and nothing was logged as a re-copy');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a key that was presented but turned away (idle pause) is no longer re-copyable and reads as reached',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(), limits: { idlePauseMinutes: 60 } });
+      const first = await press(engine);
+      assert(engine.snapshot().chat.state === 'awaiting-first-call', 'nothing has presented the key yet');
+      clock.advance(2 * 3_600_000);
+      const refused = await engine.get({ session: first.sessionCode, linkId: LINK });
+      assert(refused.status === 'paused' && refused.reason === 'idle', 'the idle pause turns the chat away');
+      const chat = engine.snapshot().chat;
+      assert(chat.calls === 0 && chat.state === 'reached' && Number.isFinite(chat.lastCallAt) && chat.firstCallAt === null,
+        'the chat reached the bridge with its key: state is reached, not awaiting-first-call, and no call is counted');
+      const next = await engine.prepareChat({ linkId: LINK, kind: 'new' });
+      assert(next.recopied !== true && next.sessionCode !== first.sessionCode && next.chatOrdinal === 2, 'the next press rotates instead of handing the same key to a second chat');
+      next.commit();
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended', 'the chat that presented the key is retired');
+      assert(engine.snapshot().paused === false && engine.snapshot().chat.state === 'awaiting-first-call', 'the rotation cleared the pause and the new chat awaits its first call');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: notePresented marks a key the controller turned away, matches only, and never counts a wrong key',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys() });
+      const first = await press(engine);
+      for (let index = 0; index < 6; index += 1) assert(engine.notePresented({ session: 'WRONG-KEY', linkId: LINK }) === false, 'a wrong key is not a presentation');
+      assert(engine.snapshot().keys.unrecognisedRecent === 0 && engine.snapshot().counts.getUnauthorized === 0 && engine.snapshot().paused === false && engine.snapshot().chat.state === 'awaiting-first-call', 'wrong keys through notePresented count nothing and pause nothing');
+      assert(engine.notePresented({ session: first.sessionCode, linkId: 'link-other' }) === false && engine.snapshot().chat.state === 'awaiting-first-call', 'the key under another link does not match');
+      assert(engine.notePresented({ session: `  ${first.sessionCode}  `, linkId: LINK }) === true, 'the chat key matches');
+      assert(engine.snapshot().chat.state === 'reached', 'the chat is reached');
+      const next = await engine.prepareChat({ linkId: LINK, kind: 'new' });
+      assert(next.recopied !== true && next.chatOrdinal === 2, 'a presented key rotates');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a pasted but uncalled starter is still re-copied while stale keys keep arriving; only a pause forces a rotation',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys() });
+      const first = await press(engine);
+      for (let index = 0; index < 20; index += 1) await engine.get({ session: 'STALE-CHAT-KEY', linkId: LINK });
+      assert(engine.snapshot().keys.unrecognisedRecent === 20 && engine.snapshot().paused === false, 'stale keys are only counted');
+      const again = await press(engine);
+      assert(again.recopied === true && again.chatOrdinal === 1 && again.sessionCode === first.sessionCode, 'the press re-copies the unused starter: stale noise must not kill it');
+      for (let index = 0; index < 5; index += 1) await engine.get({ session: 'STALE-CHAT-KEY', linkId: LINK });
+      const third = await press(engine);
+      assert(third.recopied === true && third.sessionCode === first.sessionCode, 'and again after more stale keys');
+      assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status !== 'unauthorized', 'the starter still works for its first call');
+      engine.pause('user');
+      const rotated = await press(engine);
+      assert(rotated.recopied !== true && rotated.chatOrdinal === 2 && rotated.sessionCode !== first.sessionCode, 'a paused engine rotates, and the rotation clears the pause');
+      assert(engine.snapshot().paused === false && engine.snapshot().pauseCause === null, 'the rotation lifted the pause');
+    },
+  },
+);
+
+// Ended-chat ledger: a chat from before a restart reads as ended, not as a
+// wrong code to retry. Only one-way digests are written.
+const sha = value => createHash('sha256').update(value, 'utf8').digest('hex');
+const retiredFile = store => JSON.parse(fs.readFileSync(store.retiredPath, 'utf8'));
+const engineOn = (store, clock, extra = {}) => createHandoffEngine({ source: source().api, store, now: clock.now, timers: clock, holdMs: 0, ...extra });
+async function pressAndCall(engine, linkId = LINK) {
+  const prepared = await engine.prepareChat({ linkId, kind: 'new' });
+  assert(prepared.copied === true && prepared.commit() === true, 'a press commits');
+  assert((await engine.get({ session: prepared.sessionCode, linkId })).status !== 'unauthorized', 'the chat calls');
+  return prepared;
+}
+
+// A chat that stays live across calls: with no released job the first call drains
+// (and so retires) the chat.
+async function pressAndCallLive(engine, linkId = LINK) {
+  await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+  return pressAndCall(engine, linkId);
+}
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a pre-restart key reads as ended after a restart plus a new chat, and is not counted as unrecognised',
+    run: async () => {
+      const dir = cleanDirectory();
+      try {
+        const clock = createFakeClock();
+        const store = createLaneStore({ userDataPath: dir });
+        const before = engineOn(store, clock, { random: distinctKeys(0) });
+        const ended = await pressAndCall(before);
+        const live = await pressAndCall(before);
+        await store.flush();
+        // No close(): the process died with `live` still the current chat.
+        const file = retiredFile(store);
+        assert(file.v === 2 && file.chats.length === 2 && file.chats.every(chat => Object.keys(chat).sort().join() === 'digest,retiredAt'), `the file holds only link-free digests: ${JSON.stringify(file)}`);
+        assert(!fs.readFileSync(store.retiredPath, 'utf8').toLowerCase().includes(ended.sessionCode.toLowerCase()), 'no key text is written');
+        if (process.platform !== 'win32') assert((fs.statSync(store.retiredPath).mode & 0o777) === 0o600, 'the file is owner-only');
+
+        const restarted = engineOn(createLaneStore({ userDataPath: dir }), clock, { random: distinctKeys(100) });
+        assert((await restarted.get({ session: ended.sessionCode, linkId: LINK })).status === 'session_ended', 'with no chat yet, a stale key is already session_ended');
+        const fresh = await press(restarted);
+        for (const stale of [ended, live]) assert((await restarted.get({ session: stale.sessionCode, linkId: LINK })).status === 'session_ended', 'a pre-restart key is session_ended once a new chat exists');
+        const keys = restarted.snapshot().keys;
+        assert(keys.unrecognisedRecent === 0 && keys.lastUnrecognisedAt === null && keys.ended === 3 && restarted.snapshot().counts.getUnauthorized === 0, `ended keys are not unrecognised: ${JSON.stringify(keys)}`);
+        assert((await restarted.get({ session: 'GARBLED-CODE', linkId: LINK })).status === 'unauthorized' && restarted.snapshot().keys.unrecognisedRecent === 1, 'a code nothing ever issued is still unrecognised');
+        assert((await restarted.get({ session: fresh.sessionCode, linkId: LINK })).status !== 'session_ended', 'the new chat works');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a corrupt, unreadable or wrong-shape ended-chat file loads as an empty list and the engine still works',
+    run: async () => {
+      const goodDigest = sha('x');
+      const shapes = [
+        'not json {',
+        '',
+        // A version-1 file (digests bound to the link id) loads as empty: stale chats then read as unrecognised once.
+        JSON.stringify({ v: 1, chats: [{ digest: sha(`retired-chat-v1\n${LINK}\nOLD-KEY`), linkDigest: sha(`retired-chat-link-v1\n${LINK}`), retiredAt: 1 }] }),
+        JSON.stringify({ v: 1, chats: [{ digest: goodDigest, retiredAt: 1 }] }),
+        JSON.stringify({ v: 3, chats: [] }),
+        JSON.stringify({ v: 2, chats: [{ digest: 'abc', retiredAt: 1 }] }),
+        JSON.stringify({ v: 2, chats: [{ digest: goodDigest, retiredAt: 1, extra: 'field' }] }),
+        JSON.stringify({ v: 2, chats: [{ digest: goodDigest, linkDigest: goodDigest, retiredAt: 1 }] }),
+        JSON.stringify({ v: 2, chats: [{ digest: goodDigest, retiredAt: -5 }] }),
+        JSON.stringify({ v: 2, chats: [{ digest: goodDigest, retiredAt: 1 }, { digest: goodDigest, retiredAt: 2 }] }),
+        JSON.stringify({ v: 2, chats: Array.from({ length: 33 }, (_, index) => ({ digest: sha(String(index)), retiredAt: 1 })) }),
+      ];
+      for (const text of shapes) {
+        const dir = cleanDirectory();
+        try {
+          const clock = createFakeClock();
+          const store = createLaneStore({ userDataPath: dir });
+          fs.mkdirSync(path.dirname(store.retiredPath), { recursive: true });
+          fs.writeFileSync(store.retiredPath, text);
+          assert(store.loadRetiredChats().length === 0, `a bad file loads empty: ${text.slice(0, 40)}`);
+          const engine = engineOn(store, clock, { random: distinctKeys(0) });
+          const chat = await press(engine);
+          assert((await engine.get({ session: 'OLD-KEY', linkId: LINK })).status === 'unauthorized', 'an old key is simply unrecognised');
+          assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status !== 'unauthorized', 'the engine serves on an empty list');
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+      // A file path that is a directory cannot be read at all.
+      const dir = cleanDirectory();
+      try {
+        const store = createLaneStore({ userDataPath: dir });
+        fs.mkdirSync(store.retiredPath, { recursive: true });
+        assert(store.loadRetiredChats().length === 0, 'an unreadable file loads empty');
+        const engine = engineOn(store, createFakeClock(), { random: distinctKeys(0) });
+        assert((await press(engine)).copied === true, 'and the engine still starts a chat');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      // A store that throws on load is treated the same way.
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(0), store: { loadRetiredChats() { throw new Error('boom'); }, saveRetiredChats() { throw new Error('boom'); } } });
+      const chat = await press(engine);
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status !== 'unauthorized', 'a throwing store never breaks serving');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: the ended-chat list is pruned on link revoke, by age, and capped at 32, and is never purged by a relink',
+    run: async () => {
+      // Revoke: everything goes, and the closing chat does not write itself back.
+      let dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const engine = engineOn(store, clock, { random: distinctKeys(0) });
+        const one = await pressAndCall(engine); await pressAndCall(engine);
+        await store.flush();
+        assert(fs.existsSync(store.retiredPath) && retiredFile(store).chats.length === 2, 'two chats are on record');
+        engine.pause('revoked');
+        await engine.close();
+        await store.flush();
+        assert(!fs.existsSync(store.retiredPath), 'a revoked link leaves no ended-chat file, even after the live chat closes');
+        const next = engineOn(createLaneStore({ userDataPath: dir }), clock, { random: distinctKeys(50) });
+        await press(next);
+        assert((await next.get({ session: one.sessionCode, linkId: LINK })).status === 'unauthorized', 'the revoked link ended chats are forgotten');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+
+      // Revoke in one process: the in-memory retired chats are forgotten too, not only the file.
+      dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const engine = engineOn(store, clock, { random: distinctKeys(0) });
+        const rotated = await pressAndCallLive(engine); await pressAndCall(engine);
+        assert((await engine.get({ session: rotated.sessionCode, linkId: LINK })).status === 'session_ended', 'before the revoke the rotated key reads as ended');
+        engine.pause('revoked');
+        await store.flush();
+        assert(!fs.existsSync(store.retiredPath), 'the revoke clears the file');
+        assert((await engine.get({ session: rotated.sessionCode, linkId: LINK })).status === 'unauthorized', 'after the revoke the in-memory retired key is forgotten as well');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+
+      // A relink does not purge: starting a chat under another link keeps every ended key.
+      dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const engine = engineOn(store, clock, { random: distinctKeys(0) });
+        const ended = await pressAndCallLive(engine); const live = await pressAndCall(engine);
+        await store.flush();
+        const relinked = await engine.prepareChat({ linkId: 'link-b', kind: 'new' }); relinked.commit();
+        await store.flush();
+        assert(retiredFile(store).chats.length === 3, `no ended key is purged by a chat under another link: ${JSON.stringify(retiredFile(store))}`);
+        assert((await engine.get({ session: 'anything', linkId: 'link-b' })).status === 'unauthorized', 'while a chat is live, a key nothing issued is still unrecognised');
+        for (const key of [ended, live]) for (const link of [LINK, 'link-b', 'link-c']) {
+          assert((await engine.get({ session: key.sessionCode, linkId: link })).status === 'session_ended', `an ended key reads as ended under ${link}`);
+        }
+        await store.flush();
+        assert(retiredFile(store).chats.length === 3, 'and calls carrying other links drop nothing');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+
+      // Age: the window is max(chatKeyMaxAgeHours, 24h).
+      for (const [hours, inside, outside] of [[48, 47, 49], [1, 23, 25]]) {
+        dir = cleanDirectory();
+        try {
+          const clock = createFakeClock(); const limits = { chatKeyMaxAgeHours: hours };
+          const store = createLaneStore({ userDataPath: dir });
+          const first = engineOn(store, clock, { random: distinctKeys(0), limits });
+          const old = await pressAndCall(first); await pressAndCall(first);
+          await store.flush();
+          clock.advance(inside * 3_600_000);
+          const restoredStore = createLaneStore({ userDataPath: dir });
+          const restarted = engineOn(restoredStore, clock, { random: distinctKeys(100), limits });
+          await press(restarted);
+          assert((await restarted.get({ session: old.sessionCode, linkId: LINK })).status === 'session_ended', `${inside}h after, inside the ${Math.max(hours, 24)}h window, the key reads as ended`);
+          clock.advance((outside - inside) * 3_600_000);
+          assert((await restarted.get({ session: old.sessionCode, linkId: LINK })).status === 'unauthorized', `${outside}h after, the entry has aged out`);
+          await restoredStore.flush();
+          assert(retiredFile(restoredStore).chats.length === 1, 'the aged entries are written out of the file, leaving only the chat started since');
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+
+      // Cap.
+      dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const engine = engineOn(store, clock, { random: manyKeys(0) });
+        const chats = [];
+        for (let index = 0; index < 40; index += 1) chats.push(await pressAndCall(engine));
+        await store.flush();
+        assert(CONSTANTS.RETIRED_EPOCHS === 32 && retiredFile(store).chats.length === 32, 'the file holds at most 32 entries');
+        const restarted = engineOn(createLaneStore({ userDataPath: dir }), clock, { random: manyKeys(5000) });
+        await press(restarted);
+        assert((await restarted.get({ session: chats[0].sessionCode, linkId: LINK })).status === 'unauthorized', 'the oldest chat was evicted');
+        assert((await restarted.get({ session: chats[20].sessionCode, linkId: LINK })).status === 'session_ended', 'a recent chat is remembered');
+        assert(engine.snapshot().chat.previous.length <= 5, 'the status list of previous chats stays short');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+);
+
+// A store whose ended-chat writes are recorded (each write's list) but otherwise real.
+function countingStore(dir) {
+  const real = createLaneStore({ userDataPath: dir });
+  const saves = [];
+  return { ...real, saves, saveRetiredChats(chats) { saves.push(chats.map(chat => ({ ...chat }))); return real.saveRetiredChats(chats); } };
+}
+const HOUR = 3_600_000;
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a relink (a call under another link) retires the live chat as link_changed, its key reads as ended under either link, and status shows no chat',
+    run: async () => {
+      const dir = cleanDirectory();
+      try {
+        const rec = recorders(); const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(0), ...rec.port, store });
+        const chat = await pressAndCallLive(engine, 'link-a');
+        assert(engine.snapshot().chat.state !== 'none' && engine.snapshot().chat.ordinal === 1, 'a chat is live under link A');
+        assert((await engine.get({ session: chat.sessionCode, linkId: 'link-b' })).status === 'session_ended', 'the call under link B is answered session_ended, not unauthorized');
+        const status = engine.snapshot();
+        assert(status.chat.state === 'none' && status.chat.ordinal === 0, `status shows no chat: ${JSON.stringify(status.chat)}`);
+        assert(status.chat.previous.length === 1 && status.chat.previous[0].reason === 'link_changed', 'the closed chat is listed with the link_changed reason');
+        assert(rec.logs.some(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'link_changed'), 'the log line is epoch_closed cause=link_changed');
+        assert(rec.audit.some(entry => entry.event === 'epoch_closed' && entry.fields.reason === 'link_changed'), 'the audit line carries the same closed reason');
+        for (const link of ['link-a', 'link-b', 'link-c']) assert((await engine.get({ session: chat.sessionCode, linkId: link })).status === 'session_ended', `the old key reads as ended under ${link}`);
+        const keys = engine.snapshot().keys;
+        assert(keys.ended === 4 && keys.unrecognisedRecent === 0 && engine.snapshot().counts.getUnauthorized === 0, `the old key is counted as ended, never as unrecognised: ${JSON.stringify(keys)}`);
+        // The person starts a new chat under the new link, and it works while the old key stays ended.
+        const fresh = await pressAndCall(engine, 'link-b');
+        assert(engine.snapshot().chat.state !== 'none' && (await engine.get({ session: chat.sessionCode, linkId: 'link-b' })).status === 'session_ended', 'a new chat works and the old key stays ended');
+        await store.flush();
+        const digests = retiredFile(store).chats.map(entry => entry.digest);
+        assert(digests.includes(sha(`retired-chat-v2\n${chat.sessionCode}`)) && digests.includes(sha(`retired-chat-v2\n${fresh.sessionCode}`)), 'both chats are on record by their link-free digests');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: noteLink retires only a live chat started under a different link',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(0), ...rec.port });
+      assert(engine.noteLink('link-a') === false, 'no chat: nothing to retire');
+      const chat = await pressAndCallLive(engine, 'link-a');
+      for (const value of ['link-a', '', null, undefined, 7]) assert(engine.noteLink(value) === false && engine.snapshot().chat.state !== 'none', `noteLink(${String(value)}) leaves the chat`);
+      assert(engine.noteLink('link-b') === true && engine.snapshot().chat.state === 'none', 'a different link retires the chat');
+      assert(rec.logs.filter(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'link_changed').length === 1, 'one link_changed close');
+      assert(engine.noteLink('link-b') === false, 'nothing left to retire');
+      assert((await engine.get({ session: chat.sessionCode, linkId: 'link-b' })).status === 'session_ended', 'the old key is ended');
+      await engine.close();
+      assert(engine.noteLink('link-c') === false, 'a closed engine ignores it');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a call under another link ends the live chat only when it presents that chat\'s own key (a stale grant carrying any other key cannot end a healthy chat)',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(0), ...rec.port });
+      const chat = await pressAndCallLive(engine, 'link-b');
+      for (const session of ['not-this-chats-key', '', 'x'.repeat(40)]) {
+        const result = await engine.get({ session, linkId: 'link-a' });
+        assert(result.status === 'unauthorized', `a stale-link call with another key is refused (${session.length} chars)`);
+        assert(engine.snapshot().chat.state !== 'none', 'and the healthy chat stays live');
+      }
+      assert(!rec.logs.some(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'link_changed'), 'no link_changed close from a stale grant');
+      assert((await engine.get({ session: chat.sessionCode, linkId: 'link-a' })).status === 'session_ended', 'the chat presenting its own key under another link is ended');
+      assert(rec.logs.filter(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'link_changed').length === 1, 'exactly one link_changed close');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: the ended-chat digest is link-free (the same key gives the same digest under any link) and holds no plaintext',
+    run: async () => {
+      const digests = [];
+      for (const link of ['link-one', 'link-two']) {
+        const dir = cleanDirectory();
+        try {
+          const store = createLaneStore({ userDataPath: dir });
+          const engine = engineOn(store, createFakeClock(), { random: distinctKeys(0) });
+          const chat = await pressAndCall(engine, link);
+          await store.flush();
+          const text = fs.readFileSync(store.retiredPath, 'utf8');
+          const file = JSON.parse(text);
+          assert(file.chats.length === 1 && file.chats[0].digest === sha(`retired-chat-v2\n${chat.sessionCode}`), 'the digest is sha256 of the v2 prefix and the key alone');
+          assert(!text.includes(chat.sessionCode) && !text.includes(link), 'no key and no link id in the file');
+          digests.push(file.chats[0].digest);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+      assert(digests[0] === digests[1], 'the same key under two links leaves the same digest');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a version-1 ended-chat file loads as empty and is replaced by a version-2 file on the next write',
+    run: async () => {
+      const dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = createLaneStore({ userDataPath: dir });
+        const key = 'V1-ERA-KEY';
+        fs.mkdirSync(path.dirname(store.retiredPath), { recursive: true });
+        fs.writeFileSync(store.retiredPath, JSON.stringify({ v: 1, chats: [{ digest: sha(`retired-chat-v1\n${LINK}\n${key}`), linkDigest: sha(`retired-chat-link-v1\n${LINK}`), retiredAt: clock.now() }] }));
+        assert(store.loadRetiredChats().length === 0, 'the v1 file loads as empty');
+        const engine = engineOn(store, clock, { random: distinctKeys(0) });
+        assert((await engine.get({ session: key, linkId: LINK })).status === 'session_ended' && engine.snapshot().keys.ended === 0, 'with no chat any key reads session_ended, but the v1 entry is not counted as recognised');
+        await press(engine);
+        assert((await engine.get({ session: key, linkId: LINK })).status === 'unauthorized', 'the v1 key reads as unrecognised once (fail closed, harmless)');
+        await store.flush();
+        assert(retiredFile(store).v === 2, 'the next write is a v2 file');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: the live chat entry survives a 25h-old chat, is refreshed at most once per hour of use, and no call writes the ledger',
+    run: async () => {
+      const dir = cleanDirectory();
+      try {
+        const clock = createFakeClock(); const store = countingStore(dir);
+        const engine = engineOn(store, clock, { random: distinctKeys(0), limits: { idlePauseMinutes: 0 } });
+        const chat = await pressAndCallLive(engine);
+        const digest = sha(`retired-chat-v2\n${chat.sessionCode}`);
+        await settle();
+        assert(store.saves.length === 1, `the commit wrote once: ${store.saves.length}`);
+        for (let index = 0; index < 100; index += 1) assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status !== 'unauthorized', 'a call is served');
+        await settle();
+        assert(store.saves.length === 1, `100 calls in the first hour wrote nothing: ${store.saves.length}`);
+        // 25 hours in: an unrelated lookup prunes the ledger, and the live entry must survive it.
+        clock.advance(25 * HOUR);
+        assert((await engine.get({ session: 'GARBLED', linkId: LINK })).status === 'unauthorized', 'a garbled key is unrecognised');
+        assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status !== 'unauthorized', 'the 25h-old chat still serves');
+        await settle(); await store.flush();
+        assert(store.saves.length === 2, `the first use after an hour refreshed once: ${store.saves.length}`);
+        const stamped = retiredFile(store).chats.find(entry => entry.digest === digest);
+        assert(stamped && stamped.retiredAt === clock.now(), `the entry survived and was re-stamped: ${JSON.stringify(retiredFile(store))}`);
+        for (let index = 0; index < 59; index += 1) { clock.advance(60_000); await engine.get({ session: chat.sessionCode, linkId: LINK }); }
+        await settle();
+        assert(store.saves.length === 2, `59 more minutes of use wrote nothing: ${store.saves.length}`);
+        clock.advance(2 * 60_000);
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        await settle();
+        assert(store.saves.length === 3, `the next hour of use wrote once more: ${store.saves.length}`);
+        // Retiring re-stamps it as ended, and it stays recognised.
+        const next = await press(engine);
+        assert(next.copied === true && (await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'session_ended', 'the rotated chat reads as ended');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: after a crash, a 30h-old chat that was used recently is recognised as ended, while one unused for 30h has aged out from its last refresh',
+    run: async () => {
+      for (const [label, keepUsing, expected] of [['recently used', true, 'session_ended'], ['unused for 30h', false, 'unauthorized']]) {
+        const dir = cleanDirectory();
+        try {
+          const clock = createFakeClock(); const store = countingStore(dir);
+          const engine = engineOn(store, clock, { random: distinctKeys(0), limits: { idlePauseMinutes: 0 } });
+          const chat = await pressAndCallLive(engine);
+          for (let hour = 0; hour < 30; hour += 1) {
+            clock.advance(HOUR + 1000);
+            if (keepUsing) await engine.get({ session: chat.sessionCode, linkId: LINK });
+          }
+          await settle(); await store.flush();
+          // No close(): the process died with the chat still live.
+          const restarted = engineOn(createLaneStore({ userDataPath: dir }), clock, { random: distinctKeys(100) });
+          await press(restarted);
+          assert((await restarted.get({ session: chat.sessionCode, linkId: LINK })).status === expected, `${label}: expected ${expected}`);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failing ended-chat write never throws into a request',
+    run: async () => {
+      const clock = createFakeClock(); const failures = [];
+      const stores = [
+        { loadRetiredChats: () => [], saveRetiredChats() { failures.push('throw'); throw new Error('disk gone'); } },
+        { loadRetiredChats: () => [], saveRetiredChats() { failures.push('reject'); return Promise.reject(new Error('disk gone')); } },
+      ];
+      const unhandled = []; const onUnhandled = reason => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        for (const store of stores) {
+          const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, random: distinctKeys(0), limits: { idlePauseMinutes: 0 }, store });
+          const chat = await pressAndCallLive(engine);
+          clock.advance(2 * HOUR);
+          assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status !== 'unauthorized', 'the refresh write fails and the request is still served');
+          await settle();
+        }
+        await new Promise(resolve => setImmediate(resolve));
+        assert(failures.length >= 4 && unhandled.length === 0, `both refreshes tried to write and nothing leaked: ${failures.join()} ${unhandled.length}`);
+      } finally { process.off('unhandledRejection', onUnhandled); }
     },
   },
 );

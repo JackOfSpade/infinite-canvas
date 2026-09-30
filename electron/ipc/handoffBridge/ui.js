@@ -179,6 +179,7 @@ export function registerHandoffBridgeUi({
   const candidates = new Map();
   let lastStatusAt = -Infinity;
   let statusTimer = null;
+  let clipboardClearTimer = null;
   let latestStatus = null;
   const canvasWindows = () => {
     try { return (getCanvasWindows() || []).filter(window => !window?.isDestroyed?.()); } catch { return []; }
@@ -629,9 +630,20 @@ export function registerHandoffBridgeUi({
         await abandonPrepared();
         return resultFailure(committed, 'INTERNAL');
       }
-      try { const timer = timers.setTimeout(() => { try { if (clipboard?.readText?.() === text) clipboard?.clear?.(); } catch { /* conditional clear only */ } }, CONSTANTS.CLIPBOARD_CLEAR_MS); timer?.unref?.(); } catch { /* write succeeded; clear is best effort */ }
+      // ONE pending clear. Every copy replaces the clipboard, so an earlier
+      // press's timer would only wipe a later (possibly byte-identical, e.g. a
+      // re-copied starter) copy early. Cancel it; the newest copy owns the clock.
+      if (clipboardClearTimer !== null) { try { timers.clearTimeout?.(clipboardClearTimer); } catch { /* optional */ } clipboardClearTimer = null; }
+      try {
+        const timer = timers.setTimeout(() => {
+          if (clipboardClearTimer === timer) clipboardClearTimer = null;
+          try { if (clipboard?.readText?.() === text) clipboard?.clear?.(); } catch { /* conditional clear only */ }
+        }, CONSTANTS.CLIPBOARD_CLEAR_MS);
+        clipboardClearTimer = timer ?? null;
+        timer?.unref?.();
+      } catch { /* write succeeded; clear is best effort */ }
     }
-    return success({ chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0, copied: true });
+    return success({ chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0, copied: true, ...(result?.recopied === true ? { recopied: true } : {}) });
   }
   async function release(sender, window, payload) {
     if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > CONSTANTS.MAX_LANES || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');

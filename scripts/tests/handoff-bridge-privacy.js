@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +15,9 @@ import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js'
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
 import { composeHandoffBridge, resolveTestMode, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
+import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
+import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
+import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
 import {
   redactReportUrl,
   redactReportUrlsInText,
@@ -606,6 +611,23 @@ export default [{
     assert(!serialized.includes(hostile) && serialized.includes('unavailable'), 'hostile binary details cannot cross into native dialog text');
   },
 }, {
+  name: 'handoff bridge: privacy: the restart sheet names the configured plugin only when the main-owned name is valid, else the neutral fallback',
+  async run() {
+    const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
+    const hostile = sentinel('plugin-name');
+    const detailFor = async pluginName => {
+      const specs = [];
+      await createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, spec) => { specs.push(spec); return { response: 1 }; } } })
+        .ask(sender, 'restart', { releasedCount: 1, items: [], pluginName });
+      return specs[0].detail;
+    };
+    assert((await detailFor('my_plugin')).includes('Next: paste it into a new ChatGPT chat with my_plugin selected.'), 'a valid configured name is shown');
+    for (const bad of [undefined, null, '', 5, `bad name ${hostile}`, `${hostile}\n`]) {
+      const detail = await detailFor(bad);
+      assert(detail.includes('with the Infinite Canvas plugin selected.') && !detail.includes(hostile), `an invalid or missing name falls back and is never echoed: ${JSON.stringify(bad)}`);
+    }
+  },
+}, {
   name: 'handoff bridge: privacy: every remaining native confirmation is parented and renderer/client sentinels never reach it',
   async run() {
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
@@ -642,13 +664,13 @@ export default [{
     assert(longEnable.detail.trim().split(/\s+/).length <= 70, 'long enable consent must stay under the native-sheet readability budget');
     const buttonsFor = title => specs.find(spec => spec.title === title)?.buttons;
     for (const [title, label] of [
-      ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'], ['Start a new ChatGPT chat', 'Start new chat'],
+      ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'], ['Copy a starter for a new ChatGPT chat', 'Copy starter'],
       ['Resume bridge serving', 'Resume'], ['Release work to ChatGPT', 'Release'], ['Release scoring work', 'Release'], ['Forget bridge setup', 'Forget setup'],
     ]) assert(JSON.stringify(buttonsFor(title)) === JSON.stringify(['Cancel', label]), `${title} uses its specific affirmative label with Cancel as the safe default`);
     const releaseSpec = specs.find(spec => spec.title === 'Release work to ChatGPT');
     for (const disclosure of ['1 released job:', 'Disk title — Disk company', 'Canvas: Disk.canvas', 'Destination: bridge.example.com', 'career data, job listings, and drafts through Cloudflare']) assert(releaseSpec?.detail.includes(disclosure), `release consent retains: ${disclosure}`);
-    const restartSpec = specs.find(spec => spec.title === 'Start a new ChatGPT chat');
-    for (const disclosure of ['1 released job will be available to the new chat', 'Disk title — Disk company', 'Chats from before the restart have ended']) assert(restartSpec?.detail.includes(disclosure), `restart consent retains: ${disclosure}`);
+    const restartSpec = specs.find(spec => spec.title === 'Copy a starter for a new ChatGPT chat');
+    for (const disclosure of ['1 released job will be available to the new chat', 'Disk title — Disk company', 'Chats from before the restart have ended', 'Next: paste it into a new ChatGPT chat with the Infinite Canvas plugin selected.']) assert(restartSpec?.detail.includes(disclosure), `restart consent retains: ${disclosure}`);
     const linkBreakSpec = specs.find(spec => spec.title === 'Change bridge address');
     assert(linkBreakSpec?.detail.includes('bridge.example.com') && linkBreakSpec.detail.includes('breaks the current ChatGPT link'), 'linked address consent must name the new host and reconnection consequence');
     const forgetSpec = specs.find(spec => spec.title === 'Forget bridge setup');
@@ -910,5 +932,107 @@ export default [{
       await handler({ method: 'GET', url: '/oauth/authorize', headers: { host: 'attacker.example.com' }, rawHeaders: ['host', 'attacker.example.com'], socket: { remoteAddress: '203.0.113.9' }, readableEnded: true }, response);
     }
     assert(audits.length === 0 && JSON.stringify(activity) === before, 'anonymous host noise is counters-only and cannot evict app/activity diagnostics');
+  },
+}, {
+  name: 'handoff bridge: privacy: a re-copied starter key stays out of logs, the security ledger, status and the bug report, and is dropped at the first call',
+  async run() {
+    const base = { description: 'Copy starter pressed repeatedly.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const audit = []; const lines = []; let counter = 0;
+    const jobId = '11111111-1111-4111-8111-111111111111';
+    const application = {
+      read: async () => ({ kind: 'open', handoff: { code: 'HANDOFF-A', jobId, stage: 'resume', revision: 1, prompt: 'Synthetic prompt.' } }),
+      status: async () => ({ kind: 'host' }), submit: async () => ({ kind: 'accepted', completed: true }),
+    };
+    const logger = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => 5 });
+    const engine = createHandoffEngine({
+      source: application, holdMs: 0, random: () => Buffer.alloc(26, (counter += 1)), logger,
+      audit: { append: (event, fields) => { audit.push({ event, fields }); return Promise.resolve(true); } },
+    });
+    try {
+      assert((await engine.release({ jobs: [{ jobId, canvasFilePath: '/tmp/privacy.canvas' }] })).ok, 'fixture job releases');
+      const presses = [];
+      for (let index = 0; index < 4; index += 1) { const prepared = await engine.prepareChat({ linkId: 'link-privacy', kind: 'new' }); prepared.commit(); presses.push(prepared); }
+      const key = presses[0].sessionCode;
+      assert(presses.every(item => item.sessionCode === key && item.chatOrdinal === 1) && presses.slice(1).every(item => item.recopied === true), 'four presses are one starter for chat 1');
+      setBridgeQueueDiagnosticProvider(() => ({ ...engine.snapshot(), enabled: true, serving: 'live' }));
+      const observed = () => JSON.stringify({ lines, audit, status: engine.snapshot(), activity: logger.getRecent(), report: generateMarkdown({ ...base, filterCode: 'FULL' }).markdown });
+      const beforeCall = observed();
+      assert(lines.filter(line => line === '[HandoffBridge] starter_recopied chatOrdinal=1').length === 3, 'the closed re-copy line is logged for each re-copy');
+      assert(!beforeCall.includes(key) && !beforeCall.includes(key.toLowerCase()), 'no re-copy sink carries the plaintext starter key');
+      assert(audit.every(entry => entry.event !== 'starter_recopied') && audit.filter(entry => entry.event === 'new_chat').length === 1, 'a re-copy never reaches the security ledger');
+      assert((await engine.get({ session: key, linkId: 'link-privacy' })).status === 'served', 'the re-copied key works for its first call');
+      const next = await engine.prepareChat({ linkId: 'link-privacy', kind: 'new' });
+      assert(next.recopied !== true && next.sessionCode !== key && next.chatOrdinal === 2, 'once called, the plaintext is gone and a press mints a new chat');
+      next.commit();
+      const afterCall = observed();
+      assert(!afterCall.includes(key) && !afterCall.includes(next.sessionCode), 'rotation and retirement leave no key text anywhere observable');
+    } finally { clearBridgeQueueDiagnostic(); await engine.close(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: a key that was presented and turned away, or unrecognised keys, leave no key text in status, logs, ledger or the report, and the report counts the unrecognised ones',
+  async run() {
+    const base = { description: 'Wrong keys and a refused chat.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const audit = []; const lines = []; let counter = 0; let stamp = 1_700_000_000_000;
+    const application = { read: async () => ({ kind: 'host' }), status: async () => ({ kind: 'host' }), submit: async () => ({ kind: 'accepted', completed: true }) };
+    const logger = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => 5 });
+    const engine = createHandoffEngine({
+      source: application, holdMs: 0, now: () => stamp, random: () => Buffer.alloc(26, (counter += 1)), logger, limits: { idlePauseMinutes: 60 },
+      audit: { append: (event, fields) => { audit.push({ event, fields }); return Promise.resolve(true); } },
+    });
+    try {
+      const wrong = 'WRONG-KEY-SENTINEL-' + sentinel('wrong');
+      const first = await engine.prepareChat({ linkId: 'link-privacy', kind: 'new' }); first.commit();
+      stamp += 2 * 3_600_000;
+      assert((await engine.get({ session: first.sessionCode, linkId: 'link-privacy' })).status === 'paused', 'the idle pause turns the valid key away');
+      const next = await engine.prepareChat({ linkId: 'link-privacy', kind: 'new' }); next.commit();
+      for (let index = 0; index < 20; index += 1) await engine.get({ session: wrong, linkId: 'link-privacy' });
+      assert((await engine.get({ session: first.sessionCode, linkId: 'link-privacy' })).status === 'session_ended', 'the retired key reads as ended');
+      setBridgeQueueDiagnosticProvider(() => ({ ...engine.snapshot(), enabled: true, serving: 'live' }));
+      const report = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const observed = JSON.stringify({ lines, audit, status: engine.snapshot(), activity: logger.getRecent(), report });
+      for (const secret of [first.sessionCode, next.sessionCode, wrong]) assert(!observed.includes(secret) && !observed.includes(secret.toLowerCase()), 'no presented, current or wrong key text appears in any sink');
+      assert(engine.snapshot().paused === false && engine.snapshot().pauseCause === null, 'unrecognised keys did not pause the engine');
+      const iso = new Date(stamp).toISOString();
+      assert(report.includes(`- Unrecognised chat keys: 20 in the last 10 min (last at ${iso})`), `the report states the count and time as an observation: ${report.split('\n').filter(line => /chat keys/i.test(line)).join(' | ')}`);
+      assert(report.includes('- Ended-chat keys: 1'), 'the report states the ended-chat key count');
+      assert(!/Unrecognised chat keys[^\n]*(attack|because|caused|stale chat)/i.test(report), 'the line states observations only, never a cause');
+    } finally { clearBridgeQueueDiagnostic(); await engine.close(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: the persisted ended-chat file never contains a plaintext chat key, a link id, or the in-memory epoch hash',
+  async run() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-handoff-privacy-ledger-'));
+    let counter = 0;
+    const application = { read: async () => ({ kind: 'host' }), status: async () => ({ kind: 'host' }), submit: async () => ({ kind: 'accepted', completed: true }) };
+    const store = createLaneStore({ userDataPath: dir });
+    const engine = createHandoffEngine({ source: application, store, holdMs: 0, random: () => Buffer.alloc(26, (counter += 1)) });
+    try {
+      const linkId = 'link-ledger-' + sentinel('link');
+      const codes = [];
+      for (let index = 0; index < 3; index += 1) {
+        const prepared = await engine.prepareChat({ linkId, kind: 'new' }); prepared.commit(); codes.push(prepared.sessionCode);
+        await engine.get({ session: prepared.sessionCode, linkId });
+      }
+      await store.flush();
+      const text = fs.readFileSync(store.retiredPath, 'utf8');
+      const parsed = JSON.parse(text);
+      assert(parsed.chats.length === 3, 'three chats are on record');
+      for (const secret of [...codes, linkId]) assert(!text.includes(secret) && !text.toLowerCase().includes(secret.toLowerCase()), 'the file holds neither a chat key nor the link id');
+      assert(parsed.v === 2 && parsed.chats.every(chat => Object.keys(chat).sort().join() === 'digest,retiredAt' && /^[a-f0-9]{64}$/.test(chat.digest)), 'entries are digests only, with no link digest field');
+      // The file digest is under its own domain prefix, so it is not the epoch hash.
+      const epochHash = crypto.createHash('sha256').update(`epoch\n${linkId}\n${codes[0]}`).digest('hex');
+      assert(!text.includes(epochHash), 'the in-memory epoch hash is not what is written');
+      // It is link-free: exactly sha256 over the v2 prefix and the key, and no digest of the link id is written either.
+      const sha = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+      assert(codes.every(code => parsed.chats.some(chat => chat.digest === sha(`retired-chat-v2\n${code}`))), 'each digest is the link-free digest of its key');
+      for (const linkDigest of [sha(`retired-chat-link-v1\n${linkId}`), sha(`epoch-link\n${linkId}`), sha(`retired-chat-v1\n${linkId}\n${codes[0]}`)]) assert(!text.includes(linkDigest), 'no link-bound or link-only digest is written');
+      // A live chat that is relinked away is retired as ended and leaves nothing but its link-free digest.
+      const relinked = await engine.prepareChat({ linkId: linkId + '-b', kind: 'new' }); relinked.commit();
+      assert(engine.noteLink(linkId + '-c') === true, 'a relink retires the live chat');
+      await store.flush();
+      const after = fs.readFileSync(store.retiredPath, 'utf8');
+      assert(JSON.parse(after).chats.length === 4 && !after.includes(relinked.sessionCode) && !after.includes(linkId), 'the relink adds only a digest');
+      assert(fs.readdirSync(path.dirname(store.retiredPath)).every(name => !name.endsWith('.tmp')), 'no temporary file is left behind');
+    } finally { await engine.close(); fs.rmSync(dir, { recursive: true, force: true }); }
   },
 }];

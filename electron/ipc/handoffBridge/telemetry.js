@@ -219,7 +219,7 @@ const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'j
 const QUEUE_SERVING = new Set(['off', 'live', 'paused', 'stopping', 'starting', 'failed', 'error']);
 const QUEUE_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'network', 'expiry', 'sleep', 'quit', 'tunnel', 'other']);
 const QUEUE_FAULTS = new Set(['persist_failed', 'source_failed', 'other']);
-const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'working', 'full']);
+const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'full']);
 const QUEUE_COUNT_KEYS = ['releaseCalls', 'releaseNoops', 'unreleaseCalls', 'lanesDropped', 'droppedDiscarded', 'droppedPruned', 'droppedMissing', 'droppedSaved'];
 const QUEUE_MAX_LANES = 20;
 
@@ -260,6 +260,9 @@ export function reduceBridgeQueue(raw) {
   }
   const counts = {};
   for (const key of QUEUE_COUNT_KEYS) counts[key] = smallInt(raw.counts?.[key]);
+  // Chat keys the engine did not recognise: counts and one time, nothing more.
+  const keys = raw.keys && typeof raw.keys === 'object' ? raw.keys : {};
+  const lastUnrecognisedAt = finite(keys.lastUnrecognisedAt);
   return Object.freeze({
     at,
     enabled: raw.enabled === true,
@@ -279,6 +282,12 @@ export function reduceBridgeQueue(raw) {
     }),
     lanes: Object.freeze(lanes),
     counts: Object.freeze(counts),
+    keys: Object.freeze({
+      unrecognisedRecent: smallInt(keys.unrecognisedRecent, 1000),
+      unrecognisedWindowMinutes: smallInt(keys.unrecognisedWindowMinutes, 1440) || 10,
+      lastUnrecognisedAt: lastUnrecognisedAt === null || lastUnrecognisedAt < 0 ? null : lastUnrecognisedAt,
+      ended: smallInt(keys.ended),
+    }),
   });
 }
 

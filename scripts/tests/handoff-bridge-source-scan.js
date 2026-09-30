@@ -194,7 +194,7 @@ function namedFunctionSource(source, name) {
 
 const DIALOG_DETAIL_KEYS = new Set([
   'at', 'canvasFilePath', 'count', 'hostname', 'idlePauseMinutes', 'items', 'long',
-  'minutes', 'path', 'reason', 'releasedCount', 'sha256', 'signature', 'size',
+  'minutes', 'path', 'pluginName', 'reason', 'releasedCount', 'sha256', 'signature', 'size',
   'sourcePath', 'version',
 ]);
 
@@ -491,7 +491,7 @@ export default [
         'link_revoked', 'refresh_reuse', 'code_reuse', 'pause', 'resume', 'pairing_opened',
         'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
         'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed',
-        'epoch_closed', 'release', 'unrelease', 'new_chat', 'continue', 'source_mismatch',
+        'epoch_closed', 'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
       ];
       assert(JSON.stringify(CREDENTIAL_LOG_CODES) === JSON.stringify(expectedCodes), 'the logger code surface is the frozen credential/control enum');
       assert(JSON.stringify(Object.keys(LOG_FIELDS_BY_CODE)) === JSON.stringify(expectedCodes), 'each logger code has a closed field allow-list');
@@ -542,9 +542,11 @@ export default [
 
       const epochAuth = namedFunctionSource(engine, 'authenticate');
       assert(epochAuth.includes('sameDigest(digest, epoch.keyHash)')
-        && epochAuth.includes('sameDigest(digest, retired.hash)')
+        && epochAuth.includes('sameHex(retired.digest, ended)')
         && !epochAuth.includes('epoch.linkId') && !epochAuth.includes('retired.linkId')
-        && !engine.includes('linkId: epoch.linkId'), 'the epoch digest must be the sole link-binding comparison for live and retired chats');
+        && !engine.includes('linkId: epoch.linkId'), 'the epoch digest must be the sole link-binding comparison for the live chat, and ended chats are recognised by a link-free digest compared in constant time');
+      assert(namedFunctionSource(engine, 'sameHex').includes('sameDigest') && /function endedDigest\(key\)/.test(engine) && !/function endedDigest\([^)]*linkId/.test(engine),
+        'the ended-chat digest takes the key alone and hex digests are compared through the constant-time helper');
 
       const lanes = read('lanes.js'); const application = read('sources/application.js'); const push = read('sources/push.js'); const index = read('index.js');
       const guard = namedFunctionSource(lanes, 'createHandoffCodeGuard');

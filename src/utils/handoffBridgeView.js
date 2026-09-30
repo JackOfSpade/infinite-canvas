@@ -11,7 +11,7 @@ import { applicationStageLabel } from './applicationHandoffDock.js';
 export const HEALTH_IDS = Object.freeze([
   'off', 'setup', 'alarm', 'fault', 'paused', 'restart', 'tunnel-problem', 'starting',
   'tunnel-unreachable', 'link-problem', 'needs-you', 'duplicate-serve', 'stalled',
-  'chat-full', 'working', 'saving', 'first-call', 'nudge', 'chat-idle', 'ready',
+  'chat-full', 'working', 'saving', 'reached', 'first-call', 'nudge', 'chat-idle', 'ready',
 ]);
 
 const NOTE_IDS = new Set([
@@ -138,7 +138,7 @@ export function deriveBridgeHealth(status, now = 0) {
     const work = stageLabel && stageLabel !== 'Application handoff'
       ? `${stageLabel.charAt(0).toLowerCase()}${stageLabel.slice(1)}`
       : chat.outstanding.task === 'job-scoring' ? 'job scoring' : 'this handoff';
-    matches.push(entry('stalled', 'attention', BRIDGE_DYNAMIC_COPY.stalled(age, work), ['copy-starter', 'new-chat', 'open-dock']));
+    matches.push(entry('stalled', 'attention', BRIDGE_DYNAMIC_COPY.stalled(age, work), ['new-chat', 'open-dock']));
   }
   if (chat.state === 'full') {
     matches.push(entry('chat-full', 'attention', BRIDGE_COPY.health['chat-full'], ['new-chat']));
@@ -148,6 +148,9 @@ export function deriveBridgeHealth(status, now = 0) {
   }
   if (count(applications.working)) {
     matches.push(entry('saving', 'working', BRIDGE_COPY.health.saving));
+  }
+  if (chat.state === 'reached') {
+    matches.push(entry('reached', 'working', BRIDGE_DYNAMIC_COPY.reached(chat.ordinal)));
   }
   if (chat.state === 'awaiting-first-call') {
     matches.push(entry('first-call', 'nudge', BRIDGE_DYNAMIC_COPY.firstCall(chat.ordinal), ['copy-starter']));

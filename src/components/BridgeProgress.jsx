@@ -41,7 +41,12 @@ function invoke(method) {
     return Promise.resolve(fn.call(api)).then(
       result => (result && typeof result === 'object' && result.success === false
         ? { success: false, code: typeof result.code === 'string' ? result.code : 'INTERNAL' }
-        : { success: true }),
+        : {
+          success: true,
+          // Main decides whether the press re-copied the same starter.
+          recopied: result?.recopied === true,
+          chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0,
+        }),
       () => ({ success: false, code: 'INTERNAL' }),
     );
   } catch {
@@ -62,7 +67,8 @@ export function BridgeProgress({ status, item }) {
   const jobs = Array.isArray(status?.queue?.jobs) ? status.queue.jobs : [];
   const job = jobs.find(entry => entry?.jobId === item?.jobId) || null;
   const chat = status?.chat && typeof status.chat === 'object' ? status.chat : {};
-  const view = deriveBridgeJobProgress({ job, chat, item, now, bridge: { paused: status?.paused === true } });
+  const pluginName = status?.config?.pluginName;
+  const view = deriveBridgeJobProgress({ job, chat, item, now, bridge: { paused: status?.paused === true, pluginName } });
   const lines = progressTimeLines(view, now);
   const ticking = view.since !== null || view.lastHeard !== null;
 
@@ -99,12 +105,16 @@ export function BridgeProgress({ status, item }) {
     setBusy(true);
     try {
       const result = await invoke(method);
-      if (mountedRef.current) setNotice(result.success ? success : ipcErrorMessage(result.code));
+      if (mountedRef.current) {
+        if (!result.success) setNotice(ipcErrorMessage(result.code));
+        else if (method === 'handoffBridgeNewChat' && result.recopied && result.chatOrdinal > 0) setNotice(BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName));
+        else setNotice(success);
+      }
     } finally {
       busyRef.current = false;
       if (mountedRef.current) setBusy(false);
     }
-  }, []);
+  }, [pluginName]);
 
   // The panel's gate for both chat buttons.
   const canStartChat = status?.enabled === true && status?.serving === 'live' && status?.paused !== true
@@ -115,8 +125,10 @@ export function BridgeProgress({ status, item }) {
     const age = Number.isFinite(chat.lastCallAt) && referenceNow >= chat.lastCallAt
       ? referenceNow - chat.lastCallAt
       : Infinity;
-    if (chat.ordinal && age < 120000) setConfirmNew(true);
-    else void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew);
+    // An unused chat (no call yet) is never ended by a starter press: main
+    // hands back the same starter, so there is nothing to confirm.
+    if (chat.ordinal && chat.state !== 'awaiting-first-call' && age < 120000) setConfirmNew(true);
+    else void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew(pluginName));
   };
   const onAction = () => {
     if (busyRef.current) return;
@@ -186,7 +198,7 @@ export function BridgeProgress({ status, item }) {
           onConfirm={() => {
             if (busyRef.current) return;
             setConfirmNew(false);
-            void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew);
+            void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew(pluginName));
           }}
           onCancel={() => setConfirmNew(false)}
         />

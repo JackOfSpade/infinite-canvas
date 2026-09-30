@@ -2,6 +2,7 @@ import { assert } from './testHelpers.js';
 import { IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffBridgeTray } from '../../electron/ipc/handoffBridge/tray.js';
+import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 
 const JOB = '550e8400-e29b-41d4-a716-446655440000';
 const EXTRA_JOB = '660e8400-e29b-41d4-a716-446655440000';
@@ -244,6 +245,40 @@ export default [
     assert((await invoke(good, IPC_CHANNELS.NEW_CHAT)).success && JSON.stringify(calls.slice(0, 2)) === JSON.stringify([['write', 'synthetic'], ['commit', 't']]), 'clipboard write must happen before epoch commit');
     const badCalls = []; const bad = setup({ controller: { prepareChat: async () => ({ commitToken: 't', starter: 'synthetic' }), commitChat: async () => { badCalls.push('commit'); }, abandonChat: async () => { badCalls.push('abandon'); } }, clipboard: { writeText() { throw new Error('denied'); } } });
     assert((await invoke(bad, IPC_CHANNELS.NEW_CHAT)).code === 'CLIPBOARD_FAILED' && JSON.stringify(badCalls) === JSON.stringify(['abandon']), 'clipboard failure abandons prepared chat and never commits');
+  } },
+  { name: 'handoff bridge: ipc: a re-copied starter is reported as recopied with its ordinal, and a rotated one is not', async run() {
+    const calls = [];
+    const make = prepared => setup({ controller: { prepareChat: async () => prepared, commitChat: async token => { calls.push(['commit', token]); return { success: true }; }, abandonChat: async () => ({ success: true }) }, clipboard: { writeText: text => calls.push(['write', text]), readText: () => '', clear() {} } });
+    const again = await invoke(make({ commitToken: 'r', starter: 'synthetic', chatOrdinal: 3, recopied: true }), IPC_CHANNELS.NEW_CHAT);
+    assert(again.success === true && again.recopied === true && again.chatOrdinal === 3 && again.copied === true, 'main tells the renderer this was a re-copy of chat 3');
+    assert(JSON.stringify(calls) === JSON.stringify([['write', 'synthetic'], ['commit', 'r']]), 'a re-copy still writes the clipboard before committing');
+    const fresh = await invoke(make({ commitToken: 'f', starter: 'synthetic', chatOrdinal: 4 }), IPC_CHANNELS.NEW_CHAT);
+    assert(fresh.success === true && fresh.chatOrdinal === 4 && !('recopied' in fresh), 'a rotated chat carries no recopied flag');
+    const truthy = await invoke(make({ commitToken: 'x', starter: 'synthetic', chatOrdinal: 5, recopied: 'yes' }), IPC_CHANNELS.NEW_CHAT);
+    assert(!('recopied' in truthy), 'only a literal true is forwarded');
+  } },
+  { name: 'handoff bridge: ipc: a re-copy restarts the single clipboard-clear clock, so an earlier press never wipes it early', async run() {
+    const clock = fakeClock(); let clipboardText = ''; let clears = 0;
+    const clipboard = { writeText: text => { clipboardText = text; }, readText: () => clipboardText, clear() { clears += 1; clipboardText = ''; } };
+    const h = setup({ now: clock.now, timers: clock.timers, clipboard, controller: { prepareChat: async () => ({ commitToken: 'r', starter: 'synthetic-starter', chatOrdinal: 1, recopied: true }), commitChat: async () => ({ success: true }), abandonChat: async () => ({ success: true }) } });
+    const wait = CONSTANTS.CLIPBOARD_CLEAR_MS;
+    assert((await invoke(h, IPC_CHANNELS.NEW_CHAT)).success === true && clock.pending().length === 1, 'the first copy schedules one clear');
+    clock.advance(wait - 10_000);
+    assert((await invoke(h, IPC_CHANNELS.NEW_CHAT)).success === true, 'the second copy succeeds');
+    assert(clock.pending().length === 1, 'the second copy replaces the pending clear rather than adding a second one');
+    clock.advance(wait);
+    assert(clears === 0 && clipboardText === 'synthetic-starter', 'the first copy\'s deadline passes without wiping the newer, byte-identical copy');
+    clock.advance(wait - 10_000 + wait);
+    assert(clears === 1 && clipboardText === '' && clock.pending().length === 0, 'the newest copy is cleared one full window after IT was written');
+  } },
+  { name: 'handoff bridge: ipc: the clipboard clear still leaves text the person copied in the meantime', async run() {
+    const clock = fakeClock(); let clipboardText = ''; let clears = 0;
+    const clipboard = { writeText: text => { clipboardText = text; }, readText: () => clipboardText, clear() { clears += 1; clipboardText = ''; } };
+    const h = setup({ now: clock.now, timers: clock.timers, clipboard, controller: { prepareChat: async () => ({ commitToken: 'n', starter: 'synthetic-starter', chatOrdinal: 2 }), commitChat: async () => ({ success: true }), abandonChat: async () => ({ success: true }) } });
+    await invoke(h, IPC_CHANNELS.NEW_CHAT);
+    clipboardText = 'something else';
+    clock.advance(CONSTANTS.CLIPBOARD_CLEAR_MS);
+    assert(clears === 0 && clipboardText === 'something else', 'a conditional clear never wipes unrelated clipboard text');
   } },
   { name: 'handoff bridge: ipc: a closed chat canvas abandons prepared work before clipboard or commit', async run() {
     for (const channel of [IPC_CHANNELS.NEW_CHAT, IPC_CHANNELS.CONTINUE_CHAT]) {

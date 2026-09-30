@@ -217,6 +217,7 @@ export default [
       assert(setup.includes("onClick={() => void call('handoffBridgeForgetSetup')}") && !setup.includes("confirm === 'forget'"), 'Forget setup must use the single authoritative main-process confirmation');
       for (const count of ['getServed', 'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'stallNotices', 'tunnelRestarts']) assert(panel.includes(`status.counts.${count}`), `panel counts must include ${count}`);
       for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
+      assert(panel.includes("status.chat.state !== 'awaiting-first-call'") && panel.includes('BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName)') && panel.includes('result.recopied === true'), 'the panel skips the new-chat confirmation for an unused chat and words a re-copy from main\'s recopied answer');
     },
   },
   {
@@ -1172,7 +1173,28 @@ export default [
             assert(start && !start.disabled, 'the first-call state offers the panel\'s Copy starter button');
             await act(async () => { start.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(calls.join() === 'new', `the button must call the existing handoffBridgeNewChat exactly once: ${calls}`);
-            assert(text(window).includes('Copied. Paste it into a new ChatGPT chat'), 'a successful start tells the person what was copied');
+            assert(text(window).includes('Copied. Now switch to ChatGPT, open a new chat, type @ and pick Infinite Canvas, then paste and send.'), 'a successful start tells the person what was copied');
+          },
+        });
+
+        await scenario('awaiting-first-call: a second press re-copies without any confirmation', {
+          status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: clock - 5000, firstCallAt: null, outstanding: null }),
+          item: { jobId: JOB, stage: 'evidence-plan' },
+          api: { handoffBridgeNewChat: async () => ({ success: true, copied: true, recopied: true, chatOrdinal: 1 }) },
+          async check({ window, act }) {
+            await act(async () => { button(window, 'Copy starter').click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(!text(window).includes('Copy a starter for a new chat?'), 'an unused chat never asks for confirmation, even with a recent timestamp');
+            assert(text(window).includes('Copied again: the same starter for chat 1. Paste it into a new ChatGPT chat with Infinite Canvas selected.'), `the note says it was a re-copy: ${text(window)}`);
+          },
+        });
+
+        await scenario('awaiting-first-call: main rotated after all, so the note is the ordinary one', {
+          status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }),
+          item: { jobId: JOB, stage: 'evidence-plan' },
+          api: { handoffBridgeNewChat: async () => ({ success: true, copied: true, chatOrdinal: 2 }) },
+          async check({ window, act }) {
+            await act(async () => { button(window, 'Copy starter').click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(text(window).includes('Copied. Now switch to ChatGPT, open a new chat, type @ and pick Infinite Canvas, then paste and send.') && !text(window).includes('Copied again'), 'main decision wins: no re-copy claim when main rotated');
           },
         });
 
@@ -1201,16 +1223,16 @@ export default [
           async check({ window, calls, act }) {
             assert(live(window).textContent.includes('Needs attention') && live(window).textContent.includes('ChatGPT has been quiet for 9 min'), 'stalled is worded and toned in text, with the real quiet age (served 9 minutes ago)');
             assert(/for 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
-            const start = button(window, 'Start a new chat'); assert(start, 'stalled offers Start a new chat');
+            const start = button(window, 'Copy chat starter'); assert(start, 'stalled offers Copy chat starter');
             await act(async () => { start.click(); await Promise.resolve(); });
-            assert(calls.length === 0 && text(window).includes('Start a new chat?'), 'a chat that called under two minutes ago must be confirmed first, exactly as the panel does');
+            assert(calls.length === 0 && text(window).includes('Copy a starter for a new chat?'), 'a chat that called under two minutes ago must be confirmed first, exactly as the panel does');
             await act(async () => { button(window, 'Keep chat 1').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
-            assert(calls.length === 0 && !text(window).includes('Start a new chat?'), `Keep chat must close the dialog and call nothing: ${calls}`);
-            await act(async () => { button(window, 'Start a new chat').click(); await Promise.resolve(); });
-            assert(text(window).includes('Start a new chat?'), 'the confirmation opens again');
-            await act(async () => { button(window, 'Start new chat').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
+            assert(calls.length === 0 && !text(window).includes('Copy a starter for a new chat?'), `Keep chat must close the dialog and call nothing: ${calls}`);
+            await act(async () => { button(window, 'Copy chat starter').click(); await Promise.resolve(); });
+            assert(text(window).includes('Copy a starter for a new chat?'), 'the confirmation opens again');
+            await act(async () => { button(window, 'Copy starter').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
             assert(calls.join() === 'new', `confirming calls handoffBridgeNewChat: ${calls}`);
-            assert(!text(window).includes('Start a new chat?'), 'confirming must close the dialog');
+            assert(!text(window).includes('Copy a starter for a new chat?'), 'confirming must close the dialog');
           },
         });
 
@@ -1220,7 +1242,7 @@ export default [
             assert(timers.size === 1, `a last-heard line alone still ticks: ${timers.size}`);
             const next = button(window, 'Copy Continue'); assert(next, 'an ended chat offers Copy Continue');
             await act(async () => { next.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(calls.join() === 'continue' && text(window).includes('Copied. Paste it into the existing chat.'), 'Copy Continue calls the existing handoffBridgeContinueChat with no confirmation');
+            assert(calls.join() === 'continue' && text(window).includes('Copied. Now switch to ChatGPT, paste it into the existing chat, and send.'), 'Copy Continue calls the existing handoffBridgeContinueChat with no confirmation');
           },
         });
 
@@ -1237,7 +1259,7 @@ export default [
         await scenario('a disabled bridge cannot start a chat', {
           status: view({ servedToChat: null }, { state: 'full' }, { serving: 'off' }),
           async check({ window, calls, act }) {
-            const start = button(window, 'Start a new chat'); assert(start && start.disabled, 'the panel\'s gate (live, reachable, linked) also disables this button');
+            const start = button(window, 'Copy chat starter'); assert(start && start.disabled, 'the panel\'s gate (live, reachable, linked) also disables this button');
             await act(async () => { start.click(); await Promise.resolve(); });
             assert(calls.length === 0, 'a disabled button must not call IPC');
           },
@@ -1254,7 +1276,7 @@ export default [
             // A held restart is the one stopped state that still offers a chat button, even while paused.
             status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }, top),
             async check({ window, calls, act }) {
-              const start = button(window, 'Start a new chat'); assert(start && start.disabled, `the panel's whole gate applies: ${label}`);
+              const start = button(window, 'Copy chat starter'); assert(start && start.disabled, `the panel's whole gate applies: ${label}`);
               await act(async () => { start.click(); await Promise.resolve(); });
               assert(calls.length === 0, `no IPC while ${label}`);
             },
@@ -1262,7 +1284,7 @@ export default [
         }
         await scenario('the same button is enabled when every gate passes', {
           status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }),
-          async check({ window }) { const start = button(window, 'Start a new chat'); assert(start && !start.disabled, 'the gate opens when the bridge is live, reachable, linked and not paused'); },
+          async check({ window }) { const start = button(window, 'Copy chat starter'); assert(start && !start.disabled, 'the gate opens when the bridge is live, reachable, linked and not paused'); },
         });
         await scenario('a paused bridge is forwarded to the derivation', {
           status: view({}, {}, { paused: true }),
@@ -1281,7 +1303,7 @@ export default [
           status: view({}, { state: 'full' }),
           async check({ window }) {
             assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('at its limit'), live(window).textContent);
-            assert(!window.document.querySelector('button'), 'no Start a new chat while ChatGPT may be answering');
+            assert(!window.document.querySelector('button'), 'no Copy chat starter while ChatGPT may be answering');
           },
         });
         await scenario('a host job does not claim ChatGPT answered everything', {
@@ -1337,15 +1359,15 @@ export default [
             await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); });
             assert(calls.length === 1, 'a click while pending is ignored');
             await act(async () => { release(); await gate; await Promise.resolve(); await Promise.resolve(); });
-            assert(!button(window, 'Copy Continue').disabled && text(window).includes('Copied. Paste it into the existing chat.'), 'the button is free again once the call settles');
+            assert(!button(window, 'Copy Continue').disabled && text(window).includes('Copied. Now switch to ChatGPT, paste it into the existing chat, and send.'), 'the button is free again once the call settles');
             await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); await Promise.resolve(); });
             assert(calls.length === 2, 'a later click goes through');
           },
         });
-        await scenario('a double click on Start a new chat calls the IPC once', {
+        await scenario('a double click on Copy chat starter calls the IPC once', {
           status: view({ phase: 'held', reason: 'restart' }, { state: 'full', lastCallAt: clock - 600000 }),
           async check({ window, calls, act }) {
-            const start = button(window, 'Start a new chat');
+            const start = button(window, 'Copy chat starter');
             await act(async () => { start.click(); start.click(); await Promise.resolve(); await Promise.resolve(); });
             assert(calls.join() === 'new', `a fast double click must not mint two chats: ${calls}`);
           },
@@ -1442,7 +1464,7 @@ export default [
               assert(openButton && /Pending AI handoffs/.test(openButton.textContent), 'the collapsed dock offers its expand button');
               await bundle.module.act(async () => { openButton.click(); await Promise.resolve(); });
               const text = window.document.body.textContent;
-              seen[phase] = { working: text.includes('Working in ChatGPT'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
+              seen[phase] = { working: text.includes('Handed to ChatGPT'), noPasteWording: !/No paste/i.test(text), chip: text.includes('CODE-123'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
             } finally {
               await bundle.module.act(async () => rootNode.unmount());
               if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
@@ -1451,10 +1473,12 @@ export default [
           }));
         }
         for (const phase of [null, 'held', 'needs_user', 'gone', 'done']) {
-          assert(seen[phase].paste && !seen[phase].working, `a job in phase ${phase} must show the normal paste UI, not "Working in ChatGPT": ${JSON.stringify(seen[phase])}`);
+          assert(seen[phase].paste && !seen[phase].working, `a job in phase ${phase} must show the normal paste UI, not "Handed to ChatGPT": ${JSON.stringify(seen[phase])}`);
+          assert(seen[phase].chip, `a paste-flow item (${phase}) keeps its handoff-code chip: ${JSON.stringify(seen[phase])}`);
         }
         for (const phase of ['unread', 'awaiting', 'host']) {
           assert(seen[phase].working && !seen[phase].paste, `a job ChatGPT holds (${phase}) shows the working state and no paste UI: ${JSON.stringify(seen[phase])}`);
+          assert(!seen[phase].chip && seen[phase].noPasteWording, `a job ChatGPT holds (${phase}) hides the handoff-code chip and never says "No paste": ${JSON.stringify(seen[phase])}`);
         }
       } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
     },

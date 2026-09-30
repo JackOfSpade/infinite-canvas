@@ -5,6 +5,12 @@ import crypto from 'node:crypto';
 export const LANE_STORE_VERSION = 1;
 export const LANES_FILE_NAME = 'lanes.json';
 export const LINK_META_FILE_NAME = 'link-meta.json';
+export const RETIRED_CHATS_FILE_NAME = 'retired-chats.json';
+// v2: digests are link-free (v1 digests were bound to the link id). A v1 file
+// loads as empty: stale chats then read as unrecognised once, which is harmless.
+export const RETIRED_CHATS_VERSION = 2;
+// Matches CONSTANTS.RETIRED_EPOCHS in constants.js.
+export const MAX_RETIRED_CHATS = 32;
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
@@ -33,6 +39,10 @@ export function lanesPathFor(userDataPath, pathImpl = path) {
 
 export function linkMetaPathFor(userDataPath, pathImpl = path) {
   return lanePathFor(userDataPath, LINK_META_FILE_NAME, pathImpl);
+}
+
+export function retiredChatsPathFor(userDataPath, pathImpl = path) {
+  return lanePathFor(userDataPath, RETIRED_CHATS_FILE_NAME, pathImpl);
 }
 
 function safeRead(filePath, fsImpl) {
@@ -141,6 +151,35 @@ function copyLinkMeta(value) {
   };
 }
 
+// One chat, by digest only. `digest` is sha256 over a domain-separation prefix
+// and the chat key (no link id); it cannot be turned back into the key.
+// `retiredAt` is the last time the entry was stamped (when the chat ended, or
+// while it was live, its last refresh).
+const HEX_DIGEST = /^[a-f0-9]{64}$/;
+
+function copyRetiredChat(value, { strict = true } = {}) {
+  const fields = new Set(['digest', 'retiredAt']);
+  if (!isObject(value) || (strict && !ownKeysAre(value, fields))
+      || typeof value.digest !== 'string' || !HEX_DIGEST.test(value.digest)
+      || !Number.isSafeInteger(value.retiredAt) || value.retiredAt < 0) return null;
+  return { digest: value.digest, retiredAt: value.retiredAt };
+}
+
+// A file that is not exactly what this store wrote is treated as empty: an ended
+// chat forgotten is the safe direction (its key then reads as unrecognised).
+function normalizeRetiredChats(value) {
+  if (!isObject(value) || value.v !== RETIRED_CHATS_VERSION || !Array.isArray(value.chats) || value.chats.length > MAX_RETIRED_CHATS) return [];
+  const seen = new Set();
+  const chats = [];
+  for (const item of value.chats) {
+    const chat = copyRetiredChat(item);
+    if (!chat || seen.has(chat.digest)) return [];
+    seen.add(chat.digest);
+    chats.push(chat);
+  }
+  return chats;
+}
+
 function atomicWrite(filePath, payload, { fsImpl, pathImpl, randomBytes }) {
   const directory = pathImpl.dirname(filePath);
   let descriptor;
@@ -200,8 +239,9 @@ function atomicWrite(filePath, payload, { fsImpl, pathImpl, randomBytes }) {
 }
 
 /**
- * Owns only durable application-lane and tool-surface metadata. It never
- * accepts epochs, chat keys, handoff codes, push hubs, prompts or responses.
+ * Owns only durable application-lane, tool-surface and ended-chat metadata. It
+ * never accepts epochs, plaintext chat keys, handoff codes, push hubs, prompts
+ * or responses. The ended-chat list holds one-way digests (see copyRetiredChat).
  */
 export function createLaneStore({
   userDataPath,
@@ -213,6 +253,10 @@ export function createLaneStore({
   if (typeof userDataPath !== 'string' || userDataPath.length === 0) throw new TypeError('userDataPath is required');
   const lanesPath = lanesPathFor(userDataPath, pathImpl);
   const linkPath = linkMetaPathFor(userDataPath, pathImpl);
+  const retiredPath = retiredChatsPathFor(userDataPath, pathImpl);
+  // The latest list handed to saveRetiredChats, so a load right after a save
+  // (a hard Disable then Enable) sees it before the queued write has landed.
+  let pendingRetired = null;
   let chain = Promise.resolve();
   let lastLinkMeta = copyLinkMeta(safeRead(linkPath, fsImpl));
 
@@ -225,6 +269,29 @@ export function createLaneStore({
   const readLanes = () => normalizeLanes(safeRead(lanesPath, fsImpl));
   const loadLanes = (now = clock()) => readLanes().map(lane => rehydrateLane(lane, now)).filter(Boolean);
   const readLinkMeta = () => copyLinkMeta(safeRead(linkPath, fsImpl));
+
+  const readRetiredChats = () => normalizeRetiredChats(safeRead(retiredPath, fsImpl));
+  const loadRetiredChats = () => (pendingRetired ? pendingRetired.map(chat => ({ ...chat })) : readRetiredChats());
+
+  const saveRetiredChats = chats => {
+    if (!Array.isArray(chats)) return Promise.resolve(false);
+    const list = [];
+    const seen = new Set();
+    for (const candidate of chats) {
+      const chat = copyRetiredChat(candidate, { strict: false });
+      if (!chat || seen.has(chat.digest)) continue;
+      seen.add(chat.digest);
+      list.push(chat);
+    }
+    const persisted = list.slice(-MAX_RETIRED_CHATS);
+    pendingRetired = persisted;
+    return enqueue(() => {
+      if (persisted.length === 0) {
+        try { fsImpl.unlinkSync(retiredPath); return true; } catch (error) { return error?.code === 'ENOENT'; }
+      }
+      return atomicWrite(retiredPath, { v: RETIRED_CHATS_VERSION, chats: persisted }, { fsImpl, pathImpl, randomBytes });
+    });
+  };
 
   const saveLanes = lanes => enqueue(() => {
     if (!Array.isArray(lanes)) return false;
@@ -276,12 +343,15 @@ export function createLaneStore({
   return Object.freeze({
     lanesPath,
     linkPath,
+    retiredPath,
     readLanes,
     loadLanes,
     readLinkMeta,
     saveLanes,
     saveLinkMeta,
     dropLinkMeta,
+    loadRetiredChats,
+    saveRetiredChats,
     flush: () => chain.then(() => true, () => false),
   });
 }

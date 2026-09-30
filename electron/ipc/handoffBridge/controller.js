@@ -37,7 +37,7 @@ const PROBE_STATES = new Set(['unknown', 'ok', 'failing']);
 const PROBE_REASONS = new Set(['wrong-origin', 'unexpected-redirect', 'tunnel-not-serving', 'origin-unreachable', 'ingress-mismatch', 'edge-blocked', 'edge-unreachable', 'dns-not-found', 'hostname-not-public', 'offline', 'timeout', 'too_large', 'refused', 'other']);
 const TUNNEL_EXIT_CODES = new Set(['spawn-failed', 'flag-rejected', 'tunnel-auth-rejected', 'credentials-invalid', 'network-unreachable', 'metrics-port-in-use', 'exited-unrequested', 'exited', 'exited-early', 'unrequested-exit-loop', 'crash-loop', 'hostname-not-public', 'config-rejected', 'owned-elsewhere', 'binary-untrusted', 'binary-not-found', 'binary-changed']);
 const LINK_STATES = new Set(['unlinked', 'pairing', 'linked', 'needs-renewal', 'unknown']);
-const CHAT_STATES = new Set(['none', 'awaiting-first-call', 'working', 'idle', 'full', 'ended']);
+const CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended']);
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
 const APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
 // The closed vocabulary of task names that may reach the renderer. It was
@@ -573,7 +573,7 @@ export function createHandoffBridgeController(options = {}) {
       state: oneOf(rawChat.state, CHAT_STATES, base.chat.state), jobsAssigned: Math.max(0, finite(rawChat.jobsAssigned, 0)),
       jobsCap: Math.max(0, finite(rawChat.jobsCap, config.limits.jobsPerChat)), expiresInMs: finite(rawChat.expiresInMs),
       outstanding: null, servedTwice: bool(rawChat.servedTwice),
-      previous: arrayOf(rawChat.previous, 5).flatMap(item => isObject(item) ? [{ ordinal: Math.max(0, finite(item.ordinal, 0)), endedAt: finite(item.endedAt), reason: oneOf(item.reason, new Set(['replaced', 'queue_empty', 'disabled']), null) }] : []),
+      previous: arrayOf(rawChat.previous, 5).flatMap(item => isObject(item) ? [{ ordinal: Math.max(0, finite(item.ordinal, 0)), endedAt: finite(item.endedAt), reason: oneOf(item.reason, new Set(['replaced', 'link_changed', 'queue_empty', 'disabled']), null) }] : []),
     };
     if (isObject(rawChat.outstanding)) base.chat.outstanding = {
       servedAt: finite(rawChat.outstanding.servedAt), kind: oneOf(rawChat.outstanding.kind, new Set(['application', 'push']), null),
@@ -636,6 +636,9 @@ export function createHandoffBridgeController(options = {}) {
     const answer = await call(fn, null, {
       kind,
       hostname: typeof details.hostname === 'string' ? details.hostname : null,
+      // The configured plugin name (validated at config load), so the restart
+      // sheet tells the person which plugin to pick in ChatGPT.
+      pluginName: typeof config.pluginName === 'string' && config.pluginName ? config.pluginName : null,
       // These names come from the main-owned application adapter.  No renderer
       // label or arbitrary tunnel diagnostic is ever supplied to a native sheet.
       items: arrayOf(details.items, 50).flatMap(item => isObject(item) ? [{
@@ -1087,23 +1090,53 @@ export function createHandoffBridgeController(options = {}) {
     } catch { return servingGeneration(generation) ? { allow: false, status: 'unauthorized', httpStatus: 401 } : gateUnavailable(); }
     if (!servingGeneration(generation)) return gateUnavailable();
     if (!grant || typeof grant !== 'object') return { allow: false, status: 'unauthorized', httpStatus: 401 };
+    // From here the caller's OAuth grant is known. Every refusal carries it so
+    // notePresentedKey can tell the engine that this chat's key was presented.
+    const unavailable = () => ({ ...gateUnavailable(), grant });
     const clock = await tick(generation);
-    if (!servingGeneration(generation) || !clock.success) return gateUnavailable();
+    if (!servingGeneration(generation) || !clock.success) return unavailable();
     try {
       if (rate && await rate({ request: ctx.req ?? ctx.request, source: ctx.source, grant }) === false) {
-        if (!servingGeneration(generation)) return gateUnavailable();
-        pauseForAnomaly('rate_limited'); return { allow: false, status: 'rate_limited', authenticated: true };
+        if (!servingGeneration(generation)) return unavailable();
+        pauseForAnomaly('rate_limited'); return { allow: false, status: 'rate_limited', authenticated: true, grant };
       }
-    } catch { return servingGeneration(generation) ? { allow: false, status: 'rate_limited', authenticated: true } : gateUnavailable(); }
-    if (!servingGeneration(generation)) return gateUnavailable();
-    if (serving === 'paused') return { allow: false, status: 'paused', reason: pauseCause, authenticated: true };
+    } catch { return servingGeneration(generation) ? { allow: false, status: 'rate_limited', authenticated: true, grant } : unavailable(); }
+    if (!servingGeneration(generation)) return unavailable();
+    if (serving === 'paused') return { allow: false, status: 'paused', reason: pauseCause, authenticated: true, grant };
     return { allow: true, grant, generation };
   }
+  // A call the controller turns away, for whatever reason (no canvas window, its
+  // pause, its rate limit, an abort, a serving-generation change), may never
+  // reach the engine's own key check, yet the chat that made it holds the key.
+  // Tell the engine so the starter is not handed to a second chat. The engine
+  // only MATCHES: an unknown key is not counted, paused on or reported. Any
+  // refused call that carried a session is passed on; whether it matches is the
+  // engine's business.
+  function notePresentedKey(ctx, access = {}) {
+    if (typeof ctx.session !== 'string' || !ctx.session) return;
+    void call(engine, 'notePresented', { session: ctx.session, linkId: ctx.linkId, grant: access.grant ?? ctx.grant }).catch(noOp);
+  }
+  // The pairing was replaced or renewed (a new link id). A chat still open under
+  // the old link can never authenticate again, so end it now and refresh the
+  // status: its next call is answered session_ended and the person is led to
+  // start a new chat, instead of that chat being refused as 'unauthorized' with
+  // nothing saying why. Never throws; a fake or older engine without the method
+  // is a no-op.
+  function onLinkChanged(event) {
+    const linkId = event?.linkId;
+    if (typeof linkId !== 'string' || !linkId) return false;
+    const activeEngine = engine;
+    void call(activeEngine, 'noteLink', linkId).then(retired => {
+      if (retired === true && activeEngine === engine) change();
+    }).catch(noOp);
+    return true;
+  }
   async function get(ctx = {}) {
-    if (ctx.signal?.aborted) return { status: 'retry' };
+    if (ctx.signal?.aborted) { notePresentedKey(ctx); return { status: 'retry' }; }
     const startedAt = safeNow(now);
     const access = await gate(ctx);
     if (!access.allow) {
+      notePresentedKey(ctx, access);
       // Source rejection happens before authentication and stays counters-only.
       // Rate/pause responses below authentication are controlled credential
       // events, so they may be represented by a closed tool_call record.
@@ -1111,11 +1144,13 @@ export function createHandoffBridgeController(options = {}) {
       return { status: access.status, ...(access.reason ? { reason: access.reason } : {}) };
     }
     if (ctx.signal?.aborted) {
+      notePresentedKey(ctx, access);
       const result = { status: 'retry' };
       recordToolOutcome('get', result, startedAt);
       return result;
     }
     if (!servingGeneration(access.generation)) {
+      notePresentedKey(ctx, access);
       const result = { status: 'app_unavailable' };
       recordToolOutcome('get', result, startedAt);
       return result;
@@ -1160,10 +1195,12 @@ export function createHandoffBridgeController(options = {}) {
     const startedAt = safeNow(now);
     const access = await gate(ctx);
     if (!access.allow) {
+      notePresentedKey(ctx, access);
       if (access.authenticated === true) recordToolOutcome('submit', { status: access.status }, startedAt);
       return { status: access.status, ...(access.reason ? { reason: access.reason } : {}) };
     }
     if (!servingGeneration(access.generation)) {
+      notePresentedKey(ctx, access);
       const result = { status: 'app_unavailable' };
       recordToolOutcome('submit', result, startedAt);
       return result;
@@ -1452,7 +1489,7 @@ export function createHandoffBridgeController(options = {}) {
       while (preparedChats.size > 4) preparedChats.delete(preparedChats.keys().next().value);
       // This result is consumed only by main-side ui.js for the clipboard write.
       // ui.js must return only copied/chatOrdinal to Electron's renderer IPC.
-      return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal, commitToken };
+      return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal, commitToken, ...(prepared.recopied === true ? { recopied: true } : {}) };
     } catch { return { copied: false, status: 'app_unavailable' }; }
   }
   async function commitChat(token) {
@@ -1581,7 +1618,7 @@ export function createHandoffBridgeController(options = {}) {
     enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, onBundleDiscarded, releasePushHubs, unreleasePushHub,
     newChat: args => chat('new', args), continueChat: args => chat('continue', args),
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
-    holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, reloadConfig, ackAlarm,
+    holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, onLinkChanged, reloadConfig, ackAlarm,
   });
 }
 

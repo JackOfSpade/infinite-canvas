@@ -3,7 +3,7 @@ export const CREDENTIAL_LOG_CODES = Object.freeze([
   'link_revoked', 'refresh_reuse', 'code_reuse', 'pause', 'resume', 'pairing_opened',
   'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
   'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed', 'epoch_closed',
-  'release', 'unrelease', 'new_chat', 'continue', 'source_mismatch',
+  'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
 ]);
 
 const FIELD_VALUE = /^[a-z0-9_.:-]{1,40}$/;
@@ -63,6 +63,7 @@ export const LOG_FIELDS_BY_CODE = Object.freeze({
   release: Object.freeze(['kind', 'count']),
   unrelease: Object.freeze(['kind', 'count', 'cause']),
   new_chat: Object.freeze(['chatOrdinal']),
+  starter_recopied: Object.freeze(['chatOrdinal']),
   continue: Object.freeze(['chatOrdinal']),
   source_mismatch: Object.freeze(['clientKind', 'source']),
 });

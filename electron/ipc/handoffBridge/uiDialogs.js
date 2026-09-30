@@ -1,6 +1,12 @@
 import electronPkg from 'electron';
 
 const MAX_CONFIRM_TEXT = 60;
+// The configured ChatGPT plugin name, as the controller passes it from config.
+// Same shape rule as isValidPluginName in src/utils/handoffBridgeConfig.js (this
+// module may import only siblings and electron), and the same fallback wording
+// as bridgePluginRef in the renderer copy.
+const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
+const pluginRef = value => (typeof value === 'string' && PLUGIN_NAME_PATTERN.test(value) ? value : 'the Infinite Canvas plugin');
 const fallbackHostname = value => typeof value === 'string'
   && value.length <= 253 && value === value.toLowerCase() && !value.endsWith('.')
   && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){2,}$/.test(value);
@@ -62,7 +68,7 @@ export function createHandoffBridgeDialogs({
       enable: { title: 'Turn on ChatGPT bridge', message: 'Allow ChatGPT to fetch released handoffs?', detail: '' },
       disable: { title: 'Turn off ChatGPT bridge', message: 'Stop serving released work to ChatGPT?', detail: 'This ends active bridge chats. You can turn the bridge on again later.' },
       linkBreak: { title: 'Change bridge address', message: 'Use this address and reconnect ChatGPT?', detail: '' },
-      restart: { title: 'Start a new ChatGPT chat', message: 'Make these released jobs available to it?', detail: '' },
+      restart: { title: 'Copy a starter for a new ChatGPT chat', message: 'Make these released jobs available to it?', detail: '' },
       resume: { title: 'Resume bridge serving', message: 'Let ChatGPT receive released work again?', detail: 'Released work can be served again.' },
       release: { title: 'Release work to ChatGPT', message: 'Share the selected jobs with ChatGPT?', detail: '' },
       releasePush: { title: 'Release scoring work', message: 'Let ChatGPT handle selected scoring work?', detail: 'ChatGPT can receive the selected scoring work.' },
@@ -126,6 +132,7 @@ export function createHandoffBridgeDialogs({
         count ? `${count} released ${count === 1 ? 'job' : 'jobs'} will be available to the new chat.` : '',
         names.join('\n'),
         'Chats from before the restart have ended.',
+        `Next: paste it into a new ChatGPT chat with ${pluginRef(details.pluginName)} selected.`,
       ].filter(Boolean).join('\n');
     }
     if (kind === 'resume' && details.reason === 'anomaly') {
@@ -151,7 +158,7 @@ export function createHandoffBridgeDialogs({
     busy = true;
     try {
       const affirmative = {
-        enable: 'Turn on', disable: 'Turn off', linkBreak: 'Change address', restart: 'Start new chat', resume: 'Resume',
+        enable: 'Turn on', disable: 'Turn off', linkBreak: 'Change address', restart: 'Copy starter', resume: 'Resume',
         release: 'Release', releasePush: 'Release', forget: 'Forget setup', binaryApproval: 'Approve', scoring: 'Add scoring', marketplace: 'Add marketplace',
         autoStart: 'Turn on at launch', autoRelease: 'Release automatically', sourcePolicy: 'Reduce checks', limits: 'Increase limit', networkCheck: 'Turn off check',
       };

@@ -762,7 +762,11 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       // gate and a valid local transaction. Keep its logger facts closed.
       recordClosedBridgeEvent(bridgeLog, 'consent_requested', { clientKind: LOG_CLIENT_KINDS.has(value?.clientKind) ? value.clientKind : 'unknown' });
       return pairing?.onConsentRequested?.(value);
-    }, onLinked: value => pairing?.onLinked?.(value), onDisconnected: value => pairing?.onDisconnected?.(value),
+    }, onLinked: value => {
+      pairing?.onLinked?.(value);
+      // A new link id: a chat still open under the previous link is ended now.
+      try { controller?.onLinkChanged?.(value); } catch { /* the next call retires it too */ }
+    }, onDisconnected: value => pairing?.onDisconnected?.(value),
     onAuthorizeWithoutWindow: value => {
       // This is deliberately a one-way, status-only reconnect seam. Pairing
       // applies its fresh-own-egress/renewal/rate gates and never opens a
@@ -1049,6 +1053,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       fault: inner.fault ?? status.fault ?? null,
       queue: inner.queue?.applications,
       chat: inner.chat,
+      keys: inner.keys,
       lanes: inner.queue?.jobs,
       counts: inner.counts,
     };

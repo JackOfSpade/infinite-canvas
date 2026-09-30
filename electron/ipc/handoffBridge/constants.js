@@ -93,7 +93,10 @@ export const CONSTANTS = Object.freeze({
   EPOCH_SOFT_BYTES: 500_000,
   EPOCH_HARD_BYTES: 900_000,
   STALL_NOTICE_MS: 5 * 60_000,
-  RETIRED_EPOCHS: 3,
+  // Ended chats remembered by digest (in memory, and persisted as retired-chats.json
+  // so a chat from before a restart still reads as ended). Matches MAX_RETIRED_CHATS
+  // in laneStore.js.
+  RETIRED_EPOCHS: 32,
   CHAT_KEY_LENGTH_CHARS: 26,
   CHAT_KEY_ALPHABET: '23456789ABCDEFGHJKLMNPQRSTUVWXYZ',
   CLIPBOARD_CLEAR_MS: 120_000,

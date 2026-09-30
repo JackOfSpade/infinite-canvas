@@ -2145,6 +2145,8 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
     queueMarkdown = `
 - Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
 - Queue: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/10 · this chat holds ${queue.chat.jobsAssigned}/${queue.chat.jobsCap} (chat \`${queue.chat.state}\`)
+- Unrecognised chat keys: ${queue.keys.unrecognisedRecent} in the last ${queue.keys.unrecognisedWindowMinutes} min (last at ${queue.keys.lastUnrecognisedAt === null ? 'none recorded' : new Date(queue.keys.lastUnrecognisedAt).toISOString()})
+- Ended-chat keys: ${queue.keys.ended}
 - Lane lifecycle counters: release calls ${queue.counts.releaseCalls} (added nothing: ${queue.counts.releaseNoops}) · Unrelease ${queue.counts.unreleaseCalls} · lanes dropped by the app ${queue.counts.lanesDropped} (discard event ${queue.counts.droppedDiscarded} · prune event ${queue.counts.droppedPruned} · status probe found the bundle gone ${queue.counts.droppedMissing} · status probe reported it saved ${queue.counts.droppedSaved})${laneRows ? `\n${laneRows}` : '\n  - (no lanes)'}`;
   }
   let failedStartMarkdown = '';

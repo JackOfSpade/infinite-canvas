@@ -8,6 +8,8 @@ import { EventLogger } from '../utils/EventLogger';
 // below for the one thing this dock does with it.
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { BridgeProgress } from './BridgeProgress';
+// The bridge-held rule is shared with the job card so the two cannot disagree.
+import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
@@ -16,9 +18,6 @@ import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals,
 // answer that. See applicationHandoffDock.js's doc comment for the shared
 // dock contract this file adapts application handoffs into.
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
-
-// Bridge lane phases in which ChatGPT holds the work (see isBridgeHeldApplication).
-const BRIDGE_WORKING_PHASES = new Set(['unread', 'awaiting', 'host']);
 
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
@@ -424,10 +423,7 @@ export function NonApiAiDialog() {
   // or malformed (bridge disabled, preload still connecting, or an older
   // main process): Array.isArray guards the .some() below, and optional
   // chaining guards every step reaching it.
-  const isBridgeHeldApplication = isApplicationRequest
-    && typeof activeRequest?.jobId === 'string' && activeRequest.jobId.length > 0
-    && Array.isArray(bridgeStatus?.queue?.jobs)
-    && bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId && BRIDGE_WORKING_PHASES.has(job?.phase));
+  const isBridgeHeldApplication = isApplicationRequest && isBridgeHeldJob(bridgeStatus, activeRequest?.jobId);
   // The same fault, whichever way it reached the dock: caught by submit(), or
   // read by a routine discovery pass that published a prompt-less item.
   const brokenApplicationMessage = isApplicationRequest && activeRequestId
@@ -1577,9 +1573,9 @@ export function NonApiAiDialog() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 id="non-api-ai-dialog-title" className="text-sm font-semibold text-white">
-                  Non-API AI handoff
+                  AI handoffs
                 </h2>
-                {activeRequest?.handoffCode && (
+                {activeRequest?.handoffCode && !isBridgeHeldApplication && (
                   <span className="inline-flex rounded border border-violet-400/30 bg-violet-500/15 px-2 py-0.5 font-mono text-xs font-semibold tracking-wider text-violet-200">
                     {activeRequest.handoffCode}
                   </span>
@@ -1797,10 +1793,10 @@ export function NonApiAiDialog() {
             >
               <div className="min-w-0 flex-1">
                 <div className="truncate font-semibold text-white">
-                  Working in ChatGPT
+                  Handed to ChatGPT
                 </div>
                 <div className="mt-1 text-violet-100/75">
-                  This application is handed to your ChatGPT bridge. No paste is needed here — Discard bundle is still available if you want to take it back.
+                  This application goes through the ChatGPT bridge. Its progress is below; Discard bundle takes it back.
                 </div>
               </div>
               <button

@@ -5,6 +5,8 @@ import nodePath from 'node:path';
 import { assert } from './testHelpers.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffBridgeController } from '../../electron/ipc/handoffBridge/controller.js';
+import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
+import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { createOAuthServer } from '../../electron/ipc/handoffBridge/oauth.js';
 import { createPairingOrchestrator, ownEgressMatches } from '../../electron/ipc/handoffBridge/pairing.js';
 import { PROBE_MAX_BYTES, createProbeAuthenticator, probeOwnEgress, publicProbe, socketPublicProbe } from '../../electron/ipc/handoffBridge/egressProbe.js';
@@ -67,6 +69,38 @@ function controllerHarness(overrides = {}) {
     oauth: { linkStatus: () => [], pairingStatus: () => ({}), async revokeAll() { return { ok: true }; }, async closePairing() { return { ok: true }; }, async flush() { return { ok: true }; } }, ...overrides,
   });
   return { controller, engine, timers, auditLines, notifications, setNow: value => { stamp = value; }, now: currentNow };
+}
+
+// The renderer's health line for a controller snapshot whose setup is complete.
+const healthOf = (snapshot, now) => deriveBridgeHealth({
+  availability: { ok: true }, enabled: true, setup: { binaryApproved: true, credentialsOk: true, hostnameOk: true, linked: true },
+  alarms: snapshot.alarms, paused: snapshot.paused, pauseCause: snapshot.pauseCause, chat: snapshot.chat,
+  queue: { applications: {} }, limits: snapshot.limits, tunnel: {}, link: {},
+}, now);
+
+// A real engine behind the real controller, on one shared clock. The engine
+// reports nothing to the controller: an unrecognised chat key is not a security
+// event (see the engine's authenticate()).
+function realEngineHarness(overrides = {}) {
+  let stamp = 1_000_000; let counter = 0; let windowOpen = true;
+  const now = () => stamp;
+  const engine = createHandoffEngine({
+    source: { read: async () => ({ kind: 'open', handoff: null }), status: async () => ({ kind: 'host' }), submit: async () => ({ kind: 'accepted', completed: true }) },
+    now, holdMs: 0, random: () => Buffer.alloc(26, (counter += 1)),
+  });
+  const h = controllerHarness({ engine, now, restartConfirmed: true, windows: { getCanvasWindows: () => (windowOpen ? [{ webContents: { id: 7 } }] : []) }, ...overrides });
+  const LINK_ID = 'link-controls';
+  const grant = { linkId: LINK_ID };
+  const press = async (kind = 'new') => {
+    const prepared = await h.controller.prepareChat({ kind, linkId: LINK_ID });
+    if (prepared.copied === true) assert((await h.controller.commitChat(prepared.commitToken)).success === true, 'the press commits');
+    return prepared;
+  };
+  const call = session => h.controller.get({ session, linkId: LINK_ID, grant, sourceAllowed: true });
+  // The production shape: mcp.js calls port.get({ ...args, grant, signal }) with
+  // the session inside args and NO linkId, so the link comes from the grant.
+  const callAsMcp = (session, extra = {}) => h.controller.get({ session, grant, ...extra });
+  return { ...h, engine, press, call, callAsMcp, grant, setWindowOpen: value => { windowOpen = value; }, advance: ms => { stamp += ms; }, LINK_ID };
 }
 
 function lifecycleHarness(overrides = {}) {
@@ -1677,6 +1711,184 @@ export default [
     await h.controller.pause('anomaly');
     const blocked = await h.controller.prepareChat({ kind: 'continue' });
     assert(blocked.status === 'paused' && blocked.reason === 'anomaly' && engine.calls.get === 0, 'anomaly pause cannot be bypassed by chat preparation');
+  } },
+  { name: 'handoff bridge: controls: twenty unrecognised chat keys raise no alarm, no notification and no pause, the next valid call is served, and the re-copy still works', async run() {
+    const h = realEngineHarness(); await h.controller.enable();
+    const first = await h.press();
+    for (let index = 0; index < 20; index += 1) assert((await h.call('STALE-CHAT-KEY')).status === 'unauthorized', 'an unrecognised key is refused');
+    const status = h.controller.snapshot(false);
+    assert(status.serving === 'live' && status.paused === false && status.pauseCause === null && h.engine.snapshot().paused === false, 'nothing is paused');
+    assert(status.alarms.length === 0 && h.notifications.length === 0, `no alarm and no OS notification: ${JSON.stringify(status.alarms)} ${JSON.stringify(h.notifications)}`);
+    assert(h.engine.snapshot().keys.unrecognisedRecent === 20, 'the engine still counts them for the report');
+    const again = await h.press();
+    assert(again.recopied === true && again.sessionCode === first.sessionCode && again.chatOrdinal === 1, 'Copy starter still re-copies the uncalled chat: the controller does not refuse it');
+    const served = await h.call(first.sessionCode);
+    assert(!['unauthorized', 'session_ended', 'paused', 'app_unavailable'].includes(served.status), `the next valid call is served (got ${served.status})`);
+    assert(h.controller.snapshot(false).serving === 'live' && h.controller.snapshot(false).alarms.length === 0, 'and the bridge stays live and quiet');
+  } },
+  { name: 'handoff bridge: controls: a relink event ends the live chat: session_ended (not unauthorized), no chat in status, no alarm or pause, and a new chat starts under the new link', async run() {
+    const h = realEngineHarness(); await h.controller.enable();
+    await h.engine.release({ jobs: [{ jobId: '11111111-1111-4111-8111-111111111111', canvasFilePath: '/tmp/relink.canvas' }] });
+    const first = await h.press();
+    assert(!['unauthorized', 'session_ended'].includes((await h.call(first.sessionCode)).status) && h.controller.snapshot(false).chat.state !== 'none', 'the chat is live and serving under the first link');
+    h.timers.fireAll();
+    let changes = 0; const unsubscribe = h.controller.subscribe(() => { changes += 1; });
+    for (const bad of [undefined, null, {}, { linkId: '' }, { linkId: 7 }]) assert(h.controller.onLinkChanged(bad) === false, 'a malformed event is ignored');
+    assert(h.controller.onLinkChanged({ linkId: h.LINK_ID }) === true, 'the same link is accepted');
+    await settle(); await settle();
+    h.timers.fireAll();
+    assert(h.controller.snapshot(false).chat.state !== 'none', 'the same link leaves the chat');
+    const before = changes;
+    assert(h.controller.onLinkChanged({ linkId: 'link-relinked' }) === true, 'the relink event is accepted');
+    await settle(); await settle();
+    const status = h.controller.snapshot(false);
+    h.timers.fireAll();
+    assert(status.chat.state === 'none' && changes > before, `the chat is gone from status and subscribers were told: ${JSON.stringify(status.chat)} ${changes} ${before}`);
+    assert(status.chat.previous.some(item => item.reason === 'link_changed'), 'the closed chat is listed as link_changed');
+    assert(status.serving === 'live' && status.paused === false && status.alarms.length === 0 && h.notifications.length === 0, 'nothing is paused and nobody is alarmed');
+    const relinkedGrant = { linkId: 'link-relinked' };
+    for (const [link, grant] of [[h.LINK_ID, h.grant], ['link-relinked', relinkedGrant]]) {
+      assert((await h.controller.get({ session: first.sessionCode, linkId: link, grant, sourceAllowed: true })).status === 'session_ended', `the old chat is told it ended under ${link}`);
+    }
+    assert(h.engine.snapshot().keys.unrecognisedRecent === 0 && h.engine.snapshot().counts.getUnauthorized === 0, 'and it is never counted as unrecognised');
+    const prepared = await h.controller.prepareChat({ kind: 'new', linkId: 'link-relinked' });
+    assert(prepared.copied === true && (await h.controller.commitChat(prepared.commitToken)).success === true, 'Copy chat starter works under the new link');
+    assert(!['unauthorized', 'session_ended'].includes((await h.controller.get({ session: prepared.sessionCode, linkId: 'link-relinked', grant: relinkedGrant, sourceAllowed: true })).status), 'the new chat serves');
+    unsubscribe();
+    // An engine without the method (an older fake) makes the event a no-op that never throws.
+    const bare = controllerHarness(); await bare.controller.enable();
+    assert(bare.controller.onLinkChanged({ linkId: 'link-x' }) === true, 'a fake engine without noteLink ignores the event');
+    await settle();
+  } },
+  { name: 'handoff bridge: controls: composition relays the OAuth link-created event (onLinked) to the controller as a link change', async run() {
+    const source = nodeFs.readFileSync(new URL('../../electron/ipc/handoffBridge/index.js', import.meta.url), 'utf8');
+    assert(/onLinked:\s*value\s*=>\s*\{[^}]*pairing\?\.onLinked\?\.\(value\)[^}]*controller\?\.onLinkChanged\?\.\(value\)/.test(source), 'index.js must call controller.onLinkChanged from the OAuth onLinked callback');
+    const oauth = nodeFs.readFileSync(new URL('../../electron/ipc/handoffBridge/oauth.js', import.meta.url), 'utf8');
+    assert(/safeCall\(onLinked, \{ linkId: family\.linkId,/.test(oauth), 'the OAuth server hands onLinked the new link id, which is what the controller relays');
+  } },
+  { name: 'handoff bridge: controls: the controller anomaly window still pauses on five authenticated unknown_key events sent to it directly', async run() {
+    const h = realEngineHarness(); await h.controller.enable(); await h.press();
+    for (let index = 0; index < 5; index += 1) h.controller.onSecurityEvent({ authenticated: true, kind: 'unknown_key' });
+    assert(h.controller.snapshot(false).pauseCause === 'anomaly', 'the controller policy for OAuth-origin events is unchanged');
+  } },
+  { name: 'handoff bridge: controls: a copy press while only the engine is paused rotates and clears the engine pause', async run() {
+    const h = realEngineHarness(); await h.controller.enable();
+    const first = await h.press();
+    h.engine.pause('user');
+    assert(h.engine.snapshot().paused === true && h.controller.snapshot(false).serving === 'live', 'only the engine is paused');
+    const second = await h.press();
+    assert(second.recopied !== true && second.chatOrdinal === 2 && second.sessionCode !== first.sessionCode, 'the press rotates');
+    assert(h.engine.snapshot().paused === false, 'and the rotation clears the engine pause');
+  } },
+  { name: 'handoff bridge: controls: a valid key turned away by the controller idle pause counts as presented, so the next press rotates and asks for confirmation', async run() {
+    const h = realEngineHarness(); await h.controller.enable();
+    const first = await h.press();
+    h.advance(25 * 3_600_000);
+    const refused = await h.call(first.sessionCode);
+    assert(refused.status === 'paused' && refused.reason === 'idle', 'the controller idle pause turns the chat away before the engine sees it');
+    const chat = h.controller.snapshot(false).chat;
+    assert(chat.state === 'reached' && chat.calls === 0 && Number.isFinite(chat.lastCallAt), 'status reports the chat as reached with a recent last call, not awaiting-first-call');
+    assert(healthOf({ ...h.controller.snapshot(false), paused: false, pauseCause: null }, chat.lastCallAt + 1000).id === 'reached', 'the health line says the chat has connected');
+    const next = await h.press();
+    assert(next.recopied !== true && next.chatOrdinal === 2 && next.sessionCode !== first.sessionCode, 'the press rotates to a new chat');
+    assert((await h.call(first.sessionCode)).status === 'session_ended', 'the chat that held the key is retired');
+  } },
+  { name: 'handoff bridge: controls: a valid key turned away by the rate limit counts as presented, so the next press rotates', async run() {
+    let limited = false;
+    const h = realEngineHarness({ rate: async () => !limited }); await h.controller.enable();
+    const first = await h.press();
+    limited = true;
+    assert((await h.call(first.sessionCode)).status === 'rate_limited', 'the rate limit turns the chat away');
+    assert(h.controller.snapshot(false).chat.state === 'reached', 'the key was presented');
+    limited = false;
+    const next = await h.press();
+    assert(next.recopied !== true && next.chatOrdinal === 2 && next.sessionCode !== first.sessionCode, 'the press rotates');
+  } },
+  { name: 'handoff bridge: controls: in the production shape (grant only, no linkId) every controller refusal of a call that carried the chat key marks it presented', async run() {
+    const refusals = [
+      ['no canvas window (app_unavailable)', 'app_unavailable', async h => { h.setWindowOpen(false); }],
+      ['idle pause', 'paused', async h => { h.advance(25 * 3_600_000); }],
+      ['user pause', 'paused', async h => { await h.controller.pause('user'); }],
+      ['rate limit', 'rate_limited', async h => { h.limit(true); }],
+    ];
+    for (const [label, status, arrange] of refusals) {
+      let limited = false;
+      const h = realEngineHarness({ rate: async () => !limited }); h.limit = value => { limited = value; };
+      await h.controller.enable();
+      const first = await h.press();
+      await arrange(h);
+      const refused = await h.callAsMcp(first.sessionCode);
+      assert(refused.status === status, `${label}: expected ${status}, got ${refused.status}`);
+      assert(h.controller.snapshot(false).chat.state === 'reached', `${label}: the refused call still counts as the chat reaching the bridge`);
+      h.setWindowOpen(true); limited = false; await h.controller.resume();
+      const next = await h.press();
+      assert(next.recopied !== true && next.chatOrdinal === 2 && next.sessionCode !== first.sessionCode, `${label}: the next press rotates instead of handing the key to a second chat`);
+    }
+    // submit takes the same refusal path.
+    const h = realEngineHarness(); await h.controller.enable();
+    const first = await h.press();
+    await h.controller.pause('user');
+    assert((await h.controller.submit({ session: first.sessionCode, grant: h.grant, handoffCode: 'X', response: '{}' })).status === 'paused', 'a paused submit is refused');
+    assert(h.controller.snapshot(false).chat.state === 'reached', 'a refused submit presents the key too');
+    // A wrong key in the same shape presents nothing.
+    const other = realEngineHarness(); await other.controller.enable(); await other.press();
+    other.setWindowOpen(false);
+    assert((await other.callAsMcp('WRONG-KEY')).status === 'app_unavailable' && other.controller.snapshot(false).chat.state === 'awaiting-first-call', 'a wrong key is never a presentation');
+  } },
+  { name: 'handoff bridge: controls: an aborted call that carried the chat key marks it presented, before and after the gate', async run() {
+    const h = realEngineHarness(); await h.controller.enable();
+    const first = await h.press();
+    assert((await h.callAsMcp(first.sessionCode, { signal: { aborted: true } })).status === 'retry', 'a call aborted before the gate is a retry');
+    assert(h.controller.snapshot(false).chat.state === 'reached', 'and it still presented the key');
+    let aborted = false; const signal = { get aborted() { return aborted; } };
+    const late = realEngineHarness({ rate: async () => { aborted = true; return true; } }); await late.controller.enable();
+    const chat = await late.press();
+    assert((await late.callAsMcp(chat.sessionCode, { signal })).status === 'retry', 'a call aborted while the gate ran is a retry');
+    assert(late.controller.snapshot(false).chat.state === 'reached', 'and it presented the key too');
+  } },
+  { name: 'handoff bridge: controls: the grant the controller authenticated itself is what the refusal hands the engine (fails if a refusal drops grant)', async run() {
+    // No ctx.grant and no ctx.linkId: only the grant returned by oauth.authenticate
+    // inside gate() can bind the key to its link, so this fails if any refusal
+    // return drops `grant`.
+    const LINK_ID = 'link-controls'; let limited = false;
+    const oauth = { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => ({ linkId: LINK_ID }), async revokeAll() { return { ok: true }; }, async closePairing() { return { ok: true }; }, async flush() { return { ok: true }; } };
+    for (const [label, status, arrange] of [
+      ['user pause', 'paused', async h => { await h.controller.pause('user'); }],
+      ['rate limit', 'rate_limited', async () => { limited = true; }],
+    ]) {
+      limited = false;
+      const h = realEngineHarness({ oauth, rate: async () => !limited }); await h.controller.enable();
+      const first = await h.press();
+      await arrange(h);
+      const refused = await h.controller.get({ session: first.sessionCode });
+      assert(refused.status === status, `${label}: expected ${status}, got ${refused.status}`);
+      assert(h.controller.snapshot(false).chat.state === 'reached', `${label}: the grant reached the engine, so the key matched and was marked presented`);
+    }
+  } },
+  { name: 'handoff bridge: controls: a wrong key turned away by the rate limit is not a presentation', async run() {
+    let limited = false;
+    const h = realEngineHarness({ rate: async () => !limited }); await h.controller.enable();
+    const first = await h.press();
+    limited = true;
+    await h.call('WRONG-KEY');
+    limited = false;
+    assert(h.controller.snapshot(false).chat.state === 'awaiting-first-call', 'a wrong key never marks the chat reached');
+    const again = await h.press();
+    assert(again.recopied === true && again.sessionCode === first.sessionCode, 'so the unused starter is still re-copied');
+  } },
+  { name: 'handoff bridge: controls: a re-copied starter keeps its capability and the recopied flag through the controller, and commits without a second confirmation', async run() {
+    let confirms = 0; let commits = 0;
+    const engine = enginePort({
+      async prepareChat() { return { copied: true, recopied: true, sessionCode: 'SYNTHETIC', chatOrdinal: 4, commit: () => { commits++; return true; } }; },
+    });
+    const h = controllerHarness({ engine, restartConfirmed: true, ui: { confirmEnable: async () => ({ response: 1 }), confirmRestart: async () => { confirms++; return { response: 1 }; }, notify() {} } });
+    await h.controller.enable();
+    const prepared = await h.controller.prepareChat({ kind: 'new' });
+    assert(prepared.copied === true && prepared.recopied === true && prepared.chatOrdinal === 4 && typeof prepared.commitToken === 'string', 'the controller forwards the engine decision');
+    assert((await h.controller.commitChat(prepared.commitToken)).success === true && commits === 1 && confirms === 0, 'the one-shot commit runs the re-copy commit with no restart sheet');
+    assert(!Object.keys(h.controller.snapshot(false).chat || {}).some(name => /key|starter|session/i.test(name)), 'status exposes no starter field');
+    const compat = await h.controller.newChat({});
+    assert(compat.copied === true && !('sessionCode' in compat), 'the compatibility path never leaks the session code');
   } },
   { name: 'handoff bridge: controls: alert source policy audits without rejecting and push keys remain controller-gated', async run() {
     const keys = [];

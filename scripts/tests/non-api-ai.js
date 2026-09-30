@@ -160,7 +160,7 @@ export default [
         && selectorSource.includes("isWorking ? 'action in progress' : null")
         && selectorSource.includes('<span>{selectorLabel}</span>')
         && !selectorSource.includes('handoffCode')
-        && dialogSource.includes('{activeRequest?.handoffCode && (')
+        && dialogSource.includes('{activeRequest?.handoffCode && !isBridgeHeldApplication && (')
         && dialogSource.includes('{activeRequest.handoffCode}')
         && dialogSource.includes('selectedRequestId')
         && dialogSource.includes('Pending AI handoff batches')

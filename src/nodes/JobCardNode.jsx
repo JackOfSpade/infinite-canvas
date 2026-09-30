@@ -26,6 +26,8 @@ import {
   requestApplicationHandoffFocus,
   requestApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
+import { useBridgeHeldKey } from '../hooks/useBridgeHeldKey';
+import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
 
 // Accent color encodes the hiring-fit band: a compact evidence-based assessment
 // of full-process fit, not a guaranteed hiring outcome.
@@ -397,6 +399,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
   const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
+  // Whether the ChatGPT bridge holds this card's application (the dock's own
+  // rule, see bridgeHeldApplication.js). A primitive-snapshot subscription to
+  // the shared status store: no IPC, and this card re-renders only when its own
+  // held state changes.
+  const bridgeHeldKey = useBridgeHeldKey(localApplication?.id);
+  const isPasteApplication = localApplication?.mode === 'paste' || localApplication?.transport === 'paste';
+  const bridgeHeldLine = localApplication
+    ? bridgeHeldCardLine(bridgeHeldKey, { pasteTransport: isPasteApplication, awaitingPaste: applicationAwaitsPaste(localApplication.status) })
+    : null;
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(data.salary, data.location),
     [data.salary, data.location]
@@ -1392,13 +1403,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
-                {localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
+                {bridgeHeldLine ? bridgeHeldLine.title : localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued'
+              <div className="mt-0.5 text-white/35">{bridgeHeldLine ? bridgeHeldLine.detail : localApplication.message || (localApplication.status === 'queued'
                 ? (localApplication.mode === 'paste' || localApplication.transport === 'paste'
                   ? 'Open the AI handoff, copy its self-contained prompt into your local AI chat, and paste back the requested JSON. Review prompts ask the AI to make edits in that same response; the app reviews again afterwards.'
                   : 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.')
@@ -1410,7 +1421,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               onClick={(e) => { e.stopPropagation(); requestApplicationHandoffFocus(localApplication.id); }}
               className="mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"
             >
-              Continue AI handoff
+              {bridgeHeldLine ? bridgeHeldLine.openLabel : 'Continue AI handoff'}
             </button>
           )}
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && !['saved', 'failed'].includes(localApplication.status) && (
@@ -1488,14 +1499,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
           title={localJobPending
-            ? 'A Local AI job is waiting for the local-agent routine or is being imported.'
+            ? bridgeHeldLine ? bridgeHeldLine.pendingTitle : 'A Local AI job is waiting for the local-agent routine or is being imported.'
             : displayedApplicationRun.state === 'queued'
             ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
             : 'Copy app-provided prompts into your local AI chat and paste back structured JSON. Infinite Canvas validates, renders, reviews, and saves the tailored application bundle next to your canvas'}
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
           {localJobPending
-            ? localApplication.status === 'importing' ? 'Importing…' : 'Local AI queued'
+            ? localApplication.status === 'importing' ? 'Importing…' : bridgeHeldLine ? bridgeHeldLine.pendingLabel : 'Local AI queued'
             : displayedApplicationRun.state === 'queued'
             ? `Queued · #${displayedApplicationRun.position}`
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}

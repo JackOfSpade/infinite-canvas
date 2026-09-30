@@ -22,7 +22,7 @@ import {
   describeChat,
   describeJobRow,
 } from '../utils/handoffBridgeView';
-import { BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
+import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import {
   getApplicationHandoffs,
   requestApplicationHandoffFocus,
@@ -52,7 +52,12 @@ function safeResult(result) {
   try {
     if (!result || typeof result !== 'object') return { success: true, items: [] };
     if (result.success === false) return { success: false, code: typeof result.code === 'string' ? result.code : 'INTERNAL', items: [] };
-    return { success: true, items: Array.isArray(result.items) ? result.items : [] };
+    return {
+      success: true,
+      items: Array.isArray(result.items) ? result.items : [],
+      recopied: result.recopied === true,
+      chatOrdinal: Number.isInteger(result.chatOrdinal) ? result.chatOrdinal : 0,
+    };
   } catch {
     return { success: false, code: 'INTERNAL', items: [] };
   }
@@ -176,13 +181,17 @@ export function HandoffBridgePanel() {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  const pluginName = status.config?.pluginName;
   const call = useCallback(async (method, payload) => {
     const result = await invoke(bridgeApi(), method, payload);
     if (mountedRef.current) {
-      setNotice(result?.success === false ? ipcErrorMessage(result.code) : BRIDGE_UI_COPY.done);
+      if (result?.success === false) setNotice(ipcErrorMessage(result.code));
+      else if (method === 'handoffBridgeNewChat' && result?.recopied && result.chatOrdinal > 0) {
+        setNotice(BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName));
+      } else setNotice(BRIDGE_UI_COPY.done);
     }
     return result;
-  }, []);
+  }, [pluginName]);
 
   const health = deriveBridgeHealth(status, now);
   const chat = describeChat(status.chat, now);
@@ -203,9 +212,9 @@ export function HandoffBridgePanel() {
     const age = status.chat.lastCallAt && referenceNow >= status.chat.lastCallAt
       ? referenceNow - status.chat.lastCallAt
       : Infinity;
-    if (status.chat.ordinal && age < 120000) setConfirm('new');
+    if (status.chat.ordinal && status.chat.state !== 'awaiting-first-call' && age < 120000) setConfirm('new');
     else void call('handoffBridgeNewChat');
-  }, [call, now, status.at, status.chat.lastCallAt, status.chat.ordinal]);
+  }, [call, now, status.at, status.chat.lastCallAt, status.chat.ordinal, status.chat.state]);
 
   const runHealthAction = useCallback(id => {
     if (id === 'setup') {

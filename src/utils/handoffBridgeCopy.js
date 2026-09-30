@@ -7,7 +7,7 @@ export const BRIDGE_COPY = Object.freeze({
     alarm: ['Paused: unexpected caller', 'Calls with a valid ChatGPT link but the wrong chat code were refused. If this was not you, revoke access.'],
     fault: ['Bridge needs attention', 'The bridge stopped serving until you address this problem.'],
     paused: ['Paused', 'ChatGPT is told to wait and nothing is served. The tunnel and the link stay up.'],
-    restart: ['Confirm to restart', 'The bridge restarted, so every earlier ChatGPT chat has ended. Press Start a new chat to confirm the released jobs and begin again.'],
+    restart: ['Confirm to restart', 'The bridge restarted, so every earlier ChatGPT chat has ended. Press Copy chat starter to confirm the released jobs and begin again.'],
     'tunnel-problem': ['Tunnel needs attention', 'ChatGPT cannot reach this Mac until the tunnel is ready.'],
     starting: ['Starting tunnel', 'Connecting this Mac to ChatGPT.'],
     'tunnel-unreachable': ['Tunnel unreachable', 'ChatGPT cannot reach this Mac right now.'],
@@ -15,11 +15,12 @@ export const BRIDGE_COPY = Object.freeze({
     'needs-you': ['Needs you', 'One or more jobs need your attention in the dock.'],
     'duplicate-serve': ['Two chats are using one code', 'Start a fresh chat so only one chat is serving this work.'],
     stalled: ['ChatGPT has been quiet', 'It may still be writing, may have been blocked, or the chat may have been closed.'],
-    'chat-full': ['Start a new chat', 'This chat has reached its work limit.'],
+    'chat-full': ['Start a new chat', 'This chat has reached its work limit. Copy a starter and paste it into a new ChatGPT chat.'],
     working: ['ChatGPT is working', 'A handoff is currently with ChatGPT.'],
     saving: ['The app is saving this', 'The app is applying a finished answer.'],
     'first-call': ['Waiting for chat', 'Check the plugin appeared as a chip and the message was sent.'],
-    nudge: ['Waiting for ChatGPT', 'Start a new chat, or paste Continue into the existing chat.'],
+    reached: ['Chat has connected', 'ChatGPT reached the bridge with this chat\'s code, but that call was turned away before any work was handed over. If the chat has stopped, tell it to try again.'],
+    nudge: ['Waiting for ChatGPT', 'Copy a starter for a new chat, or copy Continue and paste it into the existing chat.'],
     'chat-idle': ['Chat is idle', 'Nothing is waiting right now.'],
     ready: ['Ready', 'Linked and reachable. Nothing is waiting.'],
   }),
@@ -29,13 +30,21 @@ export const BRIDGE_COPY = Object.freeze({
   noWindow: 'Open a canvas window first.',
 });
 
+// The plugin's configured name (status.config.pluginName), which the person
+// picks after typing @ in ChatGPT. Callers pass it in: this module never reads
+// config. Without one, say which plugin without inventing its name.
+export const BRIDGE_PLUGIN_FALLBACK = 'the Infinite Canvas plugin';
+export function bridgePluginRef(pluginName) {
+  return typeof pluginName === 'string' && pluginName.trim() ? pluginName.trim() : BRIDGE_PLUGIN_FALLBACK;
+}
+
 export const BRIDGE_ACTION_COPY = Object.freeze({
   enable: 'Turn on',
   setup: 'Open setup',
   'open-panel': 'Open panel',
   'revoke-all': 'Revoke access',
   resume: 'Resume',
-  'new-chat': 'Start a new chat',
+  'new-chat': 'Copy chat starter',
   'restart-tunnel': 'Restart tunnel',
   'open-pairing': 'Open pairing',
   'open-dock': 'Open in dock',
@@ -57,7 +66,8 @@ export const BRIDGE_DYNAMIC_COPY = Object.freeze({
   needsYou: amount => [`Needs you (${amount})`, BRIDGE_COPY.health['needs-you'][1]],
   stalled: (age, work) => [`ChatGPT has been quiet for ${age} min`, `ChatGPT was given ${work} ${age} min ago and has not sent an answer since. It may still be writing, may have been blocked, or the chat may have been closed. If ChatGPT says a tool call was blocked or is no longer available, start a fresh chat: answers already accepted are kept and the new chat resumes at the step that was waiting.`],
   firstCall: ordinal => [`Waiting for chat ${ordinal || ''}`.trim(), BRIDGE_COPY.health['first-call'][1]],
-  nudge: (amount, ordinal) => [`${amount} waiting for ChatGPT`, ordinal ? `Chat ${ordinal} has stopped. Paste Continue into it, or start a new chat.` : 'Start a chat to hand them over.'],
+  reached: ordinal => [`Chat ${ordinal || ''} has connected`.replace(/\s+/g, ' ').trim(), BRIDGE_COPY.health.reached[1]],
+  nudge: (amount, ordinal) => [`${amount} waiting for ChatGPT`, ordinal ? `Chat ${ordinal} has stopped. Copy Continue and paste it into it, or copy a starter for a new chat.` : 'Copy a starter and paste it into a new ChatGPT chat to hand them over.'],
   chatIdle: (ordinal, lastCall) => [`Chat ${ordinal || ''}: idle`.trim(), `Last call ${lastCall}. Nothing is waiting.`],
 });
 
@@ -119,7 +129,7 @@ export const BRIDGE_PROGRESS_COPY = Object.freeze({
   needsYou: 'This job needs you',
   needsYouFallback: 'Open the job card to see what it needs.',
   kept: 'The bridge is not giving this job to ChatGPT. Choose Resume serving in the bridge panel to hand it back.',
-  noChat: Object.freeze(['No ChatGPT chat yet', 'Start a new chat, then paste what is copied into ChatGPT with the plugin selected.']),
+  noChat: pluginName => Object.freeze(['No ChatGPT chat yet', `Press Copy chat starter, then paste it into a new ChatGPT chat with ${bridgePluginRef(pluginName)} selected.`]),
   queued: label => ['Queued for ChatGPT', `${label ? `The ${label.toLowerCase()} step is ready.` : 'This job is ready.'} ChatGPT gets it when it asks for its next handoff.`],
   queuedChatFull: cap => ['Queued for the next chat', `This chat is already carrying its limit of ${cap} ${cap === 1 ? 'bundle' : 'bundles'}. This one is handed over in a later chat.`],
   writing: label => [`ChatGPT is working on: ${label}`, `${label} was handed to ChatGPT. Its answer has not arrived yet.`],
@@ -130,8 +140,25 @@ export const BRIDGE_PROGRESS_COPY = Object.freeze({
   elapsed: duration => `for ${duration}`,
   justNow: 'just now',
   ago: duration => `${duration} ago`,
-  copiedNew: 'Copied. Paste it into a new ChatGPT chat with the plugin selected.',
-  copiedContinue: 'Copied. Paste it into the existing chat.',
+  copiedNew: pluginName => `Copied. Now switch to ChatGPT, open a new chat, type @ and pick ${bridgePluginRef(pluginName)}, then paste and send.`,
+  copiedContinue: 'Copied. Now switch to ChatGPT, paste it into the existing chat, and send.',
+  // Pressing Copy starter again before ChatGPT has called: same starter, same chat.
+  copiedAgain: (ordinal, pluginName) => `Copied again: the same starter for chat ${ordinal}. Paste it into a new ChatGPT chat with ${bridgePluginRef(pluginName)} selected.`,
+});
+
+// The job card's application line while the bridge holds the job. Its title is
+// the dock's own headline for the job (bridgeHeldApplication.js), so these are
+// only the words around it. Nothing here claims what ChatGPT is doing: that is
+// the dock's to say, and it differs by phase.
+export const BRIDGE_CARD_COPY = Object.freeze({
+  detail: 'Open AI handoffs to see its progress.',
+  detailNeedsYou: 'Open AI handoffs: it needs you.',
+  // The dock's stalled headline carries a live minute count. The card cannot
+  // tick, so it shows the same headline without the number.
+  quiet: BRIDGE_COPY.health.stalled[0],
+  open: 'Open AI handoffs',
+  pending: 'In AI handoffs',
+  pendingTitle: 'This application is in the AI handoffs dock. Open it to see its progress.',
 });
 
 export const ACTIVITY_COPY = Object.freeze({
@@ -177,7 +204,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
   recently: 'recently',
   chatOrdinal: value => `Chat ${value}`,
   copyContinue: 'Copy Continue',
-  startChat: 'Start a new chat',
+  startChat: 'Copy chat starter',
   applications: 'Applications',
   sendAll: 'Send all pending',
   release: 'Release',
@@ -202,9 +229,9 @@ export const BRIDGE_UI_COPY = Object.freeze({
   also: 'Also:',
   revoke: 'Revoke ChatGPT access…',
   turnOff: 'Turn off',
-  confirmNewTitle: 'Start a new chat?',
-  confirmNewMessage: (ordinal, age) => `Chat ${ordinal} last called ${age}. Starting over ends that chat and refuses its next call. Work resumes in the new chat.`,
-  confirmNew: 'Start new chat',
+  confirmNewTitle: 'Copy a starter for a new chat?',
+  confirmNewMessage: (ordinal, age) => `Chat ${ordinal} last called ${age}. Copying a starter ends it now; paste the starter into a new ChatGPT chat.`,
+  confirmNew: 'Copy starter',
   keepChat: ordinal => `Keep chat ${ordinal}`,
   confirmRevokeTitle: 'Revoke ChatGPT access?',
   confirmRevokeMessage: 'This disconnects ChatGPT and ends the active chat. Released jobs stay in this app.',
@@ -337,6 +364,6 @@ export const IPC_ERROR_COPY = Object.freeze({
   // This is action feedback, including an incomplete preload surface and a
   // failed bridge start. The authoritative status card alone may say that a
   // build is unavailable.
-  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', TUNNEL_NOT_SERVING: 'This public hostname is not serving the selected tunnel. In Cloudflare DNS, make sure its tunnel target matches the credentials file you chose.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Start a new chat.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', NOT_FOUND: 'That item is no longer available.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
+  UNAVAILABLE: 'The bridge could not complete that action. Check its status and try again.', SENDER: 'That action is not allowed from this window.', BUSY: 'Another bridge dialog is open. Finish it first.', DECLINED: 'Cancelled.', INVALID: 'That value is not valid.', NO_WINDOW: 'Open a canvas window first.', NOT_READY: 'Finish setup first.', TUNNEL_NOT_READY: 'The tunnel is not reachable yet.', TUNNEL_NOT_SERVING: 'This public hostname is not serving the selected tunnel. In Cloudflare DNS, make sure its tunnel target matches the credentials file you chose.', NOT_LINKED: 'Link ChatGPT first.', PAUSED: 'The bridge is paused. Resume it first.', NO_CHAT: 'No chat has started yet. Use Copy chat starter.', CLIPBOARD_FAILED: 'Could not copy to the clipboard. Try again.', NOT_FOUND: 'That item is no longer available.', LIMIT_REACHED: 'The bridge has reached its handoff limit.', UNKNOWN_JOB: 'That job is no longer available.', DISABLED: 'Turn on the bridge first.', LINK_WOULD_BREAK: 'Changing this breaks the ChatGPT link.', INTERNAL: 'Something went wrong in the bridge. Try again; if it repeats, copy a bug report.',
 });
 export function ipcErrorMessage(code) { return IPC_ERROR_COPY[code] || IPC_ERROR_COPY.INTERNAL; }

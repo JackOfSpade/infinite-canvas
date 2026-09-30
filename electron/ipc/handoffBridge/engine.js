@@ -53,7 +53,7 @@ const STATUS_REASONS = new Set([
 const DROP_COUNTER = Object.freeze({
   bundle_discarded: 'droppedDiscarded', bundle_pruned: 'droppedPruned', bundle_missing: 'droppedMissing', bundle_saved: 'droppedSaved',
 });
-const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'closed']);
+const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'closed', 'link_changed']);
 const LOG_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 // Composition reuses the push source when it replaces a terminal engine after
 // Disable. Keep discovery visibility owned by the current engine instance so
@@ -76,6 +76,32 @@ function verdictKey(codeKey, text) {
 function epochHash(linkId, key) {
   return sha256(`epoch\n${linkId}\n${key}`);
 }
+
+// Ended-chat digest, persisted in the ledger and kept for in-memory retired
+// chats. The chat key itself is never written: only a digest under its own
+// domain-separation prefix (distinct from the in-memory epoch hash). It is
+// deliberately NOT bound to the link: recognising that a key has ended must
+// keep working after the person re-pairs (a new link id). Authenticating the
+// LIVE key stays link-bound (epochHash).
+function endedDigest(key) {
+  return createHash('sha256').update(`retired-chat-v2\n${key}`, 'utf8').digest('hex');
+}
+
+// In-memory only: which link a live chat was started under, to notice a relink.
+function epochLinkDigest(linkId) {
+  return createHash('sha256').update(`epoch-link\n${linkId}`, 'utf8').digest('hex');
+}
+
+// Hex-digest equality through the same constant-time comparison as every other
+// digest in this file.
+function sameHex(left, right) {
+  return typeof left === 'string' && typeof right === 'string' && sameDigest(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
+const HEX_DIGEST = /^[a-f0-9]{64}$/;
+const BAD_KEY_WINDOW_MS = 10 * 60_000;
+// A live chat's ledger entry is re-stamped on authenticated use at most this often.
+const LEDGER_REFRESH_MS = 3_600_000;
 
 function sameDigest(left, right) {
   return Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.length === right.length && timingSafeEqual(left, right);
@@ -212,7 +238,19 @@ export function createHandoffEngine({
   const verdicts = new Map();
   const pushVerdicts = new Map();
   const retiredEpochs = [];
+  // Chats, oldest first: {digest, retiredAt}. Loaded from the store at start (so a
+  // chat from before a restart is recognised as ended), extended when a chat
+  // starts (so a crash still leaves its key recognisable), and re-stamped when the
+  // live chat is used (at most hourly) and when it ends. `retiredAt` is therefore
+  // the last stamp, not necessarily the end. Digests only, never a key.
+  let ledger = [];
+  let ledgerPersistQueued = false;
+  // Unrecognised chat keys, for diagnostics only. A stale or garbled chat is
+  // not an attack signal (the caller already passed OAuth), so nothing here
+  // pauses or alarms.
   const badKeyTimes = [];
+  let lastBadKeyAt = null;
+  let endedKeyCount = 0;
   const waiters = new Set();
   const hintTimers = new Map();
   const lastHintAt = new Map();
@@ -387,13 +425,117 @@ export function createHandoffEngine({
     }
   }
 
+  // ---- ended-chat ledger -------------------------------------------------
+  // A chat key that is not the live one is almost always a chat that ended: one
+  // from before an app restart, or one whose in-memory retired entry was evicted.
+  // The ledger remembers ended chats across restarts so the answer is
+  // 'session_ended' (which tells ChatGPT the chat is over) rather than
+  // 'unauthorized' (which invites a retry with the same code).
+  const ledgerWindowMs = () => Math.max(limits.chatKeyMaxAgeHours, 24) * 3_600_000;
+
+  function persistLedger() {
+    if (typeof store?.saveRetiredChats !== 'function') return;
+    try {
+      const pending = store.saveRetiredChats(ledger.map(entry => ({ ...entry })));
+      if (pending && typeof pending.catch === 'function') pending.catch(() => undefined);
+    } catch { /* the ledger is a best-effort aid; serving never depends on it */ }
+  }
+
+  // The hot path (an authenticated call) never persists inline: the write is
+  // queued behind the current turn and coalesced, and it snapshots the ledger as
+  // it is then. A failure is swallowed by persistLedger.
+  function persistLedgerSoon() {
+    if (ledgerPersistQueued) return;
+    ledgerPersistQueued = true;
+    queueMicrotask(() => { ledgerPersistQueued = false; persistLedger(); });
+  }
+
+  // The live chat's own entry, or null (revoked, or no chat).
+  const liveDigest = () => (epoch && typeof epoch.endedDigest === 'string' ? epoch.endedDigest : null);
+
+  function ledgerAdd(digest, stamp) {
+    ledger = ledger.filter(entry => !sameHex(entry.digest, digest));
+    ledger.push({ digest, retiredAt: stamp });
+    // Over the cap, drop the oldest entry that is not the live chat's own.
+    while (ledger.length > CONSTANTS.RETIRED_EPOCHS) {
+      const live = liveDigest();
+      const index = ledger.findIndex(entry => !live || !sameHex(entry.digest, live));
+      ledger.splice(index === -1 ? 0 : index, 1);
+    }
+  }
+
+  // Age out old entries, never the live chat's own while it is live. Returns
+  // whether anything was dropped. (A relink does not purge: its ended keys stay
+  // ended. Only a revoke, by `all`, clears the ledger.)
+  function pruneLedger({ all = false } = {}) {
+    const stamp = safeNow(now);
+    const window = ledgerWindowMs();
+    const live = liveDigest();
+    const before = ledger.length;
+    ledger = all ? [] : ledger.filter(entry => (live && sameHex(entry.digest, live)) || stamp - entry.retiredAt <= window);
+    return ledger.length !== before;
+  }
+
+  // Re-stamp the live chat's entry. Its chat was minted (and stamped) at commit;
+  // without this a chat live for more than the window would lose the entry that
+  // makes a crash recoverable.
+  function refreshLiveEntry(stamp) {
+    const live = liveDigest();
+    if (!live) return;
+    epoch.ledgerStampAt = stamp;
+    ledgerAdd(live, stamp);
+    persistLedgerSoon();
+  }
+
+  // A validated call, or the relink event, names the link now in force. A live
+  // chat started under another link can never authenticate again (its key is
+  // bound to that link), so end it: its key becomes an ended key and its next
+  // call is answered session_ended, the status shows no chat, and the person is
+  // led to start a new one. Returns whether a chat was retired.
+  function noteLink(linkId) {
+    if (closed || !epoch || typeof linkId !== 'string' || !linkId) return false;
+    if (sameHex(epoch.linkDigest, epochLinkDigest(linkId))) return false;
+    retireEpoch('link_changed');
+    return true;
+  }
+
+  function isEndedKey(digest) {
+    if (pruneLedger()) persistLedger();
+    const live = liveDigest();
+    if (live && sameHex(digest, live)) return false;
+    return ledger.some(entry => sameHex(entry.digest, digest));
+  }
+
+  function loadLedger() {
+    try {
+      const loaded = store?.loadRetiredChats?.(safeNow(now));
+      if (!Array.isArray(loaded)) return;
+      ledger = loaded.filter(entry => entry && HEX_DIGEST.test(String(entry.digest)) && Number.isSafeInteger(entry.retiredAt))
+        .map(entry => ({ digest: entry.digest, retiredAt: entry.retiredAt }))
+        .slice(-CONSTANTS.RETIRED_EPOCHS);
+      // Anything here belongs to a process that no longer exists. Age out what
+      // is too old to matter (from its last stamp), and write the trimmed list back.
+      if (pruneLedger()) persistLedger();
+    } catch { ledger = []; /* fail closed to an empty list */ }
+  }
+
   function retireEpoch(reason) {
     if (!epoch) return;
+    // Drop the plaintext starter with the epoch: nothing may re-copy it (or
+    // find it in a still-referenced object) once the chat has ended.
+    epoch.starterKey = null;
     const retiringPushEpoch = pushEpochId(epoch);
     try { push?.closeEpoch?.(retiringPushEpoch); } catch { /* push state is disposable */ }
     for (const [key, value] of pushVerdicts) if (value.epochId === retiringPushEpoch) pushVerdicts.delete(key);
-    retiredEpochs.push({ n: epoch.n, hash: epoch.keyHash, endedAt: safeNow(now), reason });
+    retiredEpochs.push({ n: epoch.n, digest: liveDigest(), endedAt: safeNow(now), reason });
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
+    // Re-stamp this chat's persisted digest with the moment it ended. (No entry
+    // is added when the link was revoked: that path cleared the ledger.)
+    if (liveDigest()) {
+      ledgerAdd(liveDigest(), safeNow(now));
+      pruneLedger();
+      persistLedger();
+    }
     auditEvent('epoch_closed', { reason });
     log('epoch_closed', { cause: LOG_EPOCH_CAUSES.has(reason) ? reason : 'other' });
     epoch = null;
@@ -421,29 +563,65 @@ export function createHandoffEngine({
     }
   }
 
+  function markPresented(target) {
+    target.presented = true;
+    target.starterKey = null;
+    target.lastCallAt = safeNow(now);
+  }
+
+  // The controller turned away a call that carried this chat's key before the
+  // engine's own gates ran (its idle pause, its rate limit). The chat holds the
+  // key all the same. Matches only; it never counts a wrong key.
+  function notePresented({ session, linkId, grant } = {}) {
+    if (closed || !epoch || typeof session !== 'string') return false;
+    const boundLinkId = typeof (grant?.linkId ?? linkId) === 'string' ? (grant?.linkId ?? linkId) : '';
+    if (!sameDigest(epochHash(boundLinkId, session.trim()), epoch.keyHash)) return false;
+    markPresented(epoch);
+    return true;
+  }
+
   function authenticate(session, linkId) {
-    if (!epoch) return 'session_ended';
     const presented = typeof session === 'string' ? session.trim() : '';
     const boundLinkId = typeof linkId === 'string' ? linkId : '';
+    // A call ends the live chat for a link change only when it presents that
+    // chat's own key under another link: the chat itself proves the link moved.
+    // Any other call names a link that may be stale (its grant was checked when
+    // its headers arrived, possibly before a re-pair), so it must not end a
+    // healthy chat. The relink event (controller.onLinkChanged) is the
+    // authoritative path.
+    const liveKey = liveDigest();
+    if (liveKey && sameHex(endedDigest(presented), liveKey)) noteLink(boundLinkId);
+    if (!epoch) {
+      if (isEndedKey(endedDigest(presented))) endedKeyCount++;
+      return 'session_ended';
+    }
     const digest = epochHash(boundLinkId, presented);
     if (sameDigest(digest, epoch.keyHash)) {
+      // The chat holds its key and has reached the bridge with it, whatever
+      // the gates below decide. The starter can no longer be handed to a second
+      // chat, and the chat is no longer "awaiting its first call".
+      markPresented(epoch);
+      const stamp = safeNow(now);
       if (limits.chatKeyMaxAgeHours > 0
-          && safeNow(now) - epoch.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000) return 'session_ended';
+          && stamp - epoch.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000) return 'session_ended';
+      // Keep the crash-recovery entry of a long-lived chat fresh, at most hourly.
+      if (stamp - epoch.ledgerStampAt >= LEDGER_REFRESH_MS) refreshLiveEntry(stamp);
       return 'ok';
     }
+    const ended = endedDigest(presented);
     for (const retired of retiredEpochs) {
-      if (sameDigest(digest, retired.hash)) return 'session_ended';
+      if (retired.digest && sameHex(retired.digest, ended)) { endedKeyCount++; return 'session_ended'; }
     }
+    if (isEndedKey(ended)) { endedKeyCount++; return 'session_ended'; }
+    // An unrecognised key. The caller already passed OAuth, so this is our own
+    // paired ChatGPT: a stale chat or a garbled code, not an attack (chat keys
+    // are high-entropy and the controller rate-limits attempts). It is counted
+    // for the bug report and otherwise ignored: no pause, no alarm.
     const stamp = safeNow(now);
     badKeyTimes.push(stamp);
-    while (badKeyTimes.length && stamp - badKeyTimes[0] > 10 * 60_000) badKeyTimes.shift();
-    if (badKeyTimes.length >= 5) {
-      paused = true;
-      pauseCause = 'anomaly';
-      counts.pauses++;
-      auditEvent('pause', { cause: 'anomaly' });
-      log('pause', { cause: 'anomaly' });
-    }
+    lastBadKeyAt = stamp;
+    while (badKeyTimes.length && stamp - badKeyTimes[0] > BAD_KEY_WINDOW_MS) badKeyTimes.shift();
+    while (badKeyTimes.length > 1000) badKeyTimes.shift();
     counts.getUnauthorized++;
     return 'unauthorized';
   }
@@ -1097,6 +1275,7 @@ export function createHandoffEngine({
     const expectedEpoch = epoch;
     const callAt = safeNow(now);
     expectedEpoch.calls += 1;
+    expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
     expectedEpoch.firstCallAt ??= callAt;
     expectedEpoch.lastCallAt = callAt;
     expectedEpoch.lastCallKind = 'get';
@@ -1580,6 +1759,7 @@ export function createHandoffEngine({
     const expectedEpoch = epoch;
     const callAt = safeNow(now);
     expectedEpoch.calls += 1;
+    expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
     expectedEpoch.firstCallAt ??= callAt;
     expectedEpoch.lastCallAt = callAt;
     expectedEpoch.lastCallKind = 'submit';
@@ -1729,9 +1909,60 @@ export function createHandoffEngine({
     return pending;
   }
 
+  function recopiable(target, linkId) {
+    // Only a chat started by a 'new' press has a starter to hand out again: a
+    // Continue key is pasted into an EXISTING chat, so a new-chat press on it
+    // must rotate and retire that key. Nothing may have presented the key (a
+    // chat that was turned away still holds it), and the engine must be
+    // serving: a pause is not lifted by re-copying, so a paused engine rotates
+    // (rotation commits a fresh chat and clears the pause). Unrecognised keys
+    // from stale chats do not count against this: they are noise, and rotating
+    // for them would kill a starter that was pasted but has not called yet.
+    if (!target || target.mintedBy !== 'new' || target.presented || target.calls !== 0) return false;
+    if (typeof target.starterKey !== 'string' || !target.starterKey) return false;
+    if (!sameDigest(epochHash(linkId, target.starterKey), target.keyHash)) {
+      target.starterKey = null; // a different link: the plaintext is dead weight
+      return false;
+    }
+    if (paused) return false;
+    if (target.bytesServed + target.bytesReceived >= limits.epochHardBytes) return false;
+    return !(limits.chatKeyMaxAgeHours > 0
+      && safeNow(now) - target.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000);
+  }
+
   async function prepareChat({ linkId, kind = 'new' } = {}) {
     if (typeof linkId !== 'string' || !linkId) return { copied: false, status: 'unlinked' };
     if (!await confirmRestartIfNeeded()) return { copied: false, status: 'paused', reason: 'restart' };
+    // Re-copy: a chat that has been started but has not yet made a single call
+    // is still waiting for its starter to be pasted. Pressing "Copy starter"
+    // again must hand back THAT starter, not burn the unused chat and bump the
+    // ordinal. Only 'new' re-copies ('continue' pastes into an existing chat).
+    // The plaintext key is held solely on this in-memory epoch object, never
+    // persisted, logged, audited or put in status. It is dropped the moment
+    // anything presents the key (authenticate, or the controller's notePresented
+    // for a call it turned away), when the epoch is retired, when a paused
+    // revoke/quit begins, and when a prepared epoch is refused. That does not
+    // widen exposure: a key nobody has presented has not been used, and it was
+    // already placed on the clipboard when the chat was started. A key that is
+    // no longer reproducible (no plaintext, presented, engine paused, other
+    // link, expired, or minted by Continue) falls through to the rotate below.
+    const target = epoch;
+    if (kind === 'new' && recopiable(target, linkId)) {
+      return {
+        copied: true,
+        recopied: true,
+        sessionCode: target.starterKey,
+        chatOrdinal: target.n,
+        commit() {
+          // Same chat, same key: nothing rotates. Refuse only if that chat was
+          // replaced while the clipboard was being written.
+          if (epoch !== target) return false;
+          humanAction();
+          log('starter_recopied', { chatOrdinal: target.n });
+          return true;
+        },
+      };
+    }
     const sessionCode = makeChatKey(random);
     // Preparation and clipboard confirmation are deliberately split. Reserve
     // a unique ordinal before returning the one-shot commit capability so two
@@ -1741,6 +1972,18 @@ export function createHandoffEngine({
     const prepared = {
       n: preparedOrdinal,
       keyHash: epochHash(linkId, sessionCode),
+      // Link-free digest for the ended-chat ledger (see endedDigest), and the
+      // link the chat was started under. Computed here because the plaintext key
+      // is not kept once it has been presented.
+      endedDigest: endedDigest(sessionCode),
+      linkDigest: epochLinkDigest(linkId),
+      // When the ledger entry was last stamped (see refreshLiveEntry).
+      ledgerStampAt: 0,
+      // Plaintext key, in memory only, until the key is first presented (see
+      // re-copy above). Only a 'new' press hands out a re-copyable starter.
+      starterKey: kind === 'new' ? sessionCode : null,
+      mintedBy: kind === 'new' ? 'new' : 'continue',
+      presented: false,
       mintedAt: safeNow(now),
       bytesServed: 0,
       bytesReceived: 0,
@@ -1766,13 +2009,18 @@ export function createHandoffEngine({
         // A later preparation may be copied and committed first. Refuse the
         // older capability instead of rotating the live chat backwards onto
         // an already-used ordinal (and therefore an aliased push namespace).
-        if (prepared.n <= epochOrdinal) return false;
+        if (prepared.n <= epochOrdinal) { prepared.starterKey = null; return false; }
         retireEpoch(kind === 'continue' ? 'continued' : 'rotated');
         epochOrdinal = prepared.n;
         epoch = prepared;
         paused = false;
         pauseCause = null;
-        badKeyTimes.length = 0;
+        // Record the new chat in the ledger now, so a process that dies before
+        // this chat is retired still recognises its key as ended afterwards.
+        prepared.ledgerStampAt = prepared.mintedAt;
+        pruneLedger();
+        ledgerAdd(prepared.endedDigest, prepared.mintedAt);
+        persistLedger();
         humanAction();
         if (kind === 'continue') counts.chatsContinued++;
         else counts.chatsStarted++;
@@ -1788,7 +2036,7 @@ export function createHandoffEngine({
     const prepared = await prepareChat({ ...args, kind: 'new' });
     if (!prepared.copied) return prepared;
     prepared.commit();
-    return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal };
+    return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal, ...(prepared.recopied ? { recopied: true } : {}) };
   }
 
   async function continueChat(args = {}) {
@@ -2036,6 +2284,19 @@ export function createHandoffEngine({
   }
 
   function pause(cause = 'user') {
+    // A revoked link or a quitting app ends any chance of re-copying the
+    // starter: drop the plaintext now rather than at the next rotation.
+    if ((cause === 'revoked' || cause === 'quit') && epoch) epoch.starterKey = null;
+    if (cause === 'revoked') {
+      // The link is gone (unpaired). Forget every ended chat, in memory and on
+      // disk, and stop the live chat from re-entering the ledger when it is
+      // retired: after an unpair a stale key reads as unrecognised again.
+      if (epoch) epoch.endedDigest = null;
+      for (const retired of retiredEpochs) retired.digest = null;
+      const had = ledger.length > 0;
+      pruneLedger({ all: true });
+      if (had) persistLedger();
+    }
     paused = true;
     pauseCause = cause;
     counts.pauses++;
@@ -2140,11 +2401,20 @@ export function createHandoffEngine({
     }
     const safePush = Object.freeze({ selectedHubs: Object.freeze(safeSelectedHubs), discovered: Object.freeze(safeDiscoveredHubs) });
     const chatCalls = epoch?.calls ?? 0;
+    const keyStamp = safeNow(now);
     return Object.freeze({
       paused,
       pauseCause,
       fault,
       autoStart: autoStart === true,
+      // Diagnostics only: chat keys the engine did not recognise. Counts and a
+      // time, never any key text.
+      keys: Object.freeze({
+        unrecognisedRecent: badKeyTimes.filter(time => keyStamp - time <= BAD_KEY_WINDOW_MS).length,
+        unrecognisedWindowMinutes: BAD_KEY_WINDOW_MS / 60_000,
+        lastUnrecognisedAt: statusTime(lastBadKeyAt),
+        ended: endedKeyCount,
+      }),
       chat: Object.freeze({
         ordinal: epoch?.n ?? 0,
         startedAt: statusTime(epoch?.mintedAt),
@@ -2152,7 +2422,7 @@ export function createHandoffEngine({
         lastCallAt: statusTime(epoch?.lastCallAt),
         lastCallKind: ['get', 'submit'].includes(epoch?.lastCallKind) ? epoch.lastCallKind : null,
         calls: Number.isSafeInteger(chatCalls) ? chatCalls : 0,
-        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? 'awaiting-first-call' : 'working',
+        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? (epoch.presented ? 'reached' : 'awaiting-first-call') : 'working',
         jobsAssigned: epoch?.assignedLaneOrds.size ?? 0,
         jobsCap: limits.jobsPerChat,
         bytesServed: epoch?.bytesServed ?? 0,
@@ -2172,9 +2442,11 @@ export function createHandoffEngine({
           endedAt: statusTime(item.endedAt),
           reason: item.reason === 'continued' || item.reason === 'rotated'
             ? 'replaced'
-            : item.reason === 'drained'
-              ? 'queue_empty'
-              : 'disabled',
+            : item.reason === 'link_changed'
+              ? 'link_changed'
+              : item.reason === 'drained'
+                ? 'queue_empty'
+                : 'disabled',
         }))),
       }),
       queue: Object.freeze({
@@ -2345,6 +2617,7 @@ export function createHandoffEngine({
   }
 
   restore(restoredLanes);
+  loadLedger();
 
   return Object.freeze({
     get,
@@ -2358,6 +2631,8 @@ export function createHandoffEngine({
     pause,
     newChat,
     continueChat,
+    notePresented,
+    noteLink,
     prepareChat,
     hint,
     restore,

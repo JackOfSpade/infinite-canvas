@@ -173,9 +173,8 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
 
   // 4. Nobody to hand the job to yet.
   if (!hasChat) {
-    return build({ kind: 'no-chat', steps }, {
-      headline: BRIDGE_PROGRESS_COPY.noChat[0], detail: BRIDGE_PROGRESS_COPY.noChat[1], tone: 'attention', action: 'start-chat',
-    });
+    const [headline, detail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    return build({ kind: 'no-chat', steps }, { headline, detail, tone: 'attention', action: 'start-chat' });
   }
   if (state === 'awaiting-first-call') {
     const [headline, detail] = BRIDGE_DYNAMIC_COPY.firstCall(ordinal);
@@ -233,9 +232,10 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
 }
 
 /**
- * @param {{job?: object, chat?: object, item?: object, now?: number, bridge?: {paused?: boolean}}} input
+ * @param {{job?: object, chat?: object, item?: object, now?: number, bridge?: {paused?: boolean, pluginName?: string}}} input
  * `job` is one status.queue.jobs entry, `chat` is status.chat, `item` is the
- * dock item (stage, corrections, rejectionEscalation), `now` is epoch ms.
+ * dock item (stage, corrections, rejectionEscalation), `now` is epoch ms,
+ * `bridge.pluginName` is status.config.pluginName (named in the no-chat line).
  * Never throws: malformed input becomes a neutral generic line.
  */
 export function deriveBridgeJobProgress(input) {
