@@ -3,7 +3,7 @@ import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, AR
 import { EMPTY_JOB_LISTING_BODY_NOTE, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { CAREER_DATA_ROLE_SECTION_RULE, CAREER_TERM_OVERLAP_RULE, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_LABELS, NEUTRAL_SKILL_GROUP_RULE, renderStructuredApplicationResume, SKILL_ITEM_FILTERABLE_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS } from '../../electron/ipc/structuredResume.js';
-import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, REPEATED_PHRASE_RULE, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
+import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DURATION_CLAIM_SHAPE_RULE, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, DANGLING_DEMONSTRATIVE_RULE, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE, PAST_PROOF_VERBS, REDUNDANCY_SHINGLE_WORDS } from '../../electron/ipc/coverLetterChecks.js';
 import { assemblePasteApplicationResult, MAX_UNIT_CAREER_DATA_QUOTES } from '../../electron/ipc/pasteApplicationAssembly.js';
 import { extractResumeEvidence, RESUME_BULLET_CHARACTER_BUDGET } from '../../electron/ipc/jobApplication.js';
 import crypto from 'node:crypto';
@@ -614,6 +614,37 @@ const COVER_LETTER_DISCLOSURE_SCENARIOS = [
       `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
       'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
       'My delivery judgment covers the colleagues who depend on the service. I wrote the weekly runbook the rotation followed. This role needs the same judgment, and I can bring that experience to reliable system delivery.',
+    ],
+  },
+  {
+    // The relevance rule mandates a transfer carrier and offers a CHOICE of
+    // forms, so a writer who reaches for one form in the paragraph right after
+    // has complied with nothing. Both paragraphs below hand their proof over on
+    // one form, and the repair rotates only the first paragraph's carrier.
+    clause: 'one transfer carrier form in two consecutive paragraphs',
+    paragraphs: [
+      `${BATTERY_LEAD} ${BATTERY_BODY} That delivery experience would support reliable system delivery in the role you are filling.`,
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
+    ],
+    rejectedBy: 'repeated-transfer-carrier',
+    control: [
+      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
+    ],
+  },
+  {
+    // The shipped sentence this clause was written from turned its proof toward
+    // the employer with a noun no earlier sentence of its paragraph had used.
+    // The repair the clause prescribes is the paragraph's own noun.
+    clause: 'a demonstrative opening a later sentence whose noun the paragraph never used',
+    paragraphs: [
+      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That judgment would support reliable system delivery in the role you are filling.',
+    ],
+    rejectedBy: 'dangling-demonstrative',
+    control: [
+      `${BATTERY_LEAD} ${BATTERY_BODY} I would apply that experience to the reliable system delivery this role needs.`,
+      'My delivery practice covers the deployment step itself. I scripted that step so a colleague could repeat it without me present during the change window. That practice would support reliable system delivery in the role you are filling.',
     ],
   },
   {
@@ -4194,6 +4225,12 @@ export default [
           // one carries MIN_REPEAT_CONTENT_WORDS, so this clause also proves
           // that number reaches the prompt from the constant the gate reads.
           ['the two repeat floors and the three repeats it excuses', REPEATED_PHRASE_RULE],
+          // The two rules a second reading of the shipped letter found it
+          // passing: the same carrier form in back-to-back paragraphs, and a
+          // demonstrative whose noun the paragraph never used. A writer told
+          // neither spends a round on each.
+          ['the carrier form two neighbouring paragraphs may not share', REPEATED_TRANSFER_CARRIER_RULE],
+          ['the demonstrative noun a later sentence has to find earlier in its paragraph', DANGLING_DEMONSTRATIVE_RULE],
         ]) {
           assert(base.prompt.includes(printed),
             `the contract prints ${clause} from the constant its own check reads (missing “${printed}”)`);
@@ -6010,6 +6047,8 @@ export default [
           `its first ${SENTENCE_SHAPE_FRAME_WORDS} words`,
           `once the letter runs to ${MIN_SHARED_SHAPE_PARAGRAPHS} paragraphs, ${SHARED_SENTENCE_SHAPE_CEILING_RULE}, ${ADJACENT_SENTENCE_SHAPE_RULE}`,
           REPEATED_PHRASE_RULE,
+          REPEATED_TRANSFER_CARRIER_RULE,
+          DANGLING_DEMONSTRATIVE_RULE,
           SKILLS_BLOCK_BUDGET_RULE,
           SKILL_ITEM_FILTERABLE_RULE,
           `at least ${MIN_ROLE_THESIS_WORDS} words running ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.min} to ${COVER_LETTER_ARGUMENT_TEXT_LIMITS.max} characters`,

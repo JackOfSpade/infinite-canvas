@@ -92,7 +92,10 @@ import {
 // letter contract carries, the content-word floor that text must state, and the
 // relevance-span rule whose CHOICE of carriers settles the one apparent
 // contradiction in this pair of checks.
-import { ARGUMENT_RELEVANCE_SPAN_RULE, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE } from '../../electron/ipc/coverLetterChecks.js';
+import {
+  ARGUMENT_RELEVANCE_SPAN_RULE, checkDanglingDemonstrative, checkRepeatedTransferCarrier, DANGLING_DEMONSTRATIVE_RULE,
+  MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE,
+} from '../../electron/ipc/coverLetterChecks.js';
 
 function loadFixture(name) {
   const file = path.resolve('scripts/fixtures/cover-letter', `${name}.json`);
@@ -977,7 +980,8 @@ export default [
       ], 'Oregon Department of Fish and Wildlife');
       assert(!presentContribution.passed && presentContribution.id === 'prospective-contribution-tense'
         && presentContribution.detail.includes('past/present readiness bridge')
-        && presentContribution.detail.includes('I would apply that experience'),
+        && presentContribution.detail.includes('in a transfer form that differs from the transfer forms of the neighbouring paragraphs')
+        && !/\bI (?:would|can) (?:apply|bring|use|contribute)\b/u.test(presentContribution.detail),
       'completed experience cannot be framed as a present-tense promise to a prospective employer');
       assert(!pastReadinessContribution.passed
         && pastReadinessContribution.detail.includes('prepared me to contribute'),
@@ -2325,9 +2329,9 @@ This specific position within AWS Identity Center team represents an opportunity
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 42, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 44, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,repeated-transfer-carrier,dangling-demonstrative',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -3645,6 +3649,329 @@ This specific position within AWS Identity Center team represents an opportunity
           `${label} must fingerprint identically across two different names once curly-quoted spans are stripped (a=${JSON.stringify(a.detail)}, b=${JSON.stringify(b.detail)})`);
       }
       return Object.fromEntries(pairs.map(([label, a]) => [label, a.detail]));
+    },
+  },
+  {
+    name: 'cover letter harness: one transfer carrier form in two consecutive paragraphs is reported, and only that',
+    run: () => {
+      // The shipped letter this check was written for. Paragraph 2 handed its
+      // proof over with "That integration experience would support ..." and
+      // paragraph 3 with "That judgment would support ...": one carrier form,
+      // back to back. checkRepeatedSentenceShape missed it because its
+      // five-word frame differs in the fifth slot ("... and" against "... for").
+      const ezra = [
+        'EZRA is embedding AI across full-stack product experiences while keeping quality, testing, and safety central. My approach combines full-stack application engineering with practical AI-assisted development. As a Software Engineer at Thomson School District, I built an internal tools hub across the UI and backend with deployment and scalability considerations in mind. I would apply that capability to building AI-powered product features across the full stack.',
+        'My integration experience centers on migrations, automation, and validation across connected systems. At Thomson School District, I migrated ticketing and repair-tracking systems to third-party platforms and implemented integrations, automation, validation, and data migration workflows. That integration experience would support production Claude API integrations, including tool calling and error handling.',
+        "My AI engineering practice spans traditional development and AI-assisted or agentic coding, with hands-on work in MCP, connectors, prompt harnessing, and model delegation. That judgment would support reusable team practices for AI development while maintaining quality and cost awareness. I welcome a conversation about how my AI-assisted development practice could support EZRA's shared AI engineering patterns.",
+      ];
+      assert(checkRepeatedSentenceShape(ezra).passed,
+        'the premise: the sentence-shape check does not see this pair, which is why a second check reads the carrier');
+      const reported = checkRepeatedTransferCarrier(ezra);
+      assert(!reported.passed && reported.id === 'repeated-transfer-carrier'
+        && reported.detail.includes('paragraphs 2 and 3 both carry the same transfer form “that * would <verb>”')
+        && reported.detail.includes('paragraph 2 sentence 3, paragraph 3 sentence 2'),
+      `the shipped pair is one form once the noun phrase and the verb are slots (detail=${reported.detail})`);
+      // It names the operation, the offending form, and the form the OUTER
+      // neighbour uses so a rotation cannot land on it; it hands over no verb.
+      const quoted = reported.detail.match(/“[^”]*”/g) || [];
+      assert(quoted.join(' ') === '“that * would <verb>” “i would <verb>”'
+        && reported.detail.includes('and not “i would <verb>” (paragraph 1 uses it)'),
+      `the message quotes the offending form and the neighbour's form only (quoted=${JSON.stringify(quoted)})`);
+      for (const replacement of ['I can', 'I would', 'instead', 'such as', 'for example', 'e.g.']) {
+        assert(!reported.detail.includes(replacement),
+          `the message suggests no replacement wording (“${replacement}” in ${reported.detail})`);
+      }
+      assert(!/\b(?:apply|bring|use|contribute|help|support|enable)\b/iu.test(reported.detail.replace(/\(paragraph[^)]*\)/gu, '')),
+        `the message shows the verb slot, not a verb a writer could copy (detail=${reported.detail})`);
+      assert(!reported.detail.includes(String.fromCharCode(0x2014)), 'the message carries no em dash');
+
+      // The whole-battery view. The demonstrative check reads only the subject
+      // shape, so paragraph 1's "I would apply that capability", an object-position
+      // summary of the proof just before it, is not reported; paragraph 3 is.
+      const battery = paragraphs => evaluateCoverLetterChecks({
+        plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs, evidence: {}, jobText: '', researchText: '', companyName: 'EZRA',
+      });
+      assert(battery(ezra).filter(check => !check.passed).map(check => check.id).join(',')
+        === 'repeated-transfer-carrier,dangling-demonstrative',
+      'the shipped letter fails both new checks and nothing else');
+      assert(checkDanglingDemonstrative([ezra[0]]).passed && !checkDanglingDemonstrative([ezra[2]]).passed,
+        'paragraph 1 is not reported by the demonstrative check, and paragraph 3 is');
+      // The repair, in one round: one sentence in paragraph 3 that puts its noun
+      // where the paragraph uses it and hands its proof over in a form neither neighbour uses.
+      const repaired = [
+        ezra[0],
+        ezra[1],
+        ezra[2].replace('That judgment would support reusable team practices', 'I can bring that practice to reusable team practices'),
+      ];
+      assert(repaired[2] !== ezra[2] && battery(repaired).every(check => check.passed),
+        `the minimal repair clears the whole battery (failed=${battery(repaired).filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')})`);
+      assert(battery(repaired).length === 44, 'the repaired letter is graded by every check, not by a shortened battery');
+      // Swapping only the verb or only the noun of the shipped sentence is not a rotation.
+      const verbOnly = [ezra[0], ezra[1], ezra[2].replace('That judgment would support', 'That practice would help')];
+      assert(!checkRepeatedTransferCarrier(verbOnly).passed
+        && checkRepeatedTransferCarrier(verbOnly).detail.includes('“that * would <verb>”'),
+      'the minimal noun-and-verb swap of the shipped sentence is still one form');
+
+      const pair = (first, second) => [`I kept the reporting service dependable. ${first}`, `I wrote the runbook the rotation followed. ${second}`];
+      // Positive: the same form, in every shape a form takes.
+      for (const [label, first, second, form] of [
+        ['subject shape', 'That reporting experience would support daily delivery.', 'That runbook practice would support weekly delivery.', 'that * would <verb>'],
+        ['other determiner', 'This practice would help daily delivery.', 'This approach would help weekly delivery.', 'this * would <verb>'],
+        ['only the verb changes (subject shape)', 'That practice would support daily delivery.', 'That practice would help weekly delivery.', 'that * would <verb>'],
+        ['only the verb changes (first person)', 'I would apply that practice to daily delivery.', 'I would bring that practice to weekly delivery.', 'i would <verb>'],
+        ['the determiner after I would is not part of the form', 'I would apply that experience to daily delivery.', 'I would apply my experience to weekly delivery.', 'i would <verb>'],
+        ['first person can', 'I can bring that practice to daily delivery.', 'I can bring that approach to weekly delivery.', 'i can <verb>'],
+        ['would before the verb without I', 'You would apply that practice to daily delivery.', 'Colleagues would use that approach for weekly delivery.', 'would <verb> that *'],
+        ['a modal outside the cue is not part of the form', 'I will apply that experience to daily delivery.', 'I could bring that practice to weekly delivery.', '<verb> that *'],
+      ]) {
+        const found = checkRepeatedTransferCarrier(pair(first, second));
+        assert(!found.passed && found.detail.includes(`“${form}”`),
+          `${label}: two consecutive paragraphs on one carrier form are reported as “${form}” (detail=${found.detail})`);
+      }
+      // A closing paragraph is read like any other: it is a carrier-shaped phrase in a consecutive paragraph.
+      const closing = checkRepeatedTransferCarrier(['I kept the reporting service dependable. I can apply that experience to daily delivery.',
+        'I welcome a conversation about how I can bring my experience to your platform.']);
+      assert(!closing.passed && closing.detail.includes('“i can <verb>”') && closing.detail.includes('paragraph 2 sentence 1'),
+        `the closing is read too (detail=${closing.detail})`);
+      // Negative: everything that is not the same form, or not consecutive.
+      for (const [label, paragraphs] of [
+        ['different forms', pair('I would apply that experience to daily delivery.', 'That practice would support weekly delivery.')],
+        ['a different determiner is a different way of handing the capability over', pair('You would apply that practice to daily delivery.', 'You would apply my practice to weekly delivery.')],
+        ['a different modal after I is a different form', pair('I would apply that practice to daily delivery.', 'I can apply that practice to weekly delivery.')],
+        ['a different shape is a different form', pair('You would apply that practice to daily delivery.', 'That practice would support weekly delivery.')],
+        ['one carrier only', ['I kept the reporting service dependable. I would apply that experience to daily delivery.', 'I wrote the runbook the rotation followed.']],
+        ['no carrier at all', pair('It ran daily.', 'It ran weekly.')],
+        ['a target-only cue is ordinary prose, not a handed-over proof', pair('The rota exists to support the team every day.', 'The runbook exists to support the team every week.')],
+        ['a single paragraph', ['I would apply that experience to daily delivery. I would apply that experience to weekly delivery.']],
+        ['hostile input', ['', null, undefined, 42, { toString: () => 'x' }]],
+      ]) {
+        const found = checkRepeatedTransferCarrier(paragraphs);
+        assert(found.passed, `${label}: not reported (detail=${found.detail})`);
+      }
+      const spread = [
+        'I kept the reporting service dependable. I would apply that experience to daily delivery.',
+        'I wrote the runbook the rotation followed. That practice would support weekly delivery.',
+        'I trained the new on-call engineers. I would apply that experience to onboarding.',
+      ];
+      assert(checkRepeatedTransferCarrier(spread).passed, 'one form spread across paragraphs that do not touch is the parallelism the count allows');
+      // Four proof paragraphs on four different forms, then a closing, is a legal letter.
+      const fourForms = [
+        'I kept the reporting service dependable. This experience would help daily delivery.',
+        'I wrote the runbook the rotation followed. I would apply that practice to weekly delivery.',
+        'I trained the new on-call engineers. That approach would support onboarding.',
+        'I closed the incident review loop. I can apply that work to reviews.',
+        'I welcome a conversation about the rota.',
+      ];
+      assert(checkRepeatedTransferCarrier(fourForms).passed, 'rotating four forms through four paragraphs is what the check asks for');
+
+      // A run of three neighbours costs one rewrite, not two, and the message says so.
+      const triad = [
+        'I kept the reporting service dependable. That practice would support daily delivery.',
+        'I wrote the runbook the rotation followed. That approach would support weekly delivery.',
+        'I trained the new on-call engineers. That experience would support onboarding.',
+        'I closed the incident review loop. I welcome a conversation.',
+      ];
+      const triadReport = checkRepeatedTransferCarrier(triad);
+      assert(!triadReport.passed && triadReport.detail.includes('paragraphs 1, 2 and 3 all carry the same transfer form')
+        && triadReport.detail.includes('at least 1 of them so that no two neighbouring paragraphs share it'),
+      `a run of three neighbours is one observation that counts the rewrites (detail=${triadReport.detail})`);
+
+      // Both reports name a pair the sentence-shape check also reports, and say so:
+      // a repair that answers only the shape report keeps the carrier, so this
+      // check is not suppressed.
+      const shapeReported = [
+        'I scripted the deployment step at Acme. I would apply that practice to the reliable delivery this role needs.',
+        'I wrote the weekly runbook at Acme. I would apply that practice to the reliable delivery this role needs.',
+        'The rotation followed the runbook. My colleagues repeated the step without me present.',
+      ];
+      const shape = checkRepeatedSentenceShape(shapeReported);
+      assert(!shape.passed && shape.detail.includes('“i would * that *”'),
+        `the premise: the shape check reports this pair (detail=${shape.detail})`);
+      const both = checkRepeatedTransferCarrier(shapeReported);
+      assert(!both.passed && both.detail.includes('repeated-sentence-shape reports these same sentences')
+        && both.detail.includes('one rewrite that changes both the carrier form and the sentence shape answers both reports'),
+      `a pair the shape check also reports is reported here and says so (detail=${both.detail})`);
+      // The round-two hole this closes: the shape is rotated and the carrier kept.
+      const shapeOnlyRepair = [shapeReported[0], shapeReported[1].replace('I would apply that practice to', 'At Acme I would apply that practice to'), shapeReported[2]];
+      assert(!checkRepeatedTransferCarrier(shapeOnlyRepair).passed,
+        'a shape-only repair that keeps the carrier is still one form, and is reported');
+      const shapeReportedVerbSwap = [shapeReported[0], shapeReported[1].replace('I would apply that practice', 'I would bring that practice'), shapeReported[2]];
+      assert(!checkRepeatedSentenceShape(shapeReportedVerbSwap).passed && !checkRepeatedTransferCarrier(shapeReportedVerbSwap).passed,
+        'a verb swap in a pair the shape check reports is one form too');
+      assert(!checkRepeatedTransferCarrier(shapeReported.slice(0, 2)).passed
+        && !checkRepeatedTransferCarrier(shapeReported.slice(0, 2)).detail.includes('repeated-sentence-shape reports'),
+      'below the shape check\'s paragraph floor the pair is reported without that note');
+
+      // Rotating onto the form of the paragraph beyond the pair moves the defect one paragraph over.
+      const beyond = checkRepeatedTransferCarrier([
+        'I kept the reporting service dependable. I would apply that experience to daily delivery.',
+        'I wrote the runbook the rotation followed. I can apply that practice to weekly delivery.',
+        'I trained the new on-call engineers. I can bring that approach to onboarding.',
+        'I closed the incident review loop. That work would support reviews.',
+      ]);
+      assert(!beyond.passed && beyond.detail.includes('paragraphs 2 and 3 both carry the same transfer form “i can <verb>”')
+        && beyond.detail.includes('and not “i would <verb>” (paragraph 1 uses it) or “that * would <verb>” (paragraph 4 uses it)'),
+      `the message names each outer neighbour's form (detail=${beyond.detail})`);
+
+      // The rule the contract prints says exactly what the code does, and quotes no word to reuse.
+      for (const clause of [
+        'every carrier-shaped phrase is read in any two consecutive paragraphs, the opening and the closing included',
+        'two paragraphs standing next to each other may not both carry the same form',
+        'changing only the verb or only the noun keeps the same form',
+        'after I, only would or can is part of the form',
+        '“I would apply that X” and “I would bring my Y” are one form',
+        '“that X would support” and “that Y would help” are one form',
+        '“will apply that X” and “could apply that Y” are one form',
+        'not compliance with the rule that mandates a carrier',
+      ]) {
+        assert(REPEATED_TRANSFER_CARRIER_RULE.includes(clause), `the printed rule states “${clause}” (rule=${REPEATED_TRANSFER_CARRIER_RULE})`);
+      }
+      return { reported: reported.detail.length };
+    },
+  },
+  {
+    name: 'cover letter harness: a demonstrative transfer carrier must find its capability noun earlier in its paragraph, and nothing else is judged',
+    run: () => {
+      const paragraph3 = "My AI engineering practice spans traditional development and AI-assisted or agentic coding, with hands-on work in MCP, connectors, prompt harnessing, and model delegation. That judgment would support reusable team practices for AI development while maintaining quality and cost awareness. I welcome a conversation about how my AI-assisted development practice could support EZRA's shared AI engineering patterns.";
+      const reported = checkDanglingDemonstrative(['I built the tools hub.', paragraph3]);
+      assert(!reported.passed && reported.id === 'dangling-demonstrative'
+        && reported.detail.includes('paragraph 2 sentence 2 carries “That judgment would support”')
+        && reported.detail.includes('no earlier sentence of paragraph 2 mentions “judgment”'),
+      `the shipped sentence has no referent: its paragraph is about a practice (detail=${reported.detail})`);
+      // The message names the operation, and the two repairs it offers are the two
+      // that keep the other rules satisfied: never a noun outside the cue, and
+      // never "name the thing in full", which repeats a phrase.
+      assert(reported.detail.includes('put a word an earlier sentence of this paragraph uses for that capability directly before the noun, or use one of the back-references the relevance rule permits'),
+        'the message names the operation');
+      assert(!reported.detail.includes('in full') && !reported.detail.includes('replace that noun'),
+        'the message never asks for a replacement noun or for the thing to be named in full');
+      const quoted = reported.detail.match(/“[^”]*”/g) || [];
+      assert(quoted.join(' ') === '“That judgment would support” “judgment”', `the message quotes the carrier and the noun (quoted=${JSON.stringify(quoted)})`);
+      // The repairs it offers clear it, and keep the carrier a carrier.
+      const mapped = text => checkParagraphArgumentLinks({
+        plan: { paragraphs: [{ argumentMapping: {
+          claim: 'My AI engineering practice spans traditional development and AI-assisted or agentic coding',
+          proof: 'I built prompt harnesses that routed each task to the right model',
+          relevance: text,
+          jobNeedQuote: 'reusable team practices for AI development',
+        } }] },
+        paragraphs: [`My AI engineering practice spans traditional development and AI-assisted or agentic coding. I built prompt harnesses that routed each task to the right model. ${text}`],
+        jobText: 'The role builds reusable team practices for AI development across the engineering group.',
+      });
+      for (const [label, replacement] of [
+        ['a word the paragraph uses before the noun', 'That AI engineering judgment would support reusable team practices for AI development.'],
+        ['the paragraph\'s own noun', 'That practice would support reusable team practices for AI development.'],
+        ['a permitted back-reference', 'That experience would support reusable team practices for AI development.'],
+      ]) {
+        assert(checkDanglingDemonstrative([`My AI engineering practice spans traditional development and AI-assisted or agentic coding. I built prompt harnesses that routed each task to the right model. ${replacement}`]).passed,
+          `${label} clears the check`);
+        assert(mapped(replacement).passed, `${label} stays a legal relevance span (detail=${mapped(replacement).detail})`);
+      }
+      assert(checkRepeatedPhrase([`My AI engineering practice spans traditional development and AI-assisted or agentic coding. I built prompt harnesses that routed each task to the right model. That AI engineering judgment would support reusable team practices for AI development.`]).passed,
+        'the word borrowed from the paragraph does not trip the repeated-phrase check');
+
+      const body = 'I migrated the ticketing systems to third-party platforms at Acme.';
+      const read = sentence => checkDanglingDemonstrative([`${body} ${sentence}`]);
+      // Positives: a carrier whose capability noun, and whose modifiers, no earlier sentence used.
+      for (const [label, sentence, noun] of [
+        ['subject shape, abstract quality', 'That judgment would support reusable practices.', 'judgment'],
+        ['subject shape, another noun', 'That capability would enable faster releases.', 'capability'],
+        ['plural noun', 'Those capabilities would help a small team.', 'capabilities'],
+        ['an approach', 'This approach would help a small team.', 'approach'],
+        ['modifiers that are not earlier either', 'That agentic coding practice would support reusable standards.', 'practice'],
+      ]) {
+        const found = read(sentence);
+        assert(!found.passed && found.detail.includes(`“${noun}”`), `${label}: reported (detail=${found.detail})`);
+      }
+      // A function word before the noun is not a word the paragraph "used".
+      assert(!checkDanglingDemonstrative(['I did very careful work on the cutover. That very approach would help a small team.']).passed,
+        'a function word between the determiner and the noun does not excuse the carrier');
+      // The object shape is not read: it sits right after the proof it transfers, so its
+      // noun summarizes that action (the shipped EZRA paragraph 1 measured this way).
+      for (const sentence of ['I would apply that capability to faster releases.', 'I can bring this approach to faster releases.',
+        'To apply that judgment to reviews, I would start small.', 'I would use that practice for weekly delivery.']) {
+        assert(read(sentence).passed, `an object-position carrier is out of scope: ${sentence}`);
+      }
+      // Negatives: the noun, a stem of it, or a modifier appears earlier.
+      for (const [label, sentences] of [
+        ['the noun appears earlier', 'My migration practice starts from the records. That practice would support reusable standards.'],
+        ['the plural of the noun appears earlier', 'I documented the capabilities of each platform. That capability would help a small team.'],
+        ['the singular of the noun appears earlier', 'I documented each platform capability. Those capabilities would help a small team.'],
+        ['a modifier appears earlier', 'I ran the district cutover myself. That district cutover practice would support reusable standards.'],
+        ['a stemmed modifier appears earlier', 'I ran the migrations myself. That migration practice would support reusable standards.'],
+        ['a hyphenated modifier part appears earlier', 'I built a scan workflow for staff. That scan-triggered practice would support reusable standards.'],
+        ['the noun appears in the carrier\'s own object shape', 'My delivery approach kept releases small. I would bring that approach to your releases.'],
+      ]) {
+        const found = checkDanglingDemonstrative([sentences]);
+        assert(found.passed, `${label}: not reported (detail=${found.detail})`);
+      }
+      // The three back-references the relevance rule permits need no earlier mention, in any determiner.
+      for (const sentence of [
+        'That experience would support production integrations.', 'This experience would support production integrations.',
+        'That work would support production integrations.', 'This work would support production integrations.',
+        'Those patterns would support production integrations.', 'These patterns would support production integrations.',
+        'That integration experience would support production work.', 'That district-wide rollout work would support production work.',
+        'I would apply that experience to production integrations.', 'I would apply this work to production integrations.',
+      ]) {
+        assert(read(sentence).passed, `a permitted back-reference is never read: ${sentence}`);
+      }
+      // Nothing that is not a demonstrative transfer carrier is judged, whatever noun it opens on.
+      for (const [first, second] of [
+        ['I rebuilt the public API.', 'That rebuild let partners integrate in days.'],
+        ['I cached the pricing lookups.', 'This cut p95 latency from 900 to 120 milliseconds.'],
+        ['I added retries, idempotency keys, and dead-letter queues to the payment consumer.', 'These safeguards cut failed charges by 80 percent.'],
+        ['I kept the checkout service reliable during peak season.', 'That reliability mattered because peak weeks carried half the revenue.'],
+        ['I wrote the ETL jobs that feed the warehouse.', 'This new pipeline replaced three spreadsheets.'],
+        ['I migrated the repair records into a new platform.', 'That difficulty lay mostly in reconciling the duplicate records between platforms.'],
+        ['I migrated the repair records into a new platform.', 'That judgment guided how I sequenced the cutover.'],
+        ['I ran the migration.', 'That means I can move between UI and backend work.'],
+        ['I ran the migration.', 'That said, I kept the rollout small.'],
+        ['I ran the migration.', 'This role needs steady delivery.'],
+        ['I ran the migration.', 'That would help a small team.'],
+      ]) {
+        const found = checkDanglingDemonstrative([`${first} ${second}`]);
+        assert(found.passed, `an ordinary demonstrative sentence is out of scope: ${second} (detail=${found.detail})`);
+      }
+      // The first sentence of a paragraph has nothing earlier to find its noun in; the boundary belongs to checkOpeningDemonstrative.
+      assert(checkDanglingDemonstrative(['That judgment would support reusable practices.', 'I would apply that capability to releases.']).passed,
+        'a paragraph\'s first sentence is not read');
+      assert(checkDanglingDemonstrative(['', null, undefined, 42, { toString: () => 'x' }]).passed, 'hostile input yields a result');
+      const many = checkDanglingDemonstrative([1, 2, 3].map(() => `${body} That judgment would help. That capability would help.`));
+      assert(!many.passed && many.detail.includes('additional observation(s) omitted'), 'the report is capped like its siblings');
+
+      // The scope the rule prints is read from the arrays the regexes are built from.
+      for (const clause of ['capability', 'practice', 'approach', 'judgment', 'experience', 'work', 'pattern',
+        'must find that noun, or a word standing before it in the carrier, or a form of one of them, in an earlier sentence of the same paragraph',
+        'put a word an earlier sentence of the paragraph uses for that capability directly before the noun',
+        'no object-position carrier such as apply that X, and no other sentence that opens with a demonstrative, is read here']) {
+        assert(DANGLING_DEMONSTRATIVE_RULE.includes(clause), `the printed rule states “${clause}” (rule=${DANGLING_DEMONSTRATIVE_RULE})`);
+      }
+      assert(!DANGLING_DEMONSTRATIVE_RULE.includes('in full'), 'the printed rule does not ask for the thing to be named in full');
+
+      // The paragraph-boundary check had the same verb-as-head leniency: a modal
+      // in the previous paragraph satisfied "That judgment would".
+      const boundary = checkOpeningDemonstrative([
+        'I would rewrite the runbook before I would ship the cutover.',
+        'That judgment would support reusable practices.',
+      ]);
+      assert(!boundary.passed && boundary.detail.includes('“judgment”') && !boundary.detail.includes('“would”'),
+        `a modal in the previous paragraph is not a referent at the boundary either (detail=${boundary.detail})`);
+      assert(checkOpeningDemonstrative(['I ran the migration.', 'That would support reusable practices.']).passed,
+        'a demonstrative followed by a modal is a pronoun and has no noun to hunt for');
+      assert(checkOpeningDemonstrative(['I ran the migration.', "That couldn't wait for the quarter."]).passed,
+        'a contracted auxiliary is not a noun either');
+      return { reported: reported.detail.length };
+    },
+  },
+  {
+    name: 'cover letter harness: both new checks are appended after the established battery and reported as prose checks',
+    run: () => {
+      const checks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['I built it.', 'It ran.'], evidence: {}, jobText: '', researchText: '' });
+      assert(checks.slice(-2).map(check => check.id).join(',') === 'repeated-transfer-carrier,dangling-demonstrative',
+        'the two checks are the last two the battery returns, so the established order is unmoved');
+      assert(checks.slice(-2).every(check => check.passed && typeof check.detail === 'string' && check.detail.length > 0),
+        'each returns the result(id, passed, detail) contract with a detail on a pass');
+      return { ids: checks.slice(-2).map(check => check.id) };
     },
   },
 ];

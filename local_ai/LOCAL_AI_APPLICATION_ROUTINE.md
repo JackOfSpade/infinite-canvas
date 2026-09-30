@@ -215,8 +215,8 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    responsibility, and a bare `this` or `that` is not enough. For cross-domain proof, lead with the reusable capability and name
    the actual target responsibility it supports. Then give only enough detail
    about the prior artifact to prove that capability. `For this role's
-   interactive simulation work, I would apply my experience designing
-   input-driven web interactions` states the supported transferable capability;
+   interactive simulation work, that input-driven interaction practice would
+   support faster prototyping` states the supported transferable capability;
    a target-facing sentence that instead names an old artifact without the
    shared mechanism leaves the transfer unstated. The later past-tense proof
    can name the source-specific workflow. Explain
@@ -228,15 +228,40 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    explicitly future-facing language. Do not make the completed project the
    subject of a past/present readiness bridge such as `That project prepared
    me to contribute to the target employer's modernization` or `That project
-   equips me to contribute`. Prefer a direct bridge such as `At the target
-   employer, I would apply that experience to modernizing legacy systems`.
+   equips me to contribute`. Prefer a direct conditional bridge that names the target
+   responsibility, in a transfer form that differs from the neighbouring
+   paragraphs' transfer forms.
    Treat phrases such as `most of my work` and `throughout my career` as
    factual breadth claims that require source support. Across paragraph
    boundaries a demonstrative must find its referent in the immediately
    preceding paragraph: replace `this`, `that`, or `it` when more than one
    antecedent is plausible, and never open a paragraph with `That <thing>` or
    `This <thing>` unless the previous paragraph is about that thing; otherwise
-   restate the referent in full. When a new paragraph continues evidence from
+   restate the referent in full. A sentence after the first of its paragraph that turns its proof
+   toward the employer with `that`, `this`, `these` or `those`, then any
+   modifiers, then `capability`, `practice`, `approach` or `judgment` (or a
+   plural) and `would help`, `would support` or `would enable`, must find that
+   noun, or a word standing before it in the carrier, or a form of one of them,
+   in an earlier sentence of the same paragraph: put a word an earlier
+   sentence of the paragraph uses for that capability directly before the noun,
+   or use one of the back-references the relevance rule permits, `that
+   experience`, `this experience`, `that work`, `this work`, `those patterns`
+   or `these patterns`, which need no earlier mention. No object-position
+   carrier such as `apply that X`, and no other sentence that opens with a
+   demonstrative, is read by this rule. Every carrier-shaped phrase
+   is read in any two consecutive paragraphs, the opening and the closing
+   included, and two paragraphs standing next to each other may not both carry
+   the same form. A form is what is left of the carrier once its verb and its
+   noun are slots, so changing only the verb or only the noun keeps the same
+   form: after `I`, only `would` or `can` is part of the form, so `I would
+   apply that X` and `I would bring my Y` are one form and `I can bring` is
+   another; a carrier led by `that`, `this`, `these`, `those` or `the` and a
+   noun phrase keeps that determiner and `would`, so `that X would support`
+   and `that Y would help` are one form; any other carrier keeps its determiner
+   and a `would` standing directly before its verb, and no other modal, so
+   `will apply that X` and `could apply that Y` are one form. Reaching for one
+   form again in the very next paragraph is not compliance with the rule that
+   mandates a carrier, because that rule offers a choice of forms. When a new paragraph continues evidence from
    one prior employer named in the preceding paragraph, do not repeat its full
    name merely from habit. Within a paragraph, continue naturally when the
    candidate remains the subject or when an introduced skill, system, or

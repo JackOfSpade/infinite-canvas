@@ -443,7 +443,15 @@ export function checkNeedGrounding(needs = [], jobText = '', researchText = '') 
 // concrete transfer to an actual responsibility in the posting. It does not
 // attempt to infer claims from prose or impose sentence order; relevance may
 // precede the proof and one sentence may perform more than one job.
-const ARGUMENT_TRANSFER_CUE = /\b(?:i\s+would\s+(?:apply|bring|use|contribute)|i\s+can\s+(?:apply|bring|use)|(?:would\s+)?(?:apply|bring|use|contribute)\s+(?:that|this|my|the)\s+(?:experience|work|capability|practice|approach|judgment)|(?:that|this|these|those|the)\s+(?:[\p{L}'’-]+\s+){0,5}(?:pattern|patterns|practice|practices|experience|work|capability|capabilities|approach|approaches|judgment|judgments)\s+would\s+(?:help|support|enable)|help(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work)|support(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work))\b/iu;
+// The nouns each capability-carrying cue shape accepts, as arrays so the
+// demonstrative check reads the SAME lists the cue is built from. The verb-object
+// shape takes a singular noun; the noun-phrase-subject shape also takes plurals.
+const TRANSFER_CUE_OBJECT_NOUNS = Object.freeze(['experience', 'work', 'capability', 'practice', 'approach', 'judgment']);
+const TRANSFER_CUE_SUBJECT_NOUNS = Object.freeze([
+  'pattern', 'patterns', 'practice', 'practices', 'experience', 'work', 'capability', 'capabilities',
+  'approach', 'approaches', 'judgment', 'judgments',
+]);
+const ARGUMENT_TRANSFER_CUE = new RegExp(String.raw`\b(?:i\s+would\s+(?:apply|bring|use|contribute)|i\s+can\s+(?:apply|bring|use)|(?:would\s+)?(?:apply|bring|use|contribute)\s+(?:that|this|my|the)\s+(?:${TRANSFER_CUE_OBJECT_NOUNS.join('|')})|(?:that|this|these|those|the)\s+(?:[\p{L}'’-]+\s+){0,5}(?:${TRANSFER_CUE_SUBJECT_NOUNS.join('|')})\s+would\s+(?:help|support|enable)|help(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work)|support(?:ing)?\s+(?:this|the|your)\s+(?:role|team|work))\b`, 'iu');
 const GENERIC_ARGUMENT_RELEVANCE = /\b(?:experience|background|skills?|capabilit(?:y|ies)|work)\b[^.!?]{0,50}\b(?:relevant|applicable|valuable|useful|beneficial|transferable|well[- ]suited|fit)\b|\b(?:innovative|dynamic|fast[- ]paced)\s+(?:team|environment|work)\b/iu;
 const VACUOUS_TARGET_WORK = /\b(?:interface and service work|service and interface work)\b/iu;
 // The final alternative is the abstraction beat that sits between a
@@ -2008,7 +2016,7 @@ export function checkProspectiveContributionTense(paragraphs = [], companyName =
       if (sentenceIndex === certifiedIndex && certifiedClosingInvitation(value)) continue;
       const match = NONCONDITIONAL_PROSPECTIVE_CONTRIBUTION.exec(value);
       if (!match || (!PROSPECTIVE_CONTRIBUTION_TARGET.test(value) && !namesProspectiveCompany(sentence, companyName))) continue;
-      observations.push(`paragraph ${index + 1} uses a past/present readiness bridge for prospective-employer work (“${boundedDetailValue(match[0])}”); state the completed work as past evidence, then use conditional or future-facing target language, such as “At the target employer, I would apply that experience to …”`);
+      observations.push(`paragraph ${index + 1} uses a past/present readiness bridge for prospective-employer work (“${boundedDetailValue(match[0])}”); state the completed work as past evidence, then use conditional or future-facing target language in a transfer form that differs from the transfer forms of the neighbouring paragraphs`);
       if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
     }
     if (observations.length >= MAX_COPY_PRECISION_OBSERVATIONS) break;
@@ -3174,6 +3182,11 @@ const DEMONSTRATIVE_HEAD_STOPWORDS = new Set([
   'to', 'a', 'an', 'the', 'my', 'own', 'very',
 ]);
 
+const DEMONSTRATIVE_AUXILIARY_WORDS = new Set([
+  'would', 'could', 'can', 'will', 'should', 'may', 'might', 'must', 'shall', 'do', 'does', 'did',
+  'cannot', 'needs',
+]);
+
 function referentStem(word) {
   const lower = String(word || '').toLowerCase();
   const stripped = lower.replace(/(?:ation|ing|ed|es|s)$/u, '');
@@ -3195,10 +3208,18 @@ export function checkOpeningDemonstrative(paragraphs = []) {
     const paragraph = text(list[index]);
     const match = OPENING_DEMONSTRATIVE_RE.exec(paragraph);
     if (!match) continue;
+    // A modal or auxiliary is never a noun, so it can neither be the head to look
+    // for nor be the word that satisfies the search: “That would help” has no
+    // noun phrase at all, and “That judgment would” is looking for judgment
+    // alone. Before this, a “would” anywhere in the previous paragraph anchored
+    // “That judgment would”, and “That would help” was reported for a “would”
+    // the previous paragraph did not carry.
+    const isAuxiliary = word => DEMONSTRATIVE_AUXILIARY_WORDS.has(word) || word.endsWith("n't");
+    if (isAuxiliary(match[1].toLowerCase())) continue;
     const heads = [match[1], match[2]]
       .filter(Boolean)
       .map(word => word.toLowerCase())
-      .filter(word => !DEMONSTRATIVE_HEAD_STOPWORDS.has(word));
+      .filter(word => !DEMONSTRATIVE_HEAD_STOPWORDS.has(word) && !isAuxiliary(word));
     if (!heads.length) continue;
     const previousWords = words(list[index - 1]);
     if (heads.some(head => previousWords.some(word => referentStemsMatch(head, word)))) continue;
@@ -3412,32 +3433,13 @@ function backToBackShapeRewrites(locations) {
 }
 
 /**
- * When every paragraph makes its move the same way, the letter reads as one
- * template filled four times rather than an argument developed four ways. No
- * run-length check can see this: a template rotates the verb and the noun
- * through fixed slots, so two sentences built on one frame share no run long
- * enough to register, and `checkRedundancy` compares the letter to the RÉSUMÉ
- * rather than paragraph to paragraph. This compares shapes instead, and
- * reports only the count, the shape it read, and where it read it — whether
- * that shape is filler or deliberate parallelism is the writer's judgement,
- * which is why the ceiling leaves room for a parallel pair or a parallel triad
- * in a long letter.
- *
- * Every sentence is read, not only the closing one. Reading a single position
- * measured the position rather than the template: the live letter of
- * 2026-09-21 was rejected for four paragraphs closing on one shape, came back
- * with two closings rotated, and still opened every paragraph's evidence with
- * one frame, which this check could not see and which a reader sees first. A
- * paragraph is counted once per shape however often it repeats that shape
- * inside itself, so parallelism a writer builds within one paragraph is its
- * own business.
+ * Every sentence shape the letter carries, and which of them the shape check
+ * reports: the ones over the count ceiling, and the ones carried by paragraphs
+ * standing next to each other. One reading shared by checkRepeatedSentenceShape
+ * and by checkRepeatedTransferCarrier, which must not name a pair of sentences
+ * this one already reports. `list` is the letter's non-empty paragraph texts.
  */
-export function checkRepeatedSentenceShape(paragraphs = []) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
-  if (list.length < MIN_SHARED_SHAPE_PARAGRAPHS) {
-    return result('repeated-sentence-shape', true,
-      `letter has ${list.length} paragraph(s); sentence shapes are compared from ${MIN_SHARED_SHAPE_PARAGRAPHS}`);
-  }
+function sentenceShapeAnalysis(list) {
   const shapes = new Map();
   list.forEach((paragraph, index) => {
     const seen = new Set();
@@ -3483,6 +3485,37 @@ export function checkRepeatedSentenceShape(paragraphs = []) {
     .map(([frame, locations]) => [frame, backToBackShapeLocations(locations)])
     .sort((left, right) => right[1].length - left[1].length
       || left[1][0].paragraph - right[1][0].paragraph);
+  return { shapes, ceiling, over, adjacent };
+}
+
+/**
+ * When every paragraph makes its move the same way, the letter reads as one
+ * template filled four times rather than an argument developed four ways. No
+ * run-length check can see this: a template rotates the verb and the noun
+ * through fixed slots, so two sentences built on one frame share no run long
+ * enough to register, and `checkRedundancy` compares the letter to the RÉSUMÉ
+ * rather than paragraph to paragraph. This compares shapes instead, and
+ * reports only the count, the shape it read, and where it read it — whether
+ * that shape is filler or deliberate parallelism is the writer's judgement,
+ * which is why the ceiling leaves room for a parallel pair or a parallel triad
+ * in a long letter.
+ *
+ * Every sentence is read, not only the closing one. Reading a single position
+ * measured the position rather than the template: the live letter of
+ * 2026-09-21 was rejected for four paragraphs closing on one shape, came back
+ * with two closings rotated, and still opened every paragraph's evidence with
+ * one frame, which this check could not see and which a reader sees first. A
+ * paragraph is counted once per shape however often it repeats that shape
+ * inside itself, so parallelism a writer builds within one paragraph is its
+ * own business.
+ */
+export function checkRepeatedSentenceShape(paragraphs = []) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
+  if (list.length < MIN_SHARED_SHAPE_PARAGRAPHS) {
+    return result('repeated-sentence-shape', true,
+      `letter has ${list.length} paragraph(s); sentence shapes are compared from ${MIN_SHARED_SHAPE_PARAGRAPHS}`);
+  }
+  const { ceiling, over, adjacent } = sentenceShapeAnalysis(list);
   if (!over.length && !adjacent.length) {
     return result('repeated-sentence-shape', true,
       `no sentence shape is carried by more than ${ceiling} of ${list.length} paragraph(s) or by two consecutive paragraphs`);
@@ -3982,6 +4015,271 @@ export function checkRepeatedPhrase(paragraphs = [], { jobNeedQuotes = [] } = {}
     + ` and none of ${MIN_CROSS_PARAGRAPH_REPEAT_WORDS} words across paragraphs`);
 }
 
+const MAX_TRANSFER_CARRIER_OBSERVATIONS = 4;
+const MAX_DANGLING_DEMONSTRATIVE_OBSERVATIONS = 4;
+
+// The argument contract MANDATES a transfer carrier in every proof-bearing
+// paragraph and offers a CHOICE of forms to carry it in, so the words of one
+// carrier are compliance and checkRepeatedPhrase excuses them. What the rule
+// left open is reaching for the SAME form in the paragraph right after: the
+// shipped EZRA letter handed paragraph 2's proof over with “That integration
+// experience would support …” and paragraph 3's with “That judgment would
+// support …”, and passed every check because checkRepeatedSentenceShape
+// compares a five-word frame whose fifth slot differed (“… and” against
+// “… for”). Both sentences are one transfer form once the noun phrase and the
+// verb are read as slots, which is what the normalization below does.
+//
+// The rule says exactly what the code does, because a writer told a looser
+// version rotates the wrong part. After I only WOULD or CAN is a modal slot, so
+// “I would apply that X” and “I would bring my Y” are one form whatever
+// follows the verb; a carrier led by a noun phrase keeps its determiner and
+// would; and any other carrier is its bare verb, determiner and noun slot, so a
+// modal the cue does not list (will, could) stands in front of it without
+// making a form of its own. The examples use X and Y rather than words: a gate
+// that names a string gets it copied.
+export const REPEATED_TRANSFER_CARRIER_RULE =
+  'the carrier that hands a paragraph’s proof over is one of the forms the relevance rule lists,'
+  + ' and every carrier-shaped phrase is read in any two consecutive paragraphs, the opening and the closing included,'
+  + ' so two paragraphs standing next to each other may not both carry the same form;'
+  + ' a form is what is left of the carrier once its verb and its noun are slots, so changing only the verb or only the noun keeps the same form:'
+  + ' after I, only would or can is part of the form, so “I would apply that X” and “I would bring my Y” are one form, and “I can bring” is another;'
+  + ' a carrier led by that, this, these, those or the and a noun phrase keeps that determiner and would,'
+  + ' so “that X would support” and “that Y would help” are one form;'
+  + ' any other carrier keeps its determiner and a would standing directly before its verb, and no other modal,'
+  + ' so “will apply that X” and “could apply that Y” are one form;'
+  + ' reaching for one form again in the very next paragraph is not compliance with the rule that mandates a carrier,'
+  + ' because that rule offers a choice of forms';
+
+const TRANSFER_FORM_SUBJECT_RE = /^(that|this|these|those|the)\s+.+\s+(would)\s+(?:help|support|enable)$/u;
+const TRANSFER_FORM_FIRST_PERSON_RE = /^i\s+(would|can)\s+(?:apply|bring|use|contribute)$/u;
+const TRANSFER_FORM_OBJECT_RE = /^((?:would\s+)?)(?:apply|bring|use|contribute)\s+(that|this|my|the)\s+\S+$/u;
+// The verb slot of a form. Angle brackets keep it from being read as a word of
+// the letter, and it is deliberately not one of the verbs the cue accepts: a
+// message that showed a real verb would hand the writer a string to copy.
+const TRANSFER_FORM_VERB_SLOT = '<verb>';
+
+/**
+ * The form of one matched transfer carrier: the words the writer chose to carry
+ * it, with the parts that rotate through it left as slots. The noun phrase is a
+ * wildcard and the verb family (apply, bring, use, contribute; help, support,
+ * enable) is a verb slot, because swapping only the verb or only the noun leaves
+ * the form unchanged, which is the same reading the shape check gives a
+ * sentence. The modal and the determiner stay where the rule above says they do.
+ * Anything that matches no slot-bearing shape (“helping the team”) is its own
+ * form as written.
+ */
+function transferCarrierForm(carrier) {
+  const value = normalized(carrier);
+  const subject = TRANSFER_FORM_SUBJECT_RE.exec(value);
+  if (subject) return `${subject[1]} ${FRAME_WILDCARD} ${subject[2]} ${TRANSFER_FORM_VERB_SLOT}`;
+  const firstPerson = TRANSFER_FORM_FIRST_PERSON_RE.exec(value);
+  if (firstPerson) return `i ${firstPerson[1]} ${TRANSFER_FORM_VERB_SLOT}`;
+  const object = TRANSFER_FORM_OBJECT_RE.exec(value);
+  if (object) return `${object[1]}${TRANSFER_FORM_VERB_SLOT} ${object[2]} ${FRAME_WILDCARD}`;
+  return value;
+}
+
+// The two cue shapes that end on the TARGET (“helping this role”, “supporting your
+// team”) are not read. They carry no capability noun, so they are ordinary
+// English that any sentence about the employer can contain (“to support the
+// team”), and a body paragraph and the closing one sharing it is not two proofs
+// handed over the same way. Only a carrier that names what is being handed over,
+// or the act of handing it, is a form the writer chose to transfer with.
+const TARGET_ONLY_CARRIER_RE = /^(?:help|support)/u;
+
+/** Every transfer carrier form in a paragraph, with the sentence that carries it. */
+function paragraphTransferForms(paragraph) {
+  const forms = new Map();
+  sentences(paragraph).forEach((sentence, position) => {
+    for (const match of normalized(sentence).matchAll(ARGUMENT_TRANSFER_CUE_GLOBAL)) {
+      const form = transferCarrierForm(match[0]);
+      if (TARGET_ONLY_CARRIER_RE.test(form)) continue;
+      if (!forms.has(form)) forms.set(form, { sentence: position + 1, frame: sentenceShapeFrame(sentence) });
+    }
+  });
+  return forms;
+}
+
+function joinAlternatives(items) {
+  if (items.length < 2) return items[0] || '';
+  return `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`;
+}
+
+/**
+ * Two paragraphs standing next to each other carry the same transfer form.
+ *
+ * A pair the sentence-shape check also reports is reported here too. Suppressing
+ * it left a hole: a repair that answers the shape report alone can keep the
+ * carrier, and the same two sentences then fail this check a round later. One
+ * rewrite of a carrier clears both, so a double report costs nothing, and the
+ * message says when the two name the same sentences so the writer makes one
+ * edit that answers both rather than two that conflict.
+ *
+ * The message also names the forms the pair's OUTER neighbours use. Rotating a
+ * pair's end paragraph onto the form of the paragraph beyond it moves the
+ * defect one paragraph over, which is what a message that named only the
+ * shared form invited.
+ */
+export function checkRepeatedTransferCarrier(paragraphs = []) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
+  const perParagraph = list.map(paragraphTransferForms);
+  const reportedShapes = new Map();
+  if (list.length >= MIN_SHARED_SHAPE_PARAGRAPHS) {
+    const { over, adjacent } = sentenceShapeAnalysis(list);
+    for (const [frame, locations] of [...over, ...adjacent]) {
+      reportedShapes.set(frame, new Set([...(reportedShapes.get(frame) || []), ...locations.map(location => location.paragraph)]));
+    }
+  }
+  const pairs = new Map();
+  for (let index = 0; index + 1 < list.length; index++) {
+    for (const [form, here] of perParagraph[index]) {
+      const next = perParagraph[index + 1].get(form);
+      if (!next) continue;
+      const reported = reportedShapes.get(here.frame);
+      const sameShapeReport = Boolean(here.frame && here.frame === next.frame && reported?.has(index + 1) && reported.has(index + 2));
+      pairs.set(form, [...(pairs.get(form) || []), { paragraph: index + 1, here, next, sameShapeReport }]);
+    }
+  }
+  const neighbourForms = (paragraphNumber, shared) => (perParagraph[paragraphNumber - 1] ? [...perParagraph[paragraphNumber - 1].keys()] : [])
+    .filter(form => form !== shared)
+    .map(form => `“${boundedDetailValue(form)}” (paragraph ${paragraphNumber} uses it)`);
+  const observations = [];
+  for (const [form, found] of pairs) {
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const last = run[run.length - 1];
+      const spanned = [...run.map(pair => pair.paragraph), last.paragraph + 1];
+      const where = [...run.map(pair => `paragraph ${pair.paragraph} sentence ${pair.here.sentence}`),
+        `paragraph ${last.paragraph + 1} sentence ${last.next.sentence}`];
+      const named = spanned.length === 2
+        ? `paragraphs ${spanned[0]} and ${spanned[1]} both carry`
+        : `paragraphs ${spanned.slice(0, -1).join(', ')} and ${spanned[spanned.length - 1]} all carry`;
+      const repair = spanned.length === 2
+        ? 'one of them'
+        : `at least ${Math.floor(spanned.length / 2)} of them so that no two neighbouring paragraphs share it`;
+      const avoid = [...neighbourForms(spanned[0] - 1, form), ...neighbourForms(spanned[spanned.length - 1] + 1, form)];
+      const sameShape = run.some(pair => pair.sameShapeReport);
+      observations.push({
+        start: spanned[0],
+        message: `${named} the same transfer form “${boundedDetailValue(form)}” (${where.join(', ')});`
+          + ` rewrite the carrier in ${repair} to a different transfer form the argument rule accepts${avoid.length ? `, and not ${joinAlternatives(avoid)}` : ''}`
+          + `${sameShape ? '; repeated-sentence-shape reports these same sentences, so one rewrite that changes both the carrier form and the sentence shape answers both reports' : ''}`,
+      });
+      run = [];
+    };
+    for (const pair of found) {
+      if (run.length && pair.paragraph !== run[run.length - 1].paragraph + 1) flush();
+      run.push(pair);
+    }
+    flush();
+  }
+  observations.sort((left, right) => left.start - right.start);
+  return observationResult('repeated-transfer-carrier', observations.map(({ message }) => message), MAX_TRANSFER_CARRIER_OBSERVATIONS,
+    `${list.length} paragraph(s) carry no transfer form in two consecutive paragraphs`);
+}
+
+// The one place a demonstrative's noun is a CLOSED vocabulary. Judging every
+// sentence-opening “That <noun>” read open English without a part-of-speech
+// tagger, and it was wrong in every direction: “I rebuilt the API. That rebuild
+// …”, “This cut p95 latency …”, “These safeguards …”, “That reliability …”
+// after “reliable”, and the claim-span rule's own “That difficulty lay in …”
+// were all reported, and each repair for a true report broke a second rule. So
+// this reads only the demonstrative-headed TRANSFER CARRIER in its subject
+// shape, whose nouns ARGUMENT_TRANSFER_CUE lists, and only the nouns the
+// relevance rule's back-references do not already excuse.
+//
+// The object shape (“I would apply that capability”) is deliberately NOT read.
+// It sits directly after the proof sentence it transfers, so its noun reads as
+// a summary of the action just described rather than as a term nobody has
+// introduced, and the shipped EZRA paragraph 1 measured that way: flagging it
+// was a false positive. A sentence that OPENS on the demonstrative and names a
+// quality with no referent is what reads as dangling, so only that is judged.
+//
+// ARGUMENT_RELEVANCE_ANAPHORA_RULE permits “that experience”, “this
+// experience”, “that work”, “this work”, “those patterns” and “these patterns”
+// to point back at the proof sentence with nothing earlier required, so those
+// three nouns are exempt. The others (capability, approach, judgment, practice)
+// have no such licence: a paragraph about a practice that turns its proof
+// toward the employer with “That judgment would support …” names a second
+// abstraction nobody has introduced, which is what the shipped EZRA sentence did.
+const DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST = Object.freeze(['experience', 'work', 'pattern', 'patterns']);
+const DEMONSTRATIVE_EXEMPT_CARRIER_NOUNS = new Set(DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST);
+const DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS = Object.freeze(
+  TRANSFER_CUE_SUBJECT_NOUNS.filter(noun => !DEMONSTRATIVE_EXEMPT_CARRIER_NOUNS.has(noun)));
+// The nouns the rule prints: the singular of each judged noun, read off the
+// same array the regex below is built from.
+const DEMONSTRATIVE_JUDGED_NOUN_LIST = Object.freeze(DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS.filter(noun => !noun.endsWith('s')));
+
+export const DANGLING_DEMONSTRATIVE_RULE =
+  'a sentence after the first of its paragraph that turns its proof toward the employer with that, this, these or those,'
+  + ` then any modifiers, then ${joinAlternatives(DEMONSTRATIVE_JUDGED_NOUN_LIST)} (or its plural) and would help, support or enable,`
+  + ' must find that noun, or a word standing before it in the carrier, or a form of one of them,'
+  + ' in an earlier sentence of the same paragraph, so put a word an earlier sentence of the paragraph uses for that capability directly before the noun,'
+  + ` or use one of the back-references the relevance rule permits, which name ${joinAlternatives([...DEMONSTRATIVE_EXEMPT_CARRIER_NOUN_LIST])} and need no earlier mention;`
+  + ' no object-position carrier such as apply that X, and no other sentence that opens with a demonstrative, is read here';
+
+const DEMONSTRATIVE_SUBJECT_CARRIER_RE = new RegExp(
+  String.raw`\b(that|this|these|those)\s+((?:[\p{L}'’-]+\s+){0,5})(${DEMONSTRATIVE_JUDGED_SUBJECT_NOUNS.join('|')})\s+would\s+(?:help|support|enable)\b`, 'giu');
+
+/** A noun and its plural read as one word, so “capabilities” finds “capability”. */
+function carrierNounStem(word) {
+  const lower = String(word || '').toLowerCase();
+  if (/[^aeiou]ies$/u.test(lower)) return `${lower.slice(0, -3)}y`;
+  return /[^s]s$/u.test(lower) ? lower.slice(0, -1) : lower;
+}
+
+/**
+ * Every demonstrative-headed carrier in one sentence whose noun is judged:
+ * where it is, what it says, and the words that can excuse it. Modifier words
+ * are the ones standing between the determiner and the noun, minus function
+ * words, so “that very approach” is not excused by the “very” an earlier
+ * sentence happens to contain.
+ */
+function demonstrativeCarriers(sentence) {
+  const source = normalized(sentence);
+  const found = [];
+  for (const match of source.matchAll(DEMONSTRATIVE_SUBJECT_CARRIER_RE)) {
+    const modifiers = (match[2].match(WORD_TOKEN_RE) || []).filter(word => !FRAME_FUNCTION_WORDS.has(word));
+    found.push({ index: match.index, span: match[0], noun: match[3], modifiers });
+  }
+  return found.sort((left, right) => left.index - right.index);
+}
+
+/**
+ * A demonstrative-headed transfer carrier, after the first sentence of its
+ * paragraph, must find its noun, or a word before that noun in the carrier, in
+ * an earlier sentence of the same paragraph. See the constants above for the
+ * closed scope and the exemptions, and why nothing else is read.
+ */
+export function checkDanglingDemonstrative(paragraphs = []) {
+  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text).filter(Boolean);
+  const observations = [];
+  list.forEach((paragraph, paragraphIndex) => {
+    const own = sentences(paragraph);
+    own.forEach((sentence, position) => {
+      if (position === 0) return;
+      const earlier = own.slice(0, position).flatMap(words).flatMap(word => [word, ...word.split('-')]).map(carrierNounStem);
+      for (const carrier of demonstrativeCarriers(sentence)) {
+        const candidates = [...carrier.modifiers, carrier.noun];
+        const referenced = candidates.some(candidate => [candidate, ...candidate.split('-')].some(part => {
+          const stem = carrierNounStem(part);
+          return earlier.some(word => referentStemsMatch(stem, word));
+        }));
+        if (referenced) continue;
+        const quoted = sentence.slice(carrier.index, carrier.index + carrier.span.length);
+        observations.push(`paragraph ${paragraphIndex + 1} sentence ${position + 1} carries “${boundedDetailValue(quoted)}”,`
+          + ` but no earlier sentence of paragraph ${paragraphIndex + 1} mentions ${joinAlternatives(candidates.map(candidate => `“${candidate}”`))};`
+          + ' put a word an earlier sentence of this paragraph uses for that capability directly before the noun,'
+          + ' or use one of the back-references the relevance rule permits');
+        break;
+      }
+    });
+  });
+  return observationResult('dangling-demonstrative', observations, MAX_DANGLING_DEMONSTRATIVE_OBSERVATIONS,
+    `${list.length} paragraph(s) open no demonstrative transfer carrier on a capability noun the paragraph has not yet used`);
+}
+
 /**
  * The job-need quote each letter paragraph answers, indexed by paragraph.
  *
@@ -4104,6 +4402,10 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     checkRepeatedSentenceShape(paragraphs),
     checkRepeatedPhrase(paragraphs, { jobNeedQuotes: paragraphJobNeedQuotes(plan) }),
     checkCandidateAgency(paragraphs),
+    // Appended last for the same reason as the register block above: the
+    // established order stays stable and both read paragraphs only.
+    checkRepeatedTransferCarrier(paragraphs),
+    checkDanglingDemonstrative(paragraphs),
   ];
 }
 
