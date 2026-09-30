@@ -420,3 +420,62 @@ Bridgeable work went from 1 task to 19: the whole job pipeline, `resume-parse` (
 mark was stale -- it calls `callLLMText` with a schema and carries no file), and the four grounded
 research tasks. What remains on paste is what cannot cross a text tool at all: product photos
 (`callLLMVision`), hub screenshots, and `career-file-extract`, which IS the file-to-text step.
+
+## Handoff to Codex (2026-09-30)
+
+`main` is clean and pushed; there is no uncommitted work. The bridge is live and has done a real job: on
+2026-09-30 one ChatGPT chat took a real job card through evidence plan, résumé, cover letter and
+review in about 5.5 minutes. It fixed two cover-letter rejections by itself, with no paste from the
+user. The app saved the bundle and read every file back successfully.
+
+**Commits since the tool-surface revision** (all passed lint, `npm test` with 0 failures, the
+Electron and bridge smokes, the full conformance suite including the 10-minute soak, and the
+pre-push `act` gate):
+- `d70f903`: a live stepper in the dock for bridged applications. Discarding a bundle drops its
+  lane, restore drops lanes whose bundle is gone or saved, releases are idempotent, and bug reports
+  gain an "Application lanes" section.
+- `609f091`: Copy starter re-copies the same starter while the chat's key has never been presented.
+  Unrecognised chat keys are counted, never a pause or alarm. Ended chats are remembered across
+  restarts in `retired-chats.json`, as link-free sha256 digests, never keys. A re-pair retires the
+  live chat (`link_changed`). The dock and card copy say "copy", not "start".
+- `aadd979`: once the last job is saved, `get` returns `queue_empty`. The cause had been a stale
+  `needsRefresh` on host/done lanes counting as work. `waiting_limit` and `needs_user` stop
+  results are truthful. A stopped chat reads `idle` and the dock offers Copy Continue. The wait
+  streak resets whenever work is served.
+- `589c097`: two cover-letter checks, `repeated-transfer-carrier` and `dangling-demonstrative`
+  (subject-shape carriers only, by design). Both were measured at 0 false positives on 16
+  shipped letters and about 110 fixtures.
+
+**SURFACE_PIN is unchanged since `db265d0…`**, so none of the above needs a ChatGPT plugin Refresh.
+
+**Operating facts**
+- Never run `npm run build` while the packaged app is running: it writes into the running bundle.
+- The Desktop launcher rebuilds from the working tree, uncommitted edits included, so keep the
+  user's app closed while editing.
+- The user's running app predates `aadd979`. The next launch rebuilds it.
+- Tests: `npm test`, never bare `node scripts/test-runner.js`. Conformance:
+  `npm run selftest:handoff-bridge` (needs `--expose-gc`, already in the script).
+
+**Decisions not to undo** (reasons are in the commit messages):
+- An unrecognised chat key is our own stale chat, since OAuth already passed. Never pause or
+  alarm on it.
+- Consent is capability-bound (txn plus pairing code), not bound to Origin.
+- Only `.md`/`.txt` career files are read locally. PDF, DOCX and everything else take the AI
+  handoff (the user's choice).
+- The OpenAI connector ranges live in two places: `OPENAI_CONNECTOR_RANGES` and the two
+  Cloudflare Skip rules. Update both.
+
+**Open items**
+1. Next live check: after relaunch, run a second real application. Confirm ChatGPT ends with
+   "queue empty" immediately, and that the dock shows the chat as idle rather than working.
+2. Recommended separate project: route every lane mutation in `engine.js` through one serial
+   queue. A recurring class of bug is a rollback after a failed save that clobbers a concurrent
+   change. The known instances are fixed; the class is not.
+3. Watch the new cover-letter checks in "Paste Rejection Trace". If either shows a streak of 2 or
+   more on one job, read its message for goal-vs-operation wording before widening anything.
+4. The chat state `ended` is accepted by every enum, but the engine never emits it; retired chats
+   read `none`. Harmless; leave it or remove it deliberately.
+
+**Privacy:** never print or quote the user's career file (`~/Desktop/Job Search/Work
+Experience.md`), tunnel credentials, OAuth tokens or chat keys, including in tests and logs.
+Report only structural facts, such as counts and hashes, from personal files.
