@@ -1379,6 +1379,16 @@ function fuzzInput(choice, index, random) {
   }
 }
 
+// A heap budget read without a collection measures when the collector last
+// ran, not what is retained: the same abuse run measured 2 MB, 22 MB and 35 MB
+// back to back, and 76 MB once while other work contended for the CPU. Collect
+// first so the budget bounds retained memory. Without --expose-gc (a direct
+// invocation) this falls back to the raw reading, which is the old behaviour.
+function settledHeapUsed() {
+  if (typeof globalThis.gc === 'function') { globalThis.gc(); globalThis.gc(); }
+  return process.memoryUsage().heapUsed;
+}
+
 async function abuse(ctx) {
   const source = continuousDrainSource();
   const env = await fixture(ctx, 'abuse', true, { source, holdMs: 25, submitBudgetMs: 25000 });
@@ -1403,7 +1413,7 @@ async function abuse(ctx) {
     let current = await socketTool(env, token, 'abuse-initial-get', 'get_handoff', { session: chat.sessionCode }, 'initial authenticated drain get_handoff');
     assert.equal(current.status, 'served', 'abuse fixture did not start an engine-backed authenticated drain');
     loop.enable();
-    heap = process.memoryUsage().heapUsed;
+    heap = settledHeapUsed();
     // Generate and dispatch one case at a time: this keeps the harness from
     // retaining 10,000 request bodies while still sending the full seeded
     // corpus through Node's real parser and the production Unix listener.
@@ -1491,7 +1501,7 @@ async function abuse(ctx) {
   assert.deepEqual(Object.getOwnPropertyDescriptors(Object.prototype), prototypeBefore, 'Object.prototype changed during fuzz');
   assert.ok(p99 < 50, 'event-loop p99 ' + p99.toFixed(2) + 'ms exceeds 50ms; reopen utilityProcess isolation');
   assert.ok(max < 250, 'event-loop max ' + max.toFixed(2) + 'ms exceeds 250ms; reopen utilityProcess isolation');
-  const heapGrowth = process.memoryUsage().heapUsed - heap;
+  const heapGrowth = settledHeapUsed() - heap;
   assert.ok(heapGrowth < 64 * 1024 * 1024, 'heap exceeded bounded abuse budget: ' + heapGrowth + ' bytes');
   assert.ok(handles() - active < 30, 'socket handles remained after slow-client cleanup');
 }
@@ -1575,7 +1585,7 @@ async function soak(ctx, options, loaded) {
   });
   const until = Date.now() + (options.soakMs ?? 600000);
   const cycleDelayMs = soakCycleDelayMs();
-  const baselineHeap = process.memoryUsage().heapUsed;
+  const baselineHeap = settledHeapUsed();
   const baselineHandles = handles();
   try {
     let token = await link(env, env.socket);
@@ -1626,7 +1636,7 @@ async function soak(ctx, options, loaded) {
     assert.ok(iterations > 0, 'soak duration ended before one real SDK engine cycle');
     await audit.flush();
     assert.ok(auditFs.statSync(audit.securityPath).size < 5 * 1024 * 1024, 'security ledger grew with call volume');
-    assert.ok(process.memoryUsage().heapUsed - baselineHeap < 64 * 1024 * 1024, 'live soak heap exceeded its bounded budget');
+    assert.ok(settledHeapUsed() - baselineHeap < 64 * 1024 * 1024, 'live soak heap exceeded its bounded budget');
     assert.ok(handles() - baselineHandles < 10, 'live soak accumulated active resources');
   } finally { await env.close(); }
 }
