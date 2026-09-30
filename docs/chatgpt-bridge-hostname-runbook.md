@@ -81,9 +81,13 @@ The actual app path is chosen from its Electron user-data directory; the example
 
 Create and test the following rules for the production hostname. Rule availability and quotas on the selected Cloudflare plan are unverified; record the result of the X7 check before depending on them.
 
-1. Create a WAF custom rule for the production hostname that allows only `/mcp`, `/oauth/*`, and `/.well-known/*` and blocks every other path. Keep the origin catch-all 404 as a separate backstop.
-2. Add a source-range rule for `/mcp`, `/oauth/token`, and `/oauth/revoke`. During S1 through S6 it is **log mode**. Before S7, switch it to enforcement only after validating OpenAI's published connector ranges and the measured source prefixes. Keep `/oauth/authorize` and `/.well-known/*` open so discovery and the human pairing flow work. The in-app policy remains the backstop.
-3. Add a rate-limit rule for `/oauth/*` and `/.well-known/*`. It is defense in depth; preserve the application-side limits.
+1. Create a WAF custom rule for the production hostname that allows only `/mcp`, `/oauth/*`, and `/.well-known/*` and blocks every other path. Keep the origin catch-all 404 as a separate backstop. *(Not created as of 2026-09-29. Optional: the app already answers every unknown path with 404, so this only moves that refusal to the edge.)*
+2. Add a source-range rule for `/mcp`, `/oauth/token`, and `/oauth/revoke`. Keep `/oauth/authorize` and `/.well-known/*` open so discovery and the human pairing flow work. The in-app policy remains the backstop.
+   - **Deployed and enforcing since 2026-09-29** on `b-440a6c30e036d5789acc.lullascape.com`. There was never a log-mode phase: custom-rule "Log" is Enterprise-only, and the zone is on Free.
+   - It is three custom rules, in this order: `IC bridge - allow OpenAI connectors A` (Skip, all remaining custom rules), `... B` (Skip), `IC bridge - block non-OpenAI server routes` (Block). One expression is capped at 4,000 characters, so the 278 ranges are split 139 + 139 across the two Skip rules.
+   - The ranges are exactly `OPENAI_CONNECTOR_RANGES` (from `https://openai.com/chatgpt-connectors.json`, creationTime 2026-09-22). Verified from outside: from a non-OpenAI address the three routes return Cloudflare's 403 block page, while `/.well-known/*` and `/oauth/authorize` pass the edge.
+   - **The same list now lives in two places.** When OpenAI changes it, update the constant AND both Skip rules. A Cloudflare block happens before the request reaches the Mac, so the app's "Refused caller networks" diagnostic never sees it: if ChatGPT suddenly cannot connect and the BRIDGE report shows nothing, check this rule first.
+3. Add a rate-limit rule for `/oauth/*` and `/.well-known/*`. It is defense in depth; preserve the application-side limits. *(Not created as of 2026-09-29. Optional: the app rate-limits these routes itself.)*
 4. Do not put an Access application, generic browser challenge, Bot Fight Mode, or AI-bot blocking in front of the bridge.
 
 The Phase 0 observation was `52.255.111.0/28`, but it is not a permanent authority list. Refresh `OPENAI_CONNECTOR_RANGES` from the published source and the staged measurements before enabling enforcement. A range change can require a re-pair; do not silently widen rules to all Internet traffic just to restore service.
@@ -95,7 +99,7 @@ Only after the packaged app is healthy, the public protected-resource self-probe
 1. Create one ChatGPT MCP app with URL `https://b-<20-lowercase-hex>.lullascape.com/mcp`.
 2. Complete the staged S7 checks with synthetic data first: discovery, link, refresh, Disconnect/Reconnect, one drain, and the hostile-input check.
 3. Wait at least 30 minutes before treating a newly created plugin or any URL/tool-metadata edit as usable. A URL edit is a warm-up reset.
-4. Only then move the range rule from log mode to enforce and proceed to the monitored first real job.
+4. Only then confirm the range rule is enforcing (it is, see §4 item 2) and proceed to the monitored first real job.
 
 Use a dedicated ChatGPT Project or chat for handoffs, with memory, browsing, and unrelated connected apps configured intentionally. Delete handoff chats when appropriate for the selected data controls. Never paste the pairing code, chat epoch key, OAuth tokens, or tunnel credential into a chat.
 
