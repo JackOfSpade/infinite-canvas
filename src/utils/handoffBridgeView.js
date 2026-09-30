@@ -34,6 +34,13 @@ function entry(id, tone, copy, actionIds = []) {
   };
 }
 
+// Jobs released after ChatGPT was told to stop: still unread, and nothing will
+// read them until the person sends Continue.
+function unreadWhileIdle(status) {
+  if (status?.chat?.state !== 'idle' || !Array.isArray(status?.queue?.jobs)) return 0;
+  return status.queue.jobs.filter(job => job?.phase === 'unread').length;
+}
+
 function finish(matches, status) {
   const primary = matches[0] || entry('ready', 'ok', BRIDGE_COPY.health.ready, ['new-chat']);
   const notes = [];
@@ -46,7 +53,7 @@ function finish(matches, status) {
   const applications = status?.queue?.applications || {};
   const stalled = status?.chat?.outstanding?.stalled ? 1 : 0;
   const nudge = matches.some(item => item.id === 'nudge')
-    ? count(applications.ready) + (status?.config?.scope?.scoring ? count(status?.queue?.scoring?.pending) : 0)
+    ? count(applications.ready) + unreadWhileIdle(status) + (status?.config?.scope?.scoring ? count(status?.queue?.scoring?.pending) : 0)
     : 0;
   return {
     ...primary,
@@ -145,6 +152,12 @@ export function deriveBridgeHealth(status, now = 0) {
   }
   if (chat.state === 'working' || chat.outstanding) {
     matches.push(entry('working', 'working', BRIDGE_COPY.health.working));
+  }
+  // Unread jobs count as "working" in the queue totals, but with a stopped chat
+  // they are waiting for ChatGPT, not being saved: lead with Continue.
+  const idleUnread = unreadWhileIdle(value);
+  if (idleUnread) {
+    matches.push(entry('nudge', 'nudge', BRIDGE_DYNAMIC_COPY.nudge(count(applications.ready) + idleUnread, chat.ordinal), ['new-chat']));
   }
   if (count(applications.working)) {
     matches.push(entry('saving', 'working', BRIDGE_COPY.health.saving));

@@ -655,7 +655,7 @@ export function createHandoffEngine({
     if (lane.phase !== 'awaiting') lane.quietFrom = safeNow(now);
     lane.current = current;
     lane.needsRefresh = false;
-    lane.phase = 'awaiting';
+    setPhase(lane, 'awaiting');
     lane.reason = null;
     lane.heldFrom = null;
     lane.hostSince = null;
@@ -670,6 +670,35 @@ export function createHandoffEngine({
   // result lands was held DURING the call: the result must not un-hold it.
   function isHeldPhase(lane) {
     return lane.phase === 'held' || lane.phase === 'needs_user';
+  }
+
+  // Every phase change goes through here so `changedAt` (what the dock and the
+  // bug report show as "in this phase") is the moment the lane ENTERED its
+  // phase. It used to be stamped only by a hold, so a lane that went host ->
+  // done reported its age since release.
+  function setPhase(lane, phase, stamp = safeNow(now)) {
+    if (lane.phase !== phase) lane.changedAt = stamp;
+    lane.phase = phase;
+  }
+
+  // Work the engine still owes a lane. `needsRefresh` is a re-read request that
+  // only an AWAITING lane still owes: a renderer hint (or one that landed while
+  // the lane was awaiting) leaves the flag behind on a host, held or finished
+  // lane, where nothing consumes it, so counting it there made a saved job read
+  // as pending work forever and get() answered 'waiting' until the wait limit
+  // instead of 'queue_empty'. A held lane that resumes to awaiting keeps its flag
+  // and is counted again from that moment.
+  function laneBusy(item) {
+    return (item.needsRefresh === true && item.phase === 'awaiting')
+      || ['unread', 'host'].includes(item.phase)
+      || Boolean(item.inFlight.read || item.inFlight.status || item.inFlight.submit);
+  }
+
+  // ChatGPT was told to stop calling. Nothing will call again until the person
+  // sends Continue (or starts a chat), so the chat reads as idle, not working,
+  // until its next authenticated call clears it.
+  function markChatStopped(target) {
+    if (target && epoch === target) target.idleSince ??= safeNow(now);
   }
 
   // The result of an in-flight call reached a lane that was held meanwhile. The
@@ -762,20 +791,20 @@ export function createHandoffEngine({
       adoptCurrent(lane, result.handoff);
       lane.counters.errStreak = 0;
     } else if (result.kind === 'host') {
-      lane.phase = 'host';
+      setPhase(lane, 'host', stamp);
       lane.reason = null;
       lane.hostSince ??= stamp;
       lane.snapshot = { at: stamp, kind: 'host' };
       lane.counters.errStreak = 0;
     } else if (result.kind === 'done') {
-      lane.phase = 'done';
+      setPhase(lane, 'done', stamp);
       lane.reason = null;
       lane.snapshot = { at: stamp, kind: 'done' };
       clearLaneHint(lane);
       await persistLanes(generation);
       if (!sourceCurrent(generation)) return { kind: 'retry' };
     } else if (result.kind === 'gone') {
-      lane.phase = 'gone';
+      setPhase(lane, 'gone', stamp);
       lane.reason = null;
       lane.snapshot = { at: stamp, kind: 'gone' };
       clearLaneHint(lane);
@@ -851,7 +880,7 @@ export function createHandoffEngine({
       return result;
     }
     if (result.kind === 'awaiting') {
-      lane.phase = 'unread';
+      setPhase(lane, 'unread');
       lane.snapshot = null;
       return readAfterAwaiting ? readLane(lane, { generation }) : result;
     }
@@ -965,6 +994,7 @@ export function createHandoffEngine({
         : Buffer.byteLength(JSON.stringify(body), 'utf8');
       expectedEpoch.lastGetAt = stamp;
       counts.getServed++;
+      expectedEpoch.consecutiveWaits = 0; // work was served, so the wait streak is broken
       auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: 'push' });
       return body;
     }
@@ -1061,6 +1091,7 @@ export function createHandoffEngine({
     expectedEpoch.lastGetAt = stamp;
     expectedEpoch.bytesServed += Buffer.byteLength(JSON.stringify(body), 'utf8');
     counts.getServed++;
+    expectedEpoch.consecutiveWaits = 0; // work was served, so the wait streak is broken
     auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: lane.current.stage });
     const idleNoticeMs = CONSTANTS.SERVE_AFTER_IDLE_NOTICE_HOURS * 3_600_000;
     if (stamp - lastHumanActionAt >= idleNoticeMs && stamp - lastIdleNoticeAt >= 3_600_000) {
@@ -1153,7 +1184,7 @@ export function createHandoffEngine({
     if (removed.ok) return true;
     if (!sourceCurrent(generation)) return false;
     if (lanes.includes(lane) && !['done', 'gone'].includes(lane.phase)) {
-      lane.phase = 'gone';
+      setPhase(lane, 'gone');
       lane.reason = null;
       lane.snapshot = { at: safeNow(now), kind: 'gone' };
       epoch?.assignedLaneOrds.delete(lane.ord);
@@ -1275,6 +1306,7 @@ export function createHandoffEngine({
     const expectedEpoch = epoch;
     const callAt = safeNow(now);
     expectedEpoch.calls += 1;
+    expectedEpoch.idleSince = null; // it called again, so it is not stopped
     expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
     expectedEpoch.firstCallAt ??= callAt;
     expectedEpoch.lastCallAt = callAt;
@@ -1286,7 +1318,9 @@ export function createHandoffEngine({
     const generation = sourceGeneration;
     const resumedDuringGet = () => !epochCurrent(expectedEpoch, generation);
 
-    if (scope.applications && lanes.some(item => item.needsRefresh === true)) {
+    // A hinted host lane is re-probed here, before a push item is served, so its
+    // continuation is not passed over. (A stale flag on a finished lane is inert.)
+    if (scope.applications && lanes.some(item => item.needsRefresh === true && !['done', 'gone'].includes(item.phase))) {
       const refreshed = await refreshOneLane(generation);
       if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     }
@@ -1316,7 +1350,7 @@ export function createHandoffEngine({
 
     const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
     const pushNeedsUser = (scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user';
-    const working = pushWorking || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
+    const working = pushWorking || (scope.applications && lanes.some(laneBusy));
     if (working) {
       const wakeReason = await waitForWake(holdMs, args.signal);
       if (wakeReason === 'aborted' || args.signal?.aborted) return makeResultBody('retry');
@@ -1338,27 +1372,30 @@ export function createHandoffEngine({
       if (lane?.retry) return makeResultBody('retry');
       if (lane) return serveLane(lane, generation, expectedEpoch);
       const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
-        || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
+        || (scope.applications && lanes.some(laneBusy));
       if (!stillWorking) {
         if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
           counts.getPaused++;
+          markChatStopped(expectedEpoch);
           return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
         }
         if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
           return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user') return framePushGet(pushDecision, generation, expectedEpoch);
+        if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user') { markChatStopped(expectedEpoch); return framePushGet(pushDecision, generation, expectedEpoch); }
         if (pushDecision?.status === 'retry') return makeResultBody('retry');
         counts.getEmpty++;
         const drained = (scope.scoring || scope.marketplace)
           ? framePushGet(pushDecision, generation, expectedEpoch)
           : makeResultBody('queue_empty', { remaining: combinedRemaining() });
+        if (drained.status === 'queue_empty') markChatStopped(expectedEpoch);
         if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
         return drained;
       }
       expectedEpoch.consecutiveWaits++;
       if (expectedEpoch.consecutiveWaits >= CONSTANTS.MAX_CONSECUTIVE_WAITS) {
         counts.getPaused++;
+        markChatStopped(expectedEpoch);
         return makeResultBody('paused', { reason: 'waiting_limit', remaining: combinedRemaining(pushDecision?.remaining) });
       }
       counts.getWaiting++;
@@ -1367,17 +1404,19 @@ export function createHandoffEngine({
 
     if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
       counts.getPaused++;
+      markChatStopped(expectedEpoch);
       return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
     }
     if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
       return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (pushNeedsUser) return framePushGet(pushDecision, generation, expectedEpoch);
+    if (pushNeedsUser) { markChatStopped(expectedEpoch); return framePushGet(pushDecision, generation, expectedEpoch); }
     if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
     const result = (scope.scoring || scope.marketplace)
       ? framePushGet(pushDecision, generation, expectedEpoch)
       : makeResultBody('queue_empty', { remaining: combinedRemaining() });
+    if (result.status === 'queue_empty') markChatStopped(expectedEpoch);
     if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
     return result;
   }
@@ -1499,7 +1538,7 @@ export function createHandoffEngine({
       if (result.completed || !result.handoff) {
         if (heldOnLanding) keepHoldOverResult(lane);
         else {
-          lane.phase = 'host';
+          setPhase(lane, 'host', stamp);
           lane.hostSince = stamp;
         }
         lane.current = null;
@@ -1751,14 +1790,26 @@ export function createHandoffEngine({
     return record;
   }
 
+  // An admitted submit that ends the chat's work tells it to stop (hold, needs
+  // attention), which reads as idle exactly as a stopping get does; an accepted
+  // one is progress, so the chat's wait streak starts over.
   async function submit(args = {}) {
     const blocked = gate(args);
     if (blocked) return blocked;
+    const startEpoch = epoch;
+    const result = await submitAdmitted(args);
+    if (result?.status === 'accepted' && epoch === startEpoch && startEpoch) startEpoch.consecutiveWaits = 0;
+    if (['held', 'needs_user', 'paused'].includes(result?.status)) markChatStopped(startEpoch);
+    return result;
+  }
+
+  async function submitAdmitted(args = {}) {
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
     const generation = sourceGeneration;
     const expectedEpoch = epoch;
     const callAt = safeNow(now);
     expectedEpoch.calls += 1;
+    expectedEpoch.idleSince = null;
     expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
     expectedEpoch.firstCallAt ??= callAt;
     expectedEpoch.lastCallAt = callAt;
@@ -1873,11 +1924,12 @@ export function createHandoffEngine({
       reason: lane.reason,
       heldFrom: lane.heldFrom,
       snapshot: lane.snapshot,
+      changedAt: lane.changedAt,
     }));
     restartConfirmed = true;
     for (const lane of lanes) {
       if (lane.phase !== 'held' || lane.reason !== 'restart') continue;
-      lane.phase = 'unread';
+      setPhase(lane, 'unread');
       lane.reason = null;
       lane.heldFrom = null;
       lane.snapshot = null;
@@ -1994,6 +2046,7 @@ export function createHandoffEngine({
       lastCallKind: null,
       calls: 0,
       consecutiveWaits: 0,
+      idleSince: null,
       focusLaneOrd: null,
       servedPrompt: new Map(),
       assignedLaneOrds: new Set(),
@@ -2238,7 +2291,7 @@ export function createHandoffEngine({
       const { awaitingAnswer, servedAt, lastServedDigest, servedCodeAgain, ...marker } = prior;
       Object.assign(lane, marker);
       if (landed) {
-        if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) lane.phase = 'unread';
+        if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) setPhase(lane, 'unread');
       } else Object.assign(lane, { awaitingAnswer, servedAt, lastServedDigest, servedCodeAgain });
       return { ok: false, code: 'persist_failed' };
     }
@@ -2260,11 +2313,13 @@ export function createHandoffEngine({
         reason: lane.reason,
         heldFrom: lane.heldFrom,
         snapshot: lane.snapshot,
+        changedAt: lane.changedAt,
       };
       resumeLane(lane);
       // The time held was time ChatGPT could not have answered in.
       lane.quietFrom = safeNow(now);
-      if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) lane.phase = 'unread';
+      lane.changedAt = lane.quietFrom;
+      if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) setPhase(lane, 'unread');
       if (!await persistLanes()) {
         Object.assign(lane, prior);
         return { ok: false, code: 'persist_failed' };
@@ -2321,8 +2376,23 @@ export function createHandoffEngine({
       lastHintAt.set(lane.ord, safeNow(now));
       hintTimers.delete(lane.ord);
       lane.snapshot = null;
+      // Every live lane is flagged, not only an awaiting one: a lane held while
+      // awaiting comes back awaiting on Resume, and the person may have advanced
+      // its stage by pasting in the meantime, so it must re-read before it is
+      // served again. The flag can outlive its use on a host or finished lane;
+      // laneBusy() is what stops that stale flag counting as pending work.
       lane.needsRefresh = true;
+      // A get that is waiting is woken and probes this lane itself. With none
+      // waiting (ChatGPT was told to stop, or is busy elsewhere) nothing else
+      // will, and a saved job would read as "the app is saving this" until
+      // ChatGPT is prodded: probe the host lane once, in the background. The
+      // per-lane in-flight slot makes this at most one probe per lane, the
+      // hint throttle bounds how often it can start, and a stale source
+      // generation drops the result.
+      const probeHost = lane.phase === 'host' && waiters.size === 0 && !closed && scope.applications
+        && !lane.inFlight.status && !lane.inFlight.read;
       wake();
+      if (probeHost) void statusLane(lane, { generation }).catch(() => undefined);
     };
     if (stamp - last >= CONSTANTS.HINT_MIN_INTERVAL_MS) invalidate();
     else if (!hintTimers.has(lane.ord)) {
@@ -2422,7 +2492,7 @@ export function createHandoffEngine({
         lastCallAt: statusTime(epoch?.lastCallAt),
         lastCallKind: ['get', 'submit'].includes(epoch?.lastCallKind) ? epoch.lastCallKind : null,
         calls: Number.isSafeInteger(chatCalls) ? chatCalls : 0,
-        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? (epoch.presented ? 'reached' : 'awaiting-first-call') : 'working',
+        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? (epoch.presented ? 'reached' : 'awaiting-first-call') : epoch.idleSince != null ? 'idle' : 'working',
         jobsAssigned: epoch?.assignedLaneOrds.size ?? 0,
         jobsCap: limits.jobsPerChat,
         bytesServed: epoch?.bytesServed ?? 0,

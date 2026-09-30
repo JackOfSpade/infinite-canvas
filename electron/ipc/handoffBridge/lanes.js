@@ -151,6 +151,9 @@ export function rehydrateApplicationLane(value, now = 0) {
   lane.heldFrom = LANE_PHASES.includes(value.heldFrom) ? value.heldFrom : null;
   lane.counters = makeCounters(value.counters);
   if (!['held', 'needs_user'].includes(lane.phase)) holdLane(lane, 'restart', now);
+  // `changedAt` is memory only, so every restored lane (including one already
+  // held on disk) starts its "in this phase" clock at the restore.
+  lane.changedAt = now;
   return lane;
 }
 

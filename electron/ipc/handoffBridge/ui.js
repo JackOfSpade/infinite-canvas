@@ -706,7 +706,15 @@ export function registerHandoffBridgeUi({
       let handled = autoReleaseHandled.get(sender.id);
       if (!handled) { handled = new Set(); autoReleaseHandled.set(sender.id, handled); }
       for (const id of [...handled]) if (!jobs.has(id)) handled.delete(id);
-      const ids = [...jobs.values()].filter(item => item.dockState === 'awaiting' && !handled.has(item.jobId)).map(item => item.jobId);
+      // A job that already holds a live lane needs no release (a finished or
+      // gone lane does not block a new one), and each one used to
+      // cost a disk discover plus a no-op release: a card leaves the publication
+      // between stages (dockState null while it is neither working nor awaiting),
+      // which dropped it from `handled`, so every stage re-ran the pipeline.
+      const laned = new Set((Array.isArray(currentStatus()?.queue?.jobs) ? currentStatus().queue.jobs : []).filter(lane => lane?.phase !== 'done' && lane?.phase !== 'gone').map(lane => lane?.jobId).filter(id => typeof id === 'string'));
+      const candidatesNow = [...jobs.values()].filter(item => item.dockState === 'awaiting' && !handled.has(item.jobId));
+      for (const item of candidatesNow) if (laned.has(item.jobId)) handled.add(item.jobId);
+      const ids = candidatesNow.filter(item => !laned.has(item.jobId)).map(item => item.jobId);
       if (!ids.length) return;
       // Claim before the first await so an overlapping publication cannot
       // start a second run for the same ids.

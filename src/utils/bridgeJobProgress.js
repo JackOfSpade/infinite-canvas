@@ -183,6 +183,14 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
     });
   }
 
+  // A chat that was told to stop calls no more, so an unread job (released after
+  // that) is never going to be read until the person sends Continue. Lead with
+  // that, not with "Not read yet", which offers nothing to press.
+  const stoppedLine = () => build({ kind: 'chat-ended', steps }, {
+    headline: BRIDGE_COPY.health.nudge[0], detail: BRIDGE_DYNAMIC_COPY.nudge(1, ordinal)[1], tone: 'attention', lastHeard, action: 'continue-chat',
+  });
+  if (unread && state === 'idle') return stoppedLine();
+
   // Nothing reads an unread job until ChatGPT calls; only the two chat states
   // that mean "no call is coming yet" have something to press.
   if (unread) return unreadLine();
@@ -194,11 +202,7 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
       headline: BRIDGE_COPY.health['chat-full'][0], detail: BRIDGE_COPY.health['chat-full'][1], tone: 'attention', lastHeard, action: 'start-chat',
     });
   }
-  if (state === 'ended' || state === 'idle') {
-    return build({ kind: 'chat-ended', steps }, {
-      headline: BRIDGE_COPY.health.nudge[0], detail: BRIDGE_DYNAMIC_COPY.nudge(1, ordinal)[1], tone: 'attention', lastHeard, action: 'continue-chat',
-    });
-  }
+  if (state === 'ended' || state === 'idle') return stoppedLine();
 
   // 6. A live chat that is not being answered for this job right now: either
   // never handed it, or it answered the previous stage and this one is not

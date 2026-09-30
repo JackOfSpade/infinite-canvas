@@ -910,6 +910,29 @@ export default [
     publish(h.event, { v: 1, seq: 7, jobs }); await settle(12);
     assert(released.length === 2, 'after the job left the publication it is a fresh candidate again');
   } },
+  { name: 'handoff bridge: ipc: a job that already holds a lane is never re-described or re-released when its card leaves and re-enters the publication between stages', async run() {
+    const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
+    const status = { enabled: true, serving: 'live', config: { hostname: 'bridge.example.com' }, prefs: {}, autoRelease: true, queue: { jobs: [] } };
+    const released = []; let describes = 0;
+    const h = setup({ processStartedAt: startedAt,
+      controller: { snapshot: () => status, release: async value => { released.push(value); status.queue.jobs = [{ jobId: JOB, phase: 'awaiting' }]; return { success: true, ok: true, count: 1 }; } },
+      application: { describeForConfirm: async () => { describes++; return { ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, createdAt: '2026-01-01T00:00:00.001Z' }] }; } } });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const jobs = [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'stage-1' }];
+    publish(h.event, { v: 1, seq: 1, jobs }); await settle(12);
+    assert(released.length === 1 && describes === 1, 'the first publication releases once');
+    // Each stage change: the card is neither working nor awaiting for a moment (not published), then awaiting again.
+    for (let stage = 2; stage <= 6; stage += 1) {
+      publish(h.event, { v: 1, seq: stage * 2 - 2, jobs: [] }); await settle(12);
+      publish(h.event, { v: 1, seq: stage * 2 - 1, jobs: [{ ...jobs[0], sig: `stage-${stage}` }] }); await settle(12);
+    }
+    assert(released.length === 1 && describes === 1, `five later stages must not add a describe or a release (released ${released.length}, described ${describes})`);
+    // The lane is removed (an Unrelease or a discard) and the card comes back: it is a fresh candidate, exactly as before.
+    status.queue.jobs = [];
+    publish(h.event, { v: 1, seq: 100, jobs: [] }); await settle(12);
+    publish(h.event, { v: 1, seq: 101, jobs }); await settle(12);
+    assert(released.length === 2, 'without a lane the job is released again');
+  } },
   { name: 'handoff bridge: ipc: a failed or partial auto-release is retried on the next publication, not remembered as handled', async run() {
     const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
     const status = { enabled: true, serving: 'live', config: { hostname: 'bridge.example.com' }, prefs: {}, autoRelease: true };

@@ -15,6 +15,10 @@ export const RESULT_NOTES = Object.freeze({
   queueEmpty: 'Every handoff for this session is complete. Stop and tell the user.',
   unauthorized: "The session code was not accepted. Use the exact session code from the user's message.",
   rejected: 'Nothing was saved. Submit the complete corrected answer with the same handoffCode.',
+  // status 'paused' carries a reason. Only a real pause (no reason) is "paused";
+  // the two below used to say so too, which was false: the bridge was serving.
+  waitingLimit: 'Nothing new became ready while you waited. Stop now and tell the user this chat is idle; they will send Continue when there is more work.',
+  needsAttention: 'A job needs attention in Infinite Canvas. Stop now and tell the user.',
 });
 
 export function supersededStageNote(got, want) {
@@ -127,7 +131,10 @@ export function makeResultBody(status, fields = {}) {
     case 'app_unavailable': return { status, note: 'Open the Infinite Canvas window that owns these handoffs and try again.', ...fields };
     case 'retry': return { status, note: 'The handoff is still being processed. Retry the same call.', ...fields };
     case 'waiting': return { status, note: 'Infinite Canvas is still preparing the next handoff.', ...fields };
-    case 'paused': return { status, note: 'The bridge is paused. Stop and tell the user.', ...fields };
+    case 'paused':
+      if (fields.reason === 'waiting_limit') return { status, note: RESULT_NOTES.waitingLimit, ...fields };
+      if (fields.reason === 'needs_user') return { status, note: RESULT_NOTES.needsAttention, ...fields };
+      return { status, note: 'The bridge is paused. Stop and tell the user.', ...fields };
     case 'held': return { status, note: 'This handoff is on hold. Stop and tell the user.', ...fields };
     case 'needs_user': return { status, note: 'This handoff needs attention in Infinite Canvas. Stop and tell the user.', ...fields };
     default: return { status, ...fields };

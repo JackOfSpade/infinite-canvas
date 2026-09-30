@@ -76,6 +76,20 @@ export default [
     'blank legacy status names must become the default while custom names remain unchanged');
     assert(normalizeBridgeStatus(rawStatus(1, { prefs: { sourcePolicy: 'off' } })).prefs.sourcePolicy === 'off', 'the accepted source-policy off value must survive normalization');
   } },
+  { name: 'handoff bridge: ui: a job released after the chat was told to stop is waiting for Continue, not "The app is saving this"', run: () => {
+    const jobId = '00000000-0000-4000-8000-000000000001';
+    const idleUnread = rawStatus(1, { chat: { state: 'idle', ordinal: 1, lastCallAt: NOW - 60_000 }, queue: { applications: { working: 1 }, jobs: [{ jobId, phase: 'unread' }] } });
+    const health = deriveBridgeHealth(idleUnread, NOW);
+    assert(health.id === 'nudge' && health.badge === 1 && health.headline === '1 waiting for ChatGPT' && health.actions.some(item => item.id === 'new-chat'), `an unread job behind an idle chat leads with the nudge, got ${health.id}/${health.headline}`);
+    // A host lane is genuinely being saved, and a working chat still reads the same.
+    const idleHost = rawStatus(1, { chat: { state: 'idle', ordinal: 1, lastCallAt: NOW - 60_000 }, queue: { applications: { working: 1 }, jobs: [{ jobId, phase: 'host' }] } });
+    assert(deriveBridgeHealth(idleHost, NOW).id === 'saving', 'the app saving a job is still "The app is saving this"');
+    const workingUnread = rawStatus(1, { chat: { state: 'working', ordinal: 1, lastCallAt: NOW - 5_000 }, queue: { applications: { working: 1 }, jobs: [{ jobId, phase: 'unread' }] } });
+    assert(deriveBridgeHealth(workingUnread, NOW).id === 'working', 'a chat that is still calling is working');
+    const both = rawStatus(1, { chat: { state: 'idle', ordinal: 1, lastCallAt: NOW - 60_000 }, queue: { applications: { ready: 1, working: 1 }, jobs: [{ jobId, phase: 'unread' }, { jobId: '00000000-0000-4000-8000-000000000002', phase: 'awaiting' }] } });
+    const combined = deriveBridgeHealth(both, NOW);
+    assert(combined.id === 'nudge' && combined.badge === 2 && combined.headline === '2 waiting for ChatGPT', `the badge and headline count the unread and the ready job, got ${combined.badge}/${combined.headline}`);
+  } },
   { name: 'handoff bridge: ui: job row states retain their intended neutral and dock copy', run: () => {
     assert(describeJobRow({ phase: 'unread' }).text === 'Waiting for ChatGPT', 'an unread released job is waiting, not unreadable');
     assert(describeJobRow({ phase: 'held', reason: 'human_advance' }).text === 'Answered here; ChatGPT stopped serving it', 'a human advance must use the dock-answer copy');

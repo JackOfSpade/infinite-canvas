@@ -15,6 +15,10 @@ import { createApplicationLane, createHandoffCodeGuard, holdLane, isHumanAdvance
 import { AUDIT_LINE_EXAMPLE, ENGINE_PORT_SHAPE, SOURCE_ADAPTER_SHAPE, STATUS_SNAPSHOT_EXAMPLE, TUNNEL_PORT_SHAPE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { classifyThrow, fixedError } from '../../electron/ipc/handoffBridge/errors.js';
 import { createHandoffBridgeLog, makeLogRecord } from '../../electron/ipc/handoffBridge/log.js';
+import { createApplicationSource } from '../../electron/ipc/handoffBridge/sources/application.js';
+import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
+import { reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { SURFACE_PIN, TOOLS_LIST, surfaceHash } from '../../electron/ipc/handoffBridge/tools.js';
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
@@ -3540,6 +3544,375 @@ tests.push(
         await new Promise(resolve => setImmediate(resolve));
         assert(failures.length >= 4 && unhandled.length === 0, `both refreshes tried to write and nothing leaked: ${failures.join()} ${unhandled.length}`);
       } finally { process.off('unhandledRejection', onUnhandled); }
+    },
+  },
+);
+
+// ---- get() must not wait on a finished job (first live ChatGPT bridge run) ----
+// Live evidence: the last job was saved, yet every get answered 'waiting' for
+// ~3 minutes until the wait limit said "paused". The renderer's job-changed hint
+// had set needsRefresh on the HOST lane; nothing consumes that flag off an
+// awaiting lane, and `working` counted it, so a saved job read as pending work.
+function liveBridgeHarness({ scope = { applications: true, scoring: true, marketplace: true } } = {}) {
+  const clock = createFakeClock();
+  const jobRoot = { status: 'queued' };
+  let finalReview = false;
+  const application = createApplicationSource({
+    getHandoff: async () => ({ handoff: { handoffCode: 'HANDOFF-REVIEW', stage: 'review', prompt: 'Synthetic review prompt.', revision: 1 } }),
+    submitHandoff: async () => { finalReview = true; jobRoot.status = 'importing'; return { accepted: true, completed: true }; },
+    getStatus: async () => ({ ...jobRoot }),
+    discover: async () => [],
+    subscribeLocalApplicationDiscards: () => () => undefined,
+  });
+  const push = createPushSource({
+    // Nothing pending in any hub: scoring and marketplace are idle.
+    seam: { list: async () => ({ handoffs: [], excluded: {}, pending: 0 }), read: async () => ({ ok: false }), submit: async () => ({ outcome: 'not_pending' }) },
+    hubKey: () => null, now: clock.now, timers: clock,
+  });
+  const engine = createHandoffEngine({ sources: { application, push }, scope, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
+  return { engine, clock, jobRoot, saved: () => { jobRoot.status = 'saved'; }, finalReview: () => finalReview };
+}
+
+async function liveBridgeServedAndSubmitted(harness) {
+  const { engine } = harness;
+  assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the live job releases');
+  const chat = await engine.newChat({ linkId: LINK });
+  const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+  assert(first.status === 'served' && first.stage === 'review', `the review handoff is served, got ${first.status}`);
+  const accepted = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-REVIEW', response: answer({ code: 'HANDOFF-REVIEW', stage: 'review' }) });
+  assert(accepted.status === 'accepted' && accepted.jobComplete === true, `the final answer is accepted as complete, got ${accepted.status}`);
+  return chat.sessionCode;
+}
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a job saved after a renderer hint ends the chat with queue_empty, not waiting until the wait limit',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      const session = await liveBridgeServedAndSubmitted(harness);
+      // The card's publication changes while the app imports, then the job leaves it on save.
+      engine.hint({ jobId: JOB_A }); clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const importing = await engine.get({ session, linkId: LINK });
+      assert(importing.status === 'waiting', `an import still running is legitimately waiting, got ${importing.status}`);
+      harness.saved(); engine.hint({ jobId: JOB_A }); clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const drained = await engine.get({ session, linkId: LINK });
+      assert(drained.status === 'queue_empty', `once the bundle is saved the next get is queue_empty, got ${drained.status}`);
+      assert(engine.snapshot().queue.jobs[0].phase === 'done', 'the lane finished');
+      assert((await engine.get({ session, linkId: LINK })).status === 'session_ended', 'the drained chat is retired (terminalDrain still applies)');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a hint on a finished or held lane never becomes pending work',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      const session = await liveBridgeServedAndSubmitted(harness);
+      harness.saved();
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      // Hints arrive both before the probe (host) and after it (done, which hint() refuses).
+      engine.hint({ jobId: JOB_A }); clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
+      const result = await engine.get({ session, linkId: LINK });
+      assert(result.status === 'queue_empty', `a saved job is not work, got ${result.status}`);
+
+      const held = liveBridgeHarness();
+      assert((await held.engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const chat = await held.engine.newChat({ linkId: LINK });
+      assert((await held.engine.hold(JOB_A)).ok, 'the person holds the lane');
+      held.engine.hint({ jobId: JOB_A }); held.clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS);
+      const stopped = await held.engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(stopped.status === 'paused' && stopped.reason === 'needs_user', `a hinted held lane still asks for the person, not 'waiting', got ${stopped.status}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: waiting_limit is truthful, the bridge is not paused, and the chat reads idle until it calls again',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      const session = await liveBridgeServedAndSubmitted(harness);
+      let last = null; let polls = 0;
+      // The import genuinely never finishes: every poll is a legitimate wait.
+      for (; polls < CONSTANTS.MAX_CONSECUTIVE_WAITS + 2; polls += 1) {
+        clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+        last = await engine.get({ session, linkId: LINK });
+        if (last.status !== 'waiting') break;
+        assert(engine.snapshot().chat.state === 'working', 'a waiting chat is working');
+      }
+      assert(polls === CONSTANTS.MAX_CONSECUTIVE_WAITS - 1 && last.status === 'paused' && last.reason === 'waiting_limit', `the wait limit ends the polling, got ${last?.status}/${last?.reason} after ${polls}`);
+      assert(last.note === RESULT_NOTES.waitingLimit && !/is paused/i.test(last.note) && /idle/.test(last.note) && /Continue/.test(last.note),
+        'the waiting_limit note says the chat is idle and to send Continue, never that the bridge is paused');
+      assert(engine.snapshot().paused === false, 'the bridge itself is not paused');
+      assert(engine.snapshot().chat.state === 'idle', `the stopped chat reads idle, got ${engine.snapshot().chat.state}`);
+      // ChatGPT calling again (the person sent Continue) clears it.
+      clock.advance(CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS + 1);
+      const resumed = await engine.get({ session, linkId: LINK });
+      assert(resumed.status === 'waiting' && engine.snapshot().chat.state === 'working', 'a fresh call clears idle');
+      // A real pause still says paused.
+      engine.pause('user');
+      const paused = await engine.get({ session, linkId: LINK });
+      assert(paused.status === 'paused' && /paused/.test(paused.note), 'a real pause keeps its own wording');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a held job also stops the chat as idle, with its own truthful note',
+    run: async () => {
+      const state = await started();
+      assert((await state.engine.hold(JOB_A)).ok, 'hold');
+      const stopped = await state.engine.get({ session: state.session, linkId: LINK });
+      assert(stopped.status === 'paused' && stopped.reason === 'needs_user' && stopped.note === RESULT_NOTES.needsAttention && !/bridge is paused/i.test(stopped.note), `needs_user is not a bridge pause, got ${stopped.note}`);
+      assert(state.engine.snapshot().chat.state === 'idle', 'ChatGPT was told to stop, so the chat is idle');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane reports how long it has been in its CURRENT phase, not since release',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const releasedAt = clock.now();
+      const chat = await engine.newChat({ linkId: LINK });
+      clock.advance(11 * 60_000);
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served', 'served after 11 minutes of being released');
+      const awaitingSince = engine.snapshot().queue.jobs[0].changedAt;
+      assert(awaitingSince === clock.now(), `entering awaiting is the phase entry (${awaitingSince} vs ${clock.now()})`);
+      clock.advance(60_000);
+      await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-REVIEW', response: answer({ code: 'HANDOFF-REVIEW', stage: 'review' }) });
+      const hostAt = clock.now();
+      assert(engine.snapshot().queue.jobs[0].phase === 'host' && engine.snapshot().queue.jobs[0].changedAt === hostAt, 'entering host restarts the phase clock');
+      clock.advance(30_000); harness.saved(); clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const row = engine.snapshot().queue.jobs[0];
+      assert(row.phase === 'done' && row.changedAt > hostAt && row.changedAt < releasedAt + 13 * 60_000, 'done is stamped when the lane finished');
+      const reduced = reduceBridgeQueue({ at: clock.now() + 4000, enabled: true, serving: 'live', lanes: [row], queue: {}, chat: engine.snapshot().chat, counts: {} });
+      assert(reduced.lanes[0].ageSeconds < 60, `the bug report's "in this phase" is seconds for a lane that just finished, got ${reduced.lanes[0].ageSeconds}s`);
+      // Resuming a held lane restarts the clock too.
+      const other = await started();
+      assert((await other.engine.hold(JOB_A)).ok, 'hold'); other.clock.advance(5 * 60_000);
+      assert((await other.engine.resume({ jobId: JOB_A })).ok && other.engine.snapshot().queue.jobs[0].changedAt === other.clock.now(), 'resume is a phase change');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: idle is a closed chat state in every consumer, and the tool surface did not change',
+    run: async () => {
+      const raw = state => ({ at: 1, enabled: true, serving: 'live', lanes: [], queue: {}, chat: { state }, counts: {} });
+      for (const state of ['idle', 'ended', 'working', 'full']) assert(reduceBridgeQueue(raw(state)).chat.state === state, `${state} must survive the bug-report reducer`);
+      assert(reduceBridgeQueue(raw('made-up')).chat.state === 'none', 'an unknown state still collapses');
+      assert(surfaceHash(TOOLS_LIST) === SURFACE_PIN, 'a runtime result note must not change the surface ChatGPT caches');
+    },
+  },
+);
+
+// ---- Each fix of the "saved job reads as work" bug pinned on its own ----------
+// The stale-flag fix has two halves that fail differently, so each has a test
+// that goes red when ONLY that half is reverted.
+tests.push(
+  {
+    // Reverting only laneBusy(): a hint landed while the lane was AWAITING (the
+    // flag is set while ChatGPT writes), the final answer is accepted, the lane
+    // goes host then done, and the flag is still set on the finished lane.
+    name: 'handoff bridge: engine: a hint that landed while ChatGPT was writing does not keep a saved job "waiting"',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served', `served, got ${first.status}`);
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }) === true, 'the hint lands on the awaiting lane');
+      const accepted = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-REVIEW', response: answer({ code: 'HANDOFF-REVIEW', stage: 'review' }) });
+      assert(accepted.status === 'accepted' && accepted.jobComplete === true, `accepted as complete, got ${accepted.status}`);
+      assert(engine.snapshot().queue.jobs[0].phase === 'host', 'the app is saving it');
+      harness.saved();
+      clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(next.status === 'queue_empty', `a saved job with a stale hint is not work; expected queue_empty, got ${next.status}/${next.reason ?? ''}`);
+      assert(engine.snapshot().queue.jobs[0].phase === 'done', 'the lane finished');
+    },
+  },
+  {
+    // Reverting only hint() to flag awaiting lanes alone: a lane held while
+    // awaiting, whose stage the person advanced by pasting, comes back awaiting
+    // with its OLD handoff on Resume unless the hint flagged the held lane.
+    name: 'handoff bridge: engine: a lane held while awaiting, hinted after the person advanced its stage, never serves the old prompt after Resume',
+    run: async () => {
+      let code = 'HANDOFF-A'; let stage = 'resume';
+      const submitted = [];
+      const { engine, clock, session } = await started({ sourceOverrides: {
+        read: async () => ({ kind: 'open', handoff: handoff({ code, stage }) }),
+        submit: async (lane, { code: sent }) => { submitted.push(sent); return { kind: 'accepted', completed: true }; },
+      } });
+      const first = await engine.get({ session, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'the resume stage is served');
+      assert((await engine.hold(JOB_A)).ok, 'the person presses Keep for me');
+      code = 'HANDOFF-HUMAN'; stage = 'cover-letter'; // they answered that stage by paste in the dock
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }) === true, 'the card publication change hints the held lane');
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'resume');
+      const after = await engine.get({ session, linkId: LINK });
+      assert(!(after.status === 'served' && after.handoffCode === 'HANDOFF-A'), 'the retired prompt must never be served again');
+      assert(after.status === 'paused' && after.reason === 'needs_user', `the lane re-reads and asks for the person, got ${after.status}/${after.reason ?? ''}`);
+      assert(engine.snapshot().queue.jobs[0].reason === 'human_advance', 'the re-read found the advanced stage');
+      assert(submitted.length === 0, 'nothing was submitted for the retired code');
+    },
+  },
+  {
+    // Reverting only the pre-refresh guard in get() to awaiting lanes: a hinted
+    // HOST lane must be re-read before a ready scoring item is served, so the
+    // job's continuation is not passed over.
+    name: 'handoff bridge: engine: a hinted host lane is refreshed before a push item is served (its continuation goes first)',
+    run: async () => {
+      const clock = createFakeClock();
+      let building = false; let appCode = 'HANDOFF-A'; let appStage = 'resume'; let pushReady = false;
+      const application = {
+        read: async () => building ? { kind: 'host' } : { kind: 'open', handoff: handoff({ code: appCode, stage: appStage }) },
+        status: async () => building ? { kind: 'host' } : { kind: 'awaiting', read: true },
+        submit: async () => { building = true; return { kind: 'accepted', completed: true }; },
+      };
+      const push = {
+        get: async () => pushReady
+          ? { status: 'served', handoffCode: 'PUSH-1', task: 'job-scoring', prompt: 'score', remaining: { ready: 1, working: 0, needsYou: 0 } }
+          : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } },
+        submit: async () => ({ status: 'unknown_handoff' }),
+      };
+      const engine = createHandoffEngine({ sources: { application, push }, scope: { applications: true, scoring: true }, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'release');
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert((await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) })).status === 'accepted', 'accepted');
+      assert(engine.snapshot().queue.jobs[0].phase === 'host', 'the app is building the next stage');
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'waiting', 'still building');
+      building = false; appCode = 'HANDOFF-B'; appStage = 'cover-letter'; pushReady = true;
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      engine.hint({ jobId: JOB_A });
+      const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === 'HANDOFF-B' && next.stage === 'cover-letter', `the job's continuation is served before the scoring item, got ${next.status}/${next.handoffCode}`);
+    },
+  },
+  {
+    // Reverting only `expectedEpoch.idleSince = null` inside submit().
+    name: 'handoff bridge: engine: a submit from an idle chat clears idle, and a submit that ends the chat marks it idle',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      const session = await liveBridgeServedAndSubmitted(harness);
+      for (let polls = 0; polls < CONSTANTS.MAX_CONSECUTIVE_WAITS + 2; polls += 1) {
+        clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+        if ((await engine.get({ session, linkId: LINK })).status !== 'waiting') break;
+      }
+      assert(engine.snapshot().chat.state === 'idle', 'the wait limit left the chat idle');
+      // ChatGPT is heard again, by a submit rather than a get.
+      const reply = await engine.submit({ session, linkId: LINK, handoffCode: 'HANDOFF-REVIEW', response: answer({ code: 'HANDOFF-REVIEW', stage: 'review' }) });
+      assert(reply.status !== 'paused', `the submit is answered normally, got ${reply.status}`);
+      assert(engine.snapshot().chat.state === 'working', `a submit means the chat is not stopped, got ${engine.snapshot().chat.state}`);
+
+      // A submit whose answer is turned away with "stop" (the job was kept for the person) reads idle, like a stopping get.
+      const state = await served();
+      assert((await state.engine.hold(JOB_A)).ok, 'the person holds the job while ChatGPT writes');
+      const held = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer() });
+      assert(held.status === 'held', `the answer is turned away as held, got ${held.status}`);
+      assert(state.engine.snapshot().chat.state === 'idle', `ChatGPT was told to stop, so the chat is idle, got ${state.engine.snapshot().chat.state}`);
+      // A real bridge pause is not this: gate() answers it before the chat is touched.
+    },
+  },
+  {
+    name: 'handoff bridge: engine: work served or an answer accepted resets the wait streak, so a busy chat is never told to stop',
+    run: async () => {
+      let n = 1; let building = false;
+      const { engine, clock, session } = await started({ sourceOverrides: {
+        read: async () => building ? { kind: 'host' } : { kind: 'open', handoff: handoff({ code: `HANDOFF-${n}`, stage: 'review', revision: n, prompt: `Round ${n}` }) },
+        status: async () => building ? { kind: 'host' } : { kind: 'awaiting', read: true },
+        submit: async () => { building = true; n += 1; return { kind: 'accepted', completed: true }; },
+      } });
+      const rounds = CONSTANTS.MAX_CONSECUTIVE_WAITS + 4;
+      for (let round = 1; round <= rounds; round += 1) {
+        clock.advance(10_000);
+        const got = await engine.get({ session, linkId: LINK });
+        assert(got.status === 'served', `round ${round}: expected served, got ${got.status}/${got.reason ?? ''}`);
+        clock.advance(30_000);
+        const sent = await engine.submit({ session, linkId: LINK, handoffCode: got.handoffCode, response: answer({ code: got.handoffCode, stage: 'review' }) });
+        assert(sent.status === 'accepted', `round ${round}: accepted, got ${sent.status}`);
+        clock.advance(5_000 + CONSTANTS.HOST_POLL_MS);
+        const wait = await engine.get({ session, linkId: LINK }); // the app builds: one legitimate wait per round
+        assert(wait.status === 'waiting' && wait.pollCount === 1, `round ${round}: a single wait (pollCount 1), got ${wait.status}/${wait.pollCount ?? ''}/${wait.reason ?? ''}`);
+        building = false;
+      }
+      assert(engine.snapshot().chat.state === 'working', 'the chat was never told to stop');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a push item served resets the wait streak too',
+    run: async () => {
+      const clock = createFakeClock();
+      let mode = 'waiting'; let served = 0;
+      const push = {
+        get: async () => mode === 'ready'
+          ? { status: 'served', handoffCode: `PUSH-${served += 1}`, task: 'job-scoring', prompt: 'score', remaining: { ready: 1, working: 0, needsYou: 0 } }
+          : { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } },
+        submit: async () => ({ status: 'unknown_handoff' }),
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: true, scoring: true }, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
+      const chat = await engine.newChat({ linkId: LINK });
+      const call = { session: chat.sessionCode, linkId: LINK };
+      for (let round = 1; round <= 3; round += 1) {
+        mode = 'waiting';
+        for (let poll = 1; poll <= CONSTANTS.MAX_CONSECUTIVE_WAITS - 2; poll += 1) {
+          clock.advance(1000);
+          const wait = await engine.get(call);
+          assert(wait.status === 'waiting', `round ${round} poll ${poll}: expected waiting, got ${wait.status}/${wait.reason ?? ''}`);
+        }
+        mode = 'ready'; clock.advance(1000);
+        assert((await engine.get(call)).status === 'served', `round ${round}: the scoring item is served`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a hint on a host lane with no get waiting probes it in the background, once, so a saved job finishes without ChatGPT polling',
+    run: async () => {
+      const harness = liveBridgeHarness();
+      const { engine, clock } = harness;
+      await liveBridgeServedAndSubmitted(harness);
+      assert(engine.snapshot().queue.jobs[0].phase === 'host', 'the app is saving it');
+      harness.saved();
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      engine.hint({ jobId: JOB_A });
+      await settle();
+      assert(engine.snapshot().queue.jobs[0].phase === 'done', 'no get was made, yet the saved job finished');
+
+      // No probe storm: while one probe is in flight, further hints start none.
+      let statusCalls = 0; let stall = false; const gate = deferred();
+      const busy = await started({ sourceOverrides: { status: () => { statusCalls += 1; return stall ? gate.promise : Promise.resolve({ kind: 'host' }); } } });
+      const first = await busy.engine.get({ session: busy.session, linkId: LINK });
+      assert((await busy.engine.submit({ session: busy.session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) })).status === 'accepted', 'accepted');
+      assert(busy.engine.snapshot().queue.jobs[0].phase === 'host', 'host');
+      stall = true;
+      const before = statusCalls;
+      for (let hints = 0; hints < 5; hints += 1) { busy.clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1); busy.engine.hint({ jobId: JOB_A }); await settle(); }
+      assert(statusCalls - before === 1, `one in-flight probe per lane, got ${statusCalls - before}`);
+      gate.resolve({ kind: 'host' });
+      await settle();
+      // A throwing source never escapes the background probe.
+      const broken = await started({ sourceOverrides: { status: async () => { throw new Error('boom'); } } });
+      const one = await broken.engine.get({ session: broken.session, linkId: LINK });
+      await broken.engine.submit({ session: broken.session, linkId: LINK, handoffCode: one.handoffCode, response: answer({ code: one.handoffCode }) });
+      broken.clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(broken.engine.hint({ jobId: JOB_A }) === true, 'hint');
+      await settle();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a restored lane has a phase-entry time from the restore, and hold/resume go through setPhase',
+    run: async () => {
+      const lane = rehydrateApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 10, phase: 'held', reason: 'user_hold', heldFrom: 'awaiting' }, 7777);
+      assert(lane.changedAt === 7777, `an already-held lane restores with the restore time, got ${lane.changedAt}`);
+      const live = rehydrateApplicationLane({ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 10, phase: 'awaiting' }, 8888);
+      assert(live.phase === 'held' && live.changedAt === 8888, 'a lane restored from a live phase is held at the restore time');
+      const clock = createFakeClock(); clock.advance(5000);
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
+      assert(engine.restore([{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 10, phase: 'needs_user', reason: 'read_failed', heldFrom: 'unread' }]) === 1, 'restored');
+      assert(engine.snapshot().queue.jobs[0].changedAt === clock.now(), 'the dock and bug report age a restored lane from the restore, not from its release');
     },
   },
 );

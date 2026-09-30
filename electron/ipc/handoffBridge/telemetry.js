@@ -219,7 +219,7 @@ const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'j
 const QUEUE_SERVING = new Set(['off', 'live', 'paused', 'stopping', 'starting', 'failed', 'error']);
 const QUEUE_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'network', 'expiry', 'sleep', 'quit', 'tunnel', 'other']);
 const QUEUE_FAULTS = new Set(['persist_failed', 'source_failed', 'other']);
-const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'full']);
+const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended']);
 const QUEUE_COUNT_KEYS = ['releaseCalls', 'releaseNoops', 'unreleaseCalls', 'lanesDropped', 'droppedDiscarded', 'droppedPruned', 'droppedMissing', 'droppedSaved'];
 const QUEUE_MAX_LANES = 20;
 

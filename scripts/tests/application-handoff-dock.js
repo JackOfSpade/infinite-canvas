@@ -1628,6 +1628,19 @@ const bridgeJobProgressTests = [
     },
   },
   {
+    name: 'bridge progress: a job released after ChatGPT was told to stop leads with Copy Continue, not "Not read yet"',
+    run: () => {
+      const unread = progress({ job: progressJob({ phase: 'unread', servedToChat: null }), chat: progressChat({ state: 'idle' }) });
+      assert(unread.kind === 'chat-ended' && unread.action === 'continue-chat' && unread.actionLabel === 'Copy Continue' && unread.tone === 'attention', `an unread job in an idle chat must offer Copy Continue, got ${unread.kind}/${unread.action}`);
+      assert(unread.headline === 'Waiting for ChatGPT' && unread.detail.includes('Copy Continue and paste it into it'), 'it says what to do');
+      assert(unread.lastHeard === PROGRESS_NOW - 20000, 'and when the chat was last heard');
+      // A working chat still describes an unread job as not read yet, and app-side work is unchanged.
+      assert(progress({ job: progressJob({ phase: 'unread', servedToChat: null }), chat: progressChat({ state: 'working' }) }).kind === 'unread', 'a chat that is still calling will read it');
+      const host = progress({ job: progressJob({ phase: 'host' }), chat: progressChat({ state: 'idle' }) });
+      assert(host.kind === 'host' && host.action === null, 'the app saving a job is true whatever the chat is doing');
+    },
+  },
+  {
     name: 'bridge progress: a full chat that already holds this job is still working on it, with a weaker note and no Start-a-new-chat button',
     run: () => {
       const view = progress({ chat: progressChat({ state: 'full' }) });
@@ -1699,10 +1712,12 @@ const bridgeJobProgressTests = [
         'the no-chat line names the button that copies the starter, then the one paste it owes');
       const first = progress({ job: unreadJob, chat: progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null }) });
       assert(first.kind === 'first-call' && first.action === 'start-chat' && first.actionLabel === 'Copy starter', 'an unread job in a chat that has not called yet is waiting for that first call');
-      for (const state of ['working', 'full', 'ended', 'idle']) {
+      for (const state of ['working', 'full', 'ended']) {
         const view = progress({ job: unreadJob, chat: progressChat({ state }) });
         assert(view.kind === 'unread' && view.headline === 'Not read yet' && view.action === null, `an unread job with a ${state} chat says only that it is not read yet`);
       }
+      // 'idle' is the exception: ChatGPT was told to stop, so it will not read this job until Continue (see the idle test below).
+      assert(progress({ job: unreadJob, chat: progressChat({ state: 'idle' }) }).action === 'continue-chat', 'an unread job behind an idle chat is continued');
       assert(progress({ job: unreadJob, chat: { state: 'unknown', ordinal: 1 } }).kind === 'unread', 'an unreadable chat state does not change what an unread job proves');
       assert(progress({ job: unreadJob, chat: null }).kind === 'unread', 'a missing chat does not change it either');
       // Two jobs, one chat: B stays unread while A is outstanding, and is not "being read".
