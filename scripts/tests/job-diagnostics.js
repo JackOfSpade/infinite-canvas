@@ -2913,6 +2913,27 @@ export default [
     },
   },
 {
+    name: 'Node Diagnostics states a job card\'s application bundle explicitly, so a cleared pointer after a discard reads as none',
+    run: () => {
+      const bundleId = '01f8d94c-6fd3-4a2b-8c5e-0123456789ab';
+      const nodes = [
+        { id: 'card-live', type: 'jobcard', data: { title: 'Live', company: 'Acme', url: 'https://careers.example.test/a', localApplication: { id: bundleId, status: 'queued', mode: 'paste', folder: '/Users/jack/private/PRIVATE_FOLDER' } } },
+        { id: 'card-cleared', type: 'jobcard', data: { title: 'Cleared', company: 'Acme', url: 'https://careers.example.test/b', localApplication: null } },
+        { id: 'card-hostile', type: 'jobcard', data: { title: 'Hostile', company: 'Acme', url: 'https://careers.example.test/c', localApplication: { id: 'x'.repeat(40), status: '/Users/jack/PRIVATE_STATUS text' } } },
+      ];
+      const report = generateMarkdown({
+        description: 'Did the discard work?', nodes, edges: [], drawings: [], frontEndState: {},
+        nodeInternals: nodes.map(node => ({ id: node.id, type: node.type, position: { x: 0, y: 0 }, selected: false })),
+        nodeComponentStates: [], eventLogs: [], filterCode: 'FULL',
+      }).markdown;
+      const section = report.split('## Node Diagnostics')[1]?.split('\n## ')[0] || '';
+      assert(section.includes('appBundle: queued (01f8d94c)'), 'a live bundle shows its closed status and 8-hex id prefix');
+      assert(section.includes('appBundle: none'), 'a cleared pointer is stated, not omitted');
+      assert(section.includes('appBundle: unknown ('), 'a status that is not a closed word is not echoed');
+      assert(!section.includes('PRIVATE_FOLDER') && !section.includes('PRIVATE_STATUS'), 'no path or free text reaches the report');
+    },
+  },
+{
     name: 'FULL and JOBLINK reports expose broken Google URL shapes without query values',
     run: () => {
       const legacyUrl = 'https://www.google.com/search?ibp=htl;jobs&q&htidocid=SecretOpaqueId%3D%3D#fpstate=tldetail&htivrt=jobs&htiq';

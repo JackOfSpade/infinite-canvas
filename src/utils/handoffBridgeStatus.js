@@ -106,7 +106,7 @@ export const EMPTY_BRIDGE_STATUS = Object.freeze({
 
 function normalizeJob(raw) {
   const value = object(raw);
-  return Object.freeze({ jobId: safeUuid(value.jobId), phase: oneOf(value.phase, JOB_PHASES, 'unknown'), stage: nullableOneOf(value.stage, APPLICATION_STAGES), reason: nullableOneOf(value.reason, JOB_REASONS), servedToChat: nullableNumber(value.servedToChat), changedAt: nullableNumber(value.changedAt) });
+  return Object.freeze({ jobId: safeUuid(value.jobId), phase: oneOf(value.phase, JOB_PHASES, 'unknown'), stage: nullableOneOf(value.stage, APPLICATION_STAGES), reason: nullableOneOf(value.reason, JOB_REASONS), servedToChat: nullableNumber(value.servedToChat), changedAt: nullableNumber(value.changedAt), servedAt: nullableNumber(value.servedAt), answeredAt: nullableNumber(value.answeredAt), awaitingAnswer: bool(value.awaitingAnswer), stalled: bool(value.stalled), stalledSince: nullableNumber(value.stalledSince) });
 }
 
 // Never throw: this handles hostile main-process values as well as partially

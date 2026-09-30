@@ -102,6 +102,38 @@ export const JOB_ROW_COPY = Object.freeze({
   unreadable: 'Reading this job failed; retrying',
 });
 
+// Live progress for one application the bridge holds (bridgeJobProgress.js).
+// Every line states what a lane phase, chat state or counter PROVES: none names
+// a guessed cause, and none claims progress the status cannot see.
+export const BRIDGE_PROGRESS_COPY = Object.freeze({
+  region: 'ChatGPT progress',
+  stepper: 'Application steps',
+  stepState: Object.freeze({ done: 'done', current: 'current step', upcoming: 'not started yet' }),
+  toneLabel: Object.freeze({ neutral: '', working: 'In progress', attention: 'Needs attention', problem: 'Problem' }),
+  generic: Object.freeze(['Checking on this job', 'The bridge has not reported this job\'s progress yet.']),
+  gone: Object.freeze(['Discarded', 'The bridge is no longer holding this job.']),
+  done: Object.freeze(['Saved', 'Every step of this application is finished.']),
+  unread: Object.freeze(['Not read yet', 'The app reads this job when ChatGPT asks for its next handoff.']),
+  host: Object.freeze([JOB_ROW_COPY.host, 'The app is building the documents.']),
+  chatFullNote: 'This chat is at its limit, so the next handoff will need a new chat.',
+  needsYou: 'This job needs you',
+  needsYouFallback: 'Open the job card to see what it needs.',
+  kept: 'The bridge is not giving this job to ChatGPT. Choose Resume serving in the bridge panel to hand it back.',
+  noChat: Object.freeze(['No ChatGPT chat yet', 'Start a new chat, then paste what is copied into ChatGPT with the plugin selected.']),
+  queued: label => ['Queued for ChatGPT', `${label ? `The ${label.toLowerCase()} step is ready.` : 'This job is ready.'} ChatGPT gets it when it asks for its next handoff.`],
+  queuedChatFull: cap => ['Queued for the next chat', `This chat is already carrying its limit of ${cap} ${cap === 1 ? 'bundle' : 'bundles'}. This one is handed over in a later chat.`],
+  writing: label => [`ChatGPT is working on: ${label}`, `${label} was handed to ChatGPT. Its answer has not arrived yet.`],
+  writingUnknownStage: Object.freeze(['ChatGPT is working on this', 'This job was handed to ChatGPT. Its answer has not arrived yet.']),
+  fixing: (count, label) => [`ChatGPT is fixing ${count} ${count === 1 ? 'issue' : 'issues'}`, `The app found ${count === 1 ? 'an issue' : `${count} issues`} in the last ${label ? label.toLowerCase() : 'answer'} and ChatGPT has the list. The corrected answer has not arrived yet.`],
+  sameCheckStreak: count => `The same check has now failed ${count} times in a row.`,
+  lastHeard: ago => `Last heard from ChatGPT ${ago}`,
+  elapsed: duration => `for ${duration}`,
+  justNow: 'just now',
+  ago: duration => `${duration} ago`,
+  copiedNew: 'Copied. Paste it into a new ChatGPT chat with the plugin selected.',
+  copiedContinue: 'Copied. Paste it into the existing chat.',
+});
+
 export const ACTIVITY_COPY = Object.freeze({
   'link-paired': 'ChatGPT linked',
   'link-revoked': 'Link revoked',

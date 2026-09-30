@@ -44,7 +44,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
@@ -1219,6 +1219,16 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       if (d.filePath) previewParts.push(`filePath: ${redactReportPath(d.filePath)}`);
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
       if (n.type === 'jobcard') previewParts.push(`link: ${effectiveJobCardLinkState(d)}`);
+      // Stated explicitly even when empty: a cleared pointer (a discard) must
+      // read as "none" rather than as a field that was never collected. Both
+      // values are closed: a status word and the job id's 8-hex prefix.
+      if (n.type === 'jobcard') {
+        const bundle = d.localApplication;
+        const status = typeof bundle?.status === 'string' && /^[a-z][a-z-]{0,31}$/.test(bundle.status) ? bundle.status : null;
+        previewParts.push(bundle?.id
+          ? `appBundle: ${status || 'unknown'} (${shortId(bundle.id)})`
+          : 'appBundle: none');
+      }
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
       if (d.url) previewParts.push(`url: ${redactReportUrl(d.url).slice(0, 50)}`);
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
@@ -2125,7 +2135,18 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   const rejectedOrigin = oauthRejection?.telemetry === true;
   const rejectedSource = sourceRejection?.telemetry === true;
   const observedClientAuth = clientAuth?.telemetry === true;
-  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth) return '';
+  const queue = getBridgeQueueDiagnostic();
+  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth && !queue) return '';
+  let queueMarkdown = '';
+  if (queue) {
+    const laneAge = seconds => seconds === null ? 'unknown' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+    const liveLanes = queue.liveLanes;
+    const laneRows = queue.lanes.map(lane => `  - job \`${lane.job}\` · phase \`${lane.phase}\` · stage \`${lane.stage || 'none'}\` · reason \`${lane.reason || 'none'}\` · served to current chat \`${lane.servedToChat ? 'yes' : 'no'}\` · in this phase ${laneAge(lane.ageSeconds)}`).join('\n');
+    queueMarkdown = `
+- Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
+- Queue: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/10 · this chat holds ${queue.chat.jobsAssigned}/${queue.chat.jobsCap} (chat \`${queue.chat.state}\`)
+- Lane lifecycle counters: release calls ${queue.counts.releaseCalls} (added nothing: ${queue.counts.releaseNoops}) · Unrelease ${queue.counts.unreleaseCalls} · lanes dropped by the app ${queue.counts.lanesDropped} (discard event ${queue.counts.droppedDiscarded} · prune event ${queue.counts.droppedPruned} · status probe found the bundle gone ${queue.counts.droppedMissing} · status probe reported it saved ${queue.counts.droppedSaved})${laneRows ? `\n${laneRows}` : '\n  - (no lanes)'}`;
+  }
   let failedStartMarkdown = '';
   if (failedStart) {
     const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
@@ -2178,7 +2199,7 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   }
   return `
 ## Handoff Bridge Diagnostics
-${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}
+${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}
 `;
 }
 

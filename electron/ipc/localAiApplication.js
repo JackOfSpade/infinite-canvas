@@ -5225,6 +5225,7 @@ async function pruneAndCountLocalAiJobs(canvasRoot) {
           if (ownedCanvasFilePath) {
             try { await writeLocalAiJobPhase(canvasRoot, ownedCanvasFilePath, entry.name, 'pruned'); }
             catch (phaseError) { logger.warn(`[LocalAI] failed to record a pruned phase stamp for job ${entry.name}: ${phaseError?.message || phaseError}`); }
+            notifyLocalApplicationDiscarded({ jobId: entry.name, canvasFilePath: ownedCanvasFilePath, cause: 'bundle_pruned' });
           }
         }
       });
@@ -8804,6 +8805,76 @@ async function discardLocalAiTerminalReceipt(canvasRoot, canvasFilePath, jobId) 
   return true;
 }
 
+// Closed answer ('discarded' | 'pruned' | 'saved') when the app itself has a
+// record that this job's folder is legitimately gone; null otherwise (unknown
+// job, unreadable canvas, folder still present).
+async function goneJobPhase({ jobId, canvasFilePath } = {}) {
+  try {
+    const status = await localApplicationStatus(jobId, canvasFilePath);
+    if (status?.status === 'saved' && status.folder === null) return 'saved';
+    if (status?.status === 'failed' && status.folder === null) {
+      const canvas = await resolveCanvasProject(canvasFilePath);
+      const record = await readLocalAiJobPhase(canvas.canvasRoot, canvas.canonicalCanvasFilePath, jobId);
+      return record?.phase === 'discarded' || record?.phase === 'pruned' ? record.phase : null;
+    }
+  } catch { /* an unreadable canvas is not evidence the job is gone */ }
+  return null;
+}
+
+// A Local AI bundle can be removed while another subsystem still holds a
+// reference to it (the ChatGPT handoff bridge releases a lane per bundle).
+// This is the single chokepoint every explicit discard path funnels through
+// (dock "Discard bundle", job-card delete, replaced-job cleanup, an aborted
+// queue request), so a subscriber sees the removal exactly once without this
+// module importing the subscriber. Listeners get only the job id, the
+// canonical canvas path and a closed cause; they must never throw into a
+// discard that has already succeeded on disk.
+const localApplicationDiscardListeners = new Set();
+export function subscribeLocalApplicationDiscards(listener) {
+  if (typeof listener !== 'function') return () => undefined;
+  localApplicationDiscardListeners.add(listener);
+  return () => { localApplicationDiscardListeners.delete(listener); };
+}
+function notifyLocalApplicationDiscarded(event) {
+  for (const listener of [...localApplicationDiscardListeners]) {
+    try {
+      const pending = listener(event);
+      if (pending && typeof pending.catch === 'function') pending.catch(() => undefined);
+    } catch { /* a subscriber can never fail a completed discard */ }
+  }
+}
+
+// Jobs whose discard is IN PROGRESS: from the start of discardLocalApplicationJob
+// until it has finished (the 'discarded' stamp is written by then, or the
+// discard gave up). A read that races that window sees a half-removed folder:
+// ENOENT before the stamp exists, or a job-integrity fault because the manifest
+// went before the folder did. Neither is a fault of the job, so
+// get-local-application-handoff answers the same quiet {gone:true} for both.
+// Counted (not a Set of ids) so two overlapping discards of one job cannot clear
+// each other's window. Keyed by canonical canvas + job id, so a discard from a
+// foreign canvas never hides a job it does not own.
+const discardingJobs = new Map();
+function discardingKey(canonicalCanvasFilePath, jobId) {
+  return `${canonicalCanvasFilePath}\u0000${jobId}`;
+}
+function markDiscarding(key) {
+  discardingJobs.set(key, (discardingJobs.get(key) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (discardingJobs.get(key) || 1) - 1;
+    if (left > 0) discardingJobs.set(key, left); else discardingJobs.delete(key);
+  };
+}
+async function isDiscardingJob({ jobId, canvasFilePath } = {}) {
+  if (discardingJobs.size === 0 || !JOB_ID_RE.test(String(jobId || ''))) return false;
+  try {
+    const canvas = await resolveCanvasProject(canvasFilePath);
+    return discardingJobs.has(discardingKey(canvas.canonicalCanvasFilePath, String(jobId)));
+  } catch { return false; }
+}
+
 // Delete one exact app-authored Local AI job after its owning card was
 // deleted. This is deliberately separate from discard-application: the latter
 // may only remove a main-process-registered post-import workspace, while this
@@ -8812,18 +8883,53 @@ export async function discardLocalApplicationJob(jobId, canvasFilePath) {
   const normalizedJobId = String(jobId || '');
   if (!JOB_ID_RE.test(normalizedJobId)) throw new Error('Invalid Local AI job id.');
   const canvas = await resolveCanvasProject(canvasFilePath);
+  const endDiscarding = markDiscarding(discardingKey(canvas.canonicalCanvasFilePath, normalizedJobId));
+  try { return await performLocalApplicationDiscard(normalizedJobId, canvas); }
+  finally { endDiscarding(); }
+}
+
+function unprovenLocalAiJobOwnershipError() {
+  const error = new Error('This Local AI job folder is still on disk, but it could not be proven to belong to this job on this canvas, so nothing was deleted and no discard was recorded.');
+  error.code = 'LOCAL_AI_JOB_OWNERSHIP_UNPROVEN';
+  return error;
+}
+
+async function performLocalApplicationDiscard(normalizedJobId, canvas) {
   const { dir: claimedWorkDir } = jobDirectory(normalizedJobId, canvas.canvasRoot);
   let result = null;
   const acquired = await withLocalAiJobPruneClaim(normalizedJobId, claimedWorkDir, async () => {
     let removedJob = false;
+    // Evidence, read BEFORE this discard stamps its own, that this canvas has
+    // owned the job: lets a repeat discard (or one whose folder had already
+    // vanished) still be reported, while a request from a canvas that never
+    // held the job is not.
+    const priorStamp = await readLocalAiJobPhase(canvas.canvasRoot, canvas.canonicalCanvasFilePath, normalizedJobId).catch(() => null);
     try {
       const { root, dir } = await assertRealJobDirectory(normalizedJobId, canvas.canonicalCanvasFilePath);
+      // assertRealJobDirectory returns the RESOLVED path. A job path that is a link
+      // to a sibling job folder resolves inside the same root and would pass every
+      // check below while deleting (and reading the records of) another job, so the
+      // resolved folder must be exactly the one this job id names.
+      if (dir !== claimedWorkDir) throw unprovenLocalAiJobOwnershipError();
+      // A missing record is not "the folder is gone": the folder is there and
+      // the person asked for it to be removed. Each record that is still
+      // readable proves ownership on its own; only when neither is left does
+      // the stamp this canvas wrote for this exact job id stand in (it is
+      // keyed by canvas file path, so another canvas's stamp is not proof).
+      // Anything else is not this code's to delete.
+      const missingToNull = (error) => (error?.code === 'ENOENT' ? null : Promise.reject(error));
       const [manifest, inputRaw] = await Promise.all([
-        loadManifest(dir),
-        readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: MAX_LOCAL_AI_INPUT_BYTES }),
+        loadManifest(dir).catch(missingToNull),
+        readOwnedFile(root, path.join(dir, 'input.json'), { maxBytes: MAX_LOCAL_AI_INPUT_BYTES, label: 'input record' }).catch(missingToNull),
       ]);
-      const input = JSON.parse(inputRaw);
-      assertManifestCanvasOwnership(manifest, input, canvas);
+      const input = inputRaw === null ? null : JSON.parse(inputRaw);
+      if (manifest || input) assertManifestCanvasOwnership(manifest || input, input || manifest, canvas);
+      else if (priorStamp === null) {
+        // Both records missing may just mean the folder vanished under us; that
+        // is the ENOENT answer below, not an ownership failure.
+        await fs.promises.lstat(dir);
+        throw unprovenLocalAiJobOwnershipError();
+      }
       // Revalidate the precise regular directory immediately before mutation.
       const current = await fs.promises.lstat(dir);
       const currentRealPath = await fs.promises.realpath(dir);
@@ -8835,6 +8941,14 @@ export async function discardLocalApplicationJob(jobId, canvasFilePath) {
       removedJob = true;
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
+      // ENOENT excuses the discard only when the job folder ITSELF is absent.
+      // Something still sitting at that path (a dangling link, say) is not
+      // gone, and reporting it discarded would be false.
+      const stillPresent = await fs.promises.lstat(claimedWorkDir).then(() => true, lstatError => {
+        if (lstatError?.code === 'ENOENT') return false;
+        throw lstatError;
+      });
+      if (stillPresent) throw unprovenLocalAiJobOwnershipError();
     }
     const removedReceipt = await discardLocalAiTerminalReceipt(
       canvas.canvasRoot, canvas.canonicalCanvasFilePath, normalizedJobId,
@@ -8846,19 +8960,39 @@ export async function discardLocalApplicationJob(jobId, canvasFilePath) {
     // same way discardLocalAiTerminalReceipt above already is, since a job
     // whose folder is already gone has no manifest left to re-prove ownership
     // from (LOCAL_AI_JOB_PHASES's own header).
+    let stampWritten = true;
     try { await writeLocalAiJobPhase(canvas.canvasRoot, canvas.canonicalCanvasFilePath, normalizedJobId, 'discarded'); }
-    catch (phaseError) { logger.warn(`[LocalAI] failed to record a discarded phase stamp for job ${normalizedJobId}: ${phaseError?.message || phaseError}`); }
-    result = { discarded: true, removedJob, removedReceipt };
+    catch (phaseError) {
+      stampWritten = false;
+      logger.warn(`[LocalAI] failed to record a discarded phase stamp for job ${normalizedJobId}: ${phaseError?.message || phaseError}`);
+    }
+    // Success used to be silent, so a bug report could not show that a discard
+    // ran. Closed fields only: a short job id and booleans, never a path.
+    logger.info(`[LocalAI] discarded job=${normalizedJobId.slice(0, 8)} removedJob=${removedJob} removedReceipt=${removedReceipt} stamp=${stampWritten ? 'written' : 'failed'}`);
+    // Subscribers (the handoff bridge) may only be told about a bundle that is
+    // genuinely gone from THIS canvas. An idempotent request from another
+    // canvas leaves the owning canvas's folder in place and must not free the
+    // lane of a job that still exists.
+    const folderGone = await fs.promises.lstat(claimedWorkDir).then(() => false, error => error?.code === 'ENOENT');
+    const notify = folderGone && (removedJob || removedReceipt || priorStamp !== null);
+    result = { discarded: true, removedJob, removedReceipt, notify, canonicalCanvasFilePath: canvas.canonicalCanvasFilePath };
   });
   if (!acquired) {
     const error = new Error('Local AI result import or bundle save is still running; wait for it to settle before discarding this job.');
     error.code = 'LOCAL_AI_IMPORT_IN_FLIGHT';
     throw error;
   }
-  return result;
+  const { canonicalCanvasFilePath, notify: shouldNotify, ...publicResult } = result;
+  if (shouldNotify) notifyLocalApplicationDiscarded({ jobId: normalizedJobId, canvasFilePath: canonicalCanvasFilePath, cause: 'bundle_discarded' });
+  return publicResult;
 }
 
-export async function localApplicationStatus(jobId, canvasFilePath) {
+// `options.absentRootIsGone` is for a caller that already OWNS the job (the
+// handoff bridge's lane was released from this exact canvas): a canvas that is
+// intact but has no `.local-ai/jobs` folder at all then means the bundle is
+// gone (the folder was deleted by hand), not "another canvas's job". Every
+// other caller keeps the ownership rejection below.
+export async function localApplicationStatus(jobId, canvasFilePath, options = {}) {
   // A successful bundle save deliberately removes the private job directory.
   // The renderer can briefly retain a pre-save card snapshot across a reload,
   // so probing that removed directory is an expected terminal condition—not an
@@ -8900,7 +9034,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
         };
       }
     }
-    if (error?.code === 'ENOENT' && jobRootExists) {
+    if (error?.code === 'ENOENT' && (jobRootExists || options?.absentRootIsGone === true)) {
       // A discard (discardLocalApplicationJob), age-based retention pruning
       // (pruneAndCountLocalAiJobs), and an aborted or failed import all reach
       // this same ENOENT-with-no-receipt state, and this surface used to be
@@ -8914,7 +9048,7 @@ export async function localApplicationStatus(jobId, canvasFilePath) {
       // own header), never a diagnosis this code cannot prove.
       const phaseRecord = await readLocalAiJobPhase(
         requestedCanvas.canvasRoot, requestedCanvas.canonicalCanvasFilePath, jobId,
-      );
+      ).catch(() => null);
       return {
         id: jobId,
         status: 'failed',
@@ -9932,8 +10066,35 @@ export function registerLocalAiApplicationHandlers() {
     }
   });
   handleSafe('get-local-application-status', async (_event, { jobId, canvasFilePath } = {}) => ({ localJob: await localApplicationStatus(jobId, canvasFilePath) }));
-  handleSafe('get-local-application-handoff', async (_event, args = {}) =>
-    getLocalApplicationHandoff(args));
+  handleSafe('get-local-application-handoff', async (_event, args = {}) => {
+    try {
+      return await getLocalApplicationHandoff(args);
+    } catch (error) {
+      // The dock probes a bundle it has just been told to forget (a discard
+      // races its own refresh). That is an expected read of a job whose
+      // folder is gone, not a fault: handleSafe would log it at ERROR and a
+      // bug report would read it as a failed discard. Only a job the app
+      // itself recorded as gone (discard/prune tombstone, or a saved receipt)
+      // is answered quietly; any other ENOENT still rethrows and stays loud.
+      // A discard that is still removing the folder is the same expected
+      // "gone" read, whichever half-removed state the read landed in: the
+      // folder already absent (ENOENT, before the 'discarded' stamp exists) or
+      // the manifest already removed inside a folder that is still there (a
+      // job-integrity fault). Only a discard this process is running counts.
+      if ((error?.code === 'ENOENT' || isJobIntegrityFault(error)) && await isDiscardingJob(args)) {
+        logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=discarding`);
+        return { gone: true, handoff: null, localJob: null };
+      }
+      if (error?.code === 'ENOENT') {
+        const gone = await goneJobPhase(args);
+        if (gone) {
+          logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=${gone}`);
+          return { gone: true, handoff: null, localJob: null };
+        }
+      }
+      throw error;
+    }
+  });
   handleSafe('submit-local-application-handoff', async (_event, args = {}) =>
     submitLocalApplicationHandoff(args));
   handleSafe('update-local-application-draft', async (_event, args = {}) =>

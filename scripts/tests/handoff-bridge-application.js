@@ -216,4 +216,59 @@ export default [
       assert(cleanConfirmText(' Ada\nLovelace ', 60) === 'Ada Lovelace', 'confirm cleaner must normalize display whitespace');
     },
   },
+  {
+    name: 'handoff bridge: application: describeForConfirm can answer for the jobs that still exist without weakening the manual confirmation',
+    run: async () => {
+      const partial = source({ api: { discoverLocalApplicationJobs: async () => [{
+        id: lane.jobId, canvasFilePath: '/tmp/canonical.canvas', createdAt: '2026-09-27T12:00:00.000Z', job: { title: 'Ada Lovelace Engineer', company: 'Example Labs' },
+      }] } });
+      const ids = [lane.jobId, 'job-discarded-0002'];
+      const strict = await partial.describeForConfirm('/tmp/ada.canvas', ids);
+      assert(strict.ok === false && strict.code === 'unknown_job' && strict.items.length === 0, 'the manual release confirmation still fails closed when any requested job is missing');
+      const lenient = await partial.describeForConfirm('/tmp/ada.canvas', ids, { requireAll: false });
+      assert(lenient.ok === true && lenient.items.length === 1 && lenient.items[0].jobId === lane.jobId, 'the restart, enable and auto-release paths keep the live job\'s name when a sibling was discarded');
+      const none = await partial.describeForConfirm('/tmp/ada.canvas', ['job-discarded-0002'], { requireAll: false });
+      assert(none.ok === false && none.code === 'unknown_job', 'but with nothing left there is nothing to describe');
+    },
+  },
+  {
+    name: 'handoff bridge: application: the source forwards bundle-removal events from the app and unsubscribes cleanly',
+    run: async () => {
+      const heard = []; let unsubscribed = 0; let registered = null;
+      const wired = source({ api: { subscribeLocalApplicationDiscards: listener => { registered = listener; return () => { unsubscribed += 1; }; } } });
+      const stop = wired.subscribeDiscard(event => heard.push(event));
+      registered({ jobId: lane.jobId, canvasFilePath: '/tmp/ada.canvas', cause: 'bundle_discarded' });
+      assert(heard.length === 1 && heard[0].cause === 'bundle_discarded', 'the app\'s event reaches the bridge');
+      stop();
+      assert(unsubscribed === 1, 'and the subscription can be withdrawn');
+      assert(typeof wired.subscribeDiscard(null) === 'function', 'a non-function listener is inert rather than a crash');
+    },
+  },
+  {
+    name: 'handoff bridge: application: a lane whose canvas lost its whole .local-ai folder reads as gone, while a moved canvas file and other callers keep the ownership rejection',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'handoff-bridge-application-')));
+      const canvasFilePath = path.join(root, 'Canvas.json');
+      try {
+        await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.com\nSoftware Engineer\nBuilt reliable reporting systems.',
+          job: { title: 'Application Engineer', company: 'Example Labs', snippet: 'Build reliable reporting systems.' },
+          resumeProfile: { workHistory: [{ id: 'ada-role', title: 'Software Engineer', employer: 'Example Labs', startDate: '2020', endDate: '2024' }] },
+        });
+        const adapter = createApplicationSource();
+        const target = { jobId: queued.id, canvasFilePath };
+        assert(['awaiting', 'host'].includes((await adapter.status(target)).kind), 'a live bundle is not gone');
+        await fs.promises.rm(path.join(root, '.local-ai'), { recursive: true, force: true });
+        const gone = await adapter.status(target);
+        assert(gone.kind === 'gone', `an intact canvas with no .local-ai folder is proof the bundle is gone, got ${JSON.stringify(gone)}`);
+        let ownership = null;
+        try { await localApplicationStatus(queued.id, canvasFilePath); } catch (error) { ownership = error; }
+        assert(ownership?.code === 'ENOENT', 'a caller that does not own the job still gets the ownership rejection');
+        const moved = await adapter.status({ jobId: queued.id, canvasFilePath: path.join(root, 'Moved.json') });
+        assert(moved.kind === 'threw' && moved.enoent === true, `a canvas file that is not there proves nothing about the bundle, got ${JSON.stringify(moved)}`);
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
 ];

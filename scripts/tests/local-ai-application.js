@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
+import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
-import { APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
+import { subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC } from '../../electron/ipc/jobApplication.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -7346,6 +7347,335 @@ Personal Projects`;
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'application discard: subscribers hear one closed event for a bundle that is gone, a foreign canvas never frees it, and the follow-up read is quiet',
+    run: async () => {
+      const project = await createCanvasProject();
+      const otherProject = await createCanvasProject();
+      const unsubscribes = [];
+      try {
+        registerLocalAiApplicationHandlers();
+        const readHandoff = ipcMain.__getInvokeHandler('get-local-application-handoff');
+        const sender = { id: 9301, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: TRUSTED_QUEUE_CAREER_DATA, canvasFilePath: project.canvasFilePath,
+        });
+        const events = [];
+        unsubscribes.push(subscribeLocalApplicationDiscards(event => { events.push(event); }));
+        // A subscriber that throws, or rejects, must never fail a discard that already happened.
+        unsubscribes.push(subscribeLocalApplicationDiscards(() => { throw new Error('subscriber failure'); }));
+        unsubscribes.push(subscribeLocalApplicationDiscards(() => Promise.reject(new Error('async subscriber failure'))));
+
+        const foreign = await discardLocalApplicationJob(queued.id, otherProject.canvasFilePath);
+        assert(foreign.discarded && !foreign.removedJob && fs.existsSync(queued.folder) && events.length === 0,
+          'a discard request from another canvas leaves the folder and must not tell the bridge to free the job\'s lane');
+
+        const lines = getRecentLogs().length;
+        const result = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
+        assert(result.discarded && result.removedJob && !fs.existsSync(queued.folder), 'the owning canvas discards the bundle');
+        assert(Object.keys(result).sort().join(',') === 'discarded,removedJob,removedReceipt', `the public result keeps its shape, got ${Object.keys(result)}`);
+        assert(events.length === 1 && events[0].jobId === queued.id && events[0].cause === 'bundle_discarded'
+          && events[0].canvasFilePath === project.canvasFilePath, `exactly one event with a closed cause, got ${JSON.stringify(events)}`);
+        const discardLine = getRecentLogs().slice(lines).map(entry => entry.message).find(message => message.startsWith('[LocalAI] discarded job='));
+        assert(discardLine === `[LocalAI] discarded job=${queued.id.slice(0, 8)} removedJob=true removedReceipt=false stamp=written`,
+          `a successful discard leaves one closed log line, got ${discardLine}`);
+        assert(!discardLine.includes(project.root), 'and never a path');
+
+        // The dock probes the folder it was just told to forget.
+        const before = getRecentLogs().length;
+        const probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(probe?.success === true && probe.gone === true && probe.handoff === null, `a read of a job the app recorded as discarded is a quiet "gone", got ${JSON.stringify(probe)}`);
+        const probeLogs = getRecentLogs().slice(before);
+        assert(!probeLogs.some(entry => entry.level === 'error'), 'it must not log an ERROR that reads like a failed discard');
+        assert(probeLogs.some(entry => entry.message === `[LocalAI] read of gone job job=${queued.id.slice(0, 8)} phase=discarded`), 'it leaves one closed observation instead');
+
+        // A job the app has no record of stays loud.
+        const neverSeen = '323e4567-e89b-42d3-a456-426614174009';
+        const beforeLoud = getRecentLogs().length;
+        const unknown = await readHandoff({ sender }, { jobId: neverSeen, canvasFilePath: project.canvasFilePath });
+        assert(unknown?.success === false && getRecentLogs().slice(beforeLoud).some(entry => entry.level === 'error'), 'an unrecorded missing job is still an error');
+        const repeat = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
+        assert(repeat.discarded && !repeat.removedJob && events.length === 2, 'a repeat discard of an already-gone folder still tells the bridge (its lane may have outlived the folder)');
+      } finally {
+        for (const unsubscribe of unsubscribes) unsubscribe();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+        await fs.promises.rm(otherProject.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application discard: a read racing the removal answers the quiet gone at every half-removed step, and an unrelated broken job stays loud',
+    run: async () => {
+      const project = await createCanvasProject();
+      const realRm = fs.promises.rm;
+      try {
+        registerLocalAiApplicationHandlers();
+        const readHandoff = ipcMain.__getInvokeHandler('get-local-application-handoff');
+        const sender = { id: 9302, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+        const queueOne = () => queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.test\nEngineer\nMaintained internal systems with supported delivery practices.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        // The ring is bounded (a full ring stops growing), so "new" is by entry identity, not by index.
+        const mark = () => new Set(getRecentLogs());
+        const errorsSince = known => getRecentLogs().filter(entry => !known.has(entry) && entry.level === 'error');
+        // A controlled interleave: the read runs at the exact half-removed
+        // instant, from inside the removal itself.
+        const raceOnce = async (queued, when) => {
+          let probe = null;
+          const before = mark();
+          fs.promises.rm = async (target, options) => {
+            if (target !== queued.folder) return realRm.call(fs.promises, target, options);
+            if (when === 'manifest-first') {
+              await fs.promises.unlink(path.join(target, 'manifest.json'));
+              probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+              return realRm.call(fs.promises, target, options);
+            }
+            const removed = await realRm.call(fs.promises, target, options);
+            probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+            return removed;
+          };
+          try { await discardLocalApplicationJob(queued.id, project.canvasFilePath); }
+          finally { fs.promises.rm = realRm; }
+          return { probe, errors: errorsSince(before) };
+        };
+        for (const when of ['manifest-first', 'folder-first']) {
+          const queued = await queueOne();
+          const { probe, errors } = await raceOnce(queued, when);
+          assert(probe?.success === true && probe.gone === true && probe.handoff === null,
+            `a read ${when === 'manifest-first' ? 'after the manifest was removed' : 'before the discarded stamp exists'} must be the quiet gone, got ${JSON.stringify(probe)}`);
+          assert(errors.length === 0, `and must log no ERROR (${when}), got ${JSON.stringify(errors.map(entry => entry.message))}`);
+        }
+
+        // Many concurrent read/discard pairs: never an error, always either a real handoff or gone.
+        const before = mark();
+        const outcomes = await Promise.all(Array.from({ length: 12 }, async (_unused, index) => {
+          const queued = await queueOne();
+          const reads = [];
+          const discarding = discardLocalApplicationJob(queued.id, project.canvasFilePath);
+          for (let step = 0; step < 4; step += 1) {
+            await new Promise(resolve => setImmediate(resolve));
+            reads.push(readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath }));
+          }
+          await discarding;
+          reads.push(readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath }));
+          return { index, results: await Promise.all(reads) };
+        }));
+        for (const { index, results } of outcomes) {
+          for (const result of results) {
+            assert(result?.success === true && (result.gone === true || result.handoff), `concurrent read ${index} must be a handoff or gone, got ${JSON.stringify(result)}`);
+          }
+        }
+        assert(errorsSince(before).length === 0, `no concurrent read may log an ERROR, got ${JSON.stringify(errorsSince(before).map(entry => entry.message))}`);
+
+        // Outside a discard the same missing manifest is a real fault and stays loud.
+        const broken = await queueOne();
+        await fs.promises.unlink(path.join(broken.folder, 'manifest.json'));
+        const loudStart = mark();
+        const loud = await readHandoff({ sender }, { jobId: broken.id, canvasFilePath: project.canvasFilePath });
+        assert(loud?.success === false && loud.gone !== true && errorsSince(loudStart).length > 0,
+          `a job with no manifest and no discard in progress must still fail loudly, got ${JSON.stringify(loud)}`);
+      } finally {
+        fs.promises.rm = realRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application discard: a job folder whose manifest is already gone is removed when it is provably this canvas\'s own, and otherwise left in place, reported, and never stamped discarded',
+    run: async () => {
+      const project = await createCanvasProject();
+      const otherProject = await createCanvasProject();
+      const outside = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'local-ai-outside-')));
+      const events = [];
+      const unsubscribe = subscribeLocalApplicationDiscards(event => { events.push(event); });
+      try {
+        registerLocalAiApplicationHandlers();
+        const discardHandler = ipcMain.__getInvokeHandler('discard-local-application');
+        const queueOne = () => queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.test\nEngineer\nMaintained internal systems with supported delivery practices.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const stampPath = id => path.join(project.root, '.local-ai', 'phase-stamps', `${id}.json`);
+        const stampPhase = async id => fs.promises.readFile(stampPath(id), 'utf8').then(raw => JSON.parse(raw).phase, () => null);
+        const drop = (queued, ...names) => Promise.all(names.map(name => fs.promises.unlink(path.join(queued.folder, name))));
+        const exists = target => fs.promises.lstat(target).then(() => true, () => false);
+        const discard = queued => discardLocalApplicationJob(queued.id, project.canvasFilePath).then(
+          value => ({ value, error: null }), error => ({ value: null, error }));
+        const assertKept = async (queued, outcome, label) => {
+          assert(outcome.error?.code === 'LOCAL_AI_JOB_OWNERSHIP_UNPROVEN' || /different saved canvas|not trusted/.test(String(outcome.error?.message)),
+            `${label}: the discard must fail with a truthful error, got ${JSON.stringify(outcome)}`);
+          assert(await exists(queued.folder), `${label}: nothing that cannot be proven this job's own may be deleted`);
+          assert(await stampPhase(queued.id) !== 'discarded', `${label}: no discarded stamp may claim a success that did not happen`);
+        };
+
+        // The manifest is gone but the input record still says whose job it is.
+        const noManifest = await queueOne();
+        await drop(noManifest, 'manifest.json');
+        const first = await discard(noManifest);
+        assert(!first.error && first.value.discarded && first.value.removedJob, `a missing manifest must not stop the discard, got ${JSON.stringify(first)}`);
+        assert(!await exists(noManifest.folder), 'the folder must be removed so a later read cannot hit a half-deleted job');
+        assert(await stampPhase(noManifest.id) === 'discarded', 'and the discard is recorded only now that it happened');
+        assert(events.filter(event => event.jobId === noManifest.id).length === 1, 'the bridge is told exactly once');
+
+        // Both records gone: the stamp this canvas wrote at creation is the proof.
+        const bothGone = await queueOne();
+        await drop(bothGone, 'manifest.json', 'input.json');
+        const second = await discard(bothGone);
+        assert(!second.error && second.value.removedJob && !await exists(bothGone.folder),
+          `both records missing plus this canvas's own stamp is provable ownership, got ${JSON.stringify(second)}`);
+
+        // A surviving input record that names another canvas is proof of the opposite.
+        const foreignInput = await queueOne();
+        await drop(foreignInput, 'manifest.json');
+        const inputPath = path.join(foreignInput.folder, 'input.json');
+        const input = JSON.parse(await fs.promises.readFile(inputPath, 'utf8'));
+        await fs.promises.writeFile(inputPath, JSON.stringify({ ...input, canvasFilePath: otherProject.canvasFilePath, canvasRoot: otherProject.root }), 'utf8');
+        await assertKept(foreignInput, await discard(foreignInput), 'input naming another canvas');
+
+        // No records and no stamp: nothing proves whose folder it is.
+        const unproven = await queueOne();
+        await drop(unproven, 'manifest.json', 'input.json');
+        await fs.promises.unlink(stampPath(unproven.id));
+        const beforeEvents = events.length;
+        await assertKept(unproven, await discard(unproven), 'no records and no stamp');
+        assert(!await exists(stampPath(unproven.id)), 'no stamp of any kind is created for a job that was not discarded');
+        const viaIpc = await discardHandler({ sender: { id: 9310, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} } }, { jobId: unproven.id, canvasFilePath: project.canvasFilePath });
+        assert(viaIpc?.success === false && /could not be proven/i.test(String(viaIpc.error)) && await exists(unproven.folder),
+          `the dock's Discard bundle must be told the truth, got ${JSON.stringify(viaIpc)}`);
+        assert(events.length === beforeEvents, 'and the bridge is not told the bundle is gone');
+
+        // A stamp written for a different canvas is not this canvas's proof.
+        const foreignStamp = await queueOne();
+        await drop(foreignStamp, 'manifest.json', 'input.json');
+        await fs.promises.writeFile(stampPath(foreignStamp.id), JSON.stringify({
+          version: 1, jobId: foreignStamp.id, canvasFilePath: otherProject.canvasFilePath, phase: 'awaiting-paste', at: new Date().toISOString(),
+        }), 'utf8');
+        await assertKept(foreignStamp, await discard(foreignStamp), 'a stamp for another canvas');
+
+        // A link inside the folder is removed as a link, never followed.
+        const sentinel = path.join(outside, 'keep.txt');
+        await fs.promises.writeFile(sentinel, 'private', 'utf8');
+        const linkInside = await queueOne();
+        await drop(linkInside, 'manifest.json');
+        await fs.promises.symlink(outside, path.join(linkInside.folder, 'escape'));
+        const third = await discard(linkInside);
+        assert(!third.error && third.value.removedJob && !await exists(linkInside.folder), `a folder holding a link is still removed, got ${JSON.stringify(third)}`);
+        assert(await exists(sentinel), 'but what the link points at outside the job root is never touched');
+
+        // The job folder itself being a link is not a folder inside the job root.
+        const linkedFolder = await queueOne();
+        await fs.promises.rm(linkedFolder.folder, { recursive: true, force: true });
+        await fs.promises.symlink(outside, linkedFolder.folder);
+        await assertKept(linkedFolder, await discard(linkedFolder), 'a job folder that is a link out of the root');
+        assert(await exists(sentinel), 'the link target survives');
+        await fs.promises.unlink(linkedFolder.folder);
+
+        // A dangling link is present, unprovable, and left alone.
+        const dangling = await queueOne();
+        await fs.promises.rm(dangling.folder, { recursive: true, force: true });
+        await fs.promises.symlink(path.join(outside, 'no-such-target'), dangling.folder);
+        await assertKept(dangling, await discard(dangling), 'a dangling link at the job path');
+        await fs.promises.unlink(dangling.folder);
+
+        // A job path that is a link to a SIBLING job folder in the same root resolves
+        // inside the root, so only comparing it with the claimed path proves it is
+        // not this job's own: B's folder must survive A's discard.
+        const linkA = await queueOne();
+        const targetB = await queueOne();
+        await fs.promises.rm(linkA.folder, { recursive: true, force: true });
+        await fs.promises.symlink(targetB.folder, linkA.folder);
+        const beforeSiblingEvents = events.length;
+        await assertKept(linkA, await discard(linkA), 'a job path that is a link to a sibling job folder');
+        assert(await exists(path.join(targetB.folder, 'input.json')), 'the sibling job folder the link points at is never deleted');
+        assert(await stampPhase(targetB.id) !== 'discarded' && events.length === beforeSiblingEvents, 'and neither job is recorded or announced as discarded');
+        await fs.promises.unlink(linkA.folder);
+      } finally {
+        unsubscribe();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+        await fs.promises.rm(otherProject.root, { recursive: true, force: true });
+        await fs.promises.rm(outside, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application discard: the discard window is per canvas (another canvas\'s read of the same job id stays loud) and overlapping discards keep it open until both have finished',
+    run: async () => {
+      const project = await createCanvasProject();
+      const otherProject = await createCanvasProject();
+      const realRm = fs.promises.rm;
+      try {
+        registerLocalAiApplicationHandlers();
+        const readHandoff = ipcMain.__getInvokeHandler('get-local-application-handoff');
+        const sender = { id: 9303, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+        const queueOne = () => queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.test\nEngineer\nMaintained internal systems with supported delivery practices.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        // Runs `probe` while the discard is removing the folder (`afterRemoval`: right once it is gone).
+        const duringRemoval = async (queued, probe, { afterRemoval = false } = {}) => {
+          fs.promises.rm = async (target, options) => {
+            if (target !== queued.folder) return realRm.call(fs.promises, target, options);
+            if (!afterRemoval) await probe();
+            const removed = await realRm.call(fs.promises, target, options);
+            if (afterRemoval) await probe();
+            return removed;
+          };
+          try { await discardLocalApplicationJob(queued.id, project.canvasFilePath); }
+          finally { fs.promises.rm = realRm; }
+        };
+        // A read from a canvas that never owned the job is not the expected dock probe.
+        const foreign = await queueOne();
+        let foreignRead = null;
+        await duringRemoval(foreign, async () => {
+          foreignRead = await readHandoff({ sender }, { jobId: foreign.id, canvasFilePath: otherProject.canvasFilePath });
+        });
+        assert(foreignRead?.success === false && foreignRead.gone !== true,
+          `another canvas reading the same job id during a discard must stay an error, got ${JSON.stringify(foreignRead)}`);
+        // A second discard of the same job ending first must not close the first one's window.
+        const overlapped = await queueOne();
+        let secondCode = null; let ownerRead = null;
+        await duringRemoval(overlapped, async () => {
+          secondCode = await discardLocalApplicationJob(overlapped.id, project.canvasFilePath).then(() => 'ok', error => error?.code || 'threw');
+          ownerRead = await readHandoff({ sender }, { jobId: overlapped.id, canvasFilePath: project.canvasFilePath });
+        }, { afterRemoval: true });
+        assert(secondCode === 'LOCAL_AI_IMPORT_IN_FLIGHT', `the overlapping discard is refused while the first runs, got ${secondCode}`);
+        assert(ownerRead?.success === true && ownerRead.gone === true && ownerRead.handoff === null,
+          `the first discard's window stays open after the second one ends, got ${JSON.stringify(ownerRead)}`);
+      } finally {
+        fs.promises.rm = realRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+        await fs.promises.rm(otherProject.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'application dock discovery: a just-discarded bundle is never re-read, a transient read failure keeps the prompt, and a skipped replaced-handoff cleanup is logged',
+    run: async () => {
+      const hook = await fs.promises.readFile(path.resolve('src/hooks/useApplicationHandoffDock.js'), 'utf8');
+      const card = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      assert(/const discardedJobIds = new Set\(\);/.test(hook)
+        && /discardedJobIds\.add\(jobId\);[\s\S]{0,200}updateNodeDataGlobally/.test(hook)
+        && /candidates\.filter\(\(node\) => !discardedJobIds\.has\(node\.data\.localApplication\.id\)\)/.test(hook),
+      'a discard must take the job out of discovery before the React-committed pointer clear is visible, or the dock probes the deleted folder');
+      assert(hook.indexOf('discardedJobIds.delete(id)') > 0 && hook.indexOf('pointedAtIds') < hook.indexOf('discardedJobIds.has('),
+        'the guard is dropped once no card points at the id, so a reused id is not hidden forever');
+      assert(/result\?\.gone === true\) return \[local\.id, null\]/.test(hook)
+        && hook.indexOf('result?.gone === true') < hook.indexOf('if (!result?.success)'),
+      'a quiet "gone" answer is handled before it can be mistaken for a failed read');
+      assert(/if \(!result\?\.success\) \{[\s\S]{0,240}previousByJobId\.get\(local\.id\)[\s\S]{0,160}unreadable: true/.test(hook)
+        && /errorCode !== 'ENOENT'/.test(hook),
+      'handleSafe resolves every main-process failure as success:false, so a transient one must keep the previous prompt (only ENOENT evicts)');
+      assert(/replacementCommitted=\$\{replacementPersisted\}/.test(card) && /attempt < 20/.test(card),
+        'a replaced-handoff cleanup that is skipped is logged with the gate that stopped it, and the commit wait is bounded but not three zero-delay turns');
     },
   },
 ];

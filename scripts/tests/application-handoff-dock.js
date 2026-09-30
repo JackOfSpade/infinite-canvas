@@ -31,6 +31,8 @@ import {
   __resetApplicationHandoffsForTests,
 } from '../../src/utils/applicationHandoffDock.js';
 import { isWorkflowSuccessor } from '../../src/utils/nonApiAiNavigation.js';
+import { deriveBridgeJobProgress, formatProgressDuration, progressTimeLines, PROGRESS_STAGES } from '../../src/utils/bridgeJobProgress.js';
+import { BRIDGE_PROGRESS_COPY } from '../../src/utils/handoffBridgeCopy.js';
 
 const jobCard = (id, localApplication, extra = {}) => ({
   id,
@@ -53,7 +55,7 @@ const handoffRecord = (overrides = {}) => ({
   ...overrides,
 });
 
-export default [
+const dockTests = [
   {
     name: 'application dock: only genuinely finished paste bundles give up their slot',
     run: () => {
@@ -1463,7 +1465,8 @@ export default [
       assert(
         dock.includes('const isBridgeHeldApplication = isApplicationRequest')
         && dock.includes('Array.isArray(bridgeStatus?.queue?.jobs)')
-        && dock.includes('bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId)'),
+        && dock.includes('bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId && BRIDGE_WORKING_PHASES.has(job?.phase))')
+        && dock.includes("const BRIDGE_WORKING_PHASES = new Set(['unread', 'awaiting', 'host']);"),
         'isBridgeHeldApplication must gate on isApplicationRequest first and read status.queue.jobs defensively',
       );
 
@@ -1486,6 +1489,13 @@ export default [
       assert(heldBlock.includes('Working in ChatGPT'), 'a bridge-held application item must show the "Working in ChatGPT" state');
       assert(heldBlock.includes('Discard bundle') && heldBlock.includes('requestApplicationDiscardConfirm'),
         'a bridge-held application item must still offer Discard bundle');
+      // Live progress renders beside the calm status line, not inside its live
+      // region: the elapsed timers tick every second and must not re-announce.
+      assert(heldBlock.includes('<BridgeProgress status={bridgeStatus} item={activeRequest} />')
+        && dock.includes("import { BridgeProgress } from './BridgeProgress';")
+        && heldBlock.indexOf('<BridgeProgress') > heldBlock.lastIndexOf('</div>') - 200
+        && heldBlock.indexOf('<BridgeProgress') > heldBlock.indexOf('Discard bundle'),
+      'a bridge-held application item must render BridgeProgress after (outside) the status block');
       assert(
         !heldBlock.includes('Paste AI response')
         && !heldBlock.includes('id="non-api-ai-response"')
@@ -1508,3 +1518,258 @@ export default [
     },
   },
 ];
+
+// ---- bridge job progress (src/utils/bridgeJobProgress.js) -------------------
+const PROGRESS_NOW = 1_700_000_000_000;
+// A job the current chat holds AND is answering (the engine's per-job proof). A
+// job with servedToChat: null was never handed over, so it is not awaited either.
+const progressJob = (extra = {}) => ({
+  jobId: '11111111-1111-4111-8111-111111111111', phase: 'awaiting', stage: 'resume', reason: null, servedToChat: 1, changedAt: PROGRESS_NOW - 600000,
+  servedAt: extra.servedToChat === null ? null : PROGRESS_NOW - 120000, answeredAt: null, awaitingAnswer: extra.servedToChat !== null, stalled: false, stalledSince: null, ...extra,
+});
+// The same job after ChatGPT's answer was accepted and the next stage is not served yet.
+const answeredJob = (extra = {}) => progressJob({ awaitingAnswer: false, servedAt: null, answeredAt: PROGRESS_NOW - 30000, ...extra });
+const progressChat = (extra = {}) => ({
+  ordinal: 1, state: 'working', startedAt: PROGRESS_NOW - 300000, firstCallAt: PROGRESS_NOW - 290000, lastCallAt: PROGRESS_NOW - 20000, lastCallKind: 'get', calls: 3, jobsAssigned: 1, jobsCap: 2,
+  outstanding: { servedAt: PROGRESS_NOW - 120000, kind: 'application', stage: 'resume', task: null, stalled: false, stalledSince: null, stallsLastHour: 0 }, ...extra,
+});
+const progress = (input = {}) => deriveBridgeJobProgress({ job: progressJob(), chat: progressChat(), item: { stage: 'resume', corrections: [] }, now: PROGRESS_NOW, ...input });
+const stepStates = view => view.steps.map(step => step.state).join(',');
+
+const bridgeJobProgressTests = [
+  {
+    name: 'bridge progress: the four steps carry the dock\'s own stage labels and mark done / current / upcoming',
+    run: () => {
+      const view = progress();
+      assert(view.steps.map(step => step.key).join() === PROGRESS_STAGES.join(), 'the stepper must list the four stages in order');
+      assert(view.steps.every(step => step.label === applicationStageLabel(step.key)), 'step labels must be the dock\'s STAGE_LABELS');
+      assert(stepStates(view) === 'done,current,upcoming,upcoming', `resume must be the current step: ${stepStates(view)}`);
+      assert(stepStates(progress({ job: progressJob({ stage: 'review' }) })) === 'done,done,done,current', 'review current means three done');
+      assert(stepStates(progress({ job: progressJob({ stage: null }), item: {} })) === 'upcoming,upcoming,upcoming,upcoming', 'an unknown stage must not invent progress');
+    },
+  },
+  {
+    name: 'bridge progress: needs_user is a problem that names the reason in the existing copy, and held is attention',
+    run: () => {
+      const needs = progress({ job: progressJob({ phase: 'needs_user', reason: 'write_failed' }) });
+      assert(needs.tone === 'problem' && needs.headline === BRIDGE_PROGRESS_COPY.needsYou, 'needs_user is a problem headline');
+      assert(needs.detail === 'The app could not save this answer.', `reason copy must come from JOB_ROW_COPY without the row prefix or "See the dock": ${needs.detail}`);
+      assert(needs.since === PROGRESS_NOW - 600000, 'a stopped job times itself from changedAt');
+      const capped = progress({ job: progressJob({ phase: 'held', reason: 'rejection_cap' }) });
+      assert(capped.tone === 'attention' && capped.headline === BRIDGE_PROGRESS_COPY.needsYou && capped.detail.includes('rejected too many times'), 'a cap hold that needs the person is attention with its reason');
+      const kept = progress({ job: progressJob({ phase: 'held', reason: 'user_hold' }) });
+      assert(kept.tone === 'attention' && kept.headline === 'Kept for you' && kept.detail === BRIDGE_PROGRESS_COPY.kept, 'a user hold explains how to hand the job back');
+      const answered = progress({ job: progressJob({ phase: 'held', reason: 'answered_in_dock' }) });
+      assert(answered.headline === 'Answered here; ChatGPT stopped serving it', 'the answered-in-dock hold reuses the row copy');
+      const unknownReason = progress({ job: progressJob({ phase: 'needs_user', reason: 'constructor' }) });
+      assert(unknownReason.detail === BRIDGE_PROGRESS_COPY.needsYouFallback, 'a reason with no copy (even an Object.prototype key) must fall back, never render a function');
+      const restart = progress({ job: progressJob({ phase: 'held', reason: 'restart' }) });
+      assert(restart.action === 'start-chat' && restart.headline === 'Confirm to restart', 'a restart hold is resolved by starting a chat');
+      assert(progress({ job: progressJob({ phase: 'needs_user', reason: 'job_broken', stalled: true }) }).kind === 'needs_user', 'needs_user outranks stalled');
+    },
+  },
+  {
+    name: 'bridge progress: stalled reuses the BRIDGE stalled copy and offers a new chat',
+    run: () => {
+      // stalledSince is when the quiet began, so a job stalled for 4 minutes past the threshold was served 4 minutes ago.
+      const stalledJob = progressJob({ servedAt: PROGRESS_NOW - 4 * 60000, stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 });
+      const view = progress({ job: stalledJob });
+      assert(view.kind === 'stalled' && view.tone === 'attention' && view.action === 'start-chat', 'stalled is attention with a start-chat action');
+      assert(view.headline === 'ChatGPT has been quiet for 4 min', view.headline);
+      assert(view.detail.includes('was given résumé 4 min ago') && view.detail.includes('start a fresh chat'), 'stalled detail must be the shared BRIDGE copy');
+      assert(view.since === PROGRESS_NOW - 4 * 60000 && view.lastHeard === PROGRESS_NOW - 20000, 'stalled times from stalledSince and reports the last call');
+      // The stall is the JOB's, not the chat's: another lane's stall never becomes this job's.
+      const otherLaneStalled = { outstanding: { ...progressChat().outstanding, stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 } };
+      assert(progress({ chat: progressChat(otherLaneStalled) }).kind === 'writing', 'the chat\'s outstanding lane being stalled says nothing about a job that is not');
+      assert(progress({ job: progressJob({ servedToChat: null }), chat: progressChat(otherLaneStalled) }).kind === 'queued', 'a job this chat was never handed is not the stalled one');
+      assert(progress({ job: answeredJob({ stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 }) }).kind === 'queued', 'a job whose answer was accepted is not stalled, whatever stale flag rode along');
+      for (const state of ['ended', 'idle', 'full', 'awaiting-first-call']) {
+        assert(progress({ job: stalledJob, chat: progressChat({ state }) }).kind === 'stalled', `an awaited, stalled job is stalled even when the chat is ${state}`);
+      }
+      assert(progress({ job: stalledJob, chat: { ordinal: 0, state: 'none' } }).kind === 'stalled', 'an awaited, stalled job is stalled even when there is no chat');
+      assert(progress({ job: progressJob({ phase: 'unread', stalled: true }), chat: progressChat(otherLaneStalled) }).kind === 'unread', 'an unread job was never served, so another lane\'s stall is not its stall');
+      const anchoredOnServe = progress({ job: progressJob({ stalled: true, stalledSince: null }) });
+      assert(anchoredOnServe.kind === 'stalled' && anchoredOnServe.since === PROGRESS_NOW - 120000, 'with no stalledSince the job\'s own servedAt anchors the stall');
+    },
+  },
+  {
+    name: 'bridge progress: no chat, awaiting-first-call, full and ended each tell the person what to press',
+    run: () => {
+      const none = progress({ job: progressJob({ servedToChat: null }), chat: { ordinal: 0, state: 'none' } });
+      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.actionLabel === 'Start a new chat' && none.tone === 'attention', 'no chat -> start-chat');
+      const first = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null }) });
+      assert(first.kind === 'first-call' && first.headline === 'Waiting for chat 1' && first.action === 'start-chat' && first.actionLabel === 'Copy starter', 'awaiting-first-call uses the panel\'s Copy starter label');
+      assert(first.lastHeard === null, 'a chat that has never called has nothing to report as last heard');
+      const full = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ state: 'full' }) });
+      assert(full.kind === 'chat-full' && full.action === 'start-chat' && full.headline === 'Start a new chat', 'a full chat that was never handed this job needs a new chat');
+      assert(full.lastHeard === PROGRESS_NOW - 20000, 'a full chat reports its last call');
+      const ended = progress({ chat: progressChat({ state: 'ended' }) });
+      assert(ended.kind === 'chat-ended' && ended.action === 'continue-chat' && ended.actionLabel === 'Copy Continue' && ended.detail.includes('Paste Continue into it'), 'an ended chat is continued');
+      assert(ended.lastHeard === PROGRESS_NOW - 20000, 'an ended chat reports its last call');
+      assert(progress({ chat: { ordinal: 0, state: 'working' }, job: progressJob({ servedToChat: null }) }).kind === 'no-chat', 'a chat with no ordinal is not a chat');
+      assert(progress({ chat: progressChat({ state: 'idle' }) }).action === 'continue-chat', 'an idle chat with a waiting job is continued');
+      assert(progress({ chat: progressChat({ state: 'full' }), job: progressJob({ phase: 'host' }) }).action === null, 'app-side work never asks for a chat');
+    },
+  },
+  {
+    name: 'bridge progress: a full chat that already holds this job is still working on it, with a weaker note and no Start-a-new-chat button',
+    run: () => {
+      const view = progress({ chat: progressChat({ state: 'full' }) });
+      assert(view.kind === 'writing' && view.headline === 'ChatGPT is working on: Résumé', `a served job in a full chat can still be answered: ${view.kind} ${view.headline}`);
+      assert(view.action === null && view.actionLabel === null, 'the person must not be told to abandon a chat that is mid-answer');
+      assert(view.detail.includes(BRIDGE_PROGRESS_COPY.chatFullNote) && view.detail.includes('has not arrived yet'), `the detail carries the limit note: ${view.detail}`);
+      assert(!view.detail.includes('work limit'), 'the full-chat headline copy must not leak into a served job');
+      const fixing = progress({ chat: progressChat({ state: 'full' }), item: { stage: 'resume', corrections: ['a'] } });
+      assert(fixing.kind === 'fixing' && fixing.detail.includes(BRIDGE_PROGRESS_COPY.chatFullNote) && fixing.action === null, 'a correction round in a full chat gets the same note');
+      assert(!progress().detail.includes(BRIDGE_PROGRESS_COPY.chatFullNote), 'a chat with room says nothing about a limit');
+    },
+  },
+  {
+    name: 'bridge progress: queued vs served-and-waiting, and a chat at its bundle limit',
+    run: () => {
+      const queued = progress({ job: progressJob({ servedToChat: null }) });
+      assert(queued.kind === 'queued' && queued.tone === 'working' && queued.headline === 'Queued for ChatGPT' && queued.since === null, 'not yet served -> queued, no invented timer');
+      assert(queued.detail.includes('résumé step'), 'queued names the step');
+      const capped = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) });
+      assert(capped.headline === 'Queued for the next chat' && capped.detail.includes('limit of 2 bundles'), 'a chat at its limit hands this job over in a later chat');
+      const writing = progress();
+      assert(writing.kind === 'writing' && writing.tone === 'working' && writing.headline === 'ChatGPT is working on: Résumé', writing.headline);
+      assert(writing.detail.includes('has not arrived yet') && writing.lastHeard === PROGRESS_NOW - 20000, 'served -> waiting for the answer with the last call');
+      assert(writing.since === PROGRESS_NOW - 120000, 'the hand-over time is this job\'s own servedAt');
+      // Per-job proof: none of the chat-level guesses matter any more.
+      assert(progress({ chat: progressChat({ jobsAssigned: 2 }) }).since === PROGRESS_NOW - 120000, 'with several jobs in the chat the job\'s own servedAt is still exact');
+      assert(progress({ chat: progressChat({ outstanding: null }) }).kind === 'writing', 'the chat-level outstanding lane is not consulted');
+      assert(progress({ chat: progressChat({ outstanding: { ...progressChat().outstanding, servedAt: PROGRESS_NOW - 900000, stage: 'cover-letter', kind: 'push' } }) }).since === PROGRESS_NOW - 120000, 'another lane\'s outstanding entry never changes this job\'s timer');
+      // Served (it holds a slot) is not the same as being answered: the answer was accepted, the next stage is not served yet.
+      const between = progress({ job: answeredJob({ stage: 'cover-letter' }) });
+      assert(between.kind === 'queued' && between.headline === 'Queued for ChatGPT' && between.since === null && !/working on/.test(between.headline),
+        `an accepted answer with the next stage not yet served must not read as "ChatGPT is working": ${between.kind} ${between.headline}`);
+      assert(between.detail.includes('cover letter step'), 'and names the step that is ready');
+      assert(progress({ job: answeredJob(), chat: progressChat({ jobsAssigned: 2, jobsCap: 2 }) }).headline === 'Queued for ChatGPT', 'a job that already holds a slot is never told it waits for a later chat');
+      assert(progress({ job: progressJob({ awaitingAnswer: false, servedAt: null }), item: { stage: 'resume', corrections: ['a'] } }).kind === 'queued', 'corrections are only "being fixed" while the answer is actually awaited');
+    },
+  },
+  {
+    name: 'bridge progress: unread and host are app-side, and the bridge being paused overrides waiting',
+    run: () => {
+      const unread = progress({ job: progressJob({ phase: 'unread', servedToChat: null }) });
+      assert(unread.kind === 'unread' && unread.tone === 'neutral' && unread.headline === 'Not read yet' && unread.action === null, 'unread is not read yet: nothing reads it until ChatGPT asks');
+      assert(!/reading|nothing is needed/i.test(`${unread.headline} ${unread.detail}`), `unread must not claim the app is reading it or that nothing is needed: ${unread.detail}`);
+      const host = progress({ job: progressJob({ phase: 'host', stage: null }), item: {} });
+      assert(host.kind === 'host' && host.tone === 'working' && host.headline === 'The app is saving this' && host.detail === 'The app is building the documents.', `host claims only the app-side work: ${host.detail}`);
+      assert(stepStates(host) === 'upcoming,upcoming,upcoming,upcoming', 'host cannot prove ChatGPT answered every stage, so it must not mark them done');
+      assert(stepStates(progress({ job: progressJob({ phase: 'host', stage: 'review' }) })) === 'done,done,done,current', 'host with a known stage marks that stage, not everything');
+      assert(!/ChatGPT/.test(host.detail), 'host detail must not credit ChatGPT');
+      const paused = progress({ bridge: { paused: true } });
+      assert(paused.tone === 'attention' && paused.headline === 'Paused', 'a paused bridge serves nothing, so the job must not read as being written');
+      const pausedHost = progress({ bridge: { paused: true }, job: progressJob({ phase: 'host' }) });
+      assert(pausedHost.kind === 'host' && pausedHost.headline === 'The app is saving this' && pausedHost.tone === 'working', 'a pause does not change app-side saving');
+      const pausedNeeds = progress({ bridge: { paused: true }, job: progressJob({ phase: 'needs_user', reason: 'write_failed' }) });
+      assert(pausedNeeds.kind === 'needs_user' && pausedNeeds.tone === 'problem' && pausedNeeds.headline === 'This job needs you', 'a problem the person must fix outranks the pause');
+      const pausedHeld = progress({ bridge: { paused: true }, job: progressJob({ phase: 'held', reason: 'user_hold' }) });
+      assert(pausedHeld.kind === 'held' && pausedHeld.headline === 'Kept for you', 'a held job says why it is held, not just Paused');
+      const pausedUnread = progress({ bridge: { paused: true }, job: progressJob({ phase: 'unread' }) });
+      assert(pausedUnread.kind === 'unread' && pausedUnread.headline === 'Paused' && pausedUnread.tone === 'attention', 'a paused bridge reads nothing either, so Paused wins over not-read-yet');
+      assert(progress({ bridge: { paused: true }, job: progressJob({ phase: 'done' }) }).kind === 'done', 'a finished job is not paused');
+    },
+  },
+  {
+    name: 'bridge progress: an unread job names what to press before it says anything else',
+    run: () => {
+      const unreadJob = progressJob({ phase: 'unread', servedToChat: null });
+      const none = progress({ job: unreadJob, chat: { ordinal: 0, state: 'none' } });
+      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.headline === 'No ChatGPT chat yet', 'an unread job with no chat is resolved by starting one');
+      const first = progress({ job: unreadJob, chat: progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null }) });
+      assert(first.kind === 'first-call' && first.action === 'start-chat' && first.actionLabel === 'Copy starter', 'an unread job in a chat that has not called yet is waiting for that first call');
+      for (const state of ['working', 'full', 'ended', 'idle']) {
+        const view = progress({ job: unreadJob, chat: progressChat({ state }) });
+        assert(view.kind === 'unread' && view.headline === 'Not read yet' && view.action === null, `an unread job with a ${state} chat says only that it is not read yet`);
+      }
+      assert(progress({ job: unreadJob, chat: { state: 'unknown', ordinal: 1 } }).kind === 'unread', 'an unreadable chat state does not change what an unread job proves');
+      assert(progress({ job: unreadJob, chat: null }).kind === 'unread', 'a missing chat does not change it either');
+      // Two jobs, one chat: B stays unread while A is outstanding, and is not "being read".
+      const second = progress({ job: unreadJob, chat: progressChat({ jobsAssigned: 1 }) });
+      assert(second.kind === 'unread' && !/reading/i.test(second.detail), 'a job queued behind another is waiting its turn, not being read');
+    },
+  },
+  {
+    name: 'bridge progress: a correction round reports the issue count and only proven escalation',
+    run: () => {
+      const view = progress({ item: { stage: 'resume', corrections: ['a', 'b', 'c'], rejectionEscalation: null } });
+      assert(view.kind === 'fixing' && view.headline === 'ChatGPT is fixing 3 issues' && view.tone === 'working', view.headline);
+      assert(view.detail.includes('last résumé') && !/round/i.test(view.detail), 'no round number is invented: the job revision does not advance on a rejection');
+      const one = progress({ item: { stage: 'resume', corrections: ['a'] } });
+      assert(one.headline === 'ChatGPT is fixing 1 issue' && one.detail.includes('an issue'), 'singular wording');
+      const escalated = progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: true, streak: 3, checkIds: ['x'] } } });
+      assert(escalated.detail.includes('The same check has now failed 3 times in a row.'), 'an active escalation states its streak');
+      assert(!progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: false, streak: 3 } } }).detail.includes('in a row'), 'an inactive escalation is not reported');
+      assert(progress({ job: progressJob({ servedToChat: null }), item: { corrections: ['a'] } }).kind === 'queued', 'corrections only matter once the chat holds the job');
+    },
+  },
+  {
+    name: 'bridge progress: small branches that must not drift (push lane, streak floor, empty corrections, unknown stage, item stage, held reason keys)',
+    run: () => {
+      const push = progress({ chat: progressChat({ outstanding: { ...progressChat().outstanding, kind: 'push', stage: null } }) });
+      assert(push.kind === 'writing' && push.since === PROGRESS_NOW - 120000, 'a push lane being outstanding does not change this job\'s own hand-over time');
+      assert(progress({ job: progressJob({ servedAt: null }) }).since === null, 'a job with no servedAt claims no timer');
+      const oneStreak = progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: true, streak: 1 } } });
+      assert(!oneStreak.detail.includes('in a row'), 'a streak of one is not a streak');
+      assert(progress({ item: { stage: 'resume', corrections: ['a'], rejectionEscalation: { active: true, streak: 2 } } }).detail.includes('failed 2 times in a row'), 'a streak of two is reported');
+      const blank = progress({ item: { stage: 'resume', corrections: ['', null, undefined] } });
+      assert(blank.kind === 'writing', 'empty correction entries are not issues');
+      assert(progress({ item: { stage: 'resume', corrections: ['', 'real'] } }).headline === 'ChatGPT is fixing 1 issue', 'only real correction entries are counted');
+      const unknownStage = progress({ job: progressJob({ stage: null }), item: {} });
+      assert(unknownStage.kind === 'writing' && unknownStage.headline === 'ChatGPT is working on this' && !unknownStage.headline.includes('undefined'), `an unknown stage gets the stage-less line: ${unknownStage.headline}`);
+      assert(stepStates(progress({ job: progressJob({ stage: null }), item: { stage: 'review' } })) === 'done,done,done,current', 'the dock item\'s stage is used when the bridge job has none');
+      const heldConstructor = progress({ job: progressJob({ phase: 'held', reason: 'constructor' }) });
+      assert(heldConstructor.headline === 'Kept for you' && typeof heldConstructor.detail === 'string', 'a held reason that is an Object.prototype key must fall back, never render a function');
+      const queued = progress({ job: progressJob({ servedToChat: null }) });
+      assert(queued.lastHeard === PROGRESS_NOW - 20000, 'a queued job reports the chat\'s last call');
+    },
+  },
+  {
+    name: 'bridge progress: done and gone are terminal and quiet',
+    run: () => {
+      const done = progress({ job: progressJob({ phase: 'done' }) });
+      assert(done.kind === 'done' && done.tone === 'neutral' && done.headline === 'Saved' && stepStates(done) === 'done,done,done,done' && done.action === null && done.lastHeard === null, 'done is all steps complete');
+      const gone = progress({ job: progressJob({ phase: 'gone' }) });
+      assert(gone.kind === 'gone' && gone.headline === 'Discarded' && stepStates(gone) === 'done,current,upcoming,upcoming', 'gone must not claim completion');
+    },
+  },
+  {
+    name: 'bridge progress: malformed and unknown input degrades to a neutral generic line and never throws',
+    run: () => {
+      const hostile = [undefined, null, 7, 'x', [], {}, { job: null }, { job: { phase: 'nonsense' } }, { job: { phase: 'unknown' } },
+        { job: progressJob(), chat: null }, { job: progressJob(), chat: { state: 'bogus' } }, { job: progressJob(), chat: { state: 'unknown', ordinal: 1 } },
+        { job: progressJob(), chat: { state: 'working', ordinal: 'x', outstanding: 5 }, item: { corrections: 'nope', rejectionEscalation: 9 }, now: 'later' },
+        { job: progressJob({ stage: { toString() { throw new Error('boom'); } } }), chat: progressChat() },
+        { job: new Proxy({}, { get() { throw new Error('boom'); } }) }];
+      for (const input of hostile) {
+        let view;
+        try { view = deriveBridgeJobProgress(input); } catch (error) { assert(false, `deriveBridgeJobProgress threw for ${JSON.stringify(input)}: ${error.message}`); }
+        assert(view.steps.length === 4 && typeof view.headline === 'string' && view.headline && typeof view.detail === 'string', 'a view model always has four steps and a headline');
+        assert(['neutral', 'working', 'attention', 'problem'].includes(view.tone), 'tone stays in the closed set');
+        assert(view.action === null || ['start-chat', 'continue-chat'].includes(view.action), 'action stays in the closed set');
+      }
+      const unknown = deriveBridgeJobProgress({ job: { phase: 'unknown' }, chat: progressChat(), now: PROGRESS_NOW });
+      assert(unknown.kind === 'generic' && unknown.tone === 'neutral' && unknown.headline === 'Checking on this job' && unknown.action === null, 'an unknown phase is the generic line');
+      assert(deriveBridgeJobProgress({ job: progressJob(), chat: { state: 'bogus' }, now: PROGRESS_NOW }).kind === 'generic', 'an unrecognised chat state must not become a guess');
+      assert(deriveBridgeJobProgress({ job: progressJob(), chat: { ordinal: 1, state: 'unknown' }, now: PROGRESS_NOW }).kind === 'generic', 'the normaliser\'s fallback chat state (unknown) must degrade to the generic line, never assert progress');
+      assert(deriveBridgeJobProgress({ job: progressJob(), chat: { ordinal: 1, state: 'unknown' }, now: PROGRESS_NOW }).headline === 'Checking on this job', 'and say so in the neutral words');
+    },
+  },
+  {
+    name: 'bridge progress: timer text is derived from timestamps, clamps skew, and is null without an anchor',
+    run: () => {
+      assert(formatProgressDuration(20000) === '20s' && formatProgressDuration(120000) === '2 min' && formatProgressDuration(3900000) === '1 h 5 min' && formatProgressDuration(3600000) === '1 h', 'duration format');
+      assert(formatProgressDuration(-1) === null && formatProgressDuration(NaN) === null && formatProgressDuration('5') === null, 'bad durations are null');
+      const lines = progressTimeLines({ since: PROGRESS_NOW - 120000, lastHeard: PROGRESS_NOW - 20000 }, PROGRESS_NOW);
+      assert(lines.elapsed === 'for 2 min' && lines.heard === 'Last heard from ChatGPT 20s ago', `${lines.elapsed} / ${lines.heard}`);
+      assert(progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: null, lastHeard: null }, PROGRESS_NOW).heard === null, 'no anchor, no line');
+      assert(progressTimeLines({ lastHeard: PROGRESS_NOW + 5000 }, PROGRESS_NOW).heard === 'Last heard from ChatGPT just now', 'a clock skew clamps to just now');
+      assert(progressTimeLines(null, PROGRESS_NOW).elapsed === null && progressTimeLines({ since: 5 }, undefined).elapsed === null, 'malformed input yields no lines');
+    },
+  },
+];
+
+export default [...dockTests, ...bridgeJobProgressTests];

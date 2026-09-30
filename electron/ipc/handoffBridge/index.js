@@ -12,7 +12,7 @@ import { isValidHostname, isValidPluginName } from '../../../src/utils/handoffBr
 import { setReportRedactedHosts } from '../bugReport/helpers.js';
 import { createAuditSink } from './audit.js';
 import { createHandoffBridgeLog } from './log.js';
-import { createApplicationSource } from './sources/application.js';
+import { createApplicationSource, subscribeApplicationDiscards } from './sources/application.js';
 import { createPushSource } from './sources/push.js';
 import { createHandoffEngine } from './engine.js';
 import { createHandoffCodeGuard } from './lanes.js';
@@ -31,7 +31,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from './telemetry.js';
+import { clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -51,6 +51,7 @@ const completedRuntimeDisposals = new WeakMap();
 const runtimeEnableOperations = new WeakMap();
 const detachedPlatformOwners = new WeakSet();
 const ENABLE_CONSENT_VERSION = 1;
+const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function safelyUnderTmp(candidate, tmpdir, realpath) {
   if (typeof candidate !== 'string' || typeof tmpdir !== 'string' || !path.isAbsolute(candidate)) return false;
@@ -664,7 +665,7 @@ function enableConsentPort({ userData, deps = {} } = {}) {
     const items = [];
     for (const [canvasFilePath, jobIds] of groups) {
       try {
-        const described = await source.describeForConfirm?.(canvasFilePath, jobIds);
+        const described = await source.describeForConfirm?.(canvasFilePath, jobIds, { requireAll: false });
         if (!Array.isArray(described?.items)) continue;
         const wanted = new Set(jobIds);
         const seen = new Set();
@@ -992,7 +993,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       for (const group of Array.isArray(groups) ? groups.slice(0, 50) : []) {
         if (typeof group?.canvasFilePath !== 'string' || !Array.isArray(group.jobIds)) continue;
         try {
-          const described = await application.describeForConfirm?.(group.canvasFilePath, group.jobIds);
+          const described = await application.describeForConfirm?.(group.canvasFilePath, group.jobIds, { requireAll: false });
           if (!Array.isArray(described?.items)) continue;
           const wanted = new Set(group.jobIds);
           const seen = new Set();
@@ -1032,6 +1033,27 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     onOpenPanel: value => uiRegistration?.openPanel?.(value?.panel || 'bridge', value?.step),
     notify: showFixedNotification,
   });
+  // Bug-report view of the lane queue. It is pulled at report time (never
+  // pushed), reduced to closed enums and integers by telemetry.js, and only
+  // produced while the person's report-telemetry opt-in is on.
+  const bridgeQueueProvider = () => {
+    if (!bridgeDiagnosticsEnabled()) return null;
+    const status = controller?.snapshot?.(false) || {};
+    const inner = engine?.snapshot?.() || {};
+    return {
+      at: now(),
+      enabled: status.enabled === true,
+      serving: status.serving,
+      autoRelease: status.autoRelease === true,
+      paused: inner.paused === true ? (inner.pauseCause || 'user') : null,
+      fault: inner.fault ?? status.fault ?? null,
+      queue: inner.queue?.applications,
+      chat: inner.chat,
+      lanes: inner.queue?.jobs,
+      counts: inner.counts,
+    };
+  };
+  setBridgeQueueDiagnosticProvider(bridgeQueueProvider);
   const unsubscribeUi = controller.subscribe?.(status => {
     try { tray.apply?.(status); } catch { /* platform tray is optional */ }
     try {
@@ -1046,7 +1068,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       });
     } catch { /* power policy is best effort */ }
   }) || noOp;
-  return Object.freeze({ userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, readPairingCode: () => pairingCode });
+  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, readPairingCode: () => pairingCode });
 }
 
 function removePairingTestHook(current = null) {
@@ -1105,6 +1127,9 @@ function detachPlatformOwners(current) {
   if (!current || detachedPlatformOwners.has(current)) return;
   detachedPlatformOwners.add(current);
   try { current?.unsubscribeUi?.(); } catch { /* the controller is already detached */ }
+  // Keep the LAST lane view for the report (a disabled bridge's final queue is
+  // still evidence) but stop reading a torn-down engine.
+  try { retireBridgeQueueDiagnosticProvider(current?.bridgeQueueProvider); } catch { /* diagnostics are optional */ }
   try { current?.power?.dispose?.(); } catch { /* removes suspend/resume listeners */ }
   try { current?.tray?.destroy?.(); } catch { /* tray and Dock state are optional */ }
 }
@@ -1315,7 +1340,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
-  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1354,13 +1379,37 @@ async function forgetActiveRuntime(current, status) {
 
 async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
-  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); }
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
   controllerBridge?.publishBootstrap?.();
   return { success: disposed?.success !== false, status, ...(disposed?.code ? { code: disposed.code } : {}) };
 }
+
+// A discarded or pruned application bundle can never be served again, so its
+// released lane must go too. The live graph owns the lane when it exists; when
+// it does not (bridge off, or between disable and enable) the lane still sits
+// in lanes.json and would come back as a held "restart" job counting against
+// the lane limit, so the durable file is edited directly. Exported for tests.
+export async function handleApplicationBundleRemoved(event) {
+  const jobId = event?.jobId;
+  if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)) return { ok: false, code: 'invalid_arguments' };
+  try {
+    const live = await runtime?.controller?.onBundleDiscarded?.(event);
+    if (live?.ok === true || live?.code === 'not_found') return { ok: true, durable: false };
+  } catch { /* fall through to the durable file */ }
+  const userData = runtime?.userData || bootstrapContext?.userData;
+  if (typeof userData !== 'string' || !userData) return { ok: false, code: 'NOT_READY' };
+  try {
+    const store = createLaneStore({ userDataPath: userData, fsImpl: bootstrapContext?.deps?.fsImpl });
+    const stored = store.readLanes();
+    if (!stored.some(lane => lane.jobId === jobId)) return { ok: true, durable: true, removed: false };
+    const saved = await store.saveLanes(stored.filter(lane => lane.jobId !== jobId));
+    return saved ? { ok: true, durable: true, removed: true } : { ok: false, code: 'persist_failed' };
+  } catch { return { ok: false, code: 'internal_error' }; }
+}
+let discardSubscription = null;
 
 export function getHandoffBridgeStatus() {
   // Once IPC is registered, the bridge owns the renderer-facing monotonic
@@ -1398,11 +1447,12 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
   controllerBridge.invalidateBootstrap?.();
+  discardSubscription ||= subscribeApplicationDiscards(event => { void handleApplicationBundleRemoved(event); });
   const controller = controllerBridge;
   const getCanvasWindows = deps.getCanvasWindows || (() => []);
   // Enable is confirmed before a runtime exists, so this port must be real at
@@ -1449,7 +1499,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       // in-memory failed-start receipt before any later FULL report is built.
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
         clearFailedStartDiagnostic();
-        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
       }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
@@ -1535,7 +1585,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);

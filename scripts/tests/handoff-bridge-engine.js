@@ -5,7 +5,7 @@ import { assert } from './testHelpers.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createHandoffBridgePower } from '../../electron/ipc/handoffBridge/power.js';
-import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
+import { MAX_LIVE_LANES, createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
 import { createAuditSink, makeAuditLine, SECURITY_AUDIT_EVENTS } from '../../electron/ipc/handoffBridge/audit.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { APPLICATION_FENCE_RE, DUPLICATE_RESPONSE_MIN_CHARS, MAX_RESPONSE_BYTES, classifySubmission, extractPasteEnvelopeIdentity, normalizePastedResponse, responseFingerprint, stringifySubmission, trimHandoffCode } from '../../electron/ipc/handoffBridge/preflight.js';
@@ -518,8 +518,10 @@ const tests = [
   {
     name: 'handoff bridge: engine: soft job cap sessions full only when another lane is ready',
     run: async () => {
-      const { engine, session, clock } = await started({ sourceOverrides: { status: async () => ({ kind: 'done' }) }, engineOptions: { limits: { jobsPerChat: 1 } } }); await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
-      const first = await engine.get({ session, linkId: LINK }); await engine.submit({ session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      // 'done' is a saved job: it is only reported once the job has been answered and finished.
+      let finished = false;
+      const { engine, session, clock } = await started({ sourceOverrides: { status: async () => ({ kind: finished ? 'done' : 'host' }) }, engineOptions: { limits: { jobsPerChat: 1 } } }); await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const first = await engine.get({ session, linkId: LINK }); await engine.submit({ session, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) }); finished = true;
       clock.advance(CONSTANTS.HOST_POLL_MS);
       await engine.get({ session, linkId: LINK });
       assert((await engine.get({ session, linkId: LINK })).status === 'session_full', 'next ready lane must observe per-chat cap');
@@ -643,7 +645,9 @@ const tests = [
   {
     name: 'handoff bridge: engine: queue empty closes an all-terminal epoch',
     run: async () => {
-      const state = await served({ sourceOverrides: { status: async () => ({ kind: 'done' }) } }); await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage }) }); state.clock.advance(CONSTANTS.HOST_POLL_MS);
+      // 'done' is a saved job: it is only reported once the job has been answered and finished.
+      let finished = false;
+      const state = await served({ sourceOverrides: { status: async () => ({ kind: finished ? 'done' : 'host' }) } }); await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage }) }); finished = true; state.clock.advance(CONSTANTS.HOST_POLL_MS);
       assert((await state.engine.get({ session: state.session, linkId: LINK })).status === 'queue_empty', 'terminal queue must report drain first');
       assert((await state.engine.get({ session: state.session, linkId: LINK })).status === 'session_ended', 'drained epoch closes immediately after empty delivery');
     },
@@ -1439,6 +1443,1493 @@ tests.push(
       const fresh = await engine.get({ session: replacement.sessionCode, linkId: LINK });
       assert(fresh.status === 'served' && fresh.handoffCode === 'PUSH-ADA-AFTER-DRAIN'
         && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-1', 'epoch-2']), 'a fresh chat after drain must work with a new epoch id');
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Discard / release hygiene (2026-09-30 incident: a discarded bundle's released
+// lane leaked; one lane was "released" three times by auto-release keep-alives).
+function recorders() {
+  const audit = []; const logs = []; const saves = [];
+  return {
+    audit, logs, saves,
+    port: {
+      audit: { append: (event, fields) => { audit.push({ event, fields }); return Promise.resolve(true); } },
+      logger: { record: (code, fields) => { logs.push({ code, fields }); } },
+      store: { saveLanes: async lanes => { saves.push(lanes.map(lane => ({ jobId: lane.jobId, phase: lane.phase }))); return true; } },
+    },
+  };
+}
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: releasing a job that already has a lane is a true no-op, and only real additions are counted',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, ...rec.port });
+      const first = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const second = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const third = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      assert(first.ok && first.count === 1 && JSON.stringify(first.added) === JSON.stringify([JOB_A]), 'the first release adds the lane');
+      assert(second.ok && second.count === 0 && third.count === 0 && second.added.length === 0, 're-releasing reports that it added nothing');
+      assert(rec.saves.length === 1, 'a no-op release must not rewrite lanes.json');
+      assert(rec.audit.filter(row => row.event === 'release').length === 1 && rec.logs.filter(row => row.code === 'release').length === 1,
+        'one lane means one release audit row and one release log line, not one per keep-alive');
+      assert(rec.audit[0].fields.count === 1 && rec.logs[0].fields.count === 1, 'the recorded count is the number actually added');
+      const counts = engine.snapshot().counts;
+      assert(counts.releaseCalls === 3 && counts.releaseNoops === 2, 'the no-ops are visible to a bug report as counters');
+      assert(engine.snapshot().queue.jobs.length === 1, 'still exactly one lane');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a no-op release does not count as human activity, so the idle pause still engages',
+    run: async () => {
+      const clock = createFakeClock();
+      const fake = source();
+      const engine = createHandoffEngine({ source: fake.api, now: clock.now, timers: clock, holdMs: 0, limits: { idlePauseMinutes: 60 } });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      clock.advance(59 * 60_000);
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); // an unattended keep-alive
+      clock.advance(2 * 60_000);
+      const result = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(result.status === 'paused', `an unattended re-release must not reset the idle clock (got ${result.status})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: dropLane frees a served lane, its code and its chat slot, and nothing more is served for it',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock(); let discarded = false; let sourceCalls = 0;
+      const gone = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => { sourceCalls++; if (discarded) throw gone; return { kind: 'open', handoff: handoff({ jobId }) }; },
+          status: async () => { sourceCalls++; return discarded ? { kind: 'gone' } : { kind: 'host' }; },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && engine.snapshot().chat.jobsAssigned === 1, 'the bundle is served once while it exists');
+
+      discarded = true;
+      const dropped = await engine.dropLane(JOB_A, 'bundle_discarded');
+      assert(dropped.ok === true, 'the app can retire the lane');
+      const snap = engine.snapshot();
+      assert(snap.queue.jobs.length === 0 && snap.queue.applications.working === 0 && snap.queue.applications.ready === 0 && snap.chat.jobsAssigned === 0,
+        'the lane no longer occupies capacity or a chat slot');
+      assert(snap.counts.lanesDropped === 1 && snap.counts.unreleaseCalls === 0, 'an app-driven drop is counted apart from a person\'s Unrelease');
+      const late = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      assert(late.status === 'superseded', `an answer to the retired code is told it was superseded, not treated as a forged code (got ${late.status})`);
+      const callsBefore = sourceCalls;
+      const second = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(second.status !== 'served' && !JSON.stringify(second).includes('Synthetic application prompt'), 'the discarded bundle\'s cached prompt is never served again');
+      assert(sourceCalls === callsBefore, 'nothing is read for a lane that no longer exists');
+      const row = rec.audit.filter(item => item.event === 'unrelease').pop();
+      assert(row?.fields?.cause === 'bundle_discarded', 'the audit row records the closed cause');
+      assert(rec.logs.some(item => item.code === 'unrelease' && item.fields.cause === 'bundle_discarded'), 'the log line records the closed cause');
+      assert((await engine.dropLane(JOB_A)).code === 'not_found', 'dropping a lane that is not there is a quiet miss');
+      assert((await engine.dropLane(JOB_B, 'a free text cause')).code === 'not_found', 'an unknown cause is never recorded verbatim');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: dropLane rolls back when the lane store refuses the write',
+    run: async () => {
+      let ok = true; const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, store: { saveLanes: async () => ok } });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      ok = false;
+      assert((await engine.dropLane(JOB_A)).code === 'persist_failed' && engine.snapshot().queue.jobs.length === 1, 'a failed write keeps the lane');
+      assert(engine.snapshot().fault === 'persist_failed', 'and reports the fault');
+      ok = true;
+      assert((await engine.dropLane(JOB_A)).ok === true && engine.snapshot().queue.jobs.length === 0, 'the retry succeeds');
+      assert(engine.snapshot().fault === null, 'a later successful write clears the persist fault instead of leaving the bridge faulted until restart');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: finished and vanished lanes are never restored, and a resumed one is re-read rather than stuck',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source().api, now: clock.now, timers: clock, holdMs: 0,
+        restoredLanes: [
+          { ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'gone', reason: null, heldFrom: null, counters: {} },
+          { ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', reason: null, heldFrom: null, counters: {} },
+        ],
+      });
+      const jobs = engine.snapshot().queue.jobs;
+      assert(jobs.length === 1 && jobs[0].jobId === JOB_B && jobs[0].phase === 'held' && jobs[0].reason === 'restart', 'only the live lane comes back, held for restart');
+      const lane = createApplicationLane({ ord: 9, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'held' });
+      lane.heldFrom = 'gone';
+      resumeLane(lane);
+      assert(lane.phase === 'unread', 'resuming a lane held from a terminal phase re-reads it instead of restoring a snapshot-less terminal lane');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane whose bundle vanished reaches gone and is pruned after the hour',
+    run: async () => {
+      const clock = createFakeClock(); const rec = recorders();
+      const engine = createHandoffEngine({
+        source: source().api, now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      // Vanish the bundle via a status read so the lane goes terminal.
+      const goneEngine = createHandoffEngine({
+        source: source({ read: async () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); }, status: async () => ({ kind: 'gone' }) }).api,
+        now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+      });
+      await goneEngine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const goneChat = await goneEngine.newChat({ linkId: LINK });
+      await goneEngine.get({ session: goneChat.sessionCode, linkId: LINK });
+      assert(goneEngine.snapshot().queue.jobs[0]?.phase === 'gone', 'the lane reaches gone when its bundle vanishes');
+      clock.advance(61 * 60_000);
+      await goneEngine.tick();
+      assert(goneEngine.snapshot().queue.jobs.length === 0, 'and is pruned after the hour');
+      assert(chat.copied, 'the unrelated engine is unaffected');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an answer for a bundle that vanished mid-chat gets a definite answer, not an endless retry',
+    run: async () => {
+      const clock = createFakeClock(); let discarded = false;
+      const enoent = () => Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => { if (discarded) throw enoent(); return { kind: 'open', handoff: handoff({ jobId }) }; },
+          status: async () => (discarded ? { kind: 'gone' } : { kind: 'host' }),
+          submit: async () => { throw enoent(); },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      discarded = true;
+      const reply = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: answer({ code: served.handoffCode }) });
+      assert(reply.status === 'unknown_handoff', `a submit for a vanished bundle is answered definitively (got ${reply.status})`);
+      assert(engine.snapshot().queue.jobs[0]?.phase === 'gone', 'and the lane is marked gone');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane that goes gone gives its chat slot back so a live job can be served',
+    run: async () => {
+      const clock = createFakeClock(); let aGone = false;
+      const enoent = () => Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => {
+            if (jobId === JOB_A && aGone) throw enoent();
+            return { kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId }) };
+          },
+          status: async ({ jobId }) => (jobId === JOB_A && aGone ? { kind: 'gone' } : { kind: 'host' }),
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0, limits: { jobsPerChat: 1 },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served', 'the only slot is used by job A');
+      aGone = true;
+      await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      engine.hint({ jobId: JOB_A });
+      const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A)?.phase === 'gone', 'the vanished bundle is discovered on the next poll');
+      assert(next.status === 'served' && next.handoffCode === 'HANDOFF-B', `the dead job's slot is released for the live one (got ${next.status})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: terminal lanes do not count against the lane cap or block the persist',
+    run: async () => {
+      const directory = cleanDirectory(); const clock = createFakeClock();
+      try {
+        const store = createLaneStore({ userDataPath: directory });
+        let vanished = false;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => { if (vanished) throw Object.assign(new Error('x'), { code: 'ENOENT' }); return { kind: 'open', handoff: handoff({ jobId }) }; },
+            status: async () => (vanished ? { kind: 'gone' } : { kind: 'host' }),
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0, store,
+        });
+        const ids = Array.from({ length: CONSTANTS.MAX_LANES }, (_, index) => `aaaaaaaa-aaaa-4aaa-8aaa-${String(index).padStart(12, '0')}`);
+        assert((await engine.release({ jobs: ids.map(jobId => ({ jobId, canvasFilePath: PATH_A })) })).ok, 'a full set of live lanes releases');
+        vanished = true;
+        const chat = await engine.newChat({ linkId: LINK });
+        for (let index = 0; index < ids.length + 1; index += 1) await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(engine.snapshot().queue.jobs.every(job => job.phase === 'gone'), 'every lane has vanished');
+        const fresh = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        assert(fresh.ok === true, `a new release must not fail persist_failed just because ${ids.length} dead lanes linger (got ${fresh.code})`);
+        assert(store.readLanes().length === 1 && store.readLanes()[0].jobId === JOB_A, 'only the live lane is persisted; dead lanes are not written back');
+        assert(engine.snapshot().fault === null, 'and the engine is not faulted');
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+);
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: the lane store persists live lanes only, under the same cap the engine enforces',
+    run: async () => {
+      assert(MAX_LIVE_LANES === CONSTANTS.MAX_LANES, 'the store cap and the engine release cap are one rule');
+      const directory = cleanDirectory();
+      try {
+        const store = createLaneStore({ userDataPath: directory });
+        const lane = (ord, phase) => ({ ord, jobId: `bbbbbbbb-bbbb-4bbb-8bbb-${String(ord).padStart(12, '0')}`, canvasFilePath: PATH_A, releasedAt: ord, phase, reason: null, heldFrom: null, counters: {} });
+        const live = Array.from({ length: MAX_LIVE_LANES }, (_, index) => lane(index + 1, 'awaiting'));
+        const dead = Array.from({ length: 5 }, (_, index) => lane(100 + index, index % 2 ? 'done' : 'gone'));
+        assert(await store.saveLanes([...live, ...dead]) === true, 'dead lanes beside a full set of live ones must not make the save fail');
+        assert(store.readLanes().length === MAX_LIVE_LANES && store.readLanes().every(item => item.phase === 'awaiting'), 'only live lanes reach disk');
+        assert(await store.saveLanes([...live, lane(50, 'unread')]) === false, 'more live lanes than the cap is still refused');
+        // A file written by an older build holds a gone lane beside 10 live ones.
+        fs.writeFileSync(store.lanesPath, `${JSON.stringify({ v: 1, lanes: [...live.slice(0, 9), lane(200, 'gone'), lane(201, 'done')] })}\n`);
+        const loaded = store.loadLanes(5);
+        assert(loaded.length === 9 && loaded.every(item => item.phase === 'held' && item.reason === 'restart'), 'a persisted terminal lane is dropped at load, never resurrected as a restart hold');
+        assert(store.readLanes().length === 9, 'and the raw view the enable sheet reads omits it too');
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    },
+  },
+);
+
+
+// ---------------------------------------------------------------------------
+// Stranded lanes, serve-time revalidation, stall detection and per-job answer
+// tracking (2026-09-30 review).
+const settle = async () => { for (let index = 0; index < 8; index += 1) await new Promise(resolve => setImmediate(resolve)); };
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a lane restored for a bundle that is proven gone is dropped at restore, a transient probe error never drops one, and probing is bounded',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const JOB_C = '33333333-3333-4333-8333-333333333333';
+      const JOB_D = '44444444-4444-4444-8444-444444444444';
+      const JOB_E = '55555555-5555-4555-8555-555555555555';
+      const probes = { [JOB_A]: 0, [JOB_B]: 0, [JOB_C]: 0, [JOB_D]: 0, [JOB_E]: 0 };
+      let cLatched = false;
+      const lane = (ord, jobId) => ({ ord, jobId, canvasFilePath: PATH_A, releasedAt: ord, phase: 'unread', reason: null, heldFrom: null, counters: {} });
+      const engine = createHandoffEngine({
+        source: source({ status: async ({ jobId }) => {
+          probes[jobId] += 1;
+          if (jobId === JOB_A) return { kind: 'gone' };                                    // discarded / pruned / deleted by hand
+          if (jobId === JOB_B) throw Object.assign(new Error('ENOENT: canvas'), { code: 'ENOENT' }); // transient: proves nothing
+          if (jobId === JOB_C) return cLatched ? { kind: 'gone' } : { kind: 'busy' };      // unknown at first, proven on a later tick
+          if (jobId === JOB_D) return { kind: 'done' };                                    // saved tombstone
+          return { kind: 'host' };                                                          // alive
+        } }).api,
+        now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+        restoredLanes: [lane(1, JOB_A), lane(2, JOB_B), lane(3, JOB_C), lane(4, JOB_D), lane(5, JOB_E)],
+      });
+      assert(engine.snapshot().queue.jobs.length === 5, 'all five restore as held/restart before any probe answers');
+      await settle();
+      const ids = () => engine.snapshot().queue.jobs.map(job => job.jobId);
+      assert(!ids().includes(JOB_A) && !ids().includes(JOB_D), `a proven-gone lane (status gone) and a saved tombstone are dropped at restore, got ${ids()}`);
+      assert(ids().includes(JOB_B) && ids().includes(JOB_C) && ids().includes(JOB_E), 'a thrown error, a busy answer and a live bundle each keep their lane');
+      const causes = rec.logs.filter(item => item.code === 'unrelease').map(item => `${item.fields.kind}/${item.fields.cause}`).sort();
+      assert(JSON.stringify(causes) === JSON.stringify(['application/bundle_missing', 'application/bundle_saved']), `each drop is logged with its closed cause, got ${causes}`);
+      assert(rec.audit.filter(row => row.event === 'unrelease').every(row => ['bundle_missing', 'bundle_saved'].includes(row.fields.cause)), 'and audited with it');
+      assert(engine.snapshot().counts.lanesDropped === 2 && engine.snapshot().counts.unreleaseCalls === 0, 'counted as app-driven drops, not a person\'s Unrelease');
+      assert(JSON.stringify(rec.saves.at(-1).map(item => item.jobId).sort()) === JSON.stringify([JOB_B, JOB_C, JOB_E].sort()), 'the durable lanes no longer carry the dropped ones');
+
+      // A later tick retries the lane that could not be checked, and proves it.
+      cLatched = true;
+      await engine.tick(); await settle();
+      assert(!ids().includes(JOB_C), 'the lane whose probe was inconclusive is dropped once a later probe proves it gone');
+      // Probing is bounded: a lane that keeps erroring is not polled forever.
+      for (let round = 0; round < 12; round += 1) { await engine.tick(); await settle(); }
+      assert(probes[JOB_B] === 5 && ids().includes(JOB_B), `an always-erroring lane is probed a bounded number of times and never dropped (probed ${probes[JOB_B]})`);
+      assert(probes[JOB_A] === 1, 'a dropped lane is not probed again');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a served prompt is revalidated before every serve; a bundle removed outside Discard is dropped and the next job is served',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const state = { aGone: false, statusError: false }; const probed = [];
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId, prompt: `Synthetic prompt for ${jobId === JOB_B ? 'B' : 'A'}.` }) }),
+          status: async ({ jobId }) => {
+            probed.push(jobId);
+            if (jobId === JOB_A && state.statusError) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+            return jobId === JOB_A && state.aGone ? { kind: 'gone' } : { kind: 'host' };
+          },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'the first lane is served while its bundle exists');
+      assert(probed.includes(JOB_A), 'a serve confirms the bundle exists first');
+      // Re-serve after a transient probe failure: still served, never dropped.
+      state.statusError = true;
+      const again = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(again.status === 'served' && again.handoffCode === 'HANDOFF-A' && engine.snapshot().queue.jobs.length === 2, 'a transient status error must not drop the lane or stop the serve');
+      // The bundle is deleted by hand (no Discard, no event).
+      state.statusError = false; state.aGone = true;
+      const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === 'HANDOFF-B' && !JSON.stringify(next).includes('prompt for A'), `the cached prompt of the removed bundle is not re-served; the next job is (got ${next.status})`);
+      assert(engine.snapshot().queue.jobs.map(job => job.jobId).join() === JOB_B, 'the removed bundle\'s lane is dropped');
+      assert(rec.logs.some(item => item.code === 'unrelease' && item.fields.cause === 'bundle_missing') && rec.audit.some(row => row.event === 'unrelease' && row.fields.cause === 'bundle_missing'), 'with the closed cause in the log and the audit');
+      const late = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      assert(late.status === 'superseded', `an answer to the dropped lane's code is told it was superseded, got ${late.status}`);
+      // No next job at all: an honest empty answer.
+      state.aGone = false;
+      const lone = createHandoffEngine({ source: source({ status: async () => ({ kind: 'gone' }) }).api, now: clock.now, timers: clock, holdMs: 0 });
+      await lone.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const loneChat = await lone.newChat({ linkId: LINK });
+      const empty = await lone.get({ session: loneChat.sessionCode, linkId: LINK });
+      assert(empty.status === 'queue_empty' && lone.snapshot().queue.jobs.length === 0, `a lone removed bundle serves queue_empty, got ${empty.status}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane served to the current chat and quiet past STALL_NOTICE_MS is stalled per job and for the chat; a submit, a new chat or a later serve clears it',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ submit: async () => ({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-NEXT', stage: 'cover-letter' }) }) }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const beforeServe = engine.snapshot();
+      assert(beforeServe.chat.outstanding === null && beforeServe.queue.jobs.every(job => job.awaitingAnswer === false && job.stalled === false), 'nothing served, nothing outstanding');
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const servedAt = clock.now();
+      let snap = engine.snapshot();
+      const jobA = () => engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A);
+      assert(snap.chat.outstanding?.stalled === false && snap.chat.outstanding.stalledSince === null && snap.chat.outstanding.servedAt === servedAt, 'freshly served is not stalled');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
+      assert(engine.snapshot().chat.outstanding.stalled === false && jobA().stalled === false, 'one millisecond short of the threshold is not stalled');
+      clock.advance(1);
+      snap = engine.snapshot();
+      assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === servedAt, `stalledSince is when the quiet began (servedAt), got ${snap.chat.outstanding.stalledSince}`);
+      assert(jobA().stalled === true && jobA().stalledSince === servedAt && jobA().awaitingAnswer === true && jobA().servedAt === servedAt, 'the same facts are on the job row');
+      assert(snap.chat.outstanding.stallsLastHour === 1, 'one distinct stall in the last hour');
+      // Reading status again does not count the same stall twice; the tick records it too.
+      await engine.tick(); engine.snapshot();
+      assert(engine.snapshot().chat.outstanding.stallsLastHour === 1, 'the same quiet period is one stall, however often it is observed');
+      // An accepted answer clears the stall and moves the job to the next stage.
+      await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      snap = engine.snapshot();
+      assert(snap.chat.outstanding?.stalled === false && jobA().stalled === false && jobA().awaitingAnswer === true && jobA().answeredAt === clock.now(), 'an accepted submit clears the stall; the next stage is served and awaited');
+      // A second, distinct stall in the same hour is counted separately.
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(engine.snapshot().chat.outstanding.stalled === true && engine.snapshot().chat.outstanding.stallsLastHour === 2, 'a later quiet period is a second stall');
+      // A new chat never inherits a stall for work it was not served.
+      await engine.newChat({ linkId: LINK });
+      snap = engine.snapshot();
+      assert(snap.chat.outstanding === null && jobA().stalled === false && jobA().awaitingAnswer === false && jobA().servedAt === null, 'a lane served to a previous chat is neither outstanding nor stalled for the new one');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: per-job answer tracking separates "ChatGPT is answering THIS job" from "the answer was accepted and the next stage is not served yet"',
+    run: async () => {
+      const clock = createFakeClock(); let next = null;
+      const engine = createHandoffEngine({
+        source: source({ submit: async () => (next ? { kind: 'accepted', completed: false, handoff: next } : { kind: 'accepted', completed: true }) }).api,
+        now: clock.now, timers: clock, holdMs: 0, limits: { jobsPerChat: 2 },
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_B, canvasFilePath: PATH_B }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const jobOf = id => engine.snapshot().queue.jobs.find(job => job.jobId === id);
+      const a = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(a.status === 'served' && jobOf(JOB_A).awaitingAnswer === true && jobOf(JOB_B).awaitingAnswer === false && jobOf(JOB_B).servedAt === null,
+        'only the served job is being answered; the other lane, though released, is not');
+      assert(engine.snapshot().chat.outstanding.stage === jobOf(JOB_A).stage, 'and chat.outstanding agrees while there is a single job');
+      // Accepted with NO next stage handed back yet (host builds the documents).
+      const done = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: a.handoffCode, response: answer({ code: a.handoffCode, stage: a.stage }) });
+      assert(done.status === 'accepted' && done.jobComplete === true, 'the answer is accepted');
+      assert(jobOf(JOB_A).awaitingAnswer === false && jobOf(JOB_A).answeredAt === clock.now() && jobOf(JOB_A).servedAt === null && jobOf(JOB_A).stalled === false,
+        'an accepted answer with nothing served after it is answered, not awaited');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS * 3);
+      assert(jobOf(JOB_A).stalled === false && engine.snapshot().chat.outstanding === null, 'and a job nobody owes an answer for never stalls');
+      // The second job is served after the first: outstanding is THIS job, not the first served one.
+      const b = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(b.status === 'served' && jobOf(JOB_B).awaitingAnswer === true && jobOf(JOB_B).servedAt === clock.now() && jobOf(JOB_A).awaitingAnswer === false,
+        'the second job is awaited; the first is not, even though it was served earlier');
+      // A rejected answer keeps the job awaited and restarts its quiet clock.
+      const rejectEngine = createHandoffEngine({ source: source({ submit: async () => ({ kind: 'rejected', validationErrors: ['fix it'], handoff: handoff({ code: 'HANDOFF-A2' }) }) }).api, now: clock.now, timers: clock, holdMs: 0 });
+      await rejectEngine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const rejectChat = await rejectEngine.newChat({ linkId: LINK });
+      const served = await rejectEngine.get({ session: rejectChat.sessionCode, linkId: LINK });
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      const rejectedAt = clock.now(); // the moment of the rejected submit below
+      const stalledBefore = rejectEngine.snapshot().queue.jobs[0];
+      assert(stalledBefore.stalled === true, 'quiet past the threshold');
+      const rejected = await rejectEngine.submit({ session: rejectChat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: answer({ code: served.handoffCode, stage: served.stage }) });
+      assert(rejected.status === 'rejected', 'the answer is rejected');
+      const afterReject = rejectEngine.snapshot().queue.jobs[0];
+      assert(afterReject.awaitingAnswer === true && afterReject.answeredAt === null && afterReject.stalled === false,
+        'a rejected answer is not an accepted one (still awaited) and the chat was just heard, so it is not stalled');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(rejectEngine.snapshot().queue.jobs[0].stalled === true && rejectEngine.snapshot().queue.jobs[0].stalledSince === rejectedAt, 'the quiet clock restarted at the submit');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane that changes during the serve-time probe is re-validated, never served stale (completed, discarded or held mid-probe)',
+    run: async () => {
+      const setup = async () => {
+        const clock = createFakeClock(); const hold = { armed: false, gate: null };
+        const engine = createHandoffEngine({
+          source: source({
+            status: async () => { if (hold.armed) { hold.armed = false; await hold.gate.promise; } return { kind: 'host' }; },
+            read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId, prompt: `Synthetic prompt for ${jobId === JOB_B ? 'B' : 'A'}.` }) }),
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'the first lane is served');
+        const probeHeld = () => { hold.armed = true; hold.gate = deferred(); return engine.get({ session: chat.sessionCode, linkId: LINK }).then(value => ({ value }), error => ({ error })); };
+        return { engine, chat, first, hold, probeHeld };
+      };
+      // (a) The answer completing the job arrives while the next get is probing.
+      {
+        const { engine, chat, first, hold, probeHeld } = await setup();
+        const pending = probeHeld();
+        await settle();
+        const done = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+        assert(done.status === 'accepted' && done.jobComplete === true, 'the answer completing the job is accepted mid-probe');
+        hold.gate.resolve();
+        const outcome = await pending;
+        assert(!outcome.error, `a lane that completed during the probe must not throw, got ${outcome.error?.message}`);
+        assert(outcome.value.status === 'served' ? outcome.value.handoffCode === 'HANDOFF-B' : true, 'and the finished lane\'s prompt is never re-served');
+        assert(engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A).phase === 'host', 'the completed lane stays with the app');
+      }
+      // (b) The bundle is discarded while the next get is probing.
+      {
+        const { engine, chat, hold, probeHeld } = await setup();
+        const pending = probeHeld();
+        await settle();
+        assert((await engine.dropLane(JOB_A, 'bundle_discarded')).ok, 'the discard frees the lane mid-probe');
+        hold.gate.resolve();
+        const outcome = await pending;
+        assert(!outcome.error && outcome.value.status === 'served' && outcome.value.handoffCode === 'HANDOFF-B',
+          `a removed lane is not served; the next job is (got ${outcome.error?.message ?? `${outcome.value.status} ${outcome.value.handoffCode}`})`);
+        const snap = engine.snapshot();
+        assert(snap.queue.jobs.map(job => job.jobId).join() === JOB_B && snap.chat.jobsAssigned === 1,
+          `the removed lane must not re-take a chat slot, got ${snap.queue.jobs.length} lane(s) and ${snap.chat.jobsAssigned} assigned`);
+        assert(chat.sessionCode, 'chat stays valid');
+      }
+      // (c) The person holds the lane while the next get is probing.
+      {
+        const { engine, hold, probeHeld } = await setup();
+        const pending = probeHeld();
+        await settle();
+        assert((await engine.hold(JOB_A)).ok, 'the person holds the lane mid-probe');
+        hold.gate.resolve();
+        const outcome = await pending;
+        assert(!outcome.error && outcome.value.status === 'served' && outcome.value.handoffCode === 'HANDOFF-B',
+          `a held lane is not served; the next job is (got ${outcome.error?.message ?? `${outcome.value.status} ${outcome.value.handoffCode}`})`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: stalledSince is when the chat went quiet (the last-heard moment), so a stalled job reports its real quiet age',
+    run: async () => {
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ submit: async () => ({ kind: 'rejected', validationErrors: ['fix it'], handoff: handoff({ code: 'HANDOFF-A2' }) }) }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const servedAt = clock.now();
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 4 * 60_000);
+      let snap = engine.snapshot();
+      assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === servedAt && snap.queue.jobs[0].stalledSince === servedAt,
+        `quiet since the serve, 9 minutes ago, got ${snap.chat.outstanding.stalledSince}`);
+      const rejected = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+      assert(rejected.status === 'rejected', 'a rejected answer restarts the quiet clock');
+      const heardAt = clock.now();
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 2 * 60_000);
+      snap = engine.snapshot();
+      assert(snap.queue.jobs[0].stalledSince === heardAt && snap.chat.outstanding.stalledSince === heardAt, 'after a rejected answer the quiet started at that submit');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: the stall clock does not run through a hold or a pause, and resume starts a fresh quiet period',
+    run: async () => {
+      // Per-job hold, then resume.
+      {
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0 });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert((await engine.hold(JOB_A)).ok, 'the person holds the job');
+        clock.advance(21 * 60_000);
+        const jobA = () => engine.snapshot().queue.jobs[0];
+        assert(jobA().phase === 'held' && jobA().stalled === false, 'a held job is not stalled');
+        assert((await engine.resume({ jobId: JOB_A })).ok, 'and is resumed');
+        assert(jobA().stalled === false && engine.snapshot().chat.outstanding?.stalled !== true && (engine.snapshot().chat.outstanding?.stallsLastHour ?? 0) === 0,
+          'ChatGPT was never able to answer during the hold, so resume is not an instant stall');
+        assert(jobA().awaitingAnswer === false, 'and nothing was re-served, so no answer is claimed as owed');
+        // The wait starts again from the next serve, not from the resume.
+        clock.advance(60_000);
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const reservedAt = clock.now();
+        assert(jobA().awaitingAnswer === true && jobA().servedAt === reservedAt, 'the next get serves it again and the wait starts there');
+        clock.advance(CONSTANTS.STALL_NOTICE_MS);
+        assert(jobA().stalled === true && jobA().stalledSince === reservedAt, `a fresh quiet period runs from the re-serve, got ${jobA().stalledSince}`);
+      }
+      // Bridge-wide pause, a refused submit, then resume.
+      {
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0 });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        engine.pause('user');
+        clock.advance(10 * 60_000);
+        const refused = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+        assert(refused.status === 'paused', 'ChatGPT\'s answer is turned away while paused');
+        const jobA = () => engine.snapshot().queue.jobs[0];
+        assert(jobA().stalled === false && engine.snapshot().chat.outstanding?.stalled !== true, 'a paused bridge reports no stall');
+        await engine.resume();
+        const resumedAt = clock.now();
+        assert(jobA().stalled === false && (engine.snapshot().chat.outstanding?.stallsLastHour ?? 0) === 0, 'resume does not report an instant stall');
+        clock.advance(CONSTANTS.STALL_NOTICE_MS);
+        assert(jobA().stalled === true && jobA().stalledSince === resumedAt, 'the quiet period runs from the resume');
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: restore probes are spent only by a probe that ran and proved nothing; scope-off and conclusive answers spend none; an unresolved lane is retried slowly, not never',
+    run: async () => {
+      const lane = (ord, jobId) => ({ ord, jobId, canvasFilePath: PATH_A, releasedAt: ord, phase: 'unread', reason: null, heldFrom: null, counters: {} });
+      const ids = engine => engine.snapshot().queue.jobs.map(job => job.jobId);
+      // Applications scope off: nothing is probed and nothing is spent.
+      {
+        const clock = createFakeClock(); let calls = 0;
+        const engine = createHandoffEngine({
+          source: source({ status: async () => { calls += 1; return { kind: 'gone' }; } }).api,
+          scope: { applications: false, scoring: true }, now: clock.now, timers: clock, holdMs: 0, restoredLanes: [lane(1, JOB_A)],
+        });
+        for (let round = 0; round < 8; round += 1) { await engine.tick(); await settle(); }
+        assert(calls === 0 && ids(engine).includes(JOB_A), 'no probe runs while applications are off');
+        engine.setScope({ applications: true });
+        await engine.tick(); await settle();
+        assert(calls === 1 && !ids(engine).includes(JOB_A), `re-enabling still probes the stranded lane (calls ${calls})`);
+      }
+      // A conclusive "alive" answer ends the probing for that lane.
+      {
+        const clock = createFakeClock(); let calls = 0;
+        const engine = createHandoffEngine({
+          source: source({ status: async () => { calls += 1; return { kind: 'host' }; } }).api,
+          now: clock.now, timers: clock, holdMs: 0, restoredLanes: [lane(1, JOB_A)],
+        });
+        await settle();
+        for (let round = 0; round < 10; round += 1) { await engine.tick(); await settle(); }
+        assert(calls === 1 && ids(engine).includes(JOB_A), `a lane proven alive is probed once, not five times (calls ${calls})`);
+      }
+      // A lane whose probes keep failing is retried slowly and dropped once proven gone.
+      {
+        const clock = createFakeClock(); let calls = 0; let gone = false;
+        const engine = createHandoffEngine({
+          source: source({ status: async () => { calls += 1; if (gone) return { kind: 'gone' }; throw Object.assign(new Error('EIO'), { code: 'EIO' }); } }).api,
+          now: clock.now, timers: clock, holdMs: 0, restoredLanes: [lane(1, JOB_A)],
+        });
+        await settle();
+        for (let round = 0; round < 12; round += 1) { await engine.tick(); await settle(); }
+        assert(calls === 5, `the fast retries are bounded at five, got ${calls}`);
+        gone = true;
+        clock.advance(2 * 60_000); await engine.tick(); await settle();
+        assert(calls === 5 && ids(engine).includes(JOB_A), 'the slow retry waits for its interval');
+        clock.advance(4 * 60_000); await engine.tick(); await settle();
+        assert(calls === 6 && !ids(engine).includes(JOB_A), `after several minutes the lane is probed again and dropped once proven gone (calls ${calls})`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: per-cause drop counters: discard, prune, missing and saved are counted apart and sum to lanesDropped',
+    run: async () => {
+      const clock = createFakeClock();
+      const states = { [JOB_A]: 'gone', [JOB_B]: 'done' };
+      const JOB_C = '33333333-3333-4333-8333-333333333333';
+      const JOB_D = '44444444-4444-4444-8444-444444444444';
+      const lane = (ord, jobId) => ({ ord, jobId, canvasFilePath: PATH_A, releasedAt: ord, phase: 'unread', reason: null, heldFrom: null, counters: {} });
+      const engine = createHandoffEngine({
+        source: source({ status: async ({ jobId }) => ({ kind: states[jobId] || 'host' }) }).api,
+        now: clock.now, timers: clock, holdMs: 0, restoredLanes: [lane(1, JOB_A), lane(2, JOB_B), lane(3, JOB_C), lane(4, JOB_D)],
+      });
+      await settle();
+      await engine.dropLane(JOB_C, 'bundle_discarded');
+      await engine.dropLane(JOB_D, 'bundle_pruned');
+      const counts = engine.snapshot().counts;
+      assert(counts.lanesDropped === 4 && counts.droppedMissing === 1 && counts.droppedSaved === 1 && counts.droppedDiscarded === 1 && counts.droppedPruned === 1,
+        `each cause is counted, got ${JSON.stringify(counts)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane whose bundle is proven gone is never served even when the durable drop is refused, and is ended in memory',
+    run: async () => {
+      const clock = createFakeClock(); let persist = true; let statusCalls = 0;
+      const engine = createHandoffEngine({
+        source: source({ status: async () => { statusCalls += 1; return { kind: 'gone' }; } }).api,
+        store: { saveLanes: async () => persist }, now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      persist = false;
+      const result = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(result.status !== 'served', `a gone bundle is never served, got ${result.status}`);
+      const job = engine.snapshot().queue.jobs.find(item => item.jobId === JOB_A);
+      assert(job?.phase === 'gone' && statusCalls === 1, `the refused drop ends the lane in memory instead of re-probing it (phase ${job?.phase}, probes ${statusCalls})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a submit still running is activity, not a stall; a stalled lane is the chat\'s outstanding job; a rotated handoff restarts the wait; stall history ages out after an hour',
+    run: async () => {
+      // A submit in flight is never a stall.
+      {
+        const clock = createFakeClock(); const gate = deferred();
+        const engine = createHandoffEngine({ source: source({ submit: async () => { await gate.promise; return { kind: 'accepted', completed: true }; } }).api, now: clock.now, timers: clock, holdMs: 0 });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const pending = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+        await settle();
+        clock.advance(CONSTANTS.STALL_NOTICE_MS * 2);
+        assert(engine.snapshot().queue.jobs[0].stalled === false, 'a submit that is still running is not a stall');
+        gate.resolve(); await pending;
+      }
+      // The chat's outstanding job is the stalled one when another lane is fresher.
+      {
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({ read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId }) }) }).api,
+          now: clock.now, timers: clock, holdMs: 0, limits: { jobsPerChat: 2 },
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_B, canvasFilePath: PATH_B }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert((await engine.hold(JOB_A)).ok, 'the first job is held so the second can be served');
+        const second = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(second.status === 'served' && second.handoffCode === 'HANDOFF-B', 'the second job is served');
+        clock.advance(4 * 60_000);
+        assert((await engine.resume({ jobId: JOB_A })).ok, 'the first job is resumed later, so it is the fresher one');
+        clock.advance(60_000);
+        const snap = engine.snapshot();
+        const rowOf = id => snap.queue.jobs.find(job => job.jobId === id);
+        assert(rowOf(JOB_B).stalled === true && rowOf(JOB_A).stalled === false, 'only the second job has been quiet long enough');
+        assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === rowOf(JOB_B).stalledSince, 'the chat\'s outstanding job is the stalled one, not the first awaiting one');
+      }
+      // A handoff that replaces the one the chat was given clears the wait.
+      {
+        const clock = createFakeClock(); const hold = { armed: false, skip: 0, gate: null }; let mode = 'open-A';
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => (mode === 'host' ? { kind: 'host' } : { kind: 'open', handoff: handoff({ code: mode === 'open-B' ? 'HANDOFF-B' : 'HANDOFF-A', jobId }) }),
+            // While the app offers the new handoff, a lane's status says it is open again.
+            status: async () => { if (hold.armed && hold.skip-- <= 0) { hold.armed = false; await hold.gate.promise; } return mode === 'open-B' ? { kind: 'awaiting', phase: 'awaiting', read: true } : { kind: 'host' }; },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const firstServe = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(firstServe.status === 'served' && firstServe.handoffCode === 'HANDOFF-A', 'the first handoff is served');
+        // The app takes the job over (finished in the dock), then offers a new handoff.
+        mode = 'host'; clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+        assert(engine.hint({ jobId: JOB_A }) === true, 'the app hints the lane changed');
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(engine.snapshot().queue.jobs[0].phase === 'host', 'the lane is with the app');
+        // The app polls a lane it holds; its status now says the job is open again
+        // (the lane's own read is the first status call, the serve-time probe the second).
+        mode = 'open-B'; clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+        hold.armed = true; hold.skip = 1; hold.gate = deferred();
+        const pending = engine.get({ session: chat.sessionCode, linkId: LINK });
+        await settle();
+        const mid = engine.snapshot().queue.jobs[0];
+        assert(mid.phase === 'awaiting' && mid.awaitingAnswer === false && mid.servedAt === null,
+          `a different handoff has not been served yet, so nothing is awaited for it (phase ${mid.phase}, awaiting ${mid.awaitingAnswer}, servedAt ${mid.servedAt})`);
+        hold.gate.resolve();
+        const again = await pending;
+        assert(again.status === 'served' && again.handoffCode === 'HANDOFF-B' && engine.snapshot().queue.jobs[0].awaitingAnswer === true, 'the new handoff is then served and awaited');
+      }
+      // Stall history is an hour long.
+      {
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({ submit: async () => ({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-NEXT', stage: 'cover-letter' }) }) }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        clock.advance(CONSTANTS.STALL_NOTICE_MS);
+        assert(engine.snapshot().chat.outstanding.stallsLastHour === 1, 'the first stall is counted');
+        await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
+        clock.advance(66 * 60_000);
+        const outstanding = engine.snapshot().chat.outstanding;
+        assert(outstanding.stalled === true && outstanding.stallsLastHour === 1, `a stall older than an hour is no longer counted, got ${outstanding.stallsLastHour}`);
+      }
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Lane lifecycle and progress-truth follow-ups (2026-09-29 verification).
+const enoentError = () => Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a bundle saved by another route while its lane is live is dropped at the next serve, never re-served, and a submit against it is a final answer, not needs_user',
+    run: async () => {
+      // (a) The serve-time probe treats the saved tombstone as gone.
+      {
+        const clock = createFakeClock(); const rec = recorders(); let aSaved = false;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => { if (jobId === JOB_A && aSaved) throw enoentError(); return { kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId, prompt: `Synthetic prompt for ${jobId === JOB_B ? 'B' : 'A'}.` }) }; },
+            status: async ({ jobId }) => (jobId === JOB_A && aSaved ? { kind: 'done' } : { kind: 'host' }),
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0, ...rec.port,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'job A is served and left awaiting');
+        aSaved = true;
+        const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(next.status === 'served' && next.handoffCode === 'HANDOFF-B' && !JSON.stringify(next).includes('prompt for A'),
+          `a saved job's prompt is not re-served; the next job is (got ${next.status} ${next.handoffCode})`);
+        const snap = engine.snapshot();
+        assert(snap.queue.jobs.map(job => job.jobId).join() === JOB_B && snap.chat.jobsAssigned === 1, 'the saved job leaves the queue and gives its chat slot back');
+        assert(rec.logs.some(item => item.code === 'unrelease' && item.fields.cause === 'bundle_saved'), 'and is dropped with the closed bundle_saved cause');
+      }
+      // (b) A submit that finds the bundle saved is definitive and never flips the lane to needs_user.
+      {
+        const clock = createFakeClock(); let saved = false; let savedSubmits = 0;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => { if (saved) throw enoentError(); return { kind: 'open', handoff: handoff() }; },
+            status: async () => (saved ? { kind: 'done' } : { kind: 'host' }),
+            submit: async () => { if (saved) savedSubmits++; if (saved) throw enoentError(); return { kind: 'accepted', completed: true }; },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        saved = true;
+        const statuses = [];
+        for (let index = 0; index < 5; index += 1) {
+          const reply = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, extra: { n: index } }) });
+          statuses.push(reply.status);
+        }
+        assert(statuses.every(status => status === 'unknown_handoff'), `every answer for a saved job is definitive, got ${statuses}`);
+        assert(savedSubmits === 1, `only the first answer reaches the source; later ones are turned away up front (source submits ${savedSubmits})`);
+        const snap = engine.snapshot();
+        assert(snap.queue.jobs.every(job => job.phase !== 'needs_user' && job.reason !== 'write_failed') && snap.queue.applications.needsYou === 0,
+          'a finished job never reads as needing the person');
+        assert(snap.queue.jobs[0]?.phase === 'done', 'the lane is simply finished');
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a release that lost a race with a discard adds no lane; other jobs in the same release still go through, and the person\'s own Unrelease does not block a re-release',
+    run: async () => {
+      const clock = createFakeClock(); const rec = recorders();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, ...rec.port });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'job A releases');
+      assert((await engine.dropLane(JOB_A, 'bundle_discarded')).ok, 'job A is discarded');
+      const releasesBefore = rec.audit.filter(row => row.event === 'release').length;
+      const late = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      assert(late.ok === false && late.code === 'unknown_job', `a release for a discarded bundle is refused, got ${JSON.stringify(late)}`);
+      assert(engine.snapshot().queue.jobs.length === 0 && engine.snapshot().queue.applications.working === 0, 'no lane, no working count');
+      assert(rec.audit.filter(row => row.event === 'release').length === releasesBefore, 'and no release is audited');
+      const mixed = await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }, { jobId: JOB_B, canvasFilePath: PATH_B }] });
+      assert(mixed.ok === true && mixed.count === 1 && mixed.added.join() === JOB_B, `the live job of a mixed release is added alone, got ${JSON.stringify(mixed)}`);
+      // A pruned bundle is refused too; an Unrelease is the person's choice and stays reversible.
+      assert((await engine.release({ jobs: [{ jobId: '33333333-3333-4333-8333-333333333333', canvasFilePath: PATH_A }] })).ok, 'job C releases');
+      assert((await engine.dropLane('33333333-3333-4333-8333-333333333333', 'bundle_pruned')).ok, 'job C is pruned');
+      assert((await engine.release({ jobs: [{ jobId: '33333333-3333-4333-8333-333333333333', canvasFilePath: PATH_A }] })).code === 'unknown_job', 'a pruned bundle is refused');
+      assert((await engine.unrelease(JOB_B)).ok && (await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'a person\'s Unrelease can be undone by releasing again');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: every submit that reaches a lane restarts its quiet clock, whether it is junk, superseded, a cached verdict or a held answer',
+    run: async () => {
+      const clock = createFakeClock(); const minute = 60_000;
+      const engine = createHandoffEngine({
+        source: source({ submit: async () => ({ kind: 'rejected', validationErrors: ['fix it'], handoff: handoff({ code: 'HANDOFF-A' }) }) }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const jobA = () => engine.snapshot().queue.jobs[0];
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - minute);
+      const junk = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: 'not json at all' });
+      assert(junk.status === 'junk', `the first attempt is junk, got ${junk.status}`);
+      clock.advance(minute);
+      const wrongStage = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: 'cover-letter' }) });
+      assert(wrongStage.status === 'superseded', `the second attempt is for the wrong stage, got ${wrongStage.status}`);
+      const heardAt = clock.now();
+      clock.advance(minute);
+      assert(jobA().stalled === false && engine.snapshot().chat.outstanding.stalled === false, 'ChatGPT submitted a minute ago, so the job is not quiet');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - minute);
+      assert(jobA().stalled === true && jobA().stalledSince === heardAt, `it is quiet ${CONSTANTS.STALL_NOTICE_MS} ms after the last submit, got ${jobA().stalledSince}`);
+      // An identical retry answered from the verdict cache is also the chat being heard.
+      const rejected = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      assert(rejected.status === 'rejected', 'a valid answer is rejected once');
+      clock.advance(30_000);
+      const again = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      assert(again.status === 'rejected', 'the identical retry is answered from the verdict cache');
+      const retriedAt = clock.now();
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
+      assert(jobA().stalled === false, 'the cached-verdict retry restarted the quiet clock');
+      clock.advance(1);
+      assert(jobA().stalled === true && jobA().stalledSince === retriedAt, 'and the quiet period is counted from that retry');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a rejected answer after a re-read that rotated the code still leaves ChatGPT owing the corrected answer, awaited and able to stall',
+    run: async () => {
+      const clock = createFakeClock(); let reads = 0; let submits = 0;
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => { reads += 1; return { kind: 'open', handoff: handoff({ code: reads === 1 ? 'HANDOFF-A' : 'HANDOFF-A2' }) }; },
+          submit: async () => {
+            submits += 1;
+            if (submits === 1) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+            return { kind: 'rejected', validationErrors: ['fix it'], handoff: handoff({ code: 'HANDOFF-A2' }) };
+          },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const reply = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      assert(reply.status === 'rejected' && reply.handoffCode === 'HANDOFF-A2', `the correction carries the rotated code, got ${reply.status} ${reply.handoffCode}`);
+      const heardAt = clock.now();
+      let job = engine.snapshot().queue.jobs[0];
+      assert(job.awaitingAnswer === true && job.servedAt === heardAt && engine.snapshot().chat.outstanding !== null, 'ChatGPT was just handed a code, so the corrected answer is awaited');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 1000);
+      job = engine.snapshot().queue.jobs[0];
+      assert(job.stalled === true && job.stalledSince === heardAt, 'and going quiet on it is a stall');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane held or dropped while an accepted answer is being persisted is not served the next stage',
+    run: async () => {
+      for (const variant of ['hold', 'drop']) {
+        const clock = createFakeClock(); const state = { armed: false, gate: null };
+        const store = { saveLanes: async () => { if (state.armed) { state.armed = false; await state.gate.promise; } return true; } };
+        const engine = createHandoffEngine({
+          source: source({ submit: async () => ({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-NEXT', stage: 'cover-letter', prompt: 'Synthetic next-stage prompt.' }) }) }).api,
+          store, now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        state.armed = true; state.gate = deferred();
+        const pending = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+        await settle();
+        assert((variant === 'hold' ? await engine.hold(JOB_A) : await engine.dropLane(JOB_A, 'bundle_discarded')).ok, `the lane is ${variant === 'hold' ? 'held' : 'dropped'} mid-persist`);
+        state.gate.resolve();
+        const reply = await pending;
+        assert(reply.status === 'accepted' && reply.next?.status === 'retry' && !JSON.stringify(reply).includes('next-stage prompt'),
+          `${variant}: the next stage is not served for a lane that is no longer live, got ${JSON.stringify(reply.next)}`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane that goes to the app and comes back with the same handoff does not count the app\'s time as ChatGPT being quiet',
+    run: async () => {
+      const clock = createFakeClock(); const hold = { armed: false, skip: 0, gate: null }; let mode = 'open';
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => (mode === 'host' ? { kind: 'host' } : { kind: 'open', handoff: handoff({ code: 'HANDOFF-A', jobId }) }),
+          status: async () => { if (hold.armed && hold.skip-- <= 0) { hold.armed = false; await hold.gate.promise; } return mode === 'open' ? { kind: 'awaiting', phase: 'awaiting', read: true } : { kind: 'host' }; },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'the handoff is served');
+      mode = 'host'; clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }) === true, 'the app hints that the lane changed');
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(engine.snapshot().queue.jobs[0].phase === 'host', 'the lane is with the app');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      mode = 'open'; clock.advance(CONSTANTS.HOST_POLL_MS + 1);
+      hold.armed = true; hold.skip = 1; hold.gate = deferred();
+      const pending = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      const mid = engine.snapshot().queue.jobs[0];
+      assert(mid.phase === 'awaiting' && mid.awaitingAnswer === true, `the same handoff is awaited again (phase ${mid.phase}, awaiting ${mid.awaitingAnswer})`);
+      assert(mid.stalled === false, 'the time the app held the job is not ChatGPT being quiet');
+      hold.gate.resolve();
+      await pending;
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 2026-09-29 verification batch: in-flight results vs removed lanes, resume
+// truth, servedTwice, and the cheap guards that were unobserved.
+tests.push(
+  {
+    name: 'handoff bridge: engine: a read or status that resolves after its lane was Unreleased or discarded never re-registers the served code',
+    run: async () => {
+      for (const mode of ['unrelease', 'discard']) {
+        const clock = createFakeClock(); const gate = deferred(); let gated = false; let submits = 0; let reads = 0;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => { reads++; if (gated && jobId === JOB_A) await gate.promise; return { kind: 'open', handoff: handoff({ code: jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-A', jobId }) }; },
+            submit: async () => { submits++; return { kind: 'accepted', completed: true }; },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] }); // keeps the chat alive once A is removed
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', `${mode}: the lane is served`);
+        clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+        assert(engine.hint({ jobId: JOB_A }) === true, `${mode}: the app hints the lane changed`);
+        gated = true; const readsBefore = reads;
+        const pending = engine.get({ session: chat.sessionCode, linkId: LINK });
+        await settle();
+        assert(reads === readsBefore + 1, `${mode}: a lane read is in flight`);
+        const removed = mode === 'unrelease' ? await engine.unrelease(JOB_A) : await engine.dropLane(JOB_A, 'bundle_discarded');
+        assert(removed.ok === true, `${mode}: the lane is removed while the read is in flight`);
+        gate.resolve(); await pending; await settle();
+        const late = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+        assert(submits === 0, `${mode}: the removed lane's code must never reach the source (submit calls ${submits})`);
+        const expected = mode === 'unrelease' ? 'unknown_handoff' : 'superseded';
+        assert(late.status === expected, `${mode}: an answer for the removed lane is ${expected}, got ${late.status}`);
+        assert(engine.snapshot().queue.jobs.every(job => job.jobId !== JOB_A), `${mode}: the removed lane does not come back`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a submit in flight when its lane is removed reports the source outcome without re-indexing the lane',
+    run: async () => {
+      const clock = createFakeClock(); const gate = deferred(); let submits = 0;
+      const engine = createHandoffEngine({
+        source: source({
+          submit: async () => { submits++; await gate.promise; return { kind: 'accepted', handoff: handoff({ code: 'HANDOFF-A2', stage: 'review' }) }; },
+        }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const inFlight = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      await settle();
+      assert((await engine.unrelease(JOB_A)).ok && submits === 1, 'the lane is removed while its submit is in flight');
+      gate.resolve();
+      const reply = await inFlight;
+      assert(reply.status === 'accepted' && !reply.next, `the accepted answer is reported without serving a next stage for a removed lane (got ${reply.status})`);
+      const again = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-A2', response: answer({ code: 'HANDOFF-A2', stage: 'review' }) });
+      assert(again.status === 'unknown_handoff' && submits === 1, `the next stage's code was never indexed for the removed lane (got ${again.status}, ${submits} submits)`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a lane resumed from a hold does not claim ChatGPT owes an answer, and the hold is not counted as working time',
+    run: async () => {
+      const state = await served();
+      const { engine, clock } = state;
+      clock.advance(2 * 60_000);
+      assert((await engine.hold(JOB_A)).ok, 'the person holds the lane');
+      clock.advance(60 * 60_000);
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'the person resumes it with no new get');
+      const row = engine.snapshot().queue.jobs[0];
+      assert(row.phase === 'awaiting' && row.awaitingAnswer === false && row.servedAt === null,
+        `nothing was re-served, so no answer is owed and no serve time is claimed (awaiting ${row.awaitingAnswer}, servedAt ${row.servedAt})`);
+      assert(engine.snapshot().chat.outstanding === null, 'and the chat has no outstanding job');
+      const again = await engine.get({ session: state.session, linkId: LINK });
+      const rearmed = engine.snapshot().queue.jobs[0];
+      assert(again.status === 'served' && rearmed.awaitingAnswer === true && rearmed.servedAt === clock.now(), 'the next get re-arms the wait from the new serve');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a normal stage advance is not a duplicate serve; re-serving the same handoff is',
+    run: async () => {
+      const state = await served({ sourceOverrides: { submit: async () => ({ kind: 'accepted', handoff: handoff({ code: 'HANDOFF-A2', stage: 'review' }) }) } });
+      const { engine } = state;
+      assert(engine.snapshot().chat.servedTwice === false, 'one serve is not a duplicate');
+      const reply = await engine.submit({ session: state.session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage }) });
+      assert(reply.status === 'accepted' && reply.next?.status === 'served' && reply.next.stage === 'review', 'the accepted answer serves the next stage inline');
+      assert(engine.snapshot().chat.servedTwice === false, 'a new stage served after an accepted answer is not two chats on one code');
+      const repeat = await engine.get({ session: state.session, linkId: LINK });
+      assert(repeat.status === 'served' && repeat.handoffCode === 'HANDOFF-A2', 'the same handoff is served again');
+      assert(engine.snapshot().chat.servedTwice === true, 'serving the same handoff code again is reported');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a status probe that times out is not proof the bundle is gone, at serve time or at restore',
+    run: async () => {
+      const never = new Promise(() => {});
+      const timers = { setTimeout: (fn, ms) => ({ timer: setTimeout(fn, ms), unref() {} }), clearTimeout: handle => clearTimeout(handle?.timer ?? handle) };
+      const serveEngine = createHandoffEngine({ source: source({ status: async () => never }).api, timers, readWatchdogMs: 20, holdMs: 0, random: () => Buffer.alloc(26, 7) });
+      await serveEngine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await serveEngine.newChat({ linkId: LINK });
+      const result = await serveEngine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(result.status === 'served' && serveEngine.snapshot().queue.jobs.length === 1, `a slow status probe still serves the lane (got ${result.status})`);
+      await serveEngine.close();
+      const restored = createHandoffEngine({
+        source: source({ status: async () => never }).api, timers, readWatchdogMs: 20, holdMs: 0,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'unread', reason: null, heldFrom: null, counters: {} }],
+      });
+      await new Promise(resolve => setTimeout(resolve, 80));
+      assert(restored.snapshot().queue.jobs.length === 1, 'a restore probe that times out never drops the lane');
+      await restored.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: dropLane records only a closed cause and remembers a bounded set of removed bundles',
+    run: async () => {
+      const rec = recorders(); const clock = createFakeClock();
+      const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, holdMs: 0, ...rec.port });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      assert((await engine.dropLane(JOB_A, 'free text /Users/someone/private.canvas')).ok, 'an unknown cause still removes the lane');
+      assert(rec.audit.filter(row => row.event === 'unrelease').every(row => row.fields.cause === 'bundle_discarded'), 'the audit row records the closed default cause');
+      assert(rec.logs.filter(row => row.code === 'unrelease').every(row => row.fields.cause === 'bundle_discarded'), 'and so does the log line');
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).code === 'unknown_job', 'a sanitised cause is remembered as a discard');
+      const idFor = index => `${index.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`;
+      for (let index = 1; index <= 300; index += 1) await engine.dropLane(idFor(index), 'bundle_pruned');
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok === true, 'the oldest removed bundle is forgotten once the bound is passed');
+      assert((await engine.release({ jobs: [{ jobId: idFor(300), canvasFilePath: PATH_A }] })).code === 'unknown_job', 'a recent removed bundle is still refused');
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 2026-09-29 round-4 batch: rollbacks that must not clobber concurrent lane
+// changes, submits queued behind the semaphore, in-flight results vs holds and
+// chat rotation, servedTwice scope, and resume on a lane that is not held.
+const rowOf = (engine, jobId = JOB_A) => engine.snapshot().queue.jobs.find(job => job.jobId === jobId);
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: a failed Unrelease save after the submit was accepted restores a lane that re-reads the next stage instead of re-serving the answered one',
+    run: async () => {
+      const clock = createFakeClock(); const gate = deferred(); let committed = false; let saveBehaviour = 'ok'; let pendingSave = null;
+      const engine = createHandoffEngine({
+        source: source({
+          read: async ({ jobId }) => ({ kind: 'open', handoff: committed ? handoff({ code: 'HANDOFF-A2', stage: 'cover', jobId }) : handoff({ code: 'HANDOFF-A', stage: 'resume', jobId }) }),
+          submit: async () => { await gate.promise; committed = true; return { kind: 'accepted', handoff: handoff({ code: 'HANDOFF-A2', stage: 'cover' }) }; },
+        }).api,
+        store: { saveLanes: async () => { if (saveBehaviour === 'ok') return true; pendingSave = deferred(); return pendingSave.promise; } },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'the resume stage is served');
+      const inFlight = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+      await settle();
+      saveBehaviour = 'slow-fail';
+      const removal = engine.unrelease(JOB_A);
+      await settle();
+      assert(pendingSave, 'the Unrelease save is pending');
+      gate.resolve();
+      const reply = await inFlight;
+      assert(reply.status === 'accepted', `the submit was accepted while the lane was detached, got ${reply.status}`);
+      pendingSave.resolve(false);
+      assert((await removal).code === 'persist_failed', 'the Unrelease save fails');
+      saveBehaviour = 'ok';
+      const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === 'HANDOFF-A2' && next.stage === 'cover',
+        `the restored lane must serve the cover handoff the source advanced to, not the answered resume (got ${next.status} ${next.handoffCode} ${next.stage})`);
+      const stale = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer({ code: 'HANDOFF-A' }) });
+      assert(stale.status === 'duplicate', `the answered code is a duplicate, got ${stale.status}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed terminal-lane prune does not roll back a lane a concurrent release added',
+    run: async () => {
+      const clock = createFakeClock(); let saves = 0; let pendingSave = null;
+      const engine = createHandoffEngine({
+        source: source({ read: async ({ jobId }) => (jobId === JOB_A ? { kind: 'done' } : { kind: 'open', handoff: handoff({ code: 'HANDOFF-B', jobId }) }) }).api,
+        store: { saveLanes: async () => { saves++; if (saves === 3) { pendingSave = deferred(); return pendingSave.promise; } return true; } },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(rowOf(engine, JOB_A)?.phase === 'done', 'the terminal lane is done');
+      clock.advance(61 * 60_000);
+      saves = 2;
+      const ticking = engine.tick();
+      await settle();
+      assert(pendingSave, 'the prune save is pending');
+      assert((await engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] })).ok, 'a release lands while the prune save is pending');
+      pendingSave.resolve(false);
+      await ticking;
+      const rows = engine.snapshot().queue.jobs;
+      assert(rows.some(job => job.jobId === JOB_B), `the concurrently released lane must survive the prune rollback (rows ${JSON.stringify(rows.map(job => [job.jobId.slice(0, 2), job.phase]))})`);
+      assert(rows.filter(job => job.jobId === JOB_A).length <= 1, 'and no lane is duplicated');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed Unrelease save does not duplicate a lane the keep-alive re-released meanwhile',
+    run: async () => {
+      const clock = createFakeClock(); let saves = 0; let pendingSave = null;
+      const engine = createHandoffEngine({
+        source: source().api,
+        store: { saveLanes: async () => { saves++; if (saves === 2) { pendingSave = deferred(); return pendingSave.promise; } return true; } },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const removal = engine.unrelease(JOB_A);
+      await settle();
+      assert(pendingSave, 'the Unrelease save is pending');
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the keep-alive re-releases the job');
+      pendingSave.resolve(false);
+      assert((await removal).code === 'persist_failed', 'the Unrelease save fails');
+      assert(engine.snapshot().queue.jobs.filter(job => job.jobId === JOB_A).length === 1, 'exactly one lane exists for the job');
+      assert(engine.restartJobs().filter(job => job.jobId === JOB_A).length === 1, 'and restart sees one');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a submit queued behind the semaphore re-checks its lane and never calls the app for a removed, held or completed job',
+    run: async () => {
+      for (const mode of ['unrelease', 'hold', 'completed']) {
+        const clock = createFakeClock(); const gates = []; const submitted = [];
+        const engine = createHandoffEngine({
+          source: source({
+            submit: async (_lane, { text }) => { submitted.push(text.length); if (submitted.length > 2) return { kind: 'accepted', completed: true }; const gate = deferred(); gates.push(gate); await gate.promise; return { kind: 'accepted', completed: true }; },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served', `${mode}: A is served`);
+        const send = note => engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer({ extra: { note } }) });
+        // The second, different answer for the same code replays the retained first one, so it holds the other slot.
+        const first = send('one'); const second = send('two');
+        await settle();
+        assert(submitted.length === 2, `${mode}: both semaphore slots are held by in-flight app calls (${submitted.length})`);
+        const queued = send('three');
+        await settle();
+        assert(submitted.length === 2, `${mode}: the third submit waits for a slot`);
+        if (mode === 'unrelease') assert((await engine.unrelease(JOB_A)).ok, `${mode}: the lane is removed while the third submit waits`);
+        if (mode === 'hold') assert((await engine.hold(JOB_A)).ok, `${mode}: the lane is held while the third submit waits`);
+        gates[0].resolve(); await settle();
+        if (mode === 'completed') assert(rowOf(engine, JOB_A)?.phase === 'host', 'completed: the sibling submit completed the job');
+        let outcome;
+        try { outcome = await queued; } catch (error) { outcome = { threw: String(error?.message) }; }
+        assert(!outcome.threw, `${mode}: the queued submit must answer, not throw (${outcome.threw})`);
+        assert(submitted.length === 2, `${mode}: the queued submit never reached the app (${submitted.length} calls)`);
+        const expected = { unrelease: ['unknown_handoff', 'duplicate', 'superseded'], hold: ['held'], completed: ['superseded', 'duplicate', 'unknown_handoff'] }[mode];
+        assert(expected.includes(outcome.status), `${mode}: the queued submit is ${expected.join('/')}, got ${outcome.status}`);
+        for (const gate of gates) gate.resolve();
+        await Promise.allSettled([first, second]);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a chat rotation or power resume during a submit keeps the accepted next handoff from reading as a person\'s edit',
+    run: async () => {
+      for (const mode of ['newChat', 'power']) {
+        const clock = createFakeClock(); const gate = deferred(); let committed = false;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => ({ kind: 'open', handoff: committed ? handoff({ code: 'HANDOFF-A2', stage: 'review', jobId }) : handoff({ code: 'HANDOFF-A', jobId }) }),
+            submit: async () => { await gate.promise; committed = true; return { kind: 'accepted', handoff: handoff({ code: 'HANDOFF-A2', stage: 'review' }) }; },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        let chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const inFlight = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+        await settle();
+        if (mode === 'newChat') chat = await engine.newChat({ linkId: LINK }); else engine.onPowerResume();
+        gate.resolve();
+        assert((await inFlight).status === 'retry', `${mode}: the fenced submit answers retry`);
+        const next = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(next.status === 'served' && next.handoffCode === 'HANDOFF-A2' && next.stage === 'review',
+          `${mode}: the next stage the source committed is served, got ${next.status}${next.reason ? `/${next.reason}` : ''}`);
+        assert(rowOf(engine)?.phase === 'awaiting', `${mode}: the lane is not held as a human advance`);
+        const old = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer({ code: 'HANDOFF-A' }) });
+        assert(old.status === 'duplicate', `${mode}: the answered code is a duplicate, got ${old.status}`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a Hold that lands while a read is in flight is kept and the lane is not served',
+    run: async () => {
+      const clock = createFakeClock(); const gate = deferred(); let gated = false;
+      const engine = createHandoffEngine({
+        source: source({ read: async ({ jobId }) => { if (gated) await gate.promise; return { kind: 'open', handoff: handoff({ jobId }) }; } }).api,
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      gated = true;
+      const pending = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert((await engine.hold(JOB_A)).ok && rowOf(engine).phase === 'held', 'the person holds the lane while its read is in flight');
+      gate.resolve();
+      const result = await pending;
+      assert(result.status !== 'served', `the get that was reading must not serve a held lane, got ${result.status}`);
+      const row = rowOf(engine);
+      assert(row.phase === 'held' && row.awaitingAnswer === false && engine.snapshot().queue.applications.ready === 0, `the lane stays held (phase ${row.phase})`);
+      const later = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(later.status === 'paused' && later.reason === 'needs_user', `a later get is told the bridge needs the person, got ${later.status}`);
+      gated = false;
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'the person resumes');
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served', 'the resumed lane is read and served');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a Hold that lands while a submit is in flight is kept: no next stage is served and no answer is owed',
+    run: async () => {
+      for (const kind of ['accepted', 'completed', 'rejected']) {
+        const clock = createFakeClock(); const gate = deferred(); let stage2 = false;
+        const engine = createHandoffEngine({
+          source: source({
+            read: async ({ jobId }) => ({ kind: 'open', handoff: stage2 ? handoff({ code: 'HANDOFF-A2', stage: 'review', jobId }) : handoff({ jobId }) }),
+            submit: async () => {
+              await gate.promise;
+              if (kind === 'completed') return { kind: 'accepted', completed: true };
+              if (kind === 'accepted') { stage2 = true; return { kind: 'accepted', handoff: handoff({ code: 'HANDOFF-A2', stage: 'review' }) }; }
+              return { kind: 'rejected', handoff: handoff(), validationErrors: ['Fix the summary.'] };
+            },
+          }).api,
+          now: clock.now, timers: clock, holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const inFlight = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
+        await settle();
+        assert((await engine.hold(JOB_A)).ok, `${kind}: the person holds the lane`);
+        gate.resolve();
+        const reply = await inFlight;
+        if (kind !== 'rejected') assert(reply.status === 'accepted' && !reply.next, `${kind}: the accepted answer does not serve a next stage for a held lane (got ${reply.status} ${reply.next?.status})`);
+        const row = rowOf(engine);
+        assert(row.phase === 'held' && row.awaitingAnswer === false && row.servedAt === null, `${kind}: the hold survives and owes no answer (phase ${row.phase}, awaiting ${row.awaitingAnswer})`);
+        if (kind === 'completed') return;
+        assert((await engine.resume({ jobId: JOB_A })).ok, `${kind}: resume`);
+        const after = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(after.status === 'served' && after.handoffCode === (kind === 'accepted' ? 'HANDOFF-A2' : first.handoffCode), `${kind}: the resumed lane serves the right handoff, got ${after.status} ${after.handoffCode}`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: two chats on one code is reported only for a repeat serve in the same chat with no hold between',
+    run: async () => {
+      const state = await served();
+      const { engine, clock } = state;
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 60_000);
+      const chat = await engine.newChat({ linkId: LINK });
+      const again = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(again.status === 'served' && again.handoffCode === state.result.handoffCode, 'the new chat is served the same code');
+      assert(engine.snapshot().chat.servedTwice === false, 'a serve to a fresh chat after a rotation is not two chats on one code');
+      assert((await engine.hold(JOB_A)).ok && (await engine.resume({ jobId: JOB_A })).ok, 'hold and resume');
+      const third = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(third.status === 'served' && engine.snapshot().chat.servedTwice === false, 'the first serve after a hold is a fresh serve');
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'served' && engine.snapshot().chat.servedTwice === true, 'a repeat serve in the same chat is still reported');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: resuming a lane that is not held is a no-op that leaves a live stall visible',
+    run: async () => {
+      const state = await served();
+      const { engine, clock } = state;
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 60_000);
+      assert(rowOf(engine).stalled === true, 'the lane has stalled');
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'a stale Resume click still answers ok');
+      const row = rowOf(engine);
+      assert(row.stalled === true && row.awaitingAnswer === true, `the stall is still visible (stalled ${row.stalled})`);
+      assert(engine.snapshot().chat.outstanding?.stalled === true, 'and so is the chat\'s outstanding stall');
+    },
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Round-4 review: hold/resume loops, release rollback and late submit results.
+function pendingStore() {
+  const pending = [];
+  return { pending, saveLanes: () => { const gate = deferred(); pending.push(gate); return gate.promise; } };
+}
+
+function pendingEngine(store, sourceOverrides = {}) {
+  const clock = createFakeClock();
+  const engine = createHandoffEngine({
+    source: source({ read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ code: `HANDOFF-${jobId.slice(0, 2)}`, jobId }) }), ...sourceOverrides }).api,
+    store, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+  });
+  return { engine, clock };
+}
+
+tests.push(
+  {
+    name: 'handoff bridge: engine: Resume after a human-advance hold re-reads and serves the app\'s current handoff, never the retired one',
+    run: async () => {
+      let appCode = 'HANDOFF-A'; let appStage = 'resume'; const submitted = [];
+      const state = await served({ sourceOverrides: {
+        read: async () => ({ kind: 'open', handoff: handoff({ code: appCode, stage: appStage }) }),
+        submit: async (_lane, { code }) => {
+          submitted.push(code);
+          if (code !== appCode) throw Object.assign(new Error('stale handoff'), { code: 'EIO' });
+          return { kind: 'accepted', completed: true };
+        },
+      } });
+      const { engine, session } = state;
+      appCode = 'HANDOFF-B'; appStage = 'cover-letter';
+      assert(engine.hint({ jobId: JOB_A }), 'the hint is accepted');
+      await engine.get({ session, linkId: LINK });
+      assert(rowOf(engine).phase === 'held' && rowOf(engine).reason === 'human_advance', 'the person answered in the dock, so the lane holds');
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'resume');
+      const after = await engine.get({ session, linkId: LINK });
+      assert(after.status === 'served' && after.handoffCode === 'HANDOFF-B' && after.stage === 'cover-letter',
+        `Resume must serve the app's current handoff, got ${after.status} ${after.handoffCode}`);
+      const reply = await engine.submit({ session, linkId: LINK, handoffCode: after.handoffCode, response: answer({ code: after.handoffCode, stage: after.stage }) });
+      assert(reply.status === 'accepted', `the fresh handoff is accepted, got ${reply.status}`);
+      assert(!submitted.includes('HANDOFF-A'), 'the retired prompt never reached the app again');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a human-advance lane rehydrated as held still resumes through a re-read',
+    run: async () => {
+      const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff({ code: 'HANDOFF-A' }) });
+      holdLane(lane, 'human_advance', 1);
+      lane.heldFrom = 'awaiting';
+      resumeLane(lane);
+      assert(lane.phase === 'unread', `a human-advance hold never resumes straight to awaiting, got ${lane.phase}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed release does not rewind the lane ordinal under a reinstated lane',
+    run: async () => {
+      const dir = cleanDirectory();
+      const real = createLaneStore({ userDataPath: dir });
+      const held = []; let hold = false;
+      const store = { ...real, saveLanes: lanes => { if (!hold) return real.saveLanes(lanes); const gate = deferred(); held.push(gate); return gate.promise; } };
+      const { engine } = pendingEngine(store, { status: async () => ({ kind: 'host' }) });
+      const JOB_C = '33333333-3333-4333-8333-333333333333'; const JOB_D = '44444444-4444-4444-8444-444444444444';
+      const rel = jobId => engine.release({ jobs: [{ jobId, canvasFilePath: PATH_A }] });
+      assert((await rel(JOB_A)).ok, 'release A');
+      hold = true;
+      const releaseB = rel(JOB_B); await settle();
+      const unreleaseB = engine.unrelease(JOB_B); await settle();
+      held[0].resolve(false); await settle(); held[1].resolve(false);
+      assert((await releaseB).code === 'persist_failed' && (await unreleaseB).code === 'persist_failed', 'both saves fail');
+      hold = false;
+      const releaseC = await rel(JOB_C); const releaseD = await rel(JOB_D);
+      assert(releaseC.ok && releaseD.ok, `later releases must succeed on a healthy disk, got ${releaseC.code} ${releaseD.code}`);
+      const jobs = engine.snapshot().queue.jobs;
+      assert(engine.snapshot().fault !== 'persist_failed', 'no sticky persist fault');
+      assert(jobs.length === new Set(jobs.map(job => job.ord ?? job.jobId)).size && jobs.some(job => job.jobId === JOB_D), 'every job has a lane');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed release does not erase a concurrent successful release',
+    run: async () => {
+      const store = pendingStore();
+      const { engine } = pendingEngine(store, { status: async () => ({ kind: 'host' }) });
+      const releaseA = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); await settle();
+      const releaseB = engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_A }] }); await settle();
+      assert(store.pending.length === 2, 'both saves are pending');
+      store.pending[0].resolve(false); store.pending[1].resolve(true);
+      const [a, b] = [await releaseA, await releaseB];
+      assert(a.ok === false && b.ok === true, 'A fails, B succeeds');
+      const ids = engine.snapshot().queue.jobs.map(job => job.jobId);
+      assert(ids.length === 1 && ids[0] === JOB_B, `B's lane must survive A's rollback, got ${JSON.stringify(ids)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed release does not resurrect a lane a discard removed during the save',
+    run: async () => {
+      const store = pendingStore();
+      const { engine } = pendingEngine(store, { status: async () => ({ kind: 'host' }) });
+      const releaseA = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] }); await settle();
+      store.pending.shift().resolve(true); assert((await releaseA).ok, 'release A');
+      const releaseB = engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_A }] }); await settle();
+      const dropA = engine.dropLane(JOB_A, 'bundle_discarded'); await settle();
+      assert(store.pending.length === 2, 'the release and the discard saves are pending');
+      store.pending[0].resolve(false); await settle(); store.pending[1].resolve(true);
+      assert((await releaseB).ok === false && (await dropA).ok === true, 'release B fails, the discard succeeds');
+      const ids = engine.snapshot().queue.jobs.map(job => job.jobId);
+      assert(ids.length === 0, `the discarded lane must stay gone, got ${JSON.stringify(ids)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an answer the app commits after submit_stuck is remembered, so Resume re-reads instead of re-serving the answered stage',
+    run: async () => {
+      const gate = deferred(); let appCode = 'HANDOFF-A'; let reads = 0;
+      const state = await served({ engineOptions: { submitBudgetMs: 0 }, sourceOverrides: {
+        read: async () => { reads++; return { kind: 'open', handoff: handoff({ code: appCode, stage: appCode === 'HANDOFF-A' ? 'resume' : 'cover-letter' }) }; },
+        submit: () => gate.promise,
+      } });
+      const { engine, clock, session } = state;
+      await engine.submit({ session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode }) });
+      await settle();
+      clock.advance(CONSTANTS.SUBMIT_STUCK_MS + 1_000); await settle();
+      assert(rowOf(engine).reason === 'submit_stuck', 'the lane is held as submit_stuck');
+      appCode = 'HANDOFF-A2';
+      gate.resolve({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-A2', stage: 'cover-letter' }) }); await settle();
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'resume');
+      const after = await engine.get({ session, linkId: LINK });
+      assert(after.status === 'served' && after.handoffCode === 'HANDOFF-A2' && reads >= 2,
+        `Resume must serve the stage the app advanced to, got ${after.status} ${after.handoffCode}`);
+      const stale = await engine.submit({ session, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer({ code: 'HANDOFF-A' }) });
+      assert(stale.status === 'duplicate', `the answered code is a duplicate, got ${stale.status}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a rejected result with a rotated code that a power resume or chat rotation fenced off is not a human advance',
+    run: async () => {
+      for (const via of ['power', 'chat']) {
+        const gate = deferred(); let appCode = 'HANDOFF-A';
+        const state = await served({ engineOptions: { submitBudgetMs: 0 }, sourceOverrides: {
+          read: async () => ({ kind: 'open', handoff: handoff({ code: appCode }) }),
+          submit: () => gate.promise,
+        } });
+        const { engine } = state; let { session } = state;
+        await engine.submit({ session, linkId: LINK, handoffCode: 'HANDOFF-A', response: answer({ code: 'HANDOFF-A' }) }); await settle();
+        if (via === 'power') engine.onPowerResume();
+        else session = (await engine.continueChat({ linkId: LINK })).sessionCode;
+        appCode = 'HANDOFF-A2';
+        gate.resolve({ kind: 'rejected', validationErrors: ['x'], handoff: handoff({ code: 'HANDOFF-A2' }) }); await settle();
+        const next = await engine.get({ session, linkId: LINK });
+        assert(next.status === 'served' && next.handoffCode === 'HANDOFF-A2', `${via}: the rotated code is served, got ${next.status} ${next.reason ?? ''}`);
+        assert(rowOf(engine).reason !== 'human_advance', `${via}: no false human-advance hold`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed Hold save does not restore answer tracking over an accepted submit that landed during the save',
+    run: async () => {
+      const gate = deferred(); const saves = []; let slow = false;
+      const store = { saveLanes: () => { if (!slow) return Promise.resolve(true); const save = deferred(); saves.push(save); return save.promise; } };
+      const state = await served({ engineOptions: { store }, sourceOverrides: { submit: () => gate.promise } });
+      const { engine, clock, session } = state;
+      const inFlight = engine.submit({ session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode }) });
+      await settle();
+      slow = true;
+      const holding = engine.hold(JOB_A); await settle();
+      gate.resolve({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-A2', stage: 'cover-letter' }) }); await settle();
+      saves.forEach(save => save.resolve(false));
+      await inFlight;
+      assert((await holding).code === 'persist_failed', 'the hold save fails');
+      const row = rowOf(engine);
+      assert(row.awaitingAnswer === false && row.servedAt === null, `nothing was served for the new stage (awaiting ${row.awaitingAnswer})`);
+      assert(row.phase === 'awaiting' && row.reason === null, `the failed hold leaves no hold marker (phase ${row.phase}, reason ${row.reason})`);
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 60_000);
+      assert(rowOf(engine).stalled !== true && !engine.snapshot().chat.outstanding?.stalled, 'no false stall for a stage never served');
+      const next = await engine.get({ session, linkId: LINK });
+      assert(next.status === 'served' && next.handoffCode === 'HANDOFF-A2', `the new stage is served, not paused (got ${next.status} ${next.reason ?? ''})`);
     },
   },
 );

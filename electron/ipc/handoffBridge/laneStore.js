@@ -90,17 +90,27 @@ function copyLane(value, { strict = true } = {}) {
   };
 }
 
+// Finished ('done') and vanished ('gone') lanes hold nothing worth keeping:
+// there is no bundle left to serve. They are never persisted, and one found in
+// an older file is dropped rather than resurrected as a held 'restart' lane
+// the person would have to Resume (which produced a snapshot-less lane that
+// never aged out). The store cap is therefore the SAME rule the engine
+// enforces on release: at most MAX_LIVE_LANES live lanes.
+export const MAX_LIVE_LANES = 10;
+const TERMINAL_PHASES = new Set(['done', 'gone']);
+const isLiveLane = lane => !TERMINAL_PHASES.has(lane?.phase);
+
 function normalizeLanes(value) {
-  if (!isObject(value) || value.v !== LANE_STORE_VERSION || !Array.isArray(value.lanes) || value.lanes.length > 10) return [];
+  if (!isObject(value) || value.v !== LANE_STORE_VERSION || !Array.isArray(value.lanes) || value.lanes.length > MAX_LIVE_LANES * 2) return [];
   const seen = new Set();
   const lanes = [];
   for (const item of value.lanes) {
     const lane = copyLane(item);
     if (!lane || seen.has(lane.ord)) return [];
     seen.add(lane.ord);
-    lanes.push(lane);
+    if (isLiveLane(lane)) lanes.push(lane);
   }
-  return lanes;
+  return lanes.length > MAX_LIVE_LANES ? [] : lanes;
 }
 
 function rehydrateLane(lane, now) {
@@ -217,10 +227,12 @@ export function createLaneStore({
   const readLinkMeta = () => copyLinkMeta(safeRead(linkPath, fsImpl));
 
   const saveLanes = lanes => enqueue(() => {
-    if (!Array.isArray(lanes) || lanes.length > 10) return false;
+    if (!Array.isArray(lanes)) return false;
+    const live = lanes.filter(isLiveLane);
+    if (live.length > MAX_LIVE_LANES) return false;
     const persisted = [];
     const seen = new Set();
-    for (const candidate of lanes) {
+    for (const candidate of live) {
       // Runtime lanes carry prompts, codes and in-flight state. Persist only
       // the allow-list instead of rejecting those memory-only fields.
       const lane = copyLane(candidate, { strict: false });

@@ -66,6 +66,8 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
 
   useEffect(() => {
     let disposed = false;
+    // Ids of bundles the person just discarded, until no card points at them.
+    const discardedJobIds = new Set();
 
     // Every field an IPC call needs, pre-resolved so the fan-out map below is
     // pure: `local.canvasFilePath` is preferred (an application job binds to
@@ -104,6 +106,15 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
         }
         let candidates = selectApplicationHandoffCandidates(allNodes);
         knownCandidateIdsRef.current = candidateIdSignature(candidates);
+        // A bundle the person just discarded is gone from disk, but this pass
+        // enumerates nodes from a ref that only catches up after React
+        // commits the pointer clear, so the card can still look like a
+        // candidate for a moment. Reading it logged a false ERROR in the main
+        // process right after every normal discard. Once no card points at the
+        // id any more, the guard has done its job and is dropped.
+        const pointedAtIds = new Set(candidates.map((node) => node.data.localApplication.id));
+        for (const id of discardedJobIds) if (!pointedAtIds.has(id)) discardedJobIds.delete(id);
+        if (discardedJobIds.size) candidates = candidates.filter((node) => !discardedJobIds.has(node.data.localApplication.id));
         if (candidates.length > APPLICATION_HANDOFF_LIMIT) {
           EventLogger.log(`[ApplicationDock] ${candidates.length - APPLICATION_HANDOFF_LIMIT} pending application bundle(s) beyond the ${APPLICATION_HANDOFF_LIMIT}-slot dock limit were not read this pass.`);
           candidates = candidates.slice(0, APPLICATION_HANDOFF_LIMIT);
@@ -139,7 +150,20 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
             // it contributes no item this pass, exactly as before. This is
             // distinct from a thrown IPC call, which the catch below flags
             // `unreadable` and carries the previous item forward instead.
-            if (!result?.success) return [local.id, null];
+            // The main process answered that this job's folder is gone (a
+            // discard or prune it recorded itself). Nothing to show, and not
+            // a failed read.
+            if (result?.gone === true) return [local.id, null];
+            // A read that resolved unsuccessfully is NOT the same as a thrown
+            // IPC call: handleSafe turns every main-process error into a
+            // resolved { success: false }, so the catch below can never see a
+            // transient EBUSY/EACCES. Keep the previous prompt (flagged) so a
+            // person mid-paste does not lose it to a momentary failure; only a
+            // missing folder is evidence the bundle is really gone.
+            if (!result?.success) {
+              const stale = previousByJobId.get(local.id);
+              return [local.id, stale && result?.errorCode !== 'ENOENT' ? { ...stale, unreadable: true } : null];
+            }
             // The read succeeded but there is no prompt in it: either the
             // app's own post-accept work is running, or the result is
             // blocked on a card-side retry. Both are still candidates (this
@@ -257,6 +281,7 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
     const handleDiscarded = (event) => {
       const { jobId, nodeId } = event?.detail || {};
       if (!jobId || !nodeId || disposed) return;
+      discardedJobIds.add(jobId);
       const nav = ctxRef.current.navigation;
       if (!nav?.updateNodeDataGlobally) return;
       nav.updateNodeDataGlobally(nodeId, (node) => {

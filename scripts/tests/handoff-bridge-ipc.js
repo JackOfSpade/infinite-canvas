@@ -850,8 +850,58 @@ export default [
     });
     auto.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS)(auto.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'auto' }] });
     await new Promise(resolve => setImmediate(resolve));
-    assert(JSON.stringify(automatic) === JSON.stringify([{ jobs: [{ jobId: JOB, canvasFilePath: PATH }] }]),
-      'auto-release must intersect post-launch adapter rows with the exact awaiting publication');
+    assert(JSON.stringify(automatic) === JSON.stringify([{ jobs: [{ jobId: JOB, canvasFilePath: PATH }], auto: true }]),
+      'auto-release must intersect post-launch adapter rows with the exact awaiting publication, and mark itself unattended');
+  } },
+  { name: 'handoff bridge: ipc: auto-release is one-shot per job: keep-alives never re-describe or re-release, and an Unrelease sticks', async run() {
+    const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
+    const status = { enabled: true, serving: 'live', config: { hostname: 'bridge.example.com' }, prefs: {}, autoRelease: true };
+    const released = []; let describes = 0; const thirdArgs = [];
+    const h = setup({ processStartedAt: startedAt,
+      controller: { snapshot: () => status, release: async value => { released.push(value); return { success: true, ok: true, count: 1 }; } },
+      application: { describeForConfirm: async (_path, _ids, options) => { describes++; thirdArgs.push(options); return { ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, createdAt: '2026-01-01T00:00:00.001Z' }] }; } } });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const jobs = [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'a' }];
+    publish(h.event, { v: 1, seq: 1, jobs }); await settle(12);
+    // The renderer force-publishes the same state every 30 s.
+    for (let seq = 2; seq <= 4; seq += 1) { publish(h.event, { v: 1, seq, jobs }); await settle(12); }
+    assert(released.length === 1 && describes === 1, `three keep-alives after the first publication must not re-run the pipeline (released ${released.length}, described ${describes})`);
+    assert(thirdArgs[0]?.requireAll === false, 'the auto path asks for a partial answer so one vanished job cannot hide the rest');
+    // A person withdraws the release (the controller unreleases); the next keep-alive must not undo it.
+    publish(h.event, { v: 1, seq: 5, jobs: [{ ...jobs[0], sig: 'b' }] }); await settle(12);
+    assert(released.length === 1, 'a changed signature on an already-handled job does not re-release it either');
+    // Once the job leaves the dock, and a later card with the same id is not a thing, the memory is dropped.
+    publish(h.event, { v: 1, seq: 6, jobs: [] }); await settle(12);
+    publish(h.event, { v: 1, seq: 7, jobs }); await settle(12);
+    assert(released.length === 2, 'after the job left the publication it is a fresh candidate again');
+  } },
+  { name: 'handoff bridge: ipc: a failed or partial auto-release is retried on the next publication, not remembered as handled', async run() {
+    const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
+    const status = { enabled: true, serving: 'live', config: { hostname: 'bridge.example.com' }, prefs: {}, autoRelease: true };
+    let attempts = 0; let outcome = { success: false, ok: false, code: 'lane_limit' };
+    const h = setup({ processStartedAt: startedAt,
+      controller: { snapshot: () => status, release: async () => { attempts++; return outcome; } },
+      application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, createdAt: '2026-01-01T00:00:00.001Z' }] }) } });
+    const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    const jobs = [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'a' }];
+    publish(h.event, { v: 1, seq: 1, jobs }); await settle(12);
+    outcome = { success: true, ok: true, count: 1 };
+    publish(h.event, { v: 1, seq: 2, jobs }); await settle(12);
+    publish(h.event, { v: 1, seq: 3, jobs }); await settle(12);
+    assert(attempts === 2, `the refused release is retried once it can succeed and then stops (attempts ${attempts})`);
+    status.autoRelease = false;
+    publish(h.event, { v: 1, seq: 4, jobs }); await settle(12);
+    status.autoRelease = true;
+    publish(h.event, { v: 1, seq: 5, jobs }); await settle(12);
+    assert(attempts === 3, 'turning auto-release off and on again starts a fresh session for it');
+  } },
+  { name: 'handoff bridge: ipc: a job that vanishes from the publication (Discard bundle) hints the engine so its lane is re-read', run: () => {
+    const hints = []; const h = setup({ engine: { hint: value => hints.push(value) } }); const publish = h.ipc.listeners.get(IPC_CHANNELS.PUBLISH_JOBS);
+    publish(h.event, { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'a' }] });
+    publish(h.event, { v: 1, seq: 2, jobs: [] });
+    assert(JSON.stringify(hints) === JSON.stringify([{ jobId: JOB }, { jobId: JOB }]), 'appearing and disappearing are both state changes');
+    publish(h.event, { v: 1, seq: 3, jobs: [] });
+    assert(hints.length === 2, 'an unchanged empty publication hints nothing');
   } },
   { name: 'handoff bridge: ipc: Disable during a deferred describe or confirmation cannot release', async run() {
     const published = { v: 1, seq: 1, jobs: [{ jobId: JOB, canvasFilePath: PATH, dockState: 'awaiting', sig: 'race' }] };

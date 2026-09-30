@@ -18,7 +18,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -431,9 +431,89 @@ export default [{
     }
     // Every telemetry recorder composition imports must also be cleared, or a
     // stale observation outlives the link it described.
-    for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic']) {
+    for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic', 'clearBridgeQueueDiagnostic']) {
       assert(index.includes(`${cleared}()`), `${cleared} must be called so a stale observation cannot outlive its link`);
     }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL reports show the application lane queue as closed enums and integers only, and only while opted in',
+  run: () => {
+    const base = { description: 'A discarded bundle.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const JOB_UUID = '01f8d94c-6fd3-4a2b-8c5e-0123456789ab';
+    const secret = '/Users/jack/Desktop/Job Search/Ada Lovelace resume PRIVATE_PROMPT https://private.example.test/x?code=PRIVATE_CODE';
+    let enabled = true;
+    const raw = () => (enabled ? {
+      at: 100_000, enabled: true, serving: 'live', autoRelease: true, paused: null, fault: null,
+      queue: { ready: 0, working: 2, needsYou: 0, held: 0, done: 0 },
+      chat: { state: 'working', jobsAssigned: 1, jobsCap: 2, note: secret },
+      lanes: [
+        { jobId: JOB_UUID, phase: 'unread', stage: null, reason: null, servedToChat: null, changedAt: 40_000, canvasFilePath: secret, title: secret },
+        { jobId: secret, phase: secret, stage: secret, reason: secret, servedToChat: 3, changedAt: 99_000 },
+        { jobId: '11111111-1111-4111-8111-111111111111', phase: secret, stage: secret, reason: secret, servedToChat: 3, changedAt: 99_000 },
+      ],
+      counts: { releaseCalls: 3, releaseNoops: 2, unreleaseCalls: 0, lanesDropped: 4, droppedDiscarded: 1, droppedPruned: 1, droppedMissing: 1, droppedSaved: 1, prompt: secret },
+    } : null);
+    try {
+      setBridgeQueueDiagnosticProvider(raw);
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      assert(full.includes('## Handoff Bridge Diagnostics') && full.includes('job `01f8d94c` · phase `unread` · stage `none` · reason `none` · served to current chat `no` · in this phase 1m'),
+        'the report shows the lane a discarded bundle would leave behind, by its 8-hex prefix and closed phase');
+      assert(full.includes('live lanes 2/10') && full.includes('release calls 3 (added nothing: 2)') && full.includes('lanes dropped by the app 4 (discard event 1 · prune event 1 · status probe found the bundle gone 1 · status probe reported it saved 1)'), 'queue capacity and lifecycle counters are visible, each drop cause by what was observed');
+      assert(!full.includes('discarded or pruned'), 'a dropped lane is never labelled with a cause that was not observed');
+      assert(full.includes('job `11111111` · phase `unread`') && full.includes('served to current chat `yes`'), 'a hostile enum falls back to a closed value');
+      assert(bridge.includes('Application lanes') && !focused.includes('Application lanes'), 'FULL and BRIDGE carry it; other focus codes do not');
+      for (const leaked of ['PRIVATE_PROMPT', 'PRIVATE_CODE', '/Users/jack', 'Ada Lovelace', 'private.example.test', JOB_UUID, '6fd3-4a2b']) {
+        assert(!full.includes(leaked), `the lane view must never carry ${leaked}`);
+      }
+      enabled = false;
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Application lanes'), 'the provider withholds it when report telemetry is opted out');
+      enabled = true;
+      const provider = raw;
+      setBridgeQueueDiagnosticProvider(provider);
+      retireBridgeQueueDiagnosticProvider(() => null);
+      assert(getBridgeQueueDiagnostic() !== null && generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Application lanes'), 'a stale runtime cannot retire a newer provider');
+      retireBridgeQueueDiagnosticProvider(provider);
+      enabled = false;
+      assert(generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('job `01f8d94c`'), 'a retired runtime leaves its final view for a report generated afterwards');
+      clearBridgeQueueDiagnostic();
+      assert(getBridgeQueueDiagnostic() === null && !generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Application lanes'), 'clearing removes it');
+    } finally { clearBridgeQueueDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: the lane report names a failed bridge, keeps live lanes ahead of finished ones, and counts live lanes from the queue rather than the truncated list',
+  run: () => {
+    const base = { description: 'A busy queue.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const uuid = index => `${(0xa0000000 + index).toString(16)}-1111-4111-8111-111111111111`;
+    // 25 finished lanes listed FIRST (oldest in array order), then 4 live ones.
+    const finished = Array.from({ length: 25 }, (_unused, index) => ({ jobId: uuid(index), phase: index % 2 ? 'done' : 'gone', changedAt: 1_000 + index }));
+    const live = [
+      { jobId: uuid(100), phase: 'held', reason: 'restart', changedAt: 50_000 },
+      { jobId: uuid(101), phase: 'awaiting', stage: 'resume', changedAt: 60_000, servedToChat: 1 },
+      { jobId: uuid(102), phase: 'unread', changedAt: 70_000 },
+      { jobId: uuid(103), phase: 'host', changedAt: 80_000 },
+      // A live lane the list cannot show (no usable id): only the queue counts know about it.
+      { jobId: 'not-a-job-id', phase: 'unread', changedAt: 90_000 },
+    ];
+    const raw = { at: 100_000, enabled: false, serving: 'error', autoRelease: false, paused: null, fault: null,
+      queue: { ready: 1, working: 3, needsYou: 1, held: 1, done: 25 }, chat: { state: 'none', jobsAssigned: 0, jobsCap: 2 },
+      lanes: [...finished, ...live], counts: {} };
+    const reduced = reduceBridgeQueue(raw);
+    assert(reduced.serving === 'error', `a failed bridge must read as error, not ${reduced.serving}`);
+    assert(reduced.lanes.length === 19, 'the list is bounded to 20 slots (one is spent on the lane with no usable id, which is not listed)');
+    assert(reduced.lanes.slice(0, 4).every(lane => ['held', 'awaiting', 'unread', 'host'].includes(lane.phase)), 'every live lane comes before any finished lane');
+    const finishedRows = reduced.lanes.slice(4);
+    assert(finishedRows.length === 15 && finishedRows[0].job === uuid(24).slice(0, 8) && finishedRows.every((lane, position) => position === 0 || lane.ageSeconds >= finishedRows[position - 1].ageSeconds),
+      'the room left over goes to the most recently changed finished lanes, newest first');
+    assert(reduced.liveLanes === 5 && reduced.lanes.length === 19, `live lanes come from the queue counts (5), not from the rows that could be listed, got ${reduced.liveLanes}`);
+    try {
+      setBridgeQueueDiagnosticProvider(() => raw);
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(full.includes('serving `error`') && !full.includes('serving `unknown`'), 'the report must not print a failed bridge as unknown');
+      assert(full.includes('live lanes 5/10'), 'the report shows the live count from the queue, not from the truncated rows');
+      for (const index of [100, 101, 102, 103]) assert(full.includes(`job \`${uuid(index).slice(0, 8)}\``), 'each live lane is listed');
+    } finally { clearBridgeQueueDiagnostic(); }
   },
 }, {
   // The client-authentication policy is relaxed for TEST mode, which has no

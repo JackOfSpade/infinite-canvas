@@ -1115,4 +1115,348 @@ export default [
       } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
     },
   },
+  {
+    name: 'handoff bridge: render: BridgeProgress renders every state accessibly, drives the existing chat IPC, and survives malformed status',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-bridge-progress-'));
+      const entry = path.join(directory, 'ProgressProbe.jsx'); const component = path.resolve('src/components/BridgeProgress.jsx');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { BridgeProgress } from ${JSON.stringify(component)};\nexport function ProgressProbe(props) { return <BridgeProgress {...props} />; }\n`);
+      const controller = new AbortController(); let bundle;
+      const JOB = '11111111-1111-4111-8111-111111111111';
+      const clock = Date.now();
+      // The engine's per-job proof: a job this chat holds and is answering carries servedAt + awaitingAnswer.
+      const job = (extra = {}) => ({ jobId: JOB, phase: 'awaiting', stage: 'resume', reason: null, servedToChat: 1, changedAt: clock - 600000, servedAt: extra.servedToChat === null ? null : clock - 120000, answeredAt: null, awaitingAnswer: extra.servedToChat !== null, stalled: false, stalledSince: null, ...extra });
+      const working = (extra = {}) => ({ ordinal: 1, state: 'working', startedAt: clock - 300000, firstCallAt: clock - 290000, lastCallAt: clock - 20000, lastCallKind: 'get', calls: 3, jobsAssigned: 1, jobsCap: 2, outstanding: { servedAt: clock - 120000, kind: 'application', stage: 'resume', stalled: false, stalledSince: null, stallsLastHour: 0 }, ...extra });
+      const view = (jobExtra, chatExtra, top = {}) => normalizeBridgeStatus({ ...status(1, { chat: working(chatExtra), queue: { jobs: [job(jobExtra)] } }), at: clock, ...top });
+      const scenario = async (name, { status: given, item = { jobId: JOB, stage: 'resume', corrections: [] }, api = {}, check }) => {
+        await withDom(async window => withConsoleCollector(async entries => {
+          const calls = []; const timers = new Set();
+          const priorSetInterval = globalThis.setInterval; const priorClearInterval = globalThis.clearInterval;
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          globalThis.setInterval = (fn, ms) => { const id = priorSetInterval(fn, ms); timers.add(id); return id; };
+          globalThis.clearInterval = id => { timers.delete(id); return priorClearInterval(id); };
+          window.electronAPI = { handoffBridgeNewChat: async () => { calls.push('new'); return { success: true }; }, handoffBridgeContinueChat: async () => { calls.push('continue'); return { success: true }; }, ...api };
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, { status: given, item }))); await Promise.resolve(); });
+            await check({ window, calls, timers, entries, rootNode, act: bundle.module.act });
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+            globalThis.setInterval = priorSetInterval; globalThis.clearInterval = priorClearInterval;
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+          }
+          assert(timers.size === 0, `${name}: every interval the component started must be cleared on unmount`);
+          assert(entries.length === 0, `${name}: render must emit no console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
+      };
+      const text = window => window.document.body.textContent;
+      const live = window => window.document.querySelector('[role="status"][aria-live="polite"]');
+      const button = (window, label) => [...window.document.querySelectorAll('button')].find(item => item.textContent.trim() === label);
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
+
+        await scenario('awaiting-first-call', {
+          status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }),
+          item: { jobId: JOB, stage: 'evidence-plan' },
+          async check({ window, calls, timers, act }) {
+            assert(window.document.querySelector('section[aria-label="ChatGPT progress"]'), 'the progress region must be labelled');
+            assert(text(window).includes('Waiting for chat 1'), 'first-call headline');
+            const list = window.document.querySelector('ol[aria-label="Application steps"]');
+            assert(list && list.querySelectorAll('li').length === 4, 'the stepper is an ordered list of four steps');
+            assert(!/Last heard|\bfor \d/.test(text(window)), 'a chat that never called has no timer line');
+            assert(timers.size === 0, `no timer anchors means no interval while mounted: ${timers.size}`);
+            const current = [...list.querySelectorAll('li[aria-current="step"]')];
+            assert(current.length === 1 && current[0].textContent.includes('Evidence plan') && current[0].textContent.includes('current step'), 'exactly one step is aria-current, and its state is also text');
+            const start = button(window, 'Copy starter');
+            assert(start && !start.disabled, 'the first-call state offers the panel\'s Copy starter button');
+            await act(async () => { start.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.join() === 'new', `the button must call the existing handoffBridgeNewChat exactly once: ${calls}`);
+            assert(text(window).includes('Copied. Paste it into a new ChatGPT chat'), 'a successful start tells the person what was copied');
+          },
+        });
+
+        await scenario('writing the resume', {
+          status: view({}, {}),
+          async check({ window, timers, act }) {
+            const region = live(window);
+            assert(region && region.getAttribute('aria-live') === 'polite' && region.textContent.includes('ChatGPT is working on: Résumé') && region.textContent.includes('In progress'), 'the headline and its tone word sit in the polite live region');
+            assert([...window.document.querySelectorAll('[role="status"], [aria-live]')].every(item => !item.textContent.includes('Last heard') && !/\bfor \d/.test(item.textContent)), 'the ticking timer lines must stay outside every live region');
+            const states = [...window.document.querySelectorAll('ol[aria-label="Application steps"] li')].map(item => item.textContent);
+            assert(states[0].includes('done') && states[1].includes('current step') && states[2].includes('not started yet'), `step states must be text, not colour alone: ${states.join(' | ')}`);
+            assert(/for 2 min/.test(text(window)) && /Last heard from ChatGPT (just now|\d+s ago)/.test(text(window)), `elapsed and last-heard lines: ${text(window)}`);
+            assert(!window.document.querySelector('button'), 'a job ChatGPT is writing needs no button');
+            assert(timers.size === 1, `exactly one interval while mounted with timer lines: ${timers.size}`);
+            const realNow = Date.now; Date.now = () => realNow() + 90000;
+            try {
+              await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); });
+              assert(/for 3 min/.test(text(window)) && /Last heard from ChatGPT 1 min ago/.test(text(window)), `the timer lines must tick with the clock: ${text(window)}`);
+            } finally { Date.now = realNow; }
+          },
+        });
+
+        await scenario('stalled', {
+          // The engine's stalledSince is when the quiet BEGAN (here the serve), not when it crossed the 5 minute threshold.
+          status: view({ servedAt: clock - 9 * 60000, stalled: true, stalledSince: clock - 9 * 60000 }, { outstanding: { servedAt: clock - 9 * 60000, kind: 'application', stage: 'resume', stalled: true, stalledSince: clock - 9 * 60000, stallsLastHour: 1 }, lastCallAt: clock - 20000 }),
+          async check({ window, calls, act }) {
+            assert(live(window).textContent.includes('Needs attention') && live(window).textContent.includes('ChatGPT has been quiet for 9 min'), 'stalled is worded and toned in text, with the real quiet age (served 9 minutes ago)');
+            assert(/for 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
+            const start = button(window, 'Start a new chat'); assert(start, 'stalled offers Start a new chat');
+            await act(async () => { start.click(); await Promise.resolve(); });
+            assert(calls.length === 0 && text(window).includes('Start a new chat?'), 'a chat that called under two minutes ago must be confirmed first, exactly as the panel does');
+            await act(async () => { button(window, 'Keep chat 1').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
+            assert(calls.length === 0 && !text(window).includes('Start a new chat?'), `Keep chat must close the dialog and call nothing: ${calls}`);
+            await act(async () => { button(window, 'Start a new chat').click(); await Promise.resolve(); });
+            assert(text(window).includes('Start a new chat?'), 'the confirmation opens again');
+            await act(async () => { button(window, 'Start new chat').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
+            assert(calls.join() === 'new', `confirming calls handoffBridgeNewChat: ${calls}`);
+            assert(!text(window).includes('Start a new chat?'), 'confirming must close the dialog');
+          },
+        });
+
+        await scenario('ended chat is continued', {
+          status: view({ servedToChat: null }, { state: 'ended' }),
+          async check({ window, calls, timers, act }) {
+            assert(timers.size === 1, `a last-heard line alone still ticks: ${timers.size}`);
+            const next = button(window, 'Copy Continue'); assert(next, 'an ended chat offers Copy Continue');
+            await act(async () => { next.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.join() === 'continue' && text(window).includes('Copied. Paste it into the existing chat.'), 'Copy Continue calls the existing handoffBridgeContinueChat with no confirmation');
+          },
+        });
+
+        await scenario('needs_user', {
+          status: view({ phase: 'needs_user', reason: 'write_failed' }, {}),
+          async check({ window, timers }) {
+            assert(timers.size === 1 && /for 10 min/.test(text(window)) && !text(window).includes('Last heard'), `a since-only view ticks one interval: ${timers.size} ${text(window)}`);
+            assert(live(window).textContent.includes('Problem') && live(window).textContent.includes('This job needs you') && live(window).textContent.includes('The app could not save this answer.'), 'needs_user names the problem in text');
+            assert(!window.document.querySelector('button'), 'needs_user offers no chat button');
+            assert(window.document.querySelectorAll('li[aria-current="step"]').length === 1, 'the stopped step is still marked');
+          },
+        });
+
+        await scenario('a disabled bridge cannot start a chat', {
+          status: view({ servedToChat: null }, { state: 'full' }, { serving: 'off' }),
+          async check({ window, calls, act }) {
+            const start = button(window, 'Start a new chat'); assert(start && start.disabled, 'the panel\'s gate (live, reachable, linked) also disables this button');
+            await act(async () => { start.click(); await Promise.resolve(); });
+            assert(calls.length === 0, 'a disabled button must not call IPC');
+          },
+        });
+
+        const setupWith = patch => ({ setup: { ...status(1).setup, ...patch } });
+        for (const [label, top] of [
+          ['the tunnel is unreachable', setupWith({ tunnelReachable: false })],
+          ['ChatGPT is not linked', setupWith({ linked: false })],
+          ['the bridge is turned off', { enabled: false }],
+          ['the bridge is paused', { paused: true }],
+        ]) {
+          await scenario(`the button is gated when ${label}`, {
+            // A held restart is the one stopped state that still offers a chat button, even while paused.
+            status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }, top),
+            async check({ window, calls, act }) {
+              const start = button(window, 'Start a new chat'); assert(start && start.disabled, `the panel's whole gate applies: ${label}`);
+              await act(async () => { start.click(); await Promise.resolve(); });
+              assert(calls.length === 0, `no IPC while ${label}`);
+            },
+          });
+        }
+        await scenario('the same button is enabled when every gate passes', {
+          status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }),
+          async check({ window }) { const start = button(window, 'Start a new chat'); assert(start && !start.disabled, 'the gate opens when the bridge is live, reachable, linked and not paused'); },
+        });
+        await scenario('a paused bridge is forwarded to the derivation', {
+          status: view({}, {}, { paused: true }),
+          async check({ window }) {
+            assert(live(window).textContent.includes('Paused') && live(window).textContent.includes('Needs attention') && !live(window).textContent.includes('ChatGPT is working on'), `a paused bridge must not read as being written: ${live(window).textContent}`);
+          },
+        });
+        await scenario('an unread job never claims the app is reading it', {
+          status: view({ phase: 'unread', servedToChat: null }, {}),
+          async check({ window }) {
+            assert(live(window).textContent.includes('Not read yet') && !/reading/i.test(live(window).textContent), `unread copy: ${live(window).textContent}`);
+            assert(!window.document.querySelector('button'), 'a job behind a working chat needs no button');
+          },
+        });
+        await scenario('a full chat that holds the job keeps the working line and offers no new chat', {
+          status: view({}, { state: 'full' }),
+          async check({ window }) {
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('at its limit'), live(window).textContent);
+            assert(!window.document.querySelector('button'), 'no Start a new chat while ChatGPT may be answering');
+          },
+        });
+        await scenario('a host job does not claim ChatGPT answered everything', {
+          status: view({ phase: 'host', stage: null }, {}),
+          item: { jobId: JOB },
+          async check({ window }) {
+            assert(live(window).textContent.includes('The app is saving this') && !live(window).textContent.includes('ChatGPT'), live(window).textContent);
+            assert(window.document.querySelectorAll('ol[aria-label="Application steps"] li svg').length === 0, 'no step shows the done tick');
+          },
+        });
+
+        await scenario('an accepted answer with the next stage not yet served is not "ChatGPT is working"', {
+          status: view({ stage: 'cover-letter', servedAt: null, awaitingAnswer: false, answeredAt: clock - 30000 }, {}),
+          item: { jobId: JOB, stage: 'cover-letter', corrections: [] },
+          async check({ window, timers }) {
+            assert(live(window).textContent.includes('Queued for ChatGPT') && !live(window).textContent.includes('ChatGPT is working on'), `served-but-answered must read as queued: ${live(window).textContent}`);
+            assert(!/\bfor \d/.test(text(window)), 'and claims no elapsed "working" timer');
+            assert(timers.size === 1 && /Last heard from ChatGPT/.test(text(window)), 'only the chat\'s last-heard line remains');
+          },
+        });
+        await scenario('a second job\'s timer and stall are its own, not the chat\'s first outstanding lane', {
+          status: view({ servedAt: clock - 60000 }, { jobsAssigned: 2, outstanding: { servedAt: clock - 20 * 60000, kind: 'application', stage: 'evidence-plan', stalled: true, stalledSince: clock - 15 * 60000, stallsLastHour: 1 } }),
+          async check({ window }) {
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && !live(window).textContent.includes('quiet'), `another lane's stall must not paint this job stalled: ${live(window).textContent}`);
+            assert(/for 1 min/.test(text(window)) && !/for 20 min/.test(text(window)), `the elapsed line is this job's own hand-over time: ${text(window)}`);
+          },
+        });
+
+        await scenario('the timer refreshes the clock the moment its lines appear', {
+          status: view({ servedToChat: null }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }),
+          async check({ window, rootNode, timers, act }) {
+            assert(timers.size === 0, 'no lines, no interval');
+            const realNow = Date.now; Date.now = () => realNow() + 90000;
+            try {
+              // Same root element type as the first render, so this is an update and not a remount.
+              const React = bundle.module.React;
+              await act(async () => { rootNode.render(React.createElement(React.StrictMode, null, React.createElement(bundle.module.ProgressProbe, { status: view({}, {}), item: { jobId: JOB, stage: 'resume', corrections: [] } }))); await Promise.resolve(); });
+              assert(/for 3 min/.test(text(window)), `the first frame after the lines appear must already use the current clock, not the mount-time one: ${text(window)}`);
+              assert(timers.size === 1, 'the interval starts once there is a line to update');
+            } finally { Date.now = realNow; }
+          },
+        });
+
+        await scenario('a double click starts one chat, and the button works again afterwards', {
+          status: view({ servedToChat: null }, { state: 'ended', lastCallAt: clock - 600000 }),
+          async check({ window, calls, act }) {
+            let release; const gate = new Promise(resolve => { release = resolve; });
+            window.electronAPI.handoffBridgeContinueChat = async () => { calls.push('continue'); await gate; return { success: true }; };
+            const next = button(window, 'Copy Continue');
+            await act(async () => { next.click(); next.click(); await Promise.resolve(); });
+            assert(calls.join() === 'continue', `two synchronous clicks must call the IPC once: ${calls}`);
+            assert(button(window, 'Copy Continue').disabled, 'the button is disabled while its call is pending');
+            await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); });
+            assert(calls.length === 1, 'a click while pending is ignored');
+            await act(async () => { release(); await gate; await Promise.resolve(); await Promise.resolve(); });
+            assert(!button(window, 'Copy Continue').disabled && text(window).includes('Copied. Paste it into the existing chat.'), 'the button is free again once the call settles');
+            await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.length === 2, 'a later click goes through');
+          },
+        });
+        await scenario('a double click on Start a new chat calls the IPC once', {
+          status: view({ phase: 'held', reason: 'restart' }, { state: 'full', lastCallAt: clock - 600000 }),
+          async check({ window, calls, act }) {
+            const start = button(window, 'Start a new chat');
+            await act(async () => { start.click(); start.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.join() === 'new', `a fast double click must not mint two chats: ${calls}`);
+          },
+        });
+        await scenario('a failed call frees the button too', {
+          status: view({ servedToChat: null }, { state: 'ended' }),
+          api: { handoffBridgeContinueChat: async () => { throw new Error('boom'); } },
+          async check({ window, act }) {
+            await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+            assert(!button(window, 'Copy Continue').disabled, 'a rejected IPC must still clear the busy state');
+          },
+        });
+
+        await scenario('a failed action reports the shared error copy', {
+          status: view({ servedToChat: null }, { state: 'ended' }),
+          api: { handoffBridgeContinueChat: async () => ({ success: false, code: 'NO_CHAT', message: 'PRIVATE DETAIL' }) },
+          async check({ window, act }) {
+            await act(async () => { button(window, 'Copy Continue').click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(text(window).includes(IPC_ERROR_COPY.NO_CHAT) && !text(window).includes('PRIVATE DETAIL'), 'failures show closed IPC copy only');
+          },
+        });
+
+        for (const [label, given, item] of [
+          ['hostile raw status', { queue: { jobs: 'x' }, chat: 7, paused: 'yes' }, { jobId: JOB, corrections: 5 }],
+          ['undefined status and item', undefined, undefined],
+          ['unknown phase', normalizeBridgeStatus({ ...status(1, { queue: { jobs: [job({ phase: 'weird' })] } }), at: clock }), { jobId: JOB }],
+          ['job missing from queue', view({}, {}), { jobId: '22222222-2222-4222-8222-222222222222' }],
+        ]) {
+          await scenario(`malformed: ${label}`, {
+            status: given, item,
+            async check({ window }) {
+              assert(live(window).textContent.includes('Checking on this job'), `${label} must degrade to the neutral generic line`);
+              assert(window.document.querySelectorAll('ol[aria-label="Application steps"] li').length === 4 && !window.document.querySelector('button'), 'the stepper still renders and no action is offered');
+            },
+          });
+        }
+      } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'handoff bridge: render: the per-job answer fields are sanitised to times and booleans, and nothing else about a job passes',
+    run() {
+      const JOB = '11111111-1111-4111-8111-111111111111';
+      const jobs = normalizeBridgeStatus(status(1, { queue: { jobs: [
+        { jobId: JOB, phase: 'awaiting', servedAt: NOW, answeredAt: NOW - 5, awaitingAnswer: true, stalled: true, stalledSince: NOW + 1, leak: 'PRIVATE_PROMPT' },
+        { jobId: '22222222-2222-4222-8222-222222222222', phase: 'awaiting', servedAt: 'yesterday', answeredAt: -1, awaitingAnswer: 'true', stalled: 1, stalledSince: NaN },
+        { jobId: '33333333-3333-4333-8333-333333333333', phase: 'awaiting' },
+      ] } })).queue.jobs;
+      const [first, second, third] = jobs;
+      assert(first.servedAt === NOW && first.answeredAt === NOW - 5 && first.awaitingAnswer === true && first.stalled === true && first.stalledSince === NOW + 1, 'valid per-job fields pass');
+      assert(second.servedAt === null && second.answeredAt === null && second.awaitingAnswer === false && second.stalled === false && second.stalledSince === null,
+        'a non-time is null and a non-boolean is false (a truthy string or 1 is not proof)');
+      assert(third.servedAt === null && third.awaitingAnswer === false && third.stalled === false, 'absent fields default to no claim');
+      assert(!JSON.stringify(jobs).includes('PRIVATE_PROMPT'), 'unknown job keys still die in the normaliser');
+    },
+  },
+  {
+    name: 'handoff bridge: render: the real dock hides the paste UI only while ChatGPT holds the job; a kept, handed-back, gone or finished lane shows the normal paste UI',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-bridge-dock-gate-'));
+      const entry = path.join(directory, 'DockGateProbe.jsx');
+      const dialog = path.resolve('src/components/NonApiAiDialog.jsx'); const dockStore = path.resolve('src/utils/applicationHandoffDock.js'); const bridgeStore = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { NonApiAiDialog } from ${JSON.stringify(dialog)};\nexport { publishApplicationHandoffs, applicationDockRequest, __resetApplicationHandoffsForTests } from ${JSON.stringify(dockStore)};\nexport { applyHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(bridgeStore)};\nexport function DockGateProbe() { return <NonApiAiDialog />; }\n`);
+      const controller = new AbortController(); let bundle;
+      const JOB = '11111111-1111-4111-8111-111111111111';
+      const laneStatus = (seq, phase) => status(seq, { queue: { jobs: phase ? [{ jobId: JOB, phase, stage: 'resume', reason: phase === 'held' ? 'user_hold' : null, servedToChat: null, changedAt: NOW }] : [] } });
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 20000);
+        const seen = {};
+        for (const phase of [null, 'held', 'needs_user', 'gone', 'done', 'unread', 'awaiting', 'host']) {
+          await withDom(async window => withConsoleCollector(async entries => {
+            const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+            Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+            window.electronAPI = {
+              handoffBridgeGetStatus: async () => ({ status: laneStatus(1, phase) }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+              onNonApiAiRequest: () => () => {}, onNonApiAiSettled: () => () => {}, onNonApiAiCancelled: () => () => {},
+            };
+            bundle.module.__resetHandoffBridgeStoreForTests(); bundle.module.__resetApplicationHandoffsForTests();
+            const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+            try {
+              const item = bundle.module.applicationDockRequest({
+                node: { id: 'node-1', data: { title: 'Engineer', company: 'Acme', localApplication: { id: JOB, mode: 'paste', status: 'queued', stage: 'resume' } } },
+                handoff: { jobId: JOB, stage: 'resume', revision: 1, handoffCode: 'CODE-123', prompt: 'SYNTHETIC_STAGE_PROMPT', draft: '' },
+              });
+              assert(item, 'the dock item builds');
+              await bundle.module.act(async () => {
+                rootNode.render(bundle.module.React.createElement(bundle.module.DockGateProbe));
+                bundle.module.applyHandoffBridgeStatus(laneStatus(2, phase));
+                bundle.module.publishApplicationHandoffs([item]);
+                await Promise.resolve(); await Promise.resolve();
+              });
+              // The dock starts collapsed to one "Pending AI handoffs" button.
+              const openButton = window.document.querySelector('button[aria-expanded="false"]');
+              assert(openButton && /Pending AI handoffs/.test(openButton.textContent), 'the collapsed dock offers its expand button');
+              await bundle.module.act(async () => { openButton.click(); await Promise.resolve(); });
+              const text = window.document.body.textContent;
+              seen[phase] = { working: text.includes('Working in ChatGPT'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
+            } finally {
+              await bundle.module.act(async () => rootNode.unmount());
+              if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+            }
+            assert(entries.length === 0, `the dock must render without console output (${phase}): ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+          }));
+        }
+        for (const phase of [null, 'held', 'needs_user', 'gone', 'done']) {
+          assert(seen[phase].paste && !seen[phase].working, `a job in phase ${phase} must show the normal paste UI, not "Working in ChatGPT": ${JSON.stringify(seen[phase])}`);
+        }
+        for (const phase of ['unread', 'awaiting', 'host']) {
+          assert(seen[phase].working && !seen[phase].paste, `a job ChatGPT holds (${phase}) shows the working state and no paste UI: ${JSON.stringify(seen[phase])}`);
+        }
+      } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
+    },
+  },
 ];

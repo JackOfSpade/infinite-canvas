@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import nodeFs from 'node:fs';
+import nodeOs from 'node:os';
+import nodePath from 'node:path';
 import { assert } from './testHelpers.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffBridgeController } from '../../electron/ipc/handoffBridge/controller.js';
@@ -9,7 +12,9 @@ import { createHandoffBridgePower } from '../../electron/ipc/handoffBridge/power
 import { createHandoffBridgeTray, snapshotToTray } from '../../electron/ipc/handoffBridge/tray.js';
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
-import { composeHandoffBridge, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import { discardLocalApplicationJob, queueLocalApplicationJob } from '../test-dependencies.js';
+import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
+import { composeHandoffBridge, handleApplicationBundleRemoved, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
 import { createTunnelSupervisor } from '../../electron/ipc/handoffBridge/tunnel/supervisor.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createFakeProcessTable } from './fixtures/handoff-bridge/fakeProcessTable.js';
@@ -999,6 +1004,129 @@ export default [
     for (let index = 0; index < 2_000; index += 1) await h.controller.get({ sourceAllowed: true, grant: { linkId: 'synthetic' } });
     h.setNow(h.now() + 30 * 60 * 60_000); assert((await h.controller.tick()).success && h.controller.snapshot(false).pauseCause === 'idle', 'first tick after jump applies idle pause');
     assert(!h.notifications.includes('bridge-on'), 'a long-running but routine bridge state must never create an OS notification'); await h.controller.resume(); assert(h.controller.snapshot().serving === 'live', 'Resume lifts a soft idle pause');
+  } },
+  { name: 'handoff bridge: controls: an unattended re-release keeps the original release time and idle clock, so the 24h lapse still fires', async run() {
+    const calls = []; let releases = 0;
+    const engine = enginePort({
+      async release() { releases += 1; return releases === 1 ? { ok: true, count: 1, added: [JOB] } : { ok: true, count: 0, added: [] }; },
+      async hold(...args) { calls.push(['hold', ...args]); return { ok: true }; },
+      async tick() { return { ok: true }; },
+    });
+    const h = controllerHarness({ engine });
+    await h.controller.enable();
+    const request = { jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] };
+    await h.controller.release(request);
+    h.setNow(h.now() + 23 * 3_600_000);
+    const seqBefore = h.controller.snapshot(false).seq;
+    const again = await h.controller.release({ ...request, auto: true }); // a 30 s keep-alive re-attempt
+    assert(again.ok === true && again.count === 0, 'the re-release is acknowledged as adding nothing');
+    assert(h.controller.snapshot(false).seq === seqBefore, 'an unattended no-op is not a status change');
+    h.setNow(h.now() + 2 * 3_600_000);
+    await h.controller.tick();
+    assert(calls.some(call => call[0] === 'hold' && call[1] === JOB && call[2] === 'lapsed'), 'the release lapses 24h after it was made, not 24h after the last keep-alive');
+    assert(h.controller.snapshot(false).pauseCause === 'idle', 'the unattended keep-alive is not human activity, so the idle pause still engages 24h after the last person action');
+  } },
+  { name: 'handoff bridge: controls: a person re-confirming a release is still a human action even when the lane already existed', async run() {
+    let releases = 0; const engine = enginePort({ async release() { releases += 1; return releases === 1 ? { ok: true, count: 1, added: [JOB] } : { ok: true, count: 0, added: [] }; }, async tick() { return { ok: true }; } });
+    const h = controllerHarness({ engine });
+    await h.controller.enable();
+    const request = { jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] };
+    await h.controller.release(request);
+    h.setNow(h.now() + 23 * 3_600_000);
+    await h.controller.release(request); // explicit, not auto
+    h.setNow(h.now() + 2 * 3_600_000);
+    await h.controller.tick();
+    assert(h.controller.snapshot(false).pauseCause !== 'idle', 'an explicit confirmation counts as the person acting, so 25h from the first release is not yet 24h idle');
+  } },
+  { name: 'handoff bridge: controls: a lane crossing the quiet threshold, or dropped by the engine, republishes status on the tick, an idle tick stays silent, and the per-job answer fields reach the status', async run() {
+    let stalled = false; let jobs = [{ jobId: JOB, phase: 'awaiting', stage: 'resume', servedToChat: 1, changedAt: 1, servedAt: 5, answeredAt: 3, awaitingAnswer: true, stalled: false, stalledSince: null, leak: 'PRIVATE_PROMPT' }];
+    const engine = enginePort({
+      status: () => ({
+        queue: { applications: { ready: 1, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: jobs.map(job => ({ ...job, stalled, stalledSince: stalled ? 9 : null })) },
+        chat: { state: 'working', jobsCap: 2, outstanding: { servedAt: 5, kind: 'application', stage: 'resume', stalled, stalledSince: stalled ? 9 : null, stallsLastHour: stalled ? 1 : 0 } }, counts: {},
+      }),
+      async tick() { return true; },
+    });
+    const h = controllerHarness({ engine });
+    await h.controller.enable();
+    await h.controller.tick();
+    const baseline = h.controller.snapshot(false).seq;
+    await h.controller.tick(); await h.controller.tick();
+    assert(h.controller.snapshot(false).seq === baseline, 'ticks that change nothing publish nothing (no per-tick IPC)');
+    stalled = true;
+    await h.controller.tick();
+    const afterStall = h.controller.snapshot(false);
+    assert(afterStall.seq > baseline, 'a lane crossing the quiet threshold republishes on the next tick');
+    assert(afterStall.chat.outstanding.stalled === true && afterStall.chat.outstanding.stalledSince === 9 && afterStall.chat.outstanding.stallsLastHour === 1, 'the chat-level stall reaches the status');
+    const row = afterStall.queue.jobs[0];
+    assert(row.servedAt === 5 && row.answeredAt === 3 && row.awaitingAnswer === true && row.stalled === true && row.stalledSince === 9, 'the per-job answer fields reach the status');
+    assert(!JSON.stringify(afterStall).includes('PRIVATE_PROMPT'), 'and nothing else about the job does');
+    const afterSeq = afterStall.seq;
+    await h.controller.tick();
+    assert(h.controller.snapshot(false).seq === afterSeq, 'an already-published stall is not republished every tick');
+    jobs = [];
+    await h.controller.tick();
+    assert(h.controller.snapshot(false).seq > afterSeq, 'a lane the engine dropped on its own (bundle found gone) republishes too');
+  } },
+  { name: 'handoff bridge: controls: the first tick of every run publishes once, even when the quiet-state picture is unchanged since the last run', async run() {
+    const engine = enginePort({
+      status: () => ({
+        queue: { applications: { ready: 1, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [{ jobId: JOB, phase: 'awaiting', stage: 'resume', servedToChat: 1, changedAt: 1 }] },
+        chat: { state: 'working', jobsCap: 2, outstanding: null }, counts: {},
+      }),
+      async tick() { return true; },
+    });
+    const h = controllerHarness({ engine });
+    await h.controller.enable();
+    await h.controller.tick();
+    const firstRun = h.controller.snapshot(false).seq;
+    await h.controller.tick();
+    assert(h.controller.snapshot(false).seq === firstRun, 'an unchanged picture is not republished within a run');
+    await h.controller.disable();
+    await h.controller.enable();
+    const secondRunStart = h.controller.snapshot(false).seq;
+    await h.controller.tick();
+    assert(h.controller.snapshot(false).seq > secondRunStart, 'the first tick of a new run publishes once: the engine may have changed anything while the bridge was off');
+  } },
+  { name: 'handoff bridge: controls: a discarded bundle frees its lane through the engine and forgets its release time', async run() {
+    const calls = []; const holds = [];
+    const engine = enginePort({
+      async release() { return { ok: true, count: 1, added: [JOB] }; },
+      async dropLane(...args) { calls.push(args); return { ok: true }; },
+      async hold(...args) { holds.push(args); return { ok: true }; },
+      async tick() { return { ok: true }; },
+    });
+    const h = controllerHarness({ engine });
+    await h.controller.enable();
+    await h.controller.release({ jobs: [{ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas' }] });
+    assert((await h.controller.onBundleDiscarded({ jobId: JOB, canvasFilePath: '/tmp/synthetic.canvas', cause: 'bundle_discarded' })).ok === true
+      && JSON.stringify(calls) === JSON.stringify([[JOB, 'bundle_discarded']]), 'the discard reaches the engine with its closed cause');
+    h.setNow(h.now() + 30 * 3_600_000); await h.controller.tick();
+    assert(holds.every(call => call[0] !== JOB), 'a dropped lane no longer has a release deadline to lapse');
+    assert((await h.controller.onBundleDiscarded({ jobId: 'not-a-uuid' })).code === 'invalid_arguments' && calls.length === 1, 'a malformed id never reaches the engine');
+  } },
+  { name: 'handoff bridge: controls: discarding a bundle while the bridge is off frees its durable lane, so it cannot come back as a restart hold', async run() {
+    await stopHandoffBridge();
+    const root = nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'ic-bridge-discard-')));
+    const userData = nodePath.join(root, 'user-data'); nodeFs.mkdirSync(userData, { recursive: true });
+    const canvasFilePath = nodePath.join(root, 'My Canvas.json'); nodeFs.writeFileSync(canvasFilePath, '{"version":1}', 'utf8');
+    const handlers = new Map();
+    const ipc = { handle: (channel, fn) => handlers.set(channel, fn), removeHandler: channel => handlers.delete(channel), on: NOOP, removeListener: NOOP, __getInvokeHandler: channel => handlers.get(channel) };
+    try {
+      assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { userData, isPackaged: true, env: {}, getCanvasWindows: () => [] } }), 'fixture registration');
+      const queued = await queueLocalApplicationJob({ job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' }, careerData: 'Built supported systems with clear outcomes, sustained ownership, and concrete engineering judgment.', canvasFilePath });
+      const store = createLaneStore({ userDataPath: userData });
+      const lane = (ord, jobId) => ({ ord, jobId, canvasFilePath, releasedAt: ord, phase: 'unread', reason: null, heldFrom: null, counters: {} });
+      const other = '99999999-9999-4999-8999-999999999999';
+      assert(await store.saveLanes([lane(1, queued.id), lane(2, other)]), 'two released lanes are on disk');
+      await discardLocalApplicationJob(queued.id, canvasFilePath);
+      await settle(40); await store.flush();
+      const after = store.readLanes();
+      assert(after.length === 1 && after[0].jobId === other, `the discarded job's lane leaves lanes.json (the incident left it there), got ${JSON.stringify(after.map(item => item.jobId))}`);
+      assert((await handleApplicationBundleRemoved({ jobId: 'nope' })).code === 'invalid_arguments', 'a malformed id is refused');
+      assert((await handleApplicationBundleRemoved({ jobId: queued.id })).removed === false, 'a lane that is already gone is a quiet no-op');
+      assert(store.loadLanes(1).every(item => item.jobId !== queued.id), 'and nothing restores it on the next launch');
+    } finally { await stopHandoffBridge(); handlers.clear(); nodeFs.rmSync(root, { recursive: true, force: true }); }
   } },
   { name: 'handoff bridge: controls: a 30h first tick applies release lapse and advances the engine clock', async run() {
     const calls = []; const engine = enginePort({ async hold(...args) { calls.push(['hold', ...args]); return { ok: true }; }, async tick(stamp) { calls.push(['tick', stamp]); return { ok: true }; } });

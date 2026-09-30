@@ -61,7 +61,7 @@ export const LOG_FIELDS_BY_CODE = Object.freeze({
   restart_confirmed: Object.freeze(['count']),
   epoch_closed: Object.freeze(['cause', 'count']),
   release: Object.freeze(['kind', 'count']),
-  unrelease: Object.freeze(['kind', 'count']),
+  unrelease: Object.freeze(['kind', 'count', 'cause']),
   new_chat: Object.freeze(['chatOrdinal']),
   continue: Object.freeze(['chatOrdinal']),
   source_mismatch: Object.freeze(['clientKind', 'source']),

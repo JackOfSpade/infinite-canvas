@@ -49,6 +49,10 @@ const STATUS_REASONS = new Set([
   'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
+// Closed drop cause -> the per-cause counter it increments.
+const DROP_COUNTER = Object.freeze({
+  bundle_discarded: 'droppedDiscarded', bundle_pruned: 'droppedPruned', bundle_missing: 'droppedMissing', bundle_saved: 'droppedSaved',
+});
 const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'closed']);
 const LOG_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 // Composition reuses the push source when it replaces a terminal engine after
@@ -237,6 +241,12 @@ export function createHandoffEngine({
     submitAccepted: 0, submitRejected: 0, submitDuplicate: 0, submitJunk: 0,
     submitSuperseded: 0, submitMisrouted: 0, submitHeld: 0, submitTooLarge: 0,
     pauses: 0, chatsStarted: 0, chatsContinued: 0,
+    // Lane lifecycle observations for bug reports. releaseNoops counts release
+    // calls that added nothing (an auto-release keep-alive re-attempt); only
+    // real additions are audited, logged, or treated as human activity.
+    releaseCalls: 0, releaseNoops: 0, unreleaseCalls: 0, lanesDropped: 0,
+    // lanesDropped split by the closed cause the app or a status probe gave.
+    droppedDiscarded: 0, droppedPruned: 0, droppedMissing: 0, droppedSaved: 0,
   };
 
   function log(code, fields = {}) {
@@ -298,6 +308,10 @@ export function createHandoffEngine({
       const result = await store.saveLanes(lanes);
       if (!sourceCurrent(generation)) return false;
       if (result === false) throw Object.assign(new Error('lane persistence failed'), { code: 'persist_failed' });
+      // The fault describes the LAST write, not history: a later successful
+      // save proves the store works again, so a sticky flag would keep the
+      // bridge reading as faulted until restart.
+      if (fault === 'persist_failed') fault = null;
       return true;
     } catch {
       if (!sourceCurrent(generation)) return false;
@@ -452,6 +466,15 @@ export function createHandoffEngine({
       tombstoneCode(tombstones, previous.code, 'rotated', { laneOrd: lane.ord, at: safeNow(now) }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
       codeIndex.delete(previousKey);
     }
+    // A different handoff replaced the one the chat was given: nothing has
+    // been served for THIS one yet (serveLane stamps it when it goes out).
+    if (previous?.code && !codeGuard.equal(previous.code, current.code)) {
+      lane.servedAt = null;
+      lane.awaitingAnswer = false;
+    }
+    // A lane that was not awaiting (held, unread, with the app) was not being
+    // answered meanwhile: its wait starts over rather than counting that time.
+    if (lane.phase !== 'awaiting') lane.quietFrom = safeNow(now);
     lane.current = current;
     lane.needsRefresh = false;
     lane.phase = 'awaiting';
@@ -464,15 +487,96 @@ export function createHandoffEngine({
     return true;
   }
 
+  // A lane the person (or a cap) held while a call for it was in flight. Calls
+  // are only ever started for lanes that are not held, so a held lane when the
+  // result lands was held DURING the call: the result must not un-hold it.
+  function isHeldPhase(lane) {
+    return lane.phase === 'held' || lane.phase === 'needs_user';
+  }
+
+  // The result of an in-flight call reached a lane that was held meanwhile. The
+  // hold stands; the lane re-reads when it is resumed rather than trusting a
+  // read that predates the hold.
+  function keepHoldOverResult(lane) {
+    lane.heldFrom = 'unread';
+    lane.snapshot = null;
+  }
+
+  // The app answered a submit for `code` while its lane could not take the
+  // result (it was detached, the chat/generation was fenced off, or the submit
+  // outlived its stuck timeout). Remember the fact on the lane so a lane that
+  // comes back is consistent: an accepted code is retired, a rejected code that
+  // rotated is superseded, the successor is a known code (not a person's edit)
+  // and the lane re-reads before it serves anything.
+  function recordAcceptedElsewhere(lane, code, result) {
+    if (!lane || !code) return;
+    let record = null;
+    if (result?.kind === 'accepted') {
+      let nextCode = null;
+      if (!result.completed && result.handoff) nextCode = normalizeCurrentHandoff(result.handoff, safeNow(now))?.code ?? null;
+      record = { kind: 'accepted', code, nextCode };
+    } else if (result?.kind === 'rejected') {
+      const returned = normalizeCurrentHandoff(result.handoff, safeNow(now));
+      // An unchanged code needs no bookkeeping: a re-read sees the same handoff.
+      if (!returned || codeGuard.equal(returned.code, code)) return;
+      // A recorded acceptance is the stronger fact; never overwrite it.
+      if (lane.acceptedElsewhere?.kind === 'accepted') return;
+      record = { kind: 'rejected', code, nextCode: returned.code };
+    }
+    if (!record) return;
+    lane.acceptedElsewhere = record;
+    if (lanes.includes(lane)) settleAcceptedElsewhere(lane);
+  }
+
+  function settleAcceptedElsewhere(lane) {
+    const record = lane.acceptedElsewhere;
+    if (!record) return;
+    lane.acceptedElsewhere = null;
+    const stamp = safeNow(now);
+    const accepted = record.kind !== 'rejected';
+    tombstoneCode(tombstones, record.code, accepted ? 'accepted' : 'rotated', { laneOrd: lane.ord, at: stamp }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+    const key = codeGuard.key(record.code);
+    if (codeIndex.get(key)?.lane === lane) codeIndex.delete(key);
+    if (record.nextCode) rememberIssuedCode(lane, record.nextCode, codeGuard);
+    if (accepted) {
+      lane.answeredAt = stamp;
+      lane.awaitingAnswer = false;
+      lane.servedAt = null;
+    }
+    lane.retained = null;
+    lane.snapshot = null;
+    if (isHeldPhase(lane)) lane.heldFrom = 'unread';
+    else if (lane.phase === 'awaiting') lane.needsRefresh = true;
+  }
+
+  // Puts a lane a failed save had taken out back, in ordinal order, but never
+  // when the job already has a lane again (a keep-alive release ran meanwhile).
+  function reinstateLane(lane) {
+    if (lanes.includes(lane) || lanes.some(item => item.jobId === lane.jobId)) return false;
+    // Ordinals are never rewound, but a reinstated lane must never sit at or
+    // above the counter, or the next release would hand out its ordinal again.
+    laneOrdinal = Math.max(laneOrdinal, lane.ord);
+    const at = lanes.findIndex(item => item.ord > lane.ord);
+    lanes.splice(at < 0 ? lanes.length : at, 0, lane);
+    return true;
+  }
+
   async function applyReadResult(lane, raw, { fromStatus = false, recoveryStage = null, generation = sourceGeneration } = {}) {
-    if (!sourceCurrent(generation)) return { kind: 'retry' };
+    // A result that lands after its lane was removed (Unrelease, discard, a
+    // proven-gone drop) must not touch it: adopting the handoff would index the
+    // served code again for a lane that no longer exists.
+    if (!sourceCurrent(generation) || !lanes.includes(lane)) return { kind: 'retry' };
     const result = normalizeSourceResult(raw);
+    if (isHeldPhase(lane)) { keepHoldOverResult(lane); return result; }
     const stamp = safeNow(now);
     if (result.kind === 'open') {
       const code = result.handoff?.code ?? result.handoff?.handoffCode;
       const sameRecoveryStage = typeof recoveryStage === 'string' && result.handoff?.stage === recoveryStage;
       if (lane.phase === 'awaiting' && isHumanAdvance(lane, code, codeGuard) && !sameRecoveryStage) {
         holdLane(lane, 'human_advance', stamp);
+        // The prompt this lane holds is retired: Resume must re-read and adopt
+        // the app's current code, not come back awaiting the stale one.
+        keepHoldOverResult(lane);
         await persistLanes(generation);
         if (!sourceCurrent(generation)) return { kind: 'retry' };
         return result;
@@ -497,6 +601,9 @@ export function createHandoffEngine({
       lane.reason = null;
       lane.snapshot = { at: stamp, kind: 'gone' };
       clearLaneHint(lane);
+      // A vanished bundle can never be answered, so it must not keep one of
+      // the chat's job slots and starve a live job.
+      epoch?.assignedLaneOrds.delete(lane.ord);
       await persistLanes(generation);
       if (!sourceCurrent(generation)) return { kind: 'retry' };
     } else if (result.kind === 'threw') {
@@ -542,7 +649,7 @@ export function createHandoffEngine({
   }
 
   async function readLane(lane, { recoveryStage = null, generation = sourceGeneration } = {}) {
-    if (!scope.applications || !sourceCurrent(generation)) return { kind: 'retry' };
+    if (!scope.applications || !sourceCurrent(generation) || !lanes.includes(lane)) return { kind: 'retry' };
     const promise = startLaneCall(
       lane,
       'read',
@@ -556,11 +663,12 @@ export function createHandoffEngine({
   }
 
   async function applyStatusResult(lane, raw, { readAfterAwaiting = true, generation = sourceGeneration } = {}) {
-    if (!sourceCurrent(generation)) return { kind: 'retry' };
+    if (!sourceCurrent(generation) || !lanes.includes(lane)) return { kind: 'retry' };
     const result = normalizeSourceResult(raw);
+    if (isHeldPhase(lane)) { keepHoldOverResult(lane); return result; }
     if (result.kind === 'open' || result.kind === 'host' || result.kind === 'done' || result.kind === 'gone' || result.kind === 'threw') {
       await applyReadResult(lane, result, { fromStatus: true, generation });
-      if (!sourceCurrent(generation)) return { kind: 'retry' };
+      if (!sourceCurrent(generation) || !lanes.includes(lane)) return { kind: 'retry' };
       if (result.read === true) return readLane(lane, { generation });
       return result;
     }
@@ -579,7 +687,7 @@ export function createHandoffEngine({
   }
 
   async function statusLane(lane, { readAfterAwaiting = true, generation = sourceGeneration } = {}) {
-    if (!scope.applications || !sourceCurrent(generation)) return { kind: 'retry' };
+    if (!scope.applications || !sourceCurrent(generation) || !lanes.includes(lane)) return { kind: 'retry' };
     const promise = startLaneCall(
       lane,
       'status',
@@ -743,6 +851,10 @@ export function createHandoffEngine({
 
   function serveLane(lane, generation = sourceGeneration, expectedEpoch = epoch) {
     if (!scope.applications || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+    // Nothing between choosing a lane and serving it may have changed it: the
+    // serve-time probe is asynchronous, so a lane can be answered, dropped or
+    // held while it runs. A lane in any of those states is never served.
+    if (!lanes.includes(lane) || lane.phase !== 'awaiting' || !lane.current || lane.needsRefresh) return makeResultBody('retry');
     if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
       return makeResultBody('session_full', { remaining: combinedRemaining() });
     }
@@ -753,8 +865,18 @@ export function createHandoffEngine({
     lane.counters.attemptByStage[`${lane.current.stage}@${lane.current.revision}`] = lane.current.attempt;
     const body = makeServedBody({ lane, remaining: remainingCounts(lanes), servedBefore });
     const stamp = safeNow(now);
+    const servedBeforeInThisChat = lane.servedEpochN === expectedEpoch.n;
     lane.servedAt = stamp;
+    lane.awaitingAnswer = true;
+    lane.servedEpochN = expectedEpoch.n;
     lane.serves++;
+    // The same handoff code going out again (not a new stage after an accepted
+    // answer) is what `servedTwice` reports.
+    const servedDigest = codeGuard.digest(lane.current.code);
+    // Only a repeat inside ONE chat is two-chats-on-one-code evidence: a rotation
+    // revoked the old chat, and a hold (which clears the digest) ended the wait.
+    lane.servedCodeAgain = servedBeforeInThisChat && codeGuard.sameDigest(lane.lastServedDigest, servedDigest);
+    lane.lastServedDigest = servedDigest;
     expectedEpoch.servedPrompt.set(lane.ord, { stage: lane.current.stage, codeDigest: codeGuard.digest(lane.current.code) });
     expectedEpoch.assignedLaneOrds.add(lane.ord);
     expectedEpoch.focusLaneOrd = lane.ord;
@@ -770,6 +892,159 @@ export function createHandoffEngine({
     return body;
   }
 
+  // ---- Per-job answer tracking and stall detection -------------------------
+  // A lane is "awaiting an answer" only when its current prompt was served to
+  // THIS chat and no accepted submit (or replacement handoff) has come since.
+  // Every input is engine-owned state; nothing here reads a source.
+  function laneAwaitingAnswer(lane) {
+    return Boolean(epoch) && lane.phase === 'awaiting' && lane.awaitingAnswer === true
+      && lane.servedEpochN === epoch.n && Number.isFinite(lane.servedAt) && Boolean(lane.current);
+  }
+
+  // The moment the chat was last heard on this job: the serve, or a later submit
+  // attempt (a rejected answer hands ChatGPT a correction to answer again, so
+  // that clock restarts). A submit still running is activity, never a stall.
+  // A paused bridge turns every call away, and a hold or pause is time nobody
+  // could answer in: `quietFrom` (set on resume and when a lane returns to
+  // awaiting) is also a floor for the quiet clock. `anchor` is when the quiet
+  // began, which is what the person is told; `since` is when it crossed the
+  // notice threshold, which only orders the hourly stall history.
+  function laneStall(lane, stamp) {
+    if (paused || !laneAwaitingAnswer(lane) || lane.inFlight.submit) return null;
+    let anchor = lane.servedAt;
+    for (const later of [lane.submittedAt, lane.quietFrom]) if (Number.isFinite(later) && later > anchor) anchor = later;
+    if (!(stamp - anchor >= CONSTANTS.STALL_NOTICE_MS)) return null;
+    return { anchor, since: anchor + CONSTANTS.STALL_NOTICE_MS };
+  }
+
+  // Distinct stalls (a lane + the quiet period's anchor) seen in the last hour.
+  const stallLog = new Map();
+  function noteStalls(stamp) {
+    const current = new Set();
+    for (const lane of lanes) {
+      const stall = laneStall(lane, stamp);
+      if (!stall) continue;
+      const key = `${lane.ord}:${stall.anchor}`;
+      current.add(key);
+      if (!stallLog.has(key)) stallLog.set(key, stall.since);
+    }
+    for (const [key, since] of stallLog) if (!current.has(key) && stamp - since > 3_600_000) stallLog.delete(key);
+    return stallLog.size;
+  }
+
+  // ---- Proof that a bundle is gone -----------------------------------------
+  // One status probe through the application source. ONLY a proven-gone answer
+  // counts ('failed' with no folder, or a discarded/pruned/saved tombstone,
+  // which the source maps to gone / done); a thrown error, a timeout or an
+  // unrecognisable answer proves nothing and returns null.
+  // `includeSaved` also accepts the saved tombstone. `mapApplicationStatus`
+  // answers 'done' ONLY for a saved job (a finished build is 'host'), so for a
+  // lane that is being served or restored, 'done' can only mean the job was
+  // saved elsewhere and its private folder is gone.
+  // `ran` is false when no probe was attempted at all (scope off, or the source
+  // was replaced), so a caller never spends a retry on a probe that did not
+  // happen. `alive` is a conclusive answer that the bundle still exists.
+  async function probeBundle(lane, generation = sourceGeneration, { includeSaved = false } = {}) {
+    if (!scope.applications || !sourceCurrent(generation)) return { cause: null, alive: false, ran: false };
+    const timedOut = Symbol('bundle-probe-timeout');
+    let raw;
+    try {
+      raw = await raceWithBudget(
+        Promise.resolve().then(() => application.status({ jobId: lane.jobId, canvasFilePath: lane.canvasFilePath })),
+        readWatchdogMs,
+        timedOut,
+      );
+    } catch { return { cause: null, alive: false, ran: true }; }
+    if (raw === timedOut || !sourceCurrent(generation)) return { cause: null, alive: false, ran: true };
+    const result = normalizeSourceResult(raw);
+    if (result.kind === 'gone') return { cause: 'bundle_missing', alive: false, ran: true };
+    if (includeSaved && result.kind === 'done') return { cause: 'bundle_saved', alive: false, ran: true };
+    return { cause: null, alive: ['awaiting', 'host', 'needs_user', 'open'].includes(result.kind), ran: true };
+  }
+
+  async function proveBundleGone(lane, generation = sourceGeneration, options = {}) {
+    return (await probeBundle(lane, generation, options)).cause;
+  }
+
+  // Drops a lane whose bundle is proven gone. If the durable write refuses, the
+  // lane still must not be served, so it is ended in memory (terminal lanes are
+  // never persisted and are pruned after an hour).
+  async function dropProvenGoneLane(lane, cause, generation) {
+    if (!lanes.includes(lane)) return true;
+    const removed = await removeLane(lane.jobId, cause);
+    if (removed.ok) return true;
+    if (!sourceCurrent(generation)) return false;
+    if (lanes.includes(lane) && !['done', 'gone'].includes(lane.phase)) {
+      lane.phase = 'gone';
+      lane.reason = null;
+      lane.snapshot = { at: safeNow(now), kind: 'gone' };
+      epoch?.assignedLaneOrds.delete(lane.ord);
+    }
+    return true;
+  }
+
+  // Stranded lanes: restored from a lanes.json written before their bundle was
+  // discarded, pruned, saved elsewhere or deleted by hand while the bridge was
+  // off. They would sit as held/restart ("needs you") and hold a slot until a
+  // chat read them. Each restored lane is probed; only proof drops it, and one
+  // that could not be checked is retried on later ticks a bounded number of
+  // times (serve-time revalidation still covers it after that).
+  const RESTORE_PROBE_ATTEMPTS = 5;
+  // After the fast attempts a lane that still could not be checked is retried
+  // at this slow cadence, so a probe that failed five times in a row does not
+  // leave a really-gone lane counted as "needs you" until the person acts.
+  const RESTORE_REPROBE_MS = 5 * 60_000;
+  // `restoreProbes` is null once a probe answered conclusively (gone or alive).
+  function restoreProbeDue(lane, stamp) {
+    return scope.applications && Number.isInteger(lane.restoreProbes)
+      && ['held', 'needs_user'].includes(lane.phase)
+      && !(Number.isFinite(lane.restoreProbeAt) && lane.restoreProbeAt > stamp);
+  }
+  let restoreProbe = null;
+  async function probeRestoredLanes(generation = sourceGeneration) {
+    if (restoreProbe) return restoreProbe;
+    restoreProbe = (async () => {
+      try {
+        for (const lane of [...lanes]) {
+          if (!sourceCurrent(generation)) return;
+          if (!lanes.includes(lane) || !restoreProbeDue(lane, safeNow(now))) continue;
+          const outcome = await probeBundle(lane, generation, { includeSaved: true });
+          if (!sourceCurrent(generation)) return;
+          if (outcome.cause) { await dropProvenGoneLane(lane, outcome.cause, generation); lane.restoreProbes = null; continue; }
+          if (outcome.alive) { lane.restoreProbes = null; continue; }
+          if (!outcome.ran) continue;
+          if (lane.restoreProbes > 0) lane.restoreProbes -= 1;
+          if (lane.restoreProbes === 0) lane.restoreProbeAt = safeNow(now) + RESTORE_REPROBE_MS;
+        }
+      } finally { restoreProbe = null; }
+    })();
+    return restoreProbe;
+  }
+
+  // The lane to serve, after confirming its bundle still exists. A lane whose
+  // bundle is proven gone is dropped and the NEXT candidate is tried, so the
+  // chat is served the next job or an honest empty answer, never a prompt for a
+  // job that can no longer be answered. Returns { retry: true } if the world
+  // changed under the probe.
+  async function pickVerifiedLane(choose, generation, expectedEpoch) {
+    for (let attempt = 0; attempt <= CONSTANTS.MAX_LANES; attempt += 1) {
+      const lane = choose();
+      if (!lane) return null;
+      const cause = await proveBundleGone(lane, generation, { includeSaved: true });
+      if (!epochCurrent(expectedEpoch, generation)) return { retry: true };
+      if (!cause) {
+        // The probe was asynchronous: the lane may have been answered, dropped,
+        // held or refreshed meanwhile. Only a lane that is still servable goes
+        // out; otherwise choose again.
+        if (lanes.includes(lane) && lane.phase === 'awaiting' && lane.current && !lane.needsRefresh && canAssign(lane)) return lane;
+        continue;
+      }
+      await dropProvenGoneLane(lane, cause, generation);
+      if (!epochCurrent(expectedEpoch, generation)) return { retry: true };
+    }
+    return null;
+  }
+
   function terminalDrain() {
     return lanes.length === 0 || lanes.every(lane => ['done', 'gone'].includes(lane.phase));
   }
@@ -781,7 +1056,6 @@ export function createHandoffEngine({
       && Number.isFinite(lane.snapshot?.at) && lane.snapshot.at <= cutoff);
     if (expired.length === 0) return false;
     const removed = new Set(expired);
-    const priorLanes = lanes.slice();
     const priorCodes = [...codeIndex.entries()];
     lanes.splice(0, lanes.length, ...lanes.filter(lane => !removed.has(lane)));
     for (const lane of expired) {
@@ -790,9 +1064,12 @@ export function createHandoffEngine({
     for (const [codeKey, entry] of codeIndex) if (removed.has(entry?.lane)) codeIndex.delete(codeKey);
     const saved = await persistLanes(generation);
     if (!saved && sourceCurrent(generation)) {
-      lanes.splice(0, lanes.length, ...priorLanes);
-      codeIndex.clear();
-      for (const [codeKey, entry] of priorCodes) codeIndex.set(codeKey, entry);
+      // Put back only the lanes this prune took out. Restoring a snapshot of the
+      // whole array would erase every lane a release added while the save ran.
+      for (const lane of expired) {
+        if (!reinstateLane(lane)) continue;
+        for (const [codeKey, entry] of priorCodes) if (entry?.lane === lane && !codeIndex.has(codeKey)) codeIndex.set(codeKey, entry);
+      }
       return false;
     }
     return saved;
@@ -801,7 +1078,11 @@ export function createHandoffEngine({
   async function tick(stamp = safeNow(now)) {
     if (closed) return false;
     checkIdlePause();
-    await pruneTerminalLanes(Number.isFinite(stamp) ? stamp : safeNow(now));
+    // Never awaited: a slow probe must not delay the request that ticked.
+    const at = Number.isFinite(stamp) ? stamp : safeNow(now);
+    if (lanes.some(lane => restoreProbeDue(lane, at))) void probeRestoredLanes().catch(() => undefined);
+    await pruneTerminalLanes(at);
+    noteStalls(at);
     return !closed;
   }
 
@@ -830,7 +1111,8 @@ export function createHandoffEngine({
       const refreshed = await refreshOneLane(generation);
       if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     }
-    let lane = scope.applications ? chooseApplicationContinuation() : null;
+    let lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+    if (lane?.retry) return makeResultBody('retry');
     if (lane) return serveLane(lane, generation, expectedEpoch);
 
     // Push handoffs (scoring and marketplace) are preferred only at
@@ -846,9 +1128,11 @@ export function createHandoffEngine({
     // the push poll; give it another chance before starting fresh work.
     const refreshed = scope.applications ? await refreshOneLane(generation) : null;
     if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
-    lane = scope.applications ? chooseApplicationContinuation() : null;
+    lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+    if (lane?.retry) return makeResultBody('retry');
     if (lane) return serveLane(lane, generation, expectedEpoch);
-    lane = scope.applications ? chooseFreshApplication() : null;
+    lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch) : null;
+    if (lane?.retry) return makeResultBody('retry');
     if (lane) return serveLane(lane, generation, expectedEpoch);
 
     const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
@@ -860,7 +1144,8 @@ export function createHandoffEngine({
       if (resumedDuringGet()) return makeResultBody('retry');
       const refreshedAfterWait = scope.applications ? await refreshOneLane(generation) : null;
       if (resumedDuringGet() || refreshedAfterWait?.kind === 'retry') return makeResultBody('retry');
-      lane = scope.applications ? chooseApplicationContinuation() : null;
+      lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+      if (lane?.retry) return makeResultBody('retry');
       if (lane) return serveLane(lane, generation, expectedEpoch);
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
@@ -870,7 +1155,8 @@ export function createHandoffEngine({
         : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
       if (resumedDuringGet()) return makeResultBody('retry');
       if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
-      lane = scope.applications ? chooseFreshApplication() : null;
+      lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch) : null;
+      if (lane?.retry) return makeResultBody('retry');
       if (lane) return serveLane(lane, generation, expectedEpoch);
       const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
         || (scope.applications && lanes.some(item => item.needsRefresh || ['unread', 'host'].includes(item.phase) || item.inFlight.read || item.inFlight.status || item.inFlight.submit));
@@ -952,7 +1238,26 @@ export function createHandoffEngine({
         CONSTANTS.SUBMIT_STUCK_MS,
         timeout,
       );
-      if (!epochCurrent(expectedEpoch, generation)) return { kind: 'retry' };
+      if (settled === timeout) {
+        // The app is still working. If it commits after the lane was already
+        // reported stuck, that answer must not be forgotten: Resume would
+        // otherwise re-serve the stage the person's chat already answered.
+        void task.then(value => {
+          if (value === skipped) return;
+          // The lane moved to another handoff meanwhile; adoption already
+          // retired this code.
+          if (lane.current?.code && !codeGuard.equal(lane.current.code, code)) return;
+          recordAcceptedElsewhere(lane, code, normalizeSubmitResult(value));
+        }, () => undefined);
+      }
+      if (!epochCurrent(expectedEpoch, generation)) {
+        // The chat or generation moved on, but the app may have committed the
+        // answer. The fenced result is otherwise ignored, so record only that.
+        if (settled !== timeout && !settled.error && settled.value !== skipped) {
+          recordAcceptedElsewhere(lane, code, normalizeSubmitResult(settled.value));
+        }
+        return { kind: 'retry' };
+      }
       if (settled.value === skipped) return { kind: 'retry' };
       if (settled === timeout) return { kind: 'submit_stuck' };
       if (settled.error) {
@@ -968,10 +1273,25 @@ export function createHandoffEngine({
     }
   }
 
+  function detachedSubmitResult(result, code) {
+    if (result.kind === 'accepted') return makeResultBody('accepted', { jobComplete: false, next: null });
+    return code ? tombstoneResult(code) : makeResultBody('unknown_handoff');
+  }
+
   async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch) {
     if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const stamp = safeNow(now);
     const currentCode = lane.current?.code;
+    // The lane left the bridge (Unrelease, discard) while its submit was in
+    // flight. An accepted answer was still written, so say so, but never adopt
+    // the next handoff or index a code for a lane that is gone.
+    if (!lanes.includes(lane)) {
+      recordAcceptedElsewhere(lane, currentCode, result);
+      return detachedSubmitResult(result, currentCode);
+    }
+    // A hold placed while the submit was in flight stands: the answer is recorded
+    // but nothing is served or re-armed for a lane the person paused.
+    const heldOnLanding = isHeldPhase(lane);
     if (result.kind === 'submit_stuck') {
       await persistCap(lane, 'submit_stuck', generation);
       if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
@@ -989,11 +1309,20 @@ export function createHandoffEngine({
       lane.counters.junkStreak = 0;
       lane.counters.errStreak = 0;
       lane.retained = null;
+      // The answer that was outstanding for this job has arrived. If a next
+      // stage exists, serveLane below stamps it as served; until then nothing
+      // is being answered.
+      lane.answeredAt = stamp;
+      lane.awaitingAnswer = false;
+      lane.servedAt = null;
       counts.submitAccepted++;
       auditEvent('accepted', { tool: 'submit_handoff', outcome: 'accepted', stage: lane.current?.stage ?? 'unknown' });
       if (result.completed || !result.handoff) {
-        lane.phase = 'host';
-        lane.hostSince = stamp;
+        if (heldOnLanding) keepHoldOverResult(lane);
+        else {
+          lane.phase = 'host';
+          lane.hostSince = stamp;
+        }
         lane.current = null;
         notifyJobChanged(lane, generation);
         await persistLanes(generation);
@@ -1002,6 +1331,20 @@ export function createHandoffEngine({
         return makeResultBody('accepted', { jobComplete: true, next: null });
       }
       const priorStage = lane.current?.stage;
+      if (heldOnLanding) {
+        const held = normalizeCurrentHandoff(result.handoff, stamp);
+        lane.current = held;
+        keepHoldOverResult(lane);
+        if (held) {
+          rememberIssuedCode(lane, held.code, codeGuard);
+          indexLaneCode(codeIndex, lane, { epochN: expectedEpoch.n, servedAt: null }, CONSTANTS.CODE_INDEX_PER_LANE, codeGuard);
+        }
+        notifyJobChanged(lane, generation);
+        await persistLanes(generation);
+        if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+        wake();
+        return makeResultBody('accepted', { jobComplete: false, next: null });
+      }
       if (!adoptCurrent(lane, result.handoff)) {
         await persistCap(lane, 'write_failed', generation);
         if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
@@ -1047,6 +1390,13 @@ export function createHandoffEngine({
         if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         return makeResultBody('held', { reason: 'rejection_cap' });
       }
+      // ChatGPT is handed a code for the corrected answer. A recovery re-read
+      // that rotated the code reset the serve state (adoptCurrent), so re-arm it.
+      if (lane.phase === 'awaiting' && !laneAwaitingAnswer(lane)) {
+        lane.awaitingAnswer = true;
+        lane.servedAt = stamp;
+        lane.servedEpochN = expectedEpoch.n;
+      }
       await persistLanes(generation);
       if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
       wake();
@@ -1068,15 +1418,23 @@ export function createHandoffEngine({
         const originalStage = result.stage ?? lane.current?.stage;
         const reread = await readLane(lane, { recoveryStage: originalStage, generation });
         if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+        if (!lanes.includes(lane)) return detachedSubmitResult(result, currentCode);
         if (reread?.kind === 'open' && lane.current) {
           const freshStage = reread.handoff?.stage ?? lane.current.stage;
           if (originalStage && freshStage !== originalStage) {
             return makeResultBody('superseded', { note: supersededStageNote(originalStage, freshStage) });
           }
+          // Held while the re-read ran: do not send the answer to the app again.
+          if (isHeldPhase(lane)) return makeResultBody(lane.phase, { reason: lane.reason });
           const retried = await callApplicationSubmit(lane, lane.current.code, text, generation, expectedEpoch);
           return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch);
         }
         if (lane.phase === 'host') return makeResultBody('superseded');
+        // The reread proved the bundle is gone, or saved elsewhere ('done' is
+        // only ever a saved job). Counting that as a transient write error
+        // answered 'retry' and then flipped a finished lane to needs_user; it
+        // is a definite, final answer.
+        if (lane.phase === 'gone' || lane.phase === 'done') return makeResultBody('unknown_handoff');
       }
       lane.counters.errStreak++;
       if (lane.counters.errStreak >= CONSTANTS.APPLICATION_ERROR_STREAK) {
@@ -1091,10 +1449,29 @@ export function createHandoffEngine({
     return makeResultBody('retry');
   }
 
+  // What a submit that waited for a semaphore slot answers when its lane changed
+  // while it waited, or null when the lane can still take it.
+  function staleQueuedSubmitResult(lane, code, text) {
+    if (!lanes.includes(lane)) return tombstoneResult(code);
+    if (isHeldPhase(lane)) {
+      // Not a durable verdict: the person can resume and send the same answer.
+      verdicts.delete(verdictKey(codeGuard.key(code), text));
+      if (lane.phase === 'held') { counts.submitHeld++; return makeResultBody('held', { reason: lane.reason }); }
+      return makeResultBody('needs_user', { reason: lane.reason });
+    }
+    if (lane.phase === 'host') { counts.submitSuperseded++; return makeResultBody('superseded'); }
+    if (lane.phase === 'gone' || lane.phase === 'done' || !lane.current) return makeResultBody('unknown_handoff');
+    if (!codeGuard.equal(lane.current.code, code)) return tombstoneResult(code);
+    return null;
+  }
+
   async function runSubmit(lane, text, generation = sourceGeneration, expectedEpoch = epoch) {
+    const submittedCode = lane.current?.code;
     await semaphore.acquire();
     try {
       if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
+      const stale = staleQueuedSubmitResult(lane, submittedCode, text);
+      if (stale) return stale;
       const code = lane.current.code;
       const key = verdictKey(codeGuard.key(code), text);
       const retained = lane.retained;
@@ -1250,15 +1627,21 @@ export function createHandoffEngine({
     const codeDigest = codeGuard.digest(code);
     const entry = codeIndex.get(codeGuard.key(code));
     if (!entry?.lane || !codeGuard.sameDigest(codeDigest, entry.codeDigest)) return tombstoneResult(code);
+    // Backstop: a route for a lane that is no longer in the bridge is stale.
+    if (!lanes.includes(entry.lane)) { codeIndex.delete(codeGuard.key(code)); return tombstoneResult(code); }
     // A scope downgrade never lets a previously served application answer
     // reach the adapter.  Keep the release durable for a later, confirmed
     // re-enable, but deny this in-flight handoff without touching its state.
     if (!scope.applications) return makeResultBody('held', { reason: 'scope_disabled' });
     const lane = entry.lane;
+    // Any submit that reaches its lane is ChatGPT being heard on this job, even
+    // when it is turned away before the source is asked (junk, wrong stage, a
+    // cached verdict, held). runSubmit stamps its own retained record.
+    lane.submittedAt = safeNow(now);
     if (lane.phase === 'held') { counts.submitHeld++; return makeResultBody('held', { reason: lane.reason }); }
     if (lane.phase === 'needs_user') return makeResultBody('needs_user', { reason: lane.reason });
     if (lane.phase === 'host') { counts.submitSuperseded++; return makeResultBody('superseded'); }
-    if (lane.phase === 'gone' || !lane.current) return makeResultBody('unknown_handoff');
+    if (lane.phase === 'gone' || lane.phase === 'done' || !lane.current) return makeResultBody('unknown_handoff');
 
     const classification = classifySubmission({ response: text, lane, lanes, codeGuard });
     if (classification !== 'pass') {
@@ -1415,6 +1798,12 @@ export function createHandoffEngine({
     return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal };
   }
 
+  // Job ids whose bundle the app discarded or pruned this session (insertion
+  // ordered, bounded). Only these are refused by `release`; a person's own
+  // Unrelease and the probe-proven drops stay reversible.
+  const REMOVED_BUNDLES_CAP = 256;
+  const removedBundles = new Set();
+
   async function release({ jobs = [] } = {}) {
     const generation = sourceGeneration;
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
@@ -1427,13 +1816,23 @@ export function createHandoffEngine({
       }
       unique.set(item.jobId, { jobId: item.jobId, canvasFilePath: item.canvasFilePath });
     }
+    counts.releaseCalls++;
+    // A bundle the app already discarded or pruned can never be answered. A
+    // release that was in flight across that event (the manual sheet's confirm
+    // dialog can stay open) must not resurrect a lane for it.
+    for (const jobId of [...unique.keys()]) if (removedBundles.has(jobId)) unique.delete(jobId);
+    if (unique.size === 0) return { ok: false, code: 'unknown_job' };
     const additions = [...unique.values()].filter(item => !lanes.some(lane => lane.jobId === item.jobId));
     if (lanes.filter(lane => !['done', 'gone'].includes(lane.phase)).length + additions.length > CONSTANTS.MAX_LANES) {
       return { ok: false, code: 'lane_limit' };
     }
-    const beforeLanes = lanes.slice();
-    const beforePaths = new Map(beforeLanes.map(lane => [lane, lane.canvasFilePath]));
-    const beforeLaneOrdinal = laneOrdinal;
+    // Rollback is lane-precise: a save can fail while another release, an
+    // Unrelease or a discard changes the list, so only what THIS call did is
+    // undone. The lane ordinal is never rewound (ordinals may have gaps).
+    const addedLanes = [];
+    const adoptedPaths = [];
+    const added = [];
+    let adoptedPath = false;
     for (const item of unique.values()) {
       const existing = lanes.find(lane => lane.jobId === item.jobId);
       if (existing) {
@@ -1441,36 +1840,64 @@ export function createHandoffEngine({
           try {
             const adopted = await application.adoptCanvasPath(existing.jobId, item.canvasFilePath, existing.canvasFilePath);
             if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
-            if (adopted?.adopted === true) existing.canvasFilePath = item.canvasFilePath;
+            if (adopted?.adopted === true) {
+              adoptedPaths.push([existing, existing.canvasFilePath, item.canvasFilePath]);
+              existing.canvasFilePath = item.canvasFilePath;
+              adoptedPath = true;
+            }
           } catch { /* keep the trusted old path */ }
         }
         continue;
       }
-      lanes.push(createApplicationLane({
+      added.push(item.jobId);
+      const created = createApplicationLane({
         ord: ++laneOrdinal,
         jobId: item.jobId,
         canvasFilePath: item.canvasFilePath,
         releasedAt: safeNow(now),
         codeGuard,
-      }));
+      });
+      addedLanes.push(created);
+      lanes.push(created);
+    }
+    const undoRelease = () => {
+      for (const created of addedLanes) {
+        const at = lanes.indexOf(created);
+        if (at >= 0) lanes.splice(at, 1);
+      }
+      for (const [lane, before, adopted] of adoptedPaths) if (lane.canvasFilePath === adopted) lane.canvasFilePath = before;
+    };
+    // Releasing a job that already has a lane changes nothing. It must not
+    // persist, write an audit row, log a "release", count as human activity or
+    // wake a poller: the renderer re-publishes every 30 s and auto-release used
+    // to turn each keep-alive into a phantom release that also reset the idle
+    // pause. A path adoption alone is still a durable change, so it persists,
+    // but it is not a release.
+    if (added.length === 0) {
+      counts.releaseNoops++;
+      if (adoptedPath && !await persistLanes(generation)) {
+        if (sourceCurrent(generation)) undoRelease();
+        return { ok: false, code: 'persist_failed' };
+      }
+      if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
+      return { ok: true, count: 0, added: [] };
     }
     if (!await persistLanes(generation)) {
-      if (sourceCurrent(generation)) {
-        lanes.splice(0, lanes.length, ...beforeLanes);
-        for (const [lane, canvasFilePath] of beforePaths) lane.canvasFilePath = canvasFilePath;
-        laneOrdinal = beforeLaneOrdinal;
-      }
+      if (sourceCurrent(generation)) undoRelease();
       return { ok: false, code: 'persist_failed' };
     }
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     humanAction();
-    auditEvent('release', { count: unique.size });
-    log('release', { kind: 'application', count: unique.size });
+    auditEvent('release', { count: added.length });
+    log('release', { kind: 'application', count: added.length });
     wake();
-    return { ok: true, count: unique.size };
+    return { ok: true, count: added.length, added };
   }
 
-  async function unrelease(jobId) {
+  // Removes one lane. `cause` is a closed enum: 'user' is the person's own
+  // Unrelease (a human action); the others are the app noticing the bundle
+  // itself stopped existing, which is bookkeeping, never human activity.
+  async function removeLane(jobId, cause) {
     const generation = sourceGeneration;
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
     const index = lanes.findIndex(lane => lane.jobId === jobId);
@@ -1482,20 +1909,59 @@ export function createHandoffEngine({
       removedCodes.push([codeKey, entry]);
       codeIndex.delete(codeKey);
     }
+    const hadSlot = epoch?.assignedLaneOrds.delete(lane.ord) === true;
+    clearLaneHint(lane);
     if (!await persistLanes(generation)) {
       if (sourceCurrent(generation)) {
-        lanes.splice(index, 0, lane);
-        for (const [codeKey, entry] of removedCodes) codeIndex.set(codeKey, entry);
+        // Only this lane goes back, and only if the job has no lane again: a
+        // keep-alive release that ran during the save already owns the job.
+        if (reinstateLane(lane)) {
+          for (const [codeKey, entry] of removedCodes) if (!codeIndex.has(codeKey)) codeIndex.set(codeKey, entry);
+          if (hadSlot) epoch?.assignedLaneOrds.add(lane.ord);
+          // An answer the app accepted while the lane was out was not applied to it.
+          settleAcceptedElsewhere(lane);
+        }
         return { ok: false, code: 'persist_failed' };
       }
       return { ok: false, code: 'not_ready' };
     }
     if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
-    humanAction();
-    auditEvent('unrelease');
-    log('unrelease', { kind: 'application', count: 1 });
+    // A retired handoff code must never be replayable as a fresh one.
+    // When the app (not the person) retired the lane, a chat still holding
+    // its code should hear "superseded", not look like a forged code.
+    if (cause !== 'user' && lane.current?.code) {
+      tombstoneCode(tombstones, lane.current.code, 'rotated', { laneOrd: lane.ord, at: safeNow(now) }, CONSTANTS.TOMBSTONES_PER_ENGINE, codeGuard);
+    }
+    if (cause === 'user') {
+      counts.unreleaseCalls++;
+      humanAction();
+      auditEvent('unrelease');
+      log('unrelease', { kind: 'application', count: 1 });
+    } else {
+      counts.lanesDropped++;
+      const perCause = DROP_COUNTER[cause];
+      if (perCause) counts[perCause]++;
+      auditEvent('unrelease', { cause });
+      log('unrelease', { kind: 'application', count: 1, cause });
+    }
     wake();
     return { ok: true };
+  }
+
+  async function unrelease(jobId) {
+    return removeLane(jobId, 'user');
+  }
+
+  // The app tells the bridge its bundle was discarded or pruned. Only closed
+  // causes are accepted, so nothing derived from job content can reach a log.
+  async function dropLane(jobId, cause = 'bundle_discarded') {
+    const safeCause = ['bundle_discarded', 'bundle_pruned', 'bundle_missing', 'bundle_saved'].includes(cause) ? cause : 'bundle_discarded';
+    if ((safeCause === 'bundle_discarded' || safeCause === 'bundle_pruned') && typeof jobId === 'string') {
+      removedBundles.delete(jobId);
+      removedBundles.add(jobId);
+      while (removedBundles.size > REMOVED_BUNDLES_CAP) removedBundles.delete(removedBundles.values().next().value);
+    }
+    return removeLane(jobId, safeCause);
   }
 
   async function hold(jobId, reason = 'user_hold') {
@@ -1507,11 +1973,25 @@ export function createHandoffEngine({
       heldFrom: lane.heldFrom,
       snapshot: lane.snapshot,
       changedAt: lane.changedAt,
+      awaitingAnswer: lane.awaitingAnswer,
+      servedAt: lane.servedAt,
+      lastServedDigest: lane.lastServedDigest,
+      servedCodeAgain: lane.servedCodeAgain,
     };
+    const heldCurrent = lane.current;
+    const heldAnsweredAt = lane.answeredAt;
     try { holdLane(lane, reason, safeNow(now)); }
     catch { return { ok: false, code: 'invalid_arguments' }; }
     if (!await persistLanes()) {
-      Object.assign(lane, prior);
+      // An answer the app accepted (or a rotated code it returned) while the
+      // save ran already replaced the lane's handoff: the serve bookkeeping
+      // that was cleared belongs to the OLD prompt and must not come back.
+      const landed = lane.current !== heldCurrent || lane.answeredAt !== heldAnsweredAt;
+      const { awaitingAnswer, servedAt, lastServedDigest, servedCodeAgain, ...marker } = prior;
+      Object.assign(lane, marker);
+      if (landed) {
+        if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) lane.phase = 'unread';
+      } else Object.assign(lane, { awaitingAnswer, servedAt, lastServedDigest, servedCodeAgain });
       return { ok: false, code: 'persist_failed' };
     }
     humanAction();
@@ -1523,6 +2003,10 @@ export function createHandoffEngine({
     if (jobId) {
       const lane = lanes.find(item => item.jobId === jobId);
       if (!lane) return { ok: false, code: 'not_found' };
+      // Only a held lane has anything to resume. A stale or repeated click on a
+      // lane that is already running must not restart its quiet clock and hide a
+      // real stall.
+      if (!isHeldPhase(lane)) return { ok: true };
       const prior = {
         phase: lane.phase,
         reason: lane.reason,
@@ -1530,6 +2014,8 @@ export function createHandoffEngine({
         snapshot: lane.snapshot,
       };
       resumeLane(lane);
+      // The time held was time ChatGPT could not have answered in.
+      lane.quietFrom = safeNow(now);
       if (!lane.current && ['awaiting', 'host'].includes(lane.phase)) lane.phase = 'unread';
       if (!await persistLanes()) {
         Object.assign(lane, prior);
@@ -1538,6 +2024,9 @@ export function createHandoffEngine({
     } else {
       paused = false;
       pauseCause = null;
+      // A pause turns ChatGPT's calls away: no lane's quiet time includes it.
+      const resumedAt = safeNow(now);
+      for (const lane of lanes) lane.quietFrom = resumedAt;
     }
     humanAction();
     auditEvent('resume', { cause: jobId ? 'lane' : 'bridge' });
@@ -1587,12 +2076,18 @@ export function createHandoffEngine({
     if (!Array.isArray(values)) return 0;
     for (const value of values) {
       try {
+        // A finished or vanished lane has nothing left to serve; restoring it
+        // as a held 'restart' lane made the person Resume a dead job.
+        if (['done', 'gone'].includes(value?.phase)) continue;
         const lane = rehydrateApplicationLane(value, safeNow(now));
+        lane.restoreProbes = RESTORE_PROBE_ATTEMPTS;
+        lane.restoreProbeAt = 0;
         lanes.push(lane);
         laneOrdinal = Math.max(laneOrdinal, lane.ord);
       } catch { /* unknown/corrupt lanes are skipped */ }
     }
     restartConfirmed = lanes.length === 0;
+    if (lanes.some(lane => restoreProbeDue(lane, safeNow(now)))) void probeRestoredLanes().catch(() => undefined);
     return lanes.length;
   }
 
@@ -1602,7 +2097,12 @@ export function createHandoffEngine({
     try {
       if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
     } catch { /* status is advisory and must never break the control plane */ }
-    const outstandingLane = lanes.find(lane => lane.phase === 'awaiting' && lane.servedAt != null);
+    const stamp = safeNow(now);
+    const stallsNow = noteStalls(stamp);
+    // The lane a chat is being waited on for: a stalled one first, otherwise the
+    // first served to THIS chat with no accepted answer since.
+    const outstandingLane = lanes.find(lane => laneStall(lane, stamp)) ?? lanes.find(laneAwaitingAnswer);
+    const outstandingStall = outstandingLane ? laneStall(outstandingLane, stamp) : null;
     const applications = {
       ready: lanes.filter(lane => lane.phase === 'awaiting').length,
       working: lanes.filter(lane => ['unread', 'host'].includes(lane.phase)).length,
@@ -1662,11 +2162,11 @@ export function createHandoffEngine({
           kind: 'application',
           stage: statusStage(outstandingLane.current?.stage),
           task: null,
-          stalled: false,
-          stalledSince: null,
-          stallsLastHour: 0,
+          stalled: outstandingStall !== null,
+          stalledSince: outstandingStall ? statusTime(outstandingStall.anchor) : null,
+          stallsLastHour: Math.min(stallsNow, 999),
         }) : null,
-        servedTwice: Boolean(outstandingLane?.serves > 1),
+        servedTwice: outstandingLane?.servedCodeAgain === true,
         previous: Object.freeze(retiredEpochs.slice(-5).map(item => Object.freeze({
           ordinal: Number.isInteger(item.n) && item.n > 0 ? item.n : 0,
           endedAt: statusTime(item.endedAt),
@@ -1686,14 +2186,26 @@ export function createHandoffEngine({
           tasks: Object.freeze([...pushTasks].map(([task, pending]) => Object.freeze({ task, pending }))),
         }),
         push: safePush,
-        jobs: Object.freeze(lanes.map(lane => Object.freeze({
-          jobId: JOB_ID_RE.test(lane.jobId) ? lane.jobId : null,
-          phase: statusPhase(lane.phase),
-          stage: statusStage(lane.current?.stage),
-          reason: statusReason(lane.reason),
-          servedToChat: epoch?.assignedLaneOrds.has(lane.ord) ? epoch.n : null,
-          changedAt: statusTime(lane.changedAt ?? lane.releasedAt),
-        }))),
+        jobs: Object.freeze(lanes.map(lane => {
+          const stall = laneStall(lane, stamp);
+          return Object.freeze({
+            jobId: JOB_ID_RE.test(lane.jobId) ? lane.jobId : null,
+            phase: statusPhase(lane.phase),
+            stage: statusStage(lane.current?.stage),
+            reason: statusReason(lane.reason),
+            servedToChat: epoch?.assignedLaneOrds.has(lane.ord) ? epoch.n : null,
+            changedAt: statusTime(lane.changedAt ?? lane.releasedAt),
+            // Per-job answer tracking, all for the CURRENT chat only:
+            // servedAt is when this job's current stage went out, answeredAt
+            // the last accepted submit, awaitingAnswer that the stage is out
+            // and unanswered, stalled that it has been quiet too long.
+            servedAt: epoch && lane.servedEpochN === epoch.n && lane.phase === 'awaiting' ? statusTime(lane.servedAt) : null,
+            answeredAt: statusTime(lane.answeredAt),
+            awaitingAnswer: laneAwaitingAnswer(lane),
+            stalled: stall !== null,
+            stalledSince: stall ? statusTime(stall.anchor) : null,
+          });
+        })),
       }),
       push: safePush,
       counts: Object.freeze({ ...counts }),
@@ -1840,6 +2352,7 @@ export function createHandoffEngine({
     tick,
     release,
     unrelease,
+    dropLane,
     hold,
     resume,
     pause,

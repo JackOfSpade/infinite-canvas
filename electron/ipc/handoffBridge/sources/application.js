@@ -3,7 +3,17 @@ import {
   getLocalApplicationHandoff,
   localApplicationStatus,
   submitLocalApplicationHandoff,
+  subscribeLocalApplicationDiscards,
 } from '../../localAiApplication.js';
+
+// The only bridge-side view of the app's bundle-removal chokepoint. The
+// composition uses the per-source method below; index.js uses this one when
+// no runtime exists yet (a discard while the bridge is off still has to free
+// its durable lane). Listeners receive { jobId, canvasFilePath, cause } where
+// cause is a closed enum.
+export function subscribeApplicationDiscards(listener) {
+  return subscribeLocalApplicationDiscards(listener);
+}
 
 const WATCHDOG_MS = 8_000;
 const CONFIRM_TEXT_MAX_CHARS = 60;
@@ -49,6 +59,7 @@ export function createApplicationSource({
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
   codeGuard = null,
+  subscribeDiscards = api.subscribeLocalApplicationDiscards || subscribeLocalApplicationDiscards,
 } = {}) {
   let guard = null;
   function setCodeGuard(value) {
@@ -110,6 +121,13 @@ export function createApplicationSource({
     kind: 'application',
     setCodeGuard,
 
+    // Tells the engine when a bundle it may have released stops existing. A
+    // replaced/injected api without the seam simply never fires.
+    subscribeDiscard(listener) {
+      if (typeof listener !== 'function' || typeof subscribeDiscards !== 'function') return () => undefined;
+      return subscribeDiscards(listener) || (() => undefined);
+    },
+
     async read(lane) {
       const key = operationKey(lane);
       const outcome = await bounded('read', key, () => getHandoff({ jobId: lane?.jobId, canvasFilePath: lane?.canvasFilePath }));
@@ -122,7 +140,7 @@ export function createApplicationSource({
 
     async status(lane) {
       const key = operationKey(lane);
-      const outcome = await bounded('status', key, () => getStatus(lane?.jobId, lane?.canvasFilePath));
+      const outcome = await bounded('status', key, () => getStatus(lane?.jobId, lane?.canvasFilePath, { absentRootIsGone: true }));
       if (outcome.timeout) return { kind: 'busy' };
       if (outcome.error) return { kind: 'threw', ...classifyApplicationThrow(outcome.error) };
       return mapApplicationStatus(outcome.result);
@@ -159,7 +177,12 @@ export function createApplicationSource({
       }
     },
 
-    async describeForConfirm(canvasFilePath, jobIds) {
+    // `requireAll: false` is for callers that can act on a subset (auto
+    // release, the restart and enable sheets): one job that vanished must not
+    // blank the names of every live job beside it. The default still fails
+    // closed for the manual release confirmation, which must show exactly what
+    // it will release.
+    async describeForConfirm(canvasFilePath, jobIds, { requireAll = true } = {}) {
       const wanted = Array.isArray(jobIds) ? jobIds.filter(id => typeof id === 'string') : [];
       const discoveredOutcome = await bounded('discover', String(canvasFilePath || ''), () => discover(canvasFilePath));
       if (discoveredOutcome.timeout) return { ok: false, code: 'busy', canvasFilePath: null, items: [] };
@@ -168,8 +191,9 @@ export function createApplicationSource({
       if (!Array.isArray(discovered)) return { ok: false, code: 'unavailable', canvasFilePath: null, items: [] };
       const canonical = discovered.find(item => typeof item?.canvasFilePath === 'string')?.canvasFilePath || null;
       const byId = new Map(discovered.filter(item => item && typeof item.id === 'string').map(item => [item.id, item]));
-      if (wanted.length === 0 || wanted.some(id => !byId.has(id))) return { ok: false, code: 'unknown_job', canvasFilePath: canonical, items: [] };
-      const items = wanted.map(id => {
+      const present = wanted.filter(id => byId.has(id));
+      if (present.length === 0 || (requireAll !== false && present.length !== wanted.length)) return { ok: false, code: 'unknown_job', canvasFilePath: canonical, items: [] };
+      const items = present.map(id => {
         const item = byId.get(id);
         return Object.freeze({
           jobId: id,

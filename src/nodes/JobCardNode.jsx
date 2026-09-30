@@ -1046,8 +1046,12 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // deleting the old private workspace; if React has not committed within
       // these turns, preserve it rather than risking a destructive cleanup.
       let replacementPersisted = false;
-      for (let attempt = 0; attempt < 3 && !replacementPersisted; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 0));
+      // Bounded wait (about 0.5 s), not three zero-delay turns: React can
+      // take longer than that to commit under load, and a missed commit used
+      // to skip the cleanup silently, leaving the prior job's folder to age
+      // out through retention instead of being retired now.
+      for (let attempt = 0; attempt < 20 && !replacementPersisted; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 0 : 25));
         replacementPersisted = getLiveNode(idRef.current)?.data?.localApplication?.id === queued.localJob.id;
       }
       const replacedLocalApplication = replacedLocalApplicationForCleanup(
@@ -1055,6 +1059,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         queued.localJob,
         replacementPersisted,
       );
+      if (!replacedLocalApplication && expectedPriorLocalApplication?.id) {
+        // State the observation only: which gate stopped the cleanup.
+        EventLogger.log(`[LocalAI] replaced-handoff cleanup skipped job=${String(expectedPriorLocalApplication.id).slice(0, 8)} replacementCommitted=${replacementPersisted}`);
+      }
       if (replacedLocalApplication) {
         try {
           await window.electronAPI.discardLocalApplication?.({

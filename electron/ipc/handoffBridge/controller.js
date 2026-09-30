@@ -226,6 +226,7 @@ export function createHandoffBridgeController(options = {}) {
   let fault = null;
   let seq = 0;
   let tickTimer = null;
+  let quietStateSignature = null;
   let notifyTimer = null;
   let operation = null;
   let teardown = null;
@@ -310,6 +311,7 @@ export function createHandoffBridgeController(options = {}) {
   function change() { seq += 1; schedule(); }
   function startTicks() {
     if (tickTimer !== null) return;
+    quietStateSignature = null;
     try {
       tickTimer = timers.setInterval(() => { void tick(); }, TICK_MS);
       tickTimer?.unref?.();
@@ -451,6 +453,13 @@ export function createHandoffBridgeController(options = {}) {
         servedToChat: Number.isFinite(item.servedToChat) && item.servedToChat >= 0
           ? Math.floor(item.servedToChat) : null,
         changedAt: finite(item.changedAt),
+        // Per-job answer tracking (see the engine's snapshot): times or null,
+        // and closed booleans. Nothing else about the job crosses this line.
+        servedAt: finite(item.servedAt),
+        answeredAt: finite(item.answeredAt),
+        awaitingAnswer: item.awaitingAnswer === true,
+        stalled: item.stalled === true,
+        stalledSince: finite(item.stalledSince),
       }];
     }).filter(item => item.jobId !== null);
   }
@@ -1004,6 +1013,19 @@ export function createHandoffBridgeController(options = {}) {
   // exported index stop helper is the sole production caller; UI Disable is
   // always routed to disable() above and therefore fences immediately.
   function shutdownForQuit() { return stop({ gracefulQuit: true }); }
+  function publishIfQuietStateChanged() {
+    try {
+      const inner = snapshotOf(engine);
+      const jobs = Array.isArray(inner.queue?.jobs) ? inner.queue.jobs : [];
+      const signature = JSON.stringify([
+        inner.chat?.outstanding?.stalled === true,
+        jobs.map(job => [job?.jobId, job?.phase, job?.stalled === true]),
+      ]);
+      // The first tick of a run publishes once: the engine may already have
+      // dropped a stranded lane (or changed anything else) since the last push.
+      if (signature !== quietStateSignature) { quietStateSignature = signature; change(); }
+    } catch { /* an advisory republish never fails a tick */ }
+  }
   async function tick(generation = lifecycleGeneration) {
     try {
       // A direct housekeeping tick after a completed Disable is intentionally
@@ -1018,6 +1040,11 @@ export function createHandoffBridgeController(options = {}) {
       await call(engine, 'tick', stamp);
       if (!servingGeneration(generation)) return { success: false, code: 'cancelled', status: snapshot(false) };
       pruneReleasedEvidence();
+      // A lane can cross the "ChatGPT has been quiet" threshold, or be dropped
+      // because its bundle was found gone, with no request or user action to
+      // announce it. Republish only when that closed picture actually changed,
+      // so an idle bridge stays silent (no per-tick IPC).
+      publishIfQuietStateChanged();
       return { success: true, status: snapshot(false) };
     } catch { return { success: false, code: 'internal_error', status: snapshot(false) }; }
   }
@@ -1271,11 +1298,40 @@ export function createHandoffBridgeController(options = {}) {
       if (!servingGeneration(generation)) return { ok: false, code: 'NOT_READY' };
       const result = await call(activeEngine, 'release', { jobs: jobs.map(item => ({ jobId: item.jobId, canvasFilePath: item.canvasFilePath })) });
       if (!servingGeneration(generation) || activeEngine !== engine) return { ok: false, code: 'NOT_READY' };
+      // The engine reports which jobs it actually added. A job that already
+      // had a lane keeps its ORIGINAL release time: re-stamping it on every
+      // auto-release keep-alive pushed the 24 h lapse out forever. An engine
+      // that reports no `added` list (an older/injected one) keeps the legacy
+      // "everything requested was released" reading.
+      const added = Array.isArray(result?.added) ? new Set(result.added) : null;
+      const unattendedNoop = request?.auto === true && added !== null && added.size === 0;
       if (result?.ok) {
-        for (const item of jobs) releaseTimes.set(item.jobId, safeNow(now));
-        humanAction();
+        for (const item of jobs) if (added === null || added.has(item.jobId) || !releaseTimes.has(item.jobId)) releaseTimes.set(item.jobId, safeNow(now));
+        // An unattended re-attempt is not a person acting, so it must not
+        // reset the idle-pause clock either.
+        if (!unattendedNoop) humanAction();
       }
-      change(); return result || { ok: false, code: 'invalid_arguments' };
+      if (!unattendedNoop) change();
+      return result || { ok: false, code: 'invalid_arguments' };
+    } catch { return { ok: false, code: 'internal_error' }; }
+  }
+  // The app removed a bundle (discard/prune). Frees the lane and its
+  // bookkeeping without counting as a person's action. A missing lane is the
+  // normal case (the job was never released) and stays silent.
+  async function onBundleDiscarded(event) {
+    const jobId = event?.jobId;
+    if (typeof jobId !== 'string' || !UUID.test(jobId)) return { ok: false, code: 'invalid_arguments' };
+    // Deliberately NOT gated on `serving`: a runtime that is composed but not
+    // (or no longer) serving still holds the restored lanes in memory and
+    // would write the dead one back the next time it persists.
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!activeEngine) return { ok: false, code: 'NOT_READY' };
+    try {
+      const result = await call(activeEngine, 'dropLane', jobId, event?.cause);
+      if (generation !== lifecycleGeneration || activeEngine !== engine) return { ok: false, code: 'NOT_READY' };
+      if (result?.ok) { releaseTimes.delete(jobId); change(); }
+      return result || { ok: false, code: 'not_found' };
     } catch { return { ok: false, code: 'internal_error' }; }
   }
   async function unrelease(jobId) {
@@ -1522,7 +1578,7 @@ export function createHandoffBridgeController(options = {}) {
 
   return Object.freeze({
     snapshot, status: snapshot, getState: snapshot, subscribe, tick, gate, get, submit,
-    enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, releasePushHubs, unreleasePushHub,
+    enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, onBundleDiscarded, releasePushHubs, unreleasePushHub,
     newChat: args => chat('new', args), continueChat: args => chat('continue', args),
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
     holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, reloadConfig, ackAlarm,

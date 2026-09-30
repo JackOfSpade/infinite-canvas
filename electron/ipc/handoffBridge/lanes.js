@@ -112,7 +112,25 @@ export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt =
     acceptedFingerprints: new Set(),
     servedAt: null,
     serves: 0,
+    // Memory only: the digest of the code last served, and whether the latest
+    // serve repeated it.
+    lastServedDigest: null,
+    servedCodeAgain: false,
+    // Memory only: an accepted answer the app took while this lane was detached
+    // or fenced off, applied when the lane is back (see settleAcceptedElsewhere).
+    acceptedElsewhere: null,
+    // Per-job answer tracking (memory only, never persisted). awaitingAnswer is
+    // true from the moment this lane's current prompt is served to a chat until
+    // an accepted submit (or a different handoff replacing it); servedEpochN is
+    // the chat ordinal that prompt went to; answeredAt is the last accepted
+    // submit. The engine turns them into status only for the CURRENT chat.
+    awaitingAnswer: false,
+    servedEpochN: null,
+    answeredAt: null,
     submittedAt: null,
+    // Floor for the quiet clock (memory only): set when the lane comes back
+    // from a hold, a pause or a re-read, so that time is not counted as quiet.
+    quietFrom: null,
     hostSince: null,
     counters: makeCounters(),
     snapshot: null,
@@ -139,6 +157,14 @@ export function rehydrateApplicationLane(value, now = 0) {
 export function holdLane(lane, reason = 'user_hold', now = 0) {
   if (!LANE_REASONS.includes(reason)) throw new TypeError('Invalid lane reason');
   if (lane.phase !== 'held') lane.heldFrom = ['done', 'gone', 'needs_user'].includes(lane.phase) ? 'unread' : lane.phase;
+  // A hold ends the wait on the chat: when the lane comes back nothing has been
+  // re-served, so it owes no answer and has no serve time until the next get.
+  lane.awaitingAnswer = false;
+  lane.servedAt = null;
+  // ...and the serve that just ended is not a "repeat" if the same code goes out
+  // again after the hold.
+  lane.lastServedDigest = null;
+  lane.servedCodeAgain = false;
   lane.phase = ['job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
     ? 'needs_user'
     : 'held';
@@ -150,7 +176,11 @@ export function holdLane(lane, reason = 'user_hold', now = 0) {
 
 export function resumeLane(lane) {
   if (['held', 'needs_user'].includes(lane.phase)) {
-    lane.phase = LANE_PHASES.includes(lane.heldFrom) ? lane.heldFrom : 'unread';
+    // A terminal phase is not a place to resume to: the lane would come back
+    // with no snapshot and never age out. Re-read it instead.
+    // A human-advance hold means the prompt this lane held is retired, so it
+    // never resumes to 'awaiting' on that stale code; it re-reads instead.
+    lane.phase = lane.reason !== 'human_advance' && LANE_PHASES.includes(lane.heldFrom) && !['done', 'gone'].includes(lane.heldFrom) ? lane.heldFrom : 'unread';
     lane.reason = null;
     lane.heldFrom = null;
     lane.snapshot = null;

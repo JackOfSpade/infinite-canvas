@@ -7,6 +7,7 @@ import { EventLogger } from '../utils/EventLogger';
 // HandoffBridgePanel uses, no new IPC channel — see isBridgeHeldApplication
 // below for the one thing this dock does with it.
 import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
+import { BridgeProgress } from './BridgeProgress';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
@@ -15,6 +16,9 @@ import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals,
 // answer that. See applicationHandoffDock.js's doc comment for the shared
 // dock contract this file adapts application handoffs into.
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
+
+// Bridge lane phases in which ChatGPT holds the work (see isBridgeHeldApplication).
+const BRIDGE_WORKING_PHASES = new Set(['unread', 'awaiting', 'host']);
 
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
@@ -409,9 +413,13 @@ export function NonApiAiDialog() {
   const activeValidationDetails = activeError || formatValidationDiagnostic(activeRequest?.validationDiagnostic);
 
   const isApplicationRequest = activeRequest?.kind === 'application';
-  // True only when the connected ChatGPT bridge already holds THIS exact
-  // application bundle (its jobId is in status.queue.jobs) — never for a
-  // push item, and never for an application item the bridge has not taken.
+  // True only when the connected ChatGPT bridge actually HOLDS THIS exact
+  // application bundle's work: its jobId is in status.queue.jobs in a phase
+  // where ChatGPT is the one to answer it (unread, awaiting, host) — never for
+  // a push item, and never for an application item the bridge has not taken.
+  // A lane the bridge kept for the person (held, e.g. "Keep for me"), handed
+  // back (needs_user) or finished with (gone, done) is exactly where the
+  // person has to paste, so those keep the normal paste UI.
   // Degrades to false, never throws, if bridgeStatus/queue/jobs is missing
   // or malformed (bridge disabled, preload still connecting, or an older
   // main process): Array.isArray guards the .some() below, and optional
@@ -419,7 +427,7 @@ export function NonApiAiDialog() {
   const isBridgeHeldApplication = isApplicationRequest
     && typeof activeRequest?.jobId === 'string' && activeRequest.jobId.length > 0
     && Array.isArray(bridgeStatus?.queue?.jobs)
-    && bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId);
+    && bridgeStatus.queue.jobs.some(job => job?.jobId === activeRequest.jobId && BRIDGE_WORKING_PHASES.has(job?.phase));
   // The same fault, whichever way it reached the dock: caught by submit(), or
   // read by a routine discovery pass that published a prompt-less item.
   const brokenApplicationMessage = isApplicationRequest && activeRequestId
@@ -1778,7 +1786,10 @@ export function NonApiAiDialog() {
             // workflow too would invite a second, disagreeing answer for the
             // same prompt, so none of that working area renders here — only
             // a calm status line and the one control this dock still owns:
-            // giving the bundle up entirely.
+            // giving the bundle up entirely. BridgeProgress sits OUTSIDE the
+            // status div below: its timers tick every second and must not
+            // re-announce through that live region.
+            <>
             <div
               role="status"
               aria-live="polite"
@@ -1789,7 +1800,7 @@ export function NonApiAiDialog() {
                   Working in ChatGPT
                 </div>
                 <div className="mt-1 text-violet-100/75">
-                  This application is being handled in your connected ChatGPT chat. No paste is needed here — Discard bundle is still available if you want to take it back.
+                  This application is handed to your ChatGPT bridge. No paste is needed here — Discard bundle is still available if you want to take it back.
                 </div>
               </div>
               <button
@@ -1802,6 +1813,8 @@ export function NonApiAiDialog() {
                 {isDiscarding ? 'Discarding…' : 'Discard bundle'}
               </button>
             </div>
+            <BridgeProgress status={bridgeStatus} item={activeRequest} />
+            </>
           ) : (
             <>
               {activeCorrectionsRecovered && (

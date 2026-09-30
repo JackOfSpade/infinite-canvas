@@ -192,9 +192,11 @@ export function registerHandoffBridgeUi({
     try { return Boolean(expected && !expected.isDestroyed?.() && windowFor(sender) === expected); }
     catch { return false; }
   };
+  // sender id -> job ids the auto-release pipeline has already handled.
+  const autoReleaseHandled = new Map();
   const sweep = () => {
     const stamp = Number(now());
-    for (const [id, entry] of candidates) if (!Number.isFinite(stamp) || stamp - entry.at >= KEEP_ALIVE_MS || !windowFor({ id })) candidates.delete(id);
+    for (const [id, entry] of candidates) if (!Number.isFinite(stamp) || stamp - entry.at >= KEEP_ALIVE_MS || !windowFor({ id })) { candidates.delete(id); autoReleaseHandled.delete(id); }
   };
   const sendStatus = snapshot => {
     for (const window of canvasWindows()) {
@@ -657,7 +659,7 @@ export function registerHandoffBridgeUi({
   function publish(event, payload) {
     const checked = guard(event, false); if (checked.code || !plain(payload)) return;
     sweep(); const sender = checked.sender;
-    if (payload.unmount === true) { candidates.delete(sender.id); return; }
+    if (payload.unmount === true) { candidates.delete(sender.id); autoReleaseHandled.delete(sender.id); return; }
     if (payload.v !== 1 || !Number.isInteger(payload.seq) || !Array.isArray(payload.jobs) || payload.jobs.length > MAX_JOBS || new Set(payload.jobs.map(item => item?.jobId)).size !== payload.jobs.length || payload.jobs.some(item => !validJob(item))) return;
     const window = windowFor(sender); if (!window || payload.jobs.some(item => item.canvasFilePath !== window.__canvasFilePath)) return;
     const previous = candidates.get(sender.id); if (previous && payload.seq <= previous.seq) return;
@@ -671,25 +673,51 @@ export function registerHandoffBridgeUi({
       return !before || before.sig !== item.sig || before.dockState !== item.dockState || before.canvasFilePath !== item.canvasFilePath;
     });
     for (const item of changed) { try { engine.hint?.({ jobId: item.jobId }); } catch { /* a hint is best effort */ } }
+    // A job that left the publication (its bundle was discarded or saved) is
+    // also a state change. Without this a released lane for it was never
+    // re-read until a chat happened to poll, so it kept occupying capacity.
+    if (previous) {
+      for (const jobId of previous.jobs.keys()) {
+        if (!jobs.has(jobId)) { try { engine.hint?.({ jobId }); } catch { /* a hint is best effort */ } }
+      }
+    }
     // This is deliberately based on the disk adapter's createdAt view, not on
     // renderer publication time.  It is an opt-in convenience and never makes
     // an earlier job available after a relaunch.
-    if (currentStatus()?.autoRelease === true) void (async () => {
-      const ids = [...jobs.values()].filter(item => item.dockState === 'awaiting').map(item => item.jobId);
+    if (currentStatus()?.autoRelease !== true || !autoReleaseAvailable()) { autoReleaseHandled.delete(sender.id); return; }
+    void (async () => {
+      // One-shot per job per enabled session. The renderer republishes every
+      // job on each state change and on a 30 s keep-alive, so without this
+      // memory the whole describe (a disk discover) + release pipeline re-ran
+      // for every awaiting card indefinitely, re-stamped the release TTL and
+      // the idle-pause clock, and silently undid a user's Unrelease.
+      let handled = autoReleaseHandled.get(sender.id);
+      if (!handled) { handled = new Set(); autoReleaseHandled.set(sender.id, handled); }
+      for (const id of [...handled]) if (!jobs.has(id)) handled.delete(id);
+      const ids = [...jobs.values()].filter(item => item.dockState === 'awaiting' && !handled.has(item.jobId)).map(item => item.jobId);
       if (!ids.length) return;
+      // Claim before the first await so an overlapping publication cannot
+      // start a second run for the same ids.
+      for (const id of ids) handled.add(id);
+      const retry = list => { for (const id of list) handled.delete(id); };
       const context = captureReleaseContext(sender, window, ids);
-      if (context.code || !autoReleaseAvailable()) return;
-      const described = await safeCall(application, 'describeForConfirm', context.path, context.ids);
-      if (releaseContextCode(context) || !autoReleaseAvailable()) return;
+      if (context.code || !autoReleaseAvailable()) { retry(ids); return; }
+      const described = await safeCall(application, 'describeForConfirm', context.path, context.ids, { requireAll: false });
+      if (releaseContextCode(context) || !autoReleaseAvailable()) { retry(ids); return; }
       const confirmed = described?.ok ? describedJobs(described, context.ids, context.path, { requireAll: false }) : null;
-      if (!confirmed) return;
+      if (!confirmed) { retry(ids); return; }
+      const confirmedIds = new Set(confirmed.map(value => value.job.jobId));
+      // A job the disk no longer lists has nothing to release; try again only
+      // if it is still published on a later pass.
+      retry(ids.filter(id => !confirmedIds.has(id)));
       const eligible = confirmed.filter(value => Number(new Date(value.item?.createdAt)) > Number(processStartedAt));
-      if (!eligible.length || releaseContextCode(context) || !autoReleaseAvailable()) return;
+      if (!eligible.length) return;
+      if (releaseContextCode(context) || !autoReleaseAvailable()) { retry(eligible.map(value => value.job.jobId)); return; }
       // Re-check in the same turn immediately before the mutating controller
       // port. There is no renderer-controlled await between this check and
       // release, so a stale publication cannot cross the boundary.
-      if (releaseContextCode(context) || !autoReleaseAvailable()) return;
-      await safeCall(controller, 'release', { jobs: eligible.map(value => value.job) });
+      const result = await safeCall(controller, 'release', { jobs: eligible.map(value => value.job), auto: true });
+      if (!acknowledged(result)) retry(eligible.map(value => value.job.jobId));
     })();
   }
   // Registration is a closed all-or-nothing fact.  A partial Electron stub is

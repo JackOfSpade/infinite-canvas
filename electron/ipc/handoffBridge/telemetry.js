@@ -202,3 +202,107 @@ export function getFailedStartDiagnosticLines() {
   }
   return Object.freeze(lines);
 }
+
+// ---------------------------------------------------------------------------
+// Application lane queue, for FULL bug reports.
+//
+// The report used to carry no lane state at all, so a released lane whose
+// bundle had been discarded could not be told apart from a healthy one. This
+// is a PULL: the composition registers a provider, the report asks for a view
+// when it is generated, and everything is reduced here to closed enums,
+// integers and an 8-hex job prefix. No path, title, company, prompt, handoff
+// code, chat key or hostname can pass through it. The provider returns null
+// when the person's report-telemetry opt-in is off.
+const QUEUE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
+const QUEUE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart']);
+const QUEUE_SERVING = new Set(['off', 'live', 'paused', 'stopping', 'starting', 'failed', 'error']);
+const QUEUE_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'network', 'expiry', 'sleep', 'quit', 'tunnel', 'other']);
+const QUEUE_FAULTS = new Set(['persist_failed', 'source_failed', 'other']);
+const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'working', 'full']);
+const QUEUE_COUNT_KEYS = ['releaseCalls', 'releaseNoops', 'unreleaseCalls', 'lanesDropped', 'droppedDiscarded', 'droppedPruned', 'droppedMissing', 'droppedSaved'];
+const QUEUE_MAX_LANES = 20;
+
+let queueProvider = null;
+let retiredQueue = null;
+
+const smallInt = (value, max = 999999) => Number.isSafeInteger(value) && value >= 0 ? Math.min(value, max) : 0;
+
+export function reduceBridgeQueue(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = finite(raw.at) ?? Date.now();
+  const applications = raw.queue && typeof raw.queue === 'object' ? raw.queue : {};
+  const chat = raw.chat && typeof raw.chat === 'object' ? raw.chat : {};
+  const lanes = [];
+  // Live lanes are what a report is FOR, so they are kept first and in full;
+  // the room left over goes to the most recently changed finished lanes. (The
+  // first-N-in-array-order this replaced kept the OLDEST lanes and could drop a
+  // live one behind finished ones.)
+  const rawLanes = Array.isArray(raw.lanes) ? raw.lanes.filter(lane => lane && typeof lane === 'object') : [];
+  const isTerminal = lane => lane.phase === 'done' || lane.phase === 'gone';
+  const changedAtOf = lane => finite(lane.changedAt) ?? 0;
+  const ordered = [
+    ...rawLanes.filter(lane => !isTerminal(lane)),
+    ...rawLanes.filter(isTerminal).sort((a, b) => changedAtOf(b) - changedAtOf(a)),
+  ].slice(0, QUEUE_MAX_LANES);
+  for (const lane of ordered) {
+    const match = typeof lane.jobId === 'string' ? /^([a-f0-9]{8})-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.exec(lane.jobId) : null;
+    if (!match) continue;
+    const changed = finite(lane.changedAt);
+    lanes.push(Object.freeze({
+      job: match[1].toLowerCase(),
+      phase: enumOr(lane.phase, QUEUE_PHASES, 'unread'),
+      stage: enumOr(lane.stage, QUEUE_STAGES, null),
+      reason: enumOr(lane.reason, QUEUE_REASONS, null),
+      servedToChat: Number.isSafeInteger(lane.servedToChat) && lane.servedToChat >= 0,
+      ageSeconds: changed === null ? null : Math.max(0, Math.floor((at - changed) / 1000)),
+    }));
+  }
+  const counts = {};
+  for (const key of QUEUE_COUNT_KEYS) counts[key] = smallInt(raw.counts?.[key]);
+  return Object.freeze({
+    at,
+    enabled: raw.enabled === true,
+    serving: enumOr(raw.serving, QUEUE_SERVING, 'unknown'),
+    // Counted from the whole queue, never from the (possibly truncated) list.
+    liveLanes: smallInt(smallInt(applications.ready) + smallInt(applications.working) + smallInt(applications.needsYou)),
+    autoRelease: raw.autoRelease === true,
+    paused: raw.paused === null || raw.paused === undefined ? null : enumOr(raw.paused, QUEUE_PAUSE_CAUSES, 'other'),
+    fault: raw.fault === null || raw.fault === undefined ? null : enumOr(raw.fault, QUEUE_FAULTS, 'other'),
+    applications: Object.freeze({
+      ready: smallInt(applications.ready), working: smallInt(applications.working), needsYou: smallInt(applications.needsYou),
+      held: smallInt(applications.held), done: smallInt(applications.done),
+    }),
+    chat: Object.freeze({
+      state: enumOr(chat.state, QUEUE_CHAT_STATES, 'none'),
+      jobsAssigned: smallInt(chat.jobsAssigned, 99), jobsCap: smallInt(chat.jobsCap, 99),
+    }),
+    lanes: Object.freeze(lanes),
+    counts: Object.freeze(counts),
+  });
+}
+
+export function setBridgeQueueDiagnosticProvider(provider) {
+  queueProvider = typeof provider === 'function' ? provider : null;
+  retiredQueue = null;
+}
+
+// Called when a runtime is torn down: remember its final view (still evidence
+// for a report generated afterwards) and stop reading the dead engine.
+export function retireBridgeQueueDiagnosticProvider(provider = queueProvider) {
+  // Only the provider that is still current may retire: a late teardown of an
+  // old runtime must not blank the replacement's live view.
+  if (queueProvider && queueProvider === provider) {
+    try { retiredQueue = reduceBridgeQueue(queueProvider()); } catch { /* keep the previous view */ }
+    queueProvider = null;
+  }
+}
+
+export function clearBridgeQueueDiagnostic() { queueProvider = null; retiredQueue = null; }
+
+export function getBridgeQueueDiagnostic() {
+  if (queueProvider) {
+    try { return reduceBridgeQueue(queueProvider()); } catch { return null; }
+  }
+  return retiredQueue;
+}
