@@ -269,7 +269,10 @@ export function createOAuthServer({
       if (!isObject(item) || item.id !== pinnedClientId || item.clientKind !== 'cimd' || item.clientHost !== 'chatgpt.com'
         || typeof item.name !== 'string' || !Array.isArray(item.redirectUris) || item.redirectUris.length !== 1 || item.redirectUris[0] !== REDIRECT_URI
         || !Array.isArray(item.grantTypes) || !item.grantTypes.includes('authorization_code') || !item.grantTypes.includes('refresh_token')
-        || !Array.isArray(item.authMethods) || !item.authMethods.includes('none')
+        // A persisted client may be assertion-only now that production no
+        // longer accepts `none`. It still has to advertise at least one of
+        // the two closed methods; an empty or foreign-only list is invalid.
+        || !Array.isArray(item.authMethods) || (!item.authMethods.includes('none') && !item.authMethods.includes('private_key_jwt'))
         || item.authMethods.some(method => method !== 'none' && method !== 'private_key_jwt')
         || (item.authMethods.includes('private_key_jwt') && item.jwksUri !== CONSTANTS.JWKS_URL)
         || typeof item.metadataHash !== 'string') continue;

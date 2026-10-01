@@ -2454,6 +2454,10 @@ async function acceptNonApiAiResponse(record, args) {
       ...responseReceipt,
     });
     logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    // A response-validator failure is a quality correction, not a transport
+    // failure. Keep the same request available with no correction-pass budget;
+    // a person can cancel it, and phase keeps commit failures distinguishable
+    // from ordinary validation failures for callers that enforce save safety.
     sendRequest(record, 'reissue');
     return { accepted: false, validationErrors: [message], reason: phase === 'validate' ? 'validation' : 'commit_failed' };
   }

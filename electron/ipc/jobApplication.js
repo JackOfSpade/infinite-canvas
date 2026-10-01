@@ -1148,29 +1148,25 @@ export function resumeRoleLocationFailures(roles, careerData) {
   return problems;
 }
 
-// The bug report's résumé head-slice runs out inside the FIRST role's header,
-// so the repeating Experience block — bullet count, whether a `.role-meta` row
-// survived, and where the location ended up — had no representation in a
-// report at all. jobsSnapshot.js has rendered this sample for a while; nothing
-// produced it, so the section was permanently absent rather than empty. That
-// blindness is why a résumé that silently dropped every work location looked
-// identical to a correct one in every diagnostic the app collects.
+// Reports need to know whether the repeating Experience structure survived,
+// but the markup itself can carry career history and locations. Keep only
+// structural metadata: role count and whether the former bounded sample would
+// have been truncated before it was deliberately withheld.
 const ROLE_BLOCK_SAMPLE_MAX_CHARS = 1_800;
 
 export function resumeRoleBlockSample(mainHtml, maxChars = ROLE_BLOCK_SAMPLE_MAX_CHARS) {
   const html = String(mainHtml || '');
   let roleCount = 0;
-  let first = '';
+  let firstLength = 0;
   let match;
   ROLE_ARTICLE_RE.lastIndex = 0;
   while ((match = ROLE_ARTICLE_RE.exec(html))) {
     roleCount += 1;
-    if (!first) first = match[0];
+    if (!firstLength) firstLength = match[0].length;
   }
   ROLE_ARTICLE_RE.lastIndex = 0;
-  if (!first) return { found: false, roleCount: 0, sample: '', truncated: false };
-  const truncated = first.length > maxChars;
-  return { found: true, roleCount, sample: truncated ? first.slice(0, maxChars) : first, truncated };
+  if (!firstLength) return { found: false, roleCount: 0, truncated: false };
+  return { found: true, roleCount, truncated: firstLength > maxChars };
 }
 
 /**

@@ -4925,19 +4925,18 @@ Personal Projects`;
       assert(wrongFailures.length === 1 && wrongFailures[0].includes('Denver, CO') && wrongFailures[0].includes('Loveland'),
         `a contradicted location must be reported distinctly from a missing one, got ${JSON.stringify(wrongFailures)}`);
 
-      // 5. The bug report can finally see the role block. This sample renderer
-      // has existed in jobsSnapshot.js with no producer, so the section that
-      // shows "where the location ended up" was absent from every report.
+      // 5. The bug report can see the role-block structure without retaining
+      // markup that could disclose career history or work locations.
       const sample = resumeRoleBlockSample(metaRow);
-      assert(sample.found && sample.roleCount === 1 && sample.sample.includes('role-location') && !sample.truncated,
-        `the role-block sample must carry the meta row, got ${JSON.stringify(sample).slice(0, 300)}`);
+      assert(sample.found && sample.roleCount === 1 && !sample.truncated && !('sample' in sample),
+        `the role-block summary must retain only structural metadata, got ${JSON.stringify(sample).slice(0, 300)}`);
       assert(resumeRoleBlockSample('<main class="page"></main>').found === false,
         'a résumé with no role article must report the sample as not found, not fabricate one');
       assert(resumeRoleBlockSample(metaRow, 40).truncated === true,
-        'an oversized role block must report itself truncated');
+        'an oversized role block must report that a withheld sample would have been truncated');
       const twoRoles = resumeRoleBlockSample(metaRow.replace('</main>', metaRow.slice(metaRow.indexOf('<article'), metaRow.indexOf('</main>')) + '</main>'));
-      assert(twoRoles.roleCount === 2 && twoRoles.sample.split('<article').length === 2,
-        `the sample must count every role but carry only the first, got roleCount ${twoRoles.roleCount}`);
+      assert(twoRoles.roleCount === 2 && !('sample' in twoRoles),
+        `the summary must count every role without carrying markup, got ${JSON.stringify(twoRoles)}`);
 
       // 6. Production sanitizes the model's markup BEFORE any of this parses
       // it, so the fold has to survive that pass — the <time> elements and the
@@ -5058,13 +5057,9 @@ Personal Projects`;
     },
   },
   {
-    // resumeRoleBlockSample, resumeSkillsDlSample and resumeHtmlSample were all
-    // RENDERED by the bug report and PRODUCED by nothing, so the section that
-    // shows "where the location ended up" was permanently absent — which is why
-    // a résumé that dropped every work location looked identical to a correct
-    // one in every diagnostic. Pinning the producer/consumer pair is the only
-    // thing that keeps this from silently reverting to a dead field.
-    name: 'Local AI telemetry: the bug report\u2019s role-block sample has a producer on every terminal record',
+    // Pin the metadata-only producer/consumer pair so reports retain structural
+    // evidence without reintroducing raw résumé markup.
+    name: 'Local AI telemetry: the bug report\u2019s role-block summary has a producer on every terminal record',
     async run() {
       const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
       const snapshotSource = await fs.promises.readFile(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
@@ -5072,18 +5067,18 @@ Personal Projects`;
       const produced = [...localSource.matchAll(/resumeRoleBlockSample: resumeRoleBlockSample\(result\.resumeMainHtml\)/g)];
       const telemetryCalls = [...localSource.matchAll(/recordApplicationTelemetry\(\{/g)];
       assert(telemetryCalls.length === 3 && produced.length === 3,
-        `every Local AI telemetry record must carry the role-block sample, got ${produced.length} of ${telemetryCalls.length}`);
+        `every Local AI telemetry record must carry the role-block summary, got ${produced.length} of ${telemetryCalls.length}`);
       assert(localSource.includes('resumeHtmlLen: result.resumeMainHtml.length'),
         'the report\u2019s "Résumé markup: N chars" line needs its producer too');
 
       // The consumer reads exactly the shape the producer emits.
-      for (const field of ['found', 'roleCount', 'sample', 'truncated']) {
+      for (const field of ['found', 'roleCount', 'truncated']) {
         assert(snapshotSource.includes(`a.resumeRoleBlockSample.${field}`),
           `the bug report reads resumeRoleBlockSample.${field}, so the producer must emit it`);
       }
       const emitted = resumeRoleBlockSample('<main class="page"><article class="role"><ul class="highlights"><li>x</li></ul></article></main>');
-      assert(['found', 'roleCount', 'sample', 'truncated'].every(key => key in emitted),
-        `the producer must emit every field the renderer reads, got ${Object.keys(emitted).join(', ')}`);
+      assert(['found', 'roleCount', 'truncated'].every(key => key in emitted) && !('sample' in emitted),
+        `the producer must emit only the structural fields the renderer reads, got ${Object.keys(emitted).join(', ')}`);
       return { enforced: true };
     },
   },

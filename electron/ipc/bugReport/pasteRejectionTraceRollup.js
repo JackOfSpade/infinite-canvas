@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { isWithinDirectory } from '../../utils/pathSafety.js';
-import { shortId } from './helpers.js';
 
 /**
  * Durable, per-job rejection history rendered from each job's own
@@ -208,9 +208,14 @@ function formatRow(row) {
 }
 
 function jobLabel(item) {
-  const title = item.title || '(untitled)';
-  const company = item.company || '(no company)';
-  return `${title} @ ${company} · job \`${shortId(item.localApplication.id)}\``;
+  // A title/company label can be career data, while the full job UUID joins a
+  // shared report back to local state. Retain only a short one-way digest so
+  // a reader can correlate rows inside this report without either disclosure.
+  const digest = crypto.createHash('sha256')
+    .update(String(item?.localApplication?.id || ''))
+    .digest('hex')
+    .slice(0, 10);
+  return `job #${digest}`;
 }
 
 export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplications) {

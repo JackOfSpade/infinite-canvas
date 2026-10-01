@@ -3,6 +3,7 @@ const { dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
@@ -18,7 +19,7 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
-import { closeReportDiagnostic, shortId, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
@@ -58,6 +59,11 @@ function truncateDiagnosticText(value, max) {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function reportCorrelationDigest(value, fallback = 'not recorded') {
+  if (typeof value !== 'string' || !value) return fallback;
+  return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
 }
 
 // Keep Node Diagnostics aligned with JobCardNode's Open Listing action. The
@@ -855,7 +861,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
           }
         }
         if (n.type === 'sellhub' && d.platformFitPending) hits.push('platformFitPending=true');
-        if (hits.length) offenders.push(`  - \`${shortId(n.id)}\` (${n.type}): ${hits.join(', ')}`);
+        if (hits.length) offenders.push(`  - \`${reportCorrelationDigest(n.id)}\` (${n.type}): ${hits.join(', ')}`);
       }
       if (n?.type === 'group' && n.data?.canvasData?.nodes) walk(n.data.canvasData.nodes);
     }
@@ -1133,7 +1139,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
             `collection anchor pending terminal success: ${pendingCompletionIso}`
             + `${pendingCoverageIso ? `; coverage started=${pendingCoverageIso}` : ''}`
             + `; run=${d.pendingCollectionCompletion?.runId
-              ? shortId(d.pendingCollectionCompletion.runId)
+              ? reportCorrelationDigest(d.pendingCollectionCompletion.runId)
               : 'unknown'}`,
           );
         }
@@ -1220,17 +1226,19 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
       if (n.type === 'jobcard') previewParts.push(`link: ${effectiveJobCardLinkState(d)}`);
       // Stated explicitly even when empty: a cleared pointer (a discard) must
-      // read as "none" rather than as a field that was never collected. Both
-      // values are closed: a status word and the job id's 8-hex prefix.
+      // read as "none" rather than as a field that was never collected. The
+      // correlation value is one-way so an opaque job id never reaches a report.
       if (n.type === 'jobcard') {
         const bundle = d.localApplication;
         const status = typeof bundle?.status === 'string' && /^[a-z][a-z-]{0,31}$/.test(bundle.status) ? bundle.status : null;
         previewParts.push(bundle?.id
-          ? `appBundle: ${status || 'unknown'} (${shortId(bundle.id)})`
+          ? `appBundle: ${status || 'unknown'} (${reportCorrelationDigest(bundle.id)})`
           : 'appBundle: none');
       }
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
-      if (d.url) previewParts.push(`url: ${redactReportUrl(d.url).slice(0, 50)}`);
+      // Link state above is enough to diagnose whether a card can be opened.
+      // Even query-free URL paths can embed employer names, role titles, or
+      // opaque listing identifiers, so no public URL is exported here.
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
       // ── Price-drop reminder plan (sellhub) ──────────────────────────────
       // The plan is configured on the hub and broadcast to its marketplace
@@ -1258,13 +1266,15 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       // aggregated reason) can be long. lastChecked is normalized to "Ns ago"
       // so a stale status is obvious without timezone math.
       // jobgroup — the results-tree levels (likelihood band → salary range →
-      // role; legacy: category / bucket / branch). Show kind, label, count, and
-      // expanded state so the tree's structure / ordering / auto-expand state is
-      // readable from Node Diagnostics alone (otherwise these rows are blank and
-      // you can only see the node IDs). The label also carries the band's % range
-      // and the salary range, so the whole taxonomy is visible here.
+      // role; legacy: category / bucket / branch). Keep the tree's kind, count,
+      // and expanded state, but never its role/salary/category label: those values
+      // are derived from the current job listings and do not belong in automatic
+      // diagnostics. Likelihood is a fixed display-band vocabulary, not listing
+      // content, so it is safe to retain as a structural grouping fact.
       if (d.kind && ['likelihood', 'salary', 'role', 'category', 'bucket', 'branch'].includes(d.kind)) {
-        previewParts.push(`${d.kind}: ${d.label || '?'}`);
+        previewParts.push(d.kind === 'likelihood'
+          ? `likelihood: ${d.label || '?'}`
+          : `${d.kind}: label withheld`);
         if (typeof d.count === 'number') previewParts.push(`count: ${d.count}`);
         previewParts.push(`expanded: ${d.expanded ? 'true' : 'false'}`);
         if (Array.isArray(d.childIds)) previewParts.push(`children: ${d.childIds.length}`);
@@ -1412,7 +1422,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
         : '';
 
       return (
-        `| \`${shortId(n.id)}\` ` +
+        `| \`${reportCorrelationDigest(n.id)}\` ` +
         `| ${n.type} ` +
         `| ${n.selected ? '✅' : '—'} ` +
         `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
@@ -1478,7 +1488,7 @@ function buildJobSourceWarningReconciliationMarkdown(nodes, sourceCardsByHub) {
     ));
     // The number the paused-state UI actually prints.
     return [
-      `- Hub \`${shortId(hub.id)}\` · hubState \`${hub.data?.hubState || 'unknown'}\``
+      `- Hub \`${reportCorrelationDigest(hub.id)}\` · hubState \`${hub.data?.hubState || 'unknown'}\``
         + ` · retained warnings ${warnings.length} · gating ${gating.length}`
         + ` · **distinct gating sources ${distinctGating.size}** (this is the number the paused UI prints)`
         + ` · source cards on canvas ${cards.length}`,
@@ -1715,7 +1725,7 @@ function buildActiveTasksMarkdown(reportWindowId) {
             : activity;
           const flag = scrapePaused ? ' ⏸️ paused by user' : suspect ? ' ⚠️ possibly hung' : '';
           const chans = t.channels?.length ? t.channels.join(', ') : '—';
-          return `| \`${shortId(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
+          return `| \`${reportCorrelationDigest(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
         })
         .join('\n');
       activeTasksMarkdown = `
@@ -2107,7 +2117,7 @@ function buildRecentMainProcessLogLines({ filter } = {}) {
         // Logger messages can contain redirect/challenge URLs with OAuth,
         // Cloudflare, or tracking tokens. The path is useful diagnostic
         // evidence; query and fragment values are not safe to export.
-        const raw = redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(l.message || '')).replace(/\r?\n/g, ' ⏎ '));
+        const raw = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(l.message || '')).replace(/\r?\n/g, ' ⏎ ')));
         const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
@@ -2900,9 +2910,10 @@ export function registerBugReportHandlers() {
     return { filePath };
   });
 
-  // "Copy to clipboard": generate the FULL uncapped report (byte-identical to
-  // "Save to file" above — same generateMarkdown call, no maxChars) and write
-  // it to an app-managed file instead of returning it inline. A canvas-scale
+  // "Copy to clipboard": generate a FULL uncapped report with the same
+  // rendering policy as "Save to file" above, then write it to an app-managed
+  // file instead of returning it inline. The two actions occur at different
+  // times, so timestamps and live state need not be byte-identical. A canvas-scale
   // report pasted whole into a clipboard/chat consumer either gets silently
   // truncated downstream or burns most of a context window in one message;
   // a short path pointer lets an AI read the file from disk in segments

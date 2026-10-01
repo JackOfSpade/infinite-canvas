@@ -416,8 +416,9 @@ export default [
       try {
         const report = buildMarketplacePipelineSnapshot(new Set(['title-cleanup-hub']), 6);
         assert(report.includes('condition: `Used - Excellent`'), 'FULL report preserves the selected condition');
-        assert(report.includes('cleaned from raw title "Modern Round Wood Coffee Table - Excellent Condition"'),
-          'FULL report preserves the raw title and confirms cleanup occurred');
+        assert(report.includes('product title captured (withheld)') && report.includes('title normalization applied')
+          && !report.includes('Modern Round Wood Coffee Table'),
+          'FULL report retains title-cleanup state without exporting the product title');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -481,11 +482,12 @@ export default [
       });
       try {
         const report = buildMarketplacePipelineSnapshot(new Set(['bundle-hub']), 7);
-        assert(report.includes('Item 1 — "Watering Timer" · q="watering timer"') && report.includes('Item 2 — "Glass Jug" · q="glass jug"'),
-          'bundle report names each item scrape with its title');
+        assert(report.includes('Item 1 · item label captured · query recorded') && report.includes('Item 2 · item label captured · query recorded')
+          && !report.includes('Watering Timer') && !report.includes('Glass Jug'),
+          'bundle report retains per-item structural scrape evidence without item titles or queries');
         assert(!report.includes('query term(s) absent from the title'),
           'no drift flag when each query matches its item title');
-        assert(report.includes('Price synthesis — Watering Timer') && report.includes('Price synthesis — Glass Jug'),
+        assert((report.match(/Price synthesis — item correlation withheld/g) || []).length === 2,
           'bundle report renders each item synthesis');
         assert(report.includes('arrived after AI pricing began'), 'late retry is explicitly marked as excluded from finalized pricing');
         assert(report.includes('1 retry warning(s) remained'),
@@ -527,13 +529,13 @@ export default [
       try {
         const report = buildMarketplacePipelineSnapshot(new Set(['drift-hub']), 3);
         const item1Line = report.split('\n').find(l => l.includes('Item 1')) || '';
-        assert(/query term\(s\) absent from the title \([^)]*exotac[^)]*\)/i.test(item1Line),
-          `drifted item 1 is flagged with the offending tokens — got: ${item1Line}`);
+        assert(/priced query does not match the captured product title/.test(item1Line) && !/exotac/i.test(item1Line),
+          `drifted item 1 is flagged without exposing the title/query terms — got: ${item1Line}`);
         const item2Line = report.split('\n').find(l => l.includes('Item 2')) || '';
-        assert(!/query term\(s\) absent from the title/.test(item2Line),
+        assert(!/priced query does not match the captured product title/.test(item2Line),
           `the clean item 2 (query ⊆ title) is NOT flagged — got: ${item2Line}`);
         const item3Line = report.split('\n').find(l => l.includes('Item 3')) || '';
-        assert(!/query term\(s\) absent from the title/.test(item3Line),
+        assert(!/priced query does not match the captured product title/.test(item3Line),
           `terse title + broader query with a spec token is NOT mis-flagged — got: ${item3Line}`);
       } finally {
         Object.assign(telemetry, saved);
@@ -614,14 +616,14 @@ export default [
         const report = buildMarketplacePipelineSnapshot(new Set(['node-A', 'node-B']), 9);
         // Top-of-section warning fires and names the foreign node.
         assert(/Overlapping price checks/.test(report), 'overlap warning is rendered when stages span >1 node');
-        assert(/node-A/.test(report), 'overlap note names the foreign stage node');
+        assert(/from node `#[a-f0-9]{10}`/.test(report) && !/node-A/.test(report), 'overlap note names the foreign stage through a digest');
         // The scrape (headline node) carries NO foreign tag; synthesis + fit DO.
         const scrapeHdr = report.split('\n').find(l => l.startsWith('### Comp scrape')) || '';
         const synthHdr = report.split('\n').find(l => l.startsWith('### Price synthesis')) || '';
         const fitHdr = report.split('\n').find(l => l.startsWith('### Platform fit')) || '';
         assert(scrapeHdr && !/from node/.test(scrapeHdr), 'headline-node scrape header is NOT tagged foreign');
-        assert(/from node `node-A`/.test(synthHdr), 'synthesis header is tagged with its owning foreign node');
-        assert(/from node `node-A`/.test(fitHdr), 'fit header is tagged with its owning foreign node');
+        assert(/from node `#[a-f0-9]{10}`/.test(synthHdr), 'synthesis header is tagged with its owning foreign node digest');
+        assert(/from node `#[a-f0-9]{10}`/.test(fitHdr), 'fit header is tagged with its owning foreign node digest');
 
         // Control: a clean single-node run (every stage = headline node) renders
         // NO overlap warning and NO per-stage tag (don't cry wolf).
@@ -645,7 +647,7 @@ export default [
         const staleAnalyze = buildMarketplacePipelineSnapshot(new Set(['node-A']), 9);
         assert(!/Overlapping price checks/.test(staleAnalyze), 'a foreign analyze alone does NOT trigger the concurrency warning');
         const analyzeHdr = staleAnalyze.split('\n').find(l => l.startsWith('### Product analysis')) || '';
-        assert(/from node `node-Z`/.test(analyzeHdr), 'a stale foreign analyze is still tagged with its owning node');
+        assert(/from node `#[a-f0-9]{10}`/.test(analyzeHdr) && !/node-Z/.test(analyzeHdr), 'a stale foreign analyze is still tagged with its owning digest');
       } finally {
         Object.assign(telemetry, saved);
       }

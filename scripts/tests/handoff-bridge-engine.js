@@ -509,12 +509,35 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: rejection cap holds after six app rejections',
+    name: 'handoff bridge: engine: validation corrections continue past six rejections and can accept',
     run: async () => {
-      const state = await served({ sourceOverrides: { submit: async () => ({ kind: 'rejected', handoff: handoff(), validationErrors: ['synthetic invalid'] }) } });
-      let final;
-      for (let index = 0; index < 6; index++) final = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage, extra: { n: index } }) });
-      assert(final.status === 'held' && final.reason === 'rejection_cap', 'six rejections must hold');
+      let submits = 0;
+      const persisted = [];
+      const state = await served({ sourceOverrides: {
+        submit: async () => {
+          submits++;
+          return submits <= 7
+            ? { kind: 'rejected', handoff: handoff(), validationErrors: ['synthetic invalid'] }
+            : { kind: 'accepted', completed: true };
+        },
+      }, engineOptions: { store: { saveLanes: async lanes => { persisted.push(lanes); return true; } } } });
+      for (let index = 0; index < 7; index++) {
+        const rejected = await state.engine.submit({
+          session: state.session, linkId: LINK, handoffCode: state.result.handoffCode,
+          response: answer({ code: state.result.handoffCode, stage: state.result.stage, extra: { n: index } }),
+        });
+        assert(rejected.status === 'rejected', `correction ${index + 1} must remain available, not held`);
+      }
+      const lane = state.engine.snapshot().queue.jobs[0];
+      const savedLane = persisted.at(-1)?.[0];
+      assert(lane.phase === 'awaiting' && savedLane?.counters?.rejections === 7,
+        'more than six validation rejections must remain awaiting with its counter persisted for telemetry');
+      const accepted = await state.engine.submit({
+        session: state.session, linkId: LINK, handoffCode: state.result.handoffCode,
+        response: answer({ code: state.result.handoffCode, stage: state.result.stage, extra: { n: 7 } }),
+      });
+      assert(accepted.status === 'accepted' && accepted.jobComplete === true,
+        'a later corrected answer must still reach application acceptance');
     },
   },
   {
@@ -932,13 +955,42 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: review rounds cap at eight accepted revisions',
+    name: 'handoff bridge: engine: review revisions continue past eight and can complete',
     run: async () => {
-      let revision = 0;
-      const state = await served({ sourceOverrides: { submit: async () => ({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-A', stage: 'review', revision: ++revision }) }) } });
-      let code = state.result.handoffCode; let final;
-      for (let index = 0; index < 9; index++) { final = await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: code, response: answer({ code, stage: index ? 'review' : state.result.stage, extra: { index } }) }); code = final.next?.handoffCode ?? code; }
-      assert(final.status === 'held' && final.reason === 'review_round_cap', 'review rounds must stop at frozen cap');
+      let submits = 0;
+      const persisted = [];
+      const state = await served({ sourceOverrides: {
+        submit: async () => {
+          submits++;
+          return submits <= 10
+            ? { kind: 'accepted', completed: false, handoff: handoff({ code: `HANDOFF-REVIEW-${submits}`, stage: 'review', revision: submits }) }
+            : { kind: 'accepted', completed: true };
+        },
+      }, engineOptions: { store: { saveLanes: async lanes => { persisted.push(lanes); return true; } } } });
+      let code = state.result.handoffCode;
+      let stage = state.result.stage;
+      // The first accept enters review; the following nine are review→review
+      // revisions, deliberately exceeding the former automatic hold threshold.
+      for (let index = 0; index < 10; index++) {
+        const result = await state.engine.submit({
+          session: state.session, linkId: LINK, handoffCode: code,
+          response: answer({ code, stage, extra: { index } }),
+        });
+        assert(result.status === 'accepted' && result.jobComplete === false && result.next?.stage === 'review',
+          `revision ${index + 1} must serve the next review handoff without a human resume`);
+        code = result.next.handoffCode;
+        stage = result.next.stage;
+      }
+      const lane = state.engine.snapshot().queue.jobs[0];
+      const savedLane = persisted.at(-1)?.[0];
+      assert(lane.phase === 'awaiting' && savedLane?.counters?.revisedRounds === 9,
+        'more than eight review revisions must remain awaiting with its counter persisted for telemetry');
+      const completed = await state.engine.submit({
+        session: state.session, linkId: LINK, handoffCode: code,
+        response: answer({ code, stage, extra: { final: true } }),
+      });
+      assert(completed.status === 'accepted' && completed.jobComplete === true,
+        'a later review pass must still complete the application');
     },
   },
   {
@@ -2877,6 +2929,152 @@ tests.push(
     },
   },
   {
+    name: 'handoff bridge: engine: serial queue prevents a failed resume rollback from clobbering a concurrent hold',
+    run: async () => {
+      const store = pendingStore();
+      const { engine } = pendingEngine(store);
+      const releaseA = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      store.pending.shift().resolve(true);
+      assert((await releaseA).ok, 'release A');
+
+      const holdA = engine.hold(JOB_A, 'user_hold');
+      await settle();
+      store.pending.shift().resolve(true);
+      assert((await holdA).ok, 'hold A');
+      assert(rowOf(engine, JOB_A)?.reason === 'user_hold', 'initially user_hold');
+
+      const resuming = engine.resume({ jobId: JOB_A });
+      await settle();
+      assert(store.pending.length >= 1, 'resume save is pending');
+
+      const concurrentHold = engine.hold(JOB_A, 'rejection_cap');
+      await settle();
+
+      store.pending.shift().resolve(false);
+      await settle();
+
+      if (store.pending.length > 0) {
+        store.pending.shift().resolve(true);
+      }
+
+      await resuming;
+      await concurrentHold;
+
+      const row = rowOf(engine, JOB_A);
+      assert(row?.reason === 'rejection_cap', `concurrent hold reason must not be clobbered by resume rollback (got ${row?.reason})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: serial queue prevents a failed restart confirmation rollback from clobbering a concurrent hold',
+    run: async () => {
+      const store = pendingStore();
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source().api,
+        store, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 10, phase: 'held', reason: 'restart' }],
+        confirmRestart: async () => true,
+      });
+      assert(rowOf(engine, JOB_A)?.reason === 'restart', 'initially restart');
+
+      const preparing = engine.newChat({ linkId: LINK });
+      await settle();
+      assert(store.pending.length >= 1, 'restart confirmation save is pending');
+
+      const concurrentHold = engine.hold(JOB_A, 'user_hold');
+      await settle();
+
+      store.pending.shift().resolve(false);
+      await settle();
+
+      if (store.pending.length > 0) {
+        store.pending.shift().resolve(true);
+      }
+
+      await preparing;
+      await concurrentHold;
+
+      const row = rowOf(engine, JOB_A);
+      assert(row?.reason === 'user_hold', `concurrent hold reason must not be clobbered by restart confirmation rollback (got ${row?.reason})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed Resume save cannot revive a lane that a concurrent discard retired',
+    run: async () => {
+      const store = pendingStore();
+      const { engine } = pendingEngine(store);
+      const releaseA = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle(); store.pending.shift().resolve(true);
+      assert((await releaseA).ok, 'release A');
+      const holdA = engine.hold(JOB_A, 'user_hold');
+      await settle(); store.pending.shift().resolve(true);
+      assert((await holdA).ok, 'hold A');
+
+      const resuming = engine.resume({ jobId: JOB_A });
+      await settle();
+      const dropping = engine.dropLane(JOB_A, 'bundle_discarded');
+      await settle();
+      assert(store.pending.length === 2, 'the Resume and discard saves both start while storage is pending');
+
+      store.pending.shift().resolve(false);
+      store.pending.shift().resolve(true);
+      assert((await resuming).code === 'persist_failed', 'the older Resume write fails');
+      assert((await dropping).ok, 'the later discard persists');
+      assert(!rowOf(engine, JOB_A), 'the failed Resume rollback must not revive the discarded lane');
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).code === 'unknown_job',
+        'a discarded bundle remains fenced from a late re-release');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed release yields to a later hold and its durable reconciliation snapshot',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store);
+      const releasing = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      const holding = engine.hold(JOB_A, 'user_hold');
+      await settle();
+      assert(saves.length === 2, 'the later Hold stages and snapshots without waiting for the release write');
+
+      saves[0].gate.resolve(false);
+      saves[1].gate.resolve(true);
+      assert((await releasing).code === 'persist_failed', 'the initial release fails');
+      assert((await holding).ok, 'the later hold persists');
+      const row = rowOf(engine, JOB_A);
+      assert(row?.phase === 'held' && row.reason === 'user_hold', `the later state wins (got ${row?.phase} ${row?.reason})`);
+      const durable = saves[1].lanes.find(lane => lane.jobId === JOB_A);
+      assert(durable?.phase === 'held' && durable.reason === 'user_hold', 'the later save carries the reconciliation snapshot, not the failed release state');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a late accepted submit from an Unreleased generation cannot mutate a re-released job',
+    run: async () => {
+      const gate = deferred(); let generation = 0;
+      const state = await served({ engineOptions: { submitBudgetMs: 0 }, sourceOverrides: {
+        read: async () => ({ kind: 'open', handoff: handoff({ code: generation === 0 ? 'HANDOFF-OLD' : 'HANDOFF-NEW', stage: generation === 0 ? 'resume' : 'cover-letter' }) }),
+        submit: () => gate.promise,
+      } });
+      const { engine, session, result } = state;
+      const oldSubmit = engine.submit({ session, linkId: LINK, handoffCode: result.handoffCode, response: answer({ code: result.handoffCode, stage: result.stage }) });
+      await settle();
+      assert((await engine.unrelease(JOB_A)).ok, 'the original lane is removed while its submit is in flight');
+      generation = 1;
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the same job receives a fresh lane');
+      const fresh = await engine.get({ session, linkId: LINK });
+      assert(fresh.status === 'served' && fresh.handoffCode === 'HANDOFF-NEW', 'the fresh lane serves its own handoff');
+
+      gate.resolve({ kind: 'accepted', handoff: handoff({ code: 'HANDOFF-OLD-NEXT', stage: 'review' }) });
+      assert((await oldSubmit).status === 'retry', 'the original request exhausted its zero response budget');
+      await settle();
+      const row = rowOf(engine, JOB_A);
+      assert(row?.phase === 'awaiting' && row.stage === 'cover-letter', `the new lane is untouched by the old acceptance (got ${row?.phase} ${row?.stage})`);
+      const staleNext = await engine.submit({ session, linkId: LINK, handoffCode: 'HANDOFF-OLD-NEXT', response: answer({ code: 'HANDOFF-OLD-NEXT', stage: 'review' }) });
+      assert(staleNext.status === 'unknown_handoff', `the old successor was never indexed on the fresh lane (got ${staleNext.status})`);
+    },
+  },
+  {
     name: 'handoff bridge: engine: an answer the app commits after submit_stuck is remembered, so Resume re-reads instead of re-serving the answered stage',
     run: async () => {
       const gate = deferred(); let appCode = 'HANDOFF-A'; let reads = 0;
@@ -3913,6 +4111,774 @@ tests.push(
       const engine = createHandoffEngine({ source: source().api, now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0 });
       assert(engine.restore([{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 10, phase: 'needs_user', reason: 'read_failed', heldFrom: 'unread' }]) === 1, 'restored');
       assert(engine.snapshot().queue.jobs[0].changedAt === clock.now(), 'the dock and bug report age a restored lane from the restore, not from its release');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a late older save success cannot clear a newer persistence failure',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store);
+      const releasing = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      const holding = engine.hold(JOB_A, 'user_hold');
+      await settle();
+      assert(saves.length === 2, 'both writes are in flight');
+
+      saves[1].gate.resolve(false);
+      await settle();
+      assert(engine.snapshot().fault === 'persist_failed', 'the newer failed write is visible as the current fault');
+      saves[0].gate.resolve(true);
+      assert((await holding).code === 'persist_failed', 'the newer operation reports its failed save');
+      assert((await releasing).ok, 'the older operation itself did save');
+      assert(engine.snapshot().fault === 'persist_failed', 'the late older success must not clear the newer failure');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: rollback reconciliation persists the concurrent winner and clears its fault only after that write succeeds',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store, { read: async () => ({ kind: 'host' }) });
+      const releasing = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      const chat = await engine.newChat({ linkId: LINK });
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(rowOf(engine, JOB_A)?.phase === 'host', 'a concurrent source result wins the lane state before release rollback');
+
+      saves[0].gate.resolve(false);
+      assert((await releasing).code === 'persist_failed', 'the original release write fails');
+      await settle();
+      assert(saves.length === 2 && engine.snapshot().fault === 'persist_failed', 'rollback schedules a corrective write while faulted');
+      const repaired = saves[1].lanes.find(lane => lane.jobId === JOB_A);
+      assert(repaired?.phase === 'host', `the corrective snapshot must contain the winning host state, got ${repaired?.phase}`);
+
+      saves[1].gate.resolve(true);
+      await settle();
+      assert(engine.snapshot().fault === null, 'only the successful corrective write clears the persistence fault');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: lane-store writes receive immutable snapshots rather than live lane arrays',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store);
+      const releaseA = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      const first = saves[0].lanes;
+      const releaseB = engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      await settle();
+      assert(Object.isFrozen(first) && Object.isFrozen(first[0]) && Object.isFrozen(first[0].counters), 'the store receives a deeply frozen lane snapshot');
+      assert(first.length === 1 && first[0].jobId === JOB_A, 'the first write stays at its original one-lane state');
+      assert(saves[1].lanes.length === 2 && saves[1].lanes.some(lane => lane.jobId === JOB_B), 'the later release appears only in its own write');
+      saves[0].gate.resolve(true); saves[1].gate.resolve(true);
+      assert((await releaseA).ok && (await releaseB).ok, 'both writes complete');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a dynamic restore arriving during a restore probe is subsequently probed',
+    run: async () => {
+      const firstProbe = deferred(); const probed = [];
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ status: async ({ jobId }) => {
+          probed.push(jobId);
+          return jobId === JOB_A ? firstProbe.promise : { kind: 'host' };
+        } }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'unread', counters: {} }],
+      });
+      await settle();
+      assert(JSON.stringify(probed) === JSON.stringify([JOB_A]), 'the initial restore probe is in flight');
+      assert(engine.restore([{ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', counters: {} }]) === 2, 'the second restore remains synchronous');
+      firstProbe.resolve({ kind: 'host' });
+      await settle();
+      assert(probed.filter(jobId => jobId === JOB_B).length === 1, 'the dynamically restored lane is probed after the active pass finishes');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a restore probe that lands after Resume does not spend the resumed lane\'s retry budget',
+    run: async () => {
+      const firstProbe = deferred(); let probes = 0;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ status: async () => {
+          probes += 1;
+          return probes === 1 ? firstProbe.promise : { kind: 'busy' };
+        } }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'unread', counters: {} }],
+      });
+      await settle();
+      assert(probes === 1, 'the initial restore probe is pending');
+      assert((await engine.resume({ jobId: JOB_A })).ok && rowOf(engine, JOB_A)?.phase === 'unread', 'Resume changes the lane before the old probe returns');
+      firstProbe.resolve({ kind: 'busy' });
+      await settle();
+      assert((await engine.hold(JOB_A, 'user_hold')).ok, 'the lane becomes probe-eligible again in a new revision');
+      for (let attempt = 0; attempt < 5; attempt += 1) { await engine.tick(); await settle(); }
+      assert(probes === 6, `the stale probe spends no retry: one stale plus five fresh probes expected, got ${probes}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a hinted revision fences stale read and status results instead of adopting their retired handoffs',
+    run: async () => {
+      // A fresh-lane read is already in flight when the app tells us the lane changed.
+      {
+        const readGate = deferred(); let reads = 0;
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => {
+              reads += 1;
+              return reads === 1
+                ? readGate.promise
+                : { kind: 'open', handoff: handoff({ code: 'HANDOFF-FRESH', stage: 'cover-letter' }) };
+            },
+          }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const pending = engine.get({ session: chat.sessionCode, linkId: LINK });
+        await settle();
+        assert(reads === 1 && engine.hint({ jobId: JOB_A }), 'the stale read is in flight when the hint advances the lane revision');
+        readGate.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-RETIRED', stage: 'resume' }) });
+        const stale = await pending;
+        assert(!(stale.status === 'served' && stale.handoffCode === 'HANDOFF-RETIRED'), 'the old read is never served after the hint');
+        const fresh = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(fresh.status === 'served' && fresh.handoffCode === 'HANDOFF-FRESH', `the follow-up read serves the fresh handoff, got ${fresh.status}/${fresh.handoffCode ?? ''}`);
+      }
+
+      // The same rule applies to a background host-status probe.
+      {
+        const statusGate = deferred(); let reads = 0; let statuses = 0;
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => {
+              reads += 1;
+              return reads === 1
+                ? { kind: 'host' }
+                : { kind: 'open', handoff: handoff({ code: 'HANDOFF-FRESH-STATUS', stage: 'cover-letter' }) };
+            },
+            status: async () => {
+              statuses += 1;
+              return statuses === 1
+                ? statusGate.promise
+                : { kind: 'awaiting', read: true };
+            },
+          }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(rowOf(engine, JOB_A)?.phase === 'host', 'the initial read leaves the lane with the app');
+        assert(engine.hint({ jobId: JOB_A }), 'the first hint starts a host-status probe');
+        await settle();
+        clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+        assert(statuses === 1 && engine.hint({ jobId: JOB_A }), 'a second hint advances the lane while that status is in flight');
+        statusGate.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-RETIRED-STATUS', stage: 'resume' }) });
+        await settle();
+        const fresh = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(fresh.status === 'served' && fresh.handoffCode === 'HANDOFF-FRESH-STATUS', `the stale status cannot adopt its handoff, got ${fresh.status}/${fresh.handoffCode ?? ''}`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed durable source result writes a corrective snapshot and clears fault only after it succeeds',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store, { read: async () => ({ kind: 'threw', code: 'LOCAL_AI_JOB_INTEGRITY' }) });
+      const release = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle(); saves.shift().gate.resolve(true);
+      assert((await release).ok, 'release persists first');
+      const chat = await engine.newChat({ linkId: LINK });
+      const getting = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert(saves.length === 1, 'the durable source result has one pending write');
+      saves.shift().gate.resolve(false);
+      await getting;
+      await settle();
+      assert(engine.snapshot().fault === 'persist_failed' && saves.length === 1, 'a failed source-result write schedules one corrective snapshot');
+      const corrected = saves[0].lanes.find(lane => lane.jobId === JOB_A);
+      assert(corrected?.phase === 'needs_user' && corrected.reason === 'job_broken', 'the corrective snapshot retains the source-result state');
+      saves.shift().gate.resolve(true);
+      await settle();
+      assert(engine.snapshot().fault === null, 'the successful corrective snapshot clears the fault');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a reconciliation request from a new source generation survives an old in-flight worker',
+    run: async () => {
+      const saves = [];
+      const store = { saveLanes: lanes => { const gate = deferred(); saves.push({ lanes, gate }); return gate.promise; } };
+      const { engine } = pendingEngine(store);
+      const release = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle(); saves.shift().gate.resolve(true);
+      assert((await release).ok, 'release persists first');
+
+      const firstHold = engine.hold(JOB_A, 'user_hold');
+      await settle(); saves.shift().gate.resolve(false);
+      await firstHold; await settle();
+      assert(saves.length === 1, 'the old-generation reconciliation write is in flight');
+
+      assert(engine.onPowerResume(), 'power resume starts a new source generation');
+      await settle();
+      const secondHold = engine.hold(JOB_A, 'rejection_cap');
+      await settle();
+      assert(saves.length === 2, 'the new-generation operation has its own write');
+      saves[1].gate.resolve(false);
+      await secondHold;
+      saves[0].gate.resolve(true);
+      await settle();
+      assert(saves.length === 3, 'the new-generation reconciliation is not lost when the old worker exits');
+      saves[2].gate.resolve(true);
+      await settle();
+      assert(engine.snapshot().fault === null, 'the surviving new-generation reconciliation eventually succeeds');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: re-entrant public restore from an audit callback remains synchronous and restores one lane once',
+    run: async () => {
+      let engine; let restored = null; let auditCalls = 0;
+      const clock = createFakeClock();
+      engine = createHandoffEngine({
+        source: source().api,
+        audit: { append: event => {
+          if (event === 'release' && auditCalls++ === 0) {
+            restored = engine.restore([{ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', counters: {} }]);
+          }
+          return Promise.resolve(true);
+        } },
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the release completes despite re-entrant restore');
+      assert(restored === 2, `restore preserves its synchronous numeric contract, got ${restored}`);
+      const ids = engine.snapshot().queue.jobs.map(job => job.jobId);
+      assert(ids.filter(jobId => jobId === JOB_A).length === 1 && ids.filter(jobId => jobId === JOB_B).length === 1,
+        `the re-entrant restore applies exactly once, got ${JSON.stringify(ids)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a restart confirmation cannot silently unhold a lane restored after its dialog was shown',
+    run: async () => {
+      const confirmation = deferred(); let displayed = null;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source().api,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'unread', counters: {} }],
+        confirmRestart: async ords => { displayed = ords.slice(); return confirmation.promise; },
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      const preparing = engine.newChat({ linkId: LINK });
+      await settle();
+      assert(JSON.stringify(displayed) === JSON.stringify([1]), `the dialog displayed only the original lane, got ${JSON.stringify(displayed)}`);
+      assert(engine.restore([{ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', counters: {} }]) === 2, 'a second restart-held lane arrives while the dialog is pending');
+      confirmation.resolve(true);
+      await preparing;
+      const late = rowOf(engine, JOB_B);
+      assert(late?.phase === 'held' && late.reason === 'restart', `a stale confirmation must not unhold the undisplayed lane, got ${late?.phase}/${late?.reason}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed old Hold preserves an accepted submit without clobbering a later Hold reason',
+    run: async () => {
+      const submitGate = deferred(); const saves = []; let slow = false;
+      const store = { saveLanes: () => {
+        if (!slow) return Promise.resolve(true);
+        const gate = deferred(); saves.push(gate); return gate.promise;
+      } };
+      const state = await served({ engineOptions: { store }, sourceOverrides: { submit: () => submitGate.promise } });
+      const { engine, session, result } = state;
+      const inFlight = engine.submit({ session, linkId: LINK, handoffCode: result.handoffCode, response: answer({ code: result.handoffCode, stage: result.stage }) });
+      await settle();
+      slow = true;
+      const firstHold = engine.hold(JOB_A, 'user_hold');
+      await settle();
+      assert(saves.length === 1, 'the first Hold write is pending');
+      submitGate.resolve({ kind: 'accepted', completed: false, handoff: handoff({ code: 'HANDOFF-A2', stage: 'cover-letter' }) });
+      await settle();
+      assert(saves.length === 2, 'the accepted result stages its own durable state');
+      const laterHold = engine.hold(JOB_A, 'rejection_cap');
+      await settle();
+      assert(saves.length === 3, 'the later Hold stages after the accepted result');
+
+      saves[0].resolve(false);
+      saves[1].resolve(true);
+      saves[2].resolve(true);
+      assert((await firstHold).code === 'persist_failed', 'the old Hold write fails');
+      assert((await inFlight).status === 'accepted', 'the submit was accepted while it was held');
+      assert((await laterHold).ok, 'the later Hold persists');
+      const row = rowOf(engine, JOB_A);
+      assert(row?.phase === 'held' && row.reason === 'rejection_cap', `the later Hold marker wins, got ${row?.phase}/${row?.reason}`);
+      assert(row.stage === 'cover-letter' && row.awaitingAnswer === false && row.servedAt === null,
+        `the accepted bookkeeping remains intact, got ${row.stage}/${row.awaitingAnswer}/${row.servedAt}`);
+      const savesBeforeRepeat = saves.length;
+      const changedAtBeforeRepeat = row.changedAt;
+      assert((await engine.hold(JOB_A, 'rejection_cap')).ok, 'an exact repeat Hold is accepted as a no-op');
+      await settle();
+      assert(saves.length === savesBeforeRepeat && rowOf(engine, JOB_A)?.changedAt === changedAtBeforeRepeat,
+        'an identical Hold neither starts another save nor restamps its marker');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: stale awaiting and needs-user status results cannot undo newer Hold or Resume state',
+    run: async () => {
+      const run = async (outcome, mutate, verify) => {
+        const statusGate = deferred(); let reads = 0;
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => (++reads === 1 ? { kind: 'host' } : { kind: 'open', handoff: handoff({ code: 'HANDOFF-FRESH-STATUS', stage: 'cover-letter' }) }),
+            status: async () => statusGate.promise,
+          }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(rowOf(engine, JOB_A)?.phase === 'host', 'fixture starts with a host lane');
+        assert(engine.hint({ jobId: JOB_A }), 'hint starts the deferred status call');
+        await settle();
+        await mutate(engine);
+        statusGate.resolve(outcome);
+        await settle();
+        verify(engine);
+      };
+
+      await run({ kind: 'awaiting', read: true }, engine => engine.hold(JOB_A, 'user_hold'), engine => {
+        const row = rowOf(engine, JOB_A);
+        assert(row?.phase === 'held' && row.reason === 'user_hold', `stale awaiting cannot unhold the later Hold, got ${row?.phase}/${row?.reason}`);
+      });
+      await run({ kind: 'needs_user', reason: 'job_broken' }, async engine => {
+        assert((await engine.hold(JOB_A, 'user_hold')).ok, 'newer Hold');
+        assert((await engine.resume({ jobId: JOB_A })).ok, 'newer Resume');
+      }, engine => {
+        const row = rowOf(engine, JOB_A);
+        assert(row?.phase === 'unread' && row.reason === null, `stale needs_user cannot re-hold after Resume, got ${row?.phase}/${row?.reason}`);
+      });
+    },
+  },
+  {
+    name: 'handoff bridge: engine: reversed successful physical writes are repaired with a final current snapshot',
+    run: async () => {
+      const saves = []; let disk = [];
+      const store = { saveLanes: lanes => {
+        const gate = deferred(); saves.push({ lanes, gate });
+        return gate.promise.then(ok => { if (ok !== false) disk = lanes; return ok; });
+      } };
+      const { engine } = pendingEngine(store);
+      const first = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      const second = engine.release({ jobs: [{ jobId: JOB_B, canvasFilePath: PATH_B }] });
+      await settle();
+      assert(saves.length === 2, 'two immutable writes are pending');
+      saves[1].gate.resolve(true);
+      assert((await second).ok, 'v2 completes first');
+      saves[0].gate.resolve(true);
+      assert((await first).ok, 'v1 completes late and physically overwrites v2');
+      await settle();
+      assert(saves.length === 3, 'the engine schedules one final current snapshot');
+      saves[2].gate.resolve(true);
+      await settle();
+      const ids = disk.map(lane => lane.jobId).sort();
+      assert(JSON.stringify(ids) === JSON.stringify([JOB_A, JOB_B].sort()), `durable sink converges to the newest lanes, got ${JSON.stringify(ids)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a semaphore-queued malformed X submit cannot affect or call after a same-stage read rotates to Y',
+    run: async () => {
+      const gates = [deferred(), deferred()]; const sent = []; let reads = 0; let sourceCode = 'HANDOFF-X';
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => {
+            reads += 1;
+            return { kind: 'open', handoff: handoff({ code: sourceCode, stage: 'resume' }) };
+          },
+          submit: async (_lane, payload) => {
+            sent.push(payload.code);
+            return gates[sent.length - 1].promise;
+          },
+        }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      // A never-issued code is deliberately held as a human advance. Establish
+      // Y once, then return to the already-issued X so the target read can
+      // adopt Y and exercise the semaphore fence rather than that hold policy.
+      sourceCode = 'HANDOFF-Y';
+      assert(engine.hint({ jobId: JOB_A }), 'the first rotation invalidates X');
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(rowOf(engine, JOB_A)?.reason === 'human_advance', 'an unknown Y is first fenced as a human advance');
+      assert((await engine.resume({ jobId: JOB_A })).ok, 'resume permits the first Y read');
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).handoffCode === 'HANDOFF-Y', 'Y is now an issued code');
+      sourceCode = 'HANDOFF-X';
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }), 'the source rotates back to issued X');
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const submit = (suffix, response = answer({ code: first.handoffCode, extra: { text: `Synthetic answer ${suffix} `.repeat(8) } })) => engine.submit({
+        session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response,
+      });
+      const blockerOne = submit('one'); const blockerTwo = submit('two');
+      await settle();
+      assert(sent.length === 2 && sent.every(code => code === 'HANDOFF-X'), 'two admitted submits occupy both semaphore slots');
+      const queued = submit('three');
+      await settle();
+      sourceCode = 'HANDOFF-Y';
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }), 'the app advances the lane while the third submit waits');
+      await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const rotated = rowOf(engine, JOB_A);
+      assert(reads === 5 && rotated?.stage === 'resume' && rotated?.phase === 'awaiting',
+        `the lane re-reads and adopts Y before the queued submit runs (reads ${reads}, ${rotated?.phase}/${rotated?.stage})`);
+      assert(rotated.reason === null, 'the queued X request has not held the successor before its slot opens');
+      gates[0].resolve({ kind: 'accepted', completed: true }); gates[1].resolve({ kind: 'accepted', completed: true });
+      await Promise.all([blockerOne, blockerTwo]);
+      const result = await queued;
+      const final = rowOf(engine, JOB_A);
+      assert(sent.length === 2 && ['duplicate', 'superseded', 'retry', 'unknown_handoff'].includes(result.status),
+        `no X payload reaches the adapter against Y (calls ${sent.length}, got ${result.status})`);
+      assert(final?.stage === 'resume' && final.reason === null,
+        'the queued stale X request leaves Y unheld');
+      const junkBefore = engine.snapshot().counts.submitJunk;
+      const staleJunk = await submit('stale-junk', 'not an application response');
+      const afterJunk = rowOf(engine, JOB_A);
+      assert(sent.length === 2 && ['unknown_handoff', 'duplicate', 'superseded'].includes(staleJunk.status),
+        `a malformed stale X request cannot reach the adapter (calls ${sent.length}, got ${staleJunk.status})`);
+      assert(afterJunk?.stage === 'resume' && afterJunk.reason === null && engine.snapshot().counts.submitJunk === junkBefore,
+        'a malformed stale X request cannot classify against or hold Y');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a gone probe for an old canvas path cannot remove a lane after path adoption',
+    run: async () => {
+      const statusGate = deferred(); const paths = []; let statuses = 0;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: handoff({ code: 'HANDOFF-PATH' }) }),
+          status: async ({ canvasFilePath }) => {
+            paths.push(canvasFilePath); statuses += 1;
+            return statuses === 1 ? statusGate.promise : { kind: 'host' };
+          },
+          adoptCanvasPath: async () => ({ adopted: true }),
+        }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const serving = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert(paths[0] === PATH_A, 'the serve-time probe claimed the old path');
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_B }] })).ok, 'Release adopts the new canvas path');
+      statusGate.resolve({ kind: 'gone' });
+      const served = await serving;
+      assert(rowOf(engine, JOB_A) && paths.includes(PATH_B), `the old-path gone result cannot remove the adopted lane (${JSON.stringify(paths)})`);
+      assert(served.status === 'served', `the retried new-path probe still serves the lane, got ${served.status}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: restore rescans probe a dynamic lane once without re-spending an active inconclusive lane',
+    run: async () => {
+      const first = deferred(); const calls = { [JOB_A]: 0, [JOB_B]: 0 };
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ status: async ({ jobId }) => {
+          calls[jobId] += 1;
+          if (jobId === JOB_A && calls[jobId] === 1) return first.promise;
+          return jobId === JOB_B ? { kind: 'host' } : { kind: 'busy' };
+        } }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        restoredLanes: [{ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, releasedAt: 1, phase: 'unread', counters: {} }],
+      });
+      await settle();
+      assert(calls[JOB_A] === 1, 'A has one active inconclusive probe');
+      assert(engine.restore([{ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', counters: {} }]) === 2, 'B dynamically restores');
+      assert(engine.restore([{ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B, releasedAt: 2, phase: 'unread', counters: {} }]) === 2, 'a duplicate restore adds nothing');
+      await engine.tick();
+      first.resolve({ kind: 'busy' });
+      await settle();
+      assert(calls[JOB_A] === 1 && calls[JOB_B] === 1, `only B gets the rescan; calls ${JSON.stringify(calls)}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: two gets sharing a stale read cannot consume refresh and later serve its old handoff',
+    run: async () => {
+      const readGate = deferred(); let reads = 0;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ read: async () => {
+          reads += 1;
+          return reads === 1 ? readGate.promise : { kind: 'open', handoff: handoff({ code: 'HANDOFF-NEWEST', stage: 'cover-letter' }) };
+        } }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const one = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert(engine.hint({ jobId: JOB_A }), 'first hint advances the read revision');
+      clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+      assert(engine.hint({ jobId: JOB_A }), 'second hint also advances it');
+      const two = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert(reads === 1, 'both gets share the original in-flight read');
+      readGate.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-OLD', stage: 'resume' }) });
+      const [first, second] = await Promise.all([one, two]);
+      assert(![first, second].some(value => value.status === 'served' && value.handoffCode === 'HANDOFF-OLD'), 'neither shared stale read is served');
+      const fresh = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(fresh.status === 'served' && fresh.handoffCode === 'HANDOFF-NEWEST', `refresh remains owed and serves newest code, got ${fresh.status}/${fresh.handoffCode ?? ''}`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a release save made stale by power resume schedules a current-generation snapshot',
+    run: async () => {
+      const saves = []; let disk = [];
+      const store = { saveLanes: lanes => {
+        const gate = deferred(); saves.push({ lanes, gate });
+        return gate.promise.then(ok => { if (ok !== false) disk = lanes; return ok; });
+      } };
+      const { engine } = pendingEngine(store);
+      const release = engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      await settle();
+      assert(saves.length === 1 && engine.onPowerResume(), 'the release write is pending across power resume');
+      await settle();
+      saves[0].gate.resolve(true);
+      assert((await release).code === 'not_ready', 'the old-generation release completion is fenced');
+      await settle();
+      assert(saves.length === 2, 'a current-generation snapshot is scheduled after the fenced write');
+      saves[1].gate.resolve(true);
+      await settle();
+      assert(disk.length === 1 && disk[0].jobId === JOB_A, 'the durable sink receives the current lane snapshot');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: late accepted or rejected X results cannot disturb an already-served Y successor',
+    run: async () => {
+      for (const kind of ['accepted', 'rejected']) {
+        const resultGate = deferred(); let sourceCode = 'HANDOFF-Y'; let reads = 0;
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => {
+              reads += 1;
+              return { kind: 'open', handoff: handoff({ code: sourceCode, stage: 'resume' }) };
+            },
+            submit: async () => resultGate.promise,
+          }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).handoffCode === 'HANDOFF-Y', `${kind}: Y is issued first`);
+        sourceCode = 'HANDOFF-X';
+        assert(engine.hint({ jobId: JOB_A }), `${kind}: X invalidates Y`);
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(rowOf(engine, JOB_A)?.reason === 'human_advance', `${kind}: X is initially held until confirmed`);
+        assert((await engine.resume({ jobId: JOB_A })).ok, `${kind}: resume X`);
+        const x = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(x.handoffCode === 'HANDOFF-X', `${kind}: X is issued and served`);
+        const old = engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: x.handoffCode,
+          response: answer({ code: x.handoffCode, stage: x.stage }) });
+        await settle();
+
+        sourceCode = 'HANDOFF-Y';
+        clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+        assert(engine.hint({ jobId: JOB_A }), `${kind}: source rotates to issued Y while X is pending`);
+        const y = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(y.status === 'served' && y.handoffCode === 'HANDOFF-Y', `${kind}: Y is served before X lands`);
+        const before = rowOf(engine, JOB_A);
+        const readsBeforeLanding = reads;
+        resultGate.resolve(kind === 'accepted'
+          ? { kind: 'accepted', completed: false, handoff: handoff({ code: `HANDOFF-X-${kind}`, stage: 'review' }) }
+          : { kind: 'rejected', validationErrors: ['synthetic'], handoff: handoff({ code: `HANDOFF-X-${kind}`, stage: 'review' }) });
+        await old;
+        await settle();
+        const after = rowOf(engine, JOB_A);
+        assert(after?.phase === 'awaiting' && after.stage === 'resume' && after.awaitingAnswer === true && after.servedAt === before.servedAt,
+          `${kind}: late X cannot clear or restamp Y's outstanding serve`);
+        const replay = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(replay.status === 'served' && replay.handoffCode === 'HANDOFF-Y' && reads === readsBeforeLanding,
+          `${kind}: late X cannot make Y re-read or serve an X successor`);
+        const successor = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: `HANDOFF-X-${kind}`,
+          response: answer({ code: `HANDOFF-X-${kind}`, stage: 'review' }) });
+        assert(successor.status === 'unknown_handoff', `${kind}: X's successor is never indexed onto Y`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an X recovery after Y rotation retries fresh Y and a stale submit watchdog cannot hold Y',
+    run: async () => {
+      const prepareXWithIssuedY = async ({ submit, submitBudgetMs = undefined } = {}) => {
+        let sourceCode = 'HANDOFF-Y'; const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({
+            read: async () => ({ kind: 'open', handoff: handoff({ code: sourceCode, stage: 'resume' }) }),
+            submit,
+          }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+          ...(submitBudgetMs === undefined ? {} : { submitBudgetMs }),
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        sourceCode = 'HANDOFF-X';
+        assert(engine.hint({ jobId: JOB_A }), 'X invalidates initial Y');
+        await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert((await engine.resume({ jobId: JOB_A })).ok, 'resume permits X to be issued');
+        const x = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        assert(x.handoffCode === 'HANDOFF-X', 'X is the submitted issued code');
+        return {
+          engine, clock, chat, x,
+          rotateToY: async () => {
+            sourceCode = 'HANDOFF-Y';
+            clock.advance(CONSTANTS.HINT_MIN_INTERVAL_MS + 1);
+            assert(engine.hint({ jobId: JOB_A }), 'Y invalidates X while its submit is pending');
+            const y = await engine.get({ session: chat.sessionCode, linkId: LINK });
+            assert(y.status === 'served' && y.handoffCode === 'HANDOFF-Y', 'issued Y is served before X settles');
+            return y;
+          },
+        };
+      };
+
+      const throwGate = deferred(); const submittedCodes = [];
+      const recovery = await prepareXWithIssuedY({ submit: async (_lane, payload) => {
+        submittedCodes.push(payload.code);
+        if (submittedCodes.length === 1) return throwGate.promise;
+        return { kind: 'rejected', validationErrors: ['synthetic'], handoff: handoff({ code: 'HANDOFF-Y', stage: 'resume' }) };
+      } });
+      const old = recovery.engine.submit({ session: recovery.chat.sessionCode, linkId: LINK, handoffCode: recovery.x.handoffCode,
+        response: answer({ code: recovery.x.handoffCode, stage: recovery.x.stage }) });
+      await settle();
+      await recovery.rotateToY();
+      throwGate.reject(Object.assign(new Error('synthetic I/O failure'), { code: 'EIO' }));
+      const recovered = await old;
+      assert(recovered.status === 'rejected' && JSON.stringify(submittedCodes) === JSON.stringify(['HANDOFF-X', 'HANDOFF-Y']),
+        `an X recovery must retry the fresh Y code exactly once (${JSON.stringify(submittedCodes)})`);
+      const recoveredRow = rowOf(recovery.engine, JOB_A);
+      assert(recoveredRow?.phase === 'awaiting' && recoveredRow.stage === 'resume' && recoveredRow.reason === null,
+        'the fresh Y recovery remains the active, unheld handoff');
+
+      const stuckGate = deferred(); const stuckCodes = [];
+      const stuck = await prepareXWithIssuedY({ submitBudgetMs: CONSTANTS.HINT_MIN_INTERVAL_MS + 10, submit: async (_lane, payload) => {
+        stuckCodes.push(payload.code); return stuckGate.promise;
+      } });
+      const pending = stuck.engine.submit({ session: stuck.chat.sessionCode, linkId: LINK, handoffCode: stuck.x.handoffCode,
+        response: answer({ code: stuck.x.handoffCode, stage: stuck.x.stage }) });
+      await settle();
+      await stuck.rotateToY();
+      stuck.clock.advance(11);
+      await settle();
+      const yAfterTimeout = rowOf(stuck.engine, JOB_A);
+      assert(yAfterTimeout?.phase === 'awaiting' && yAfterTimeout.reason === null && yAfterTimeout.stage === 'resume' && stuckCodes.length === 1,
+        'a stale X submit watchdog cannot hold Y or retry X text against it');
+      stuckGate.resolve({ kind: 'rejected', validationErrors: [], handoff: null });
+      await pending;
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a late X result cannot index its successor after another X completion clears current ownership',
+    run: async () => {
+      for (const kind of ['accepted', 'rejected']) {
+        const gates = [deferred(), deferred()]; let submitted = 0;
+        const clock = createFakeClock();
+        const engine = createHandoffEngine({
+          source: source({ submit: async () => gates[submitted++].promise }).api,
+          now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+        });
+        await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+        const chat = await engine.newChat({ linkId: LINK });
+        const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+        const send = note => engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+          response: answer({ code: served.handoffCode, stage: served.stage, extra: { note } }) });
+        const first = send(`${kind}-first`); const late = send(`${kind}-late`);
+        await settle();
+        assert(submitted === 2, `${kind}: both X calls are admitted before either settles`);
+        gates[0].resolve({ kind: 'accepted', completed: true });
+        await first;
+        assert(rowOf(engine, JOB_A)?.phase === 'host', `${kind}: first completion clears the lane current handoff`);
+        const successorCode = `HANDOFF-X-LATE-${kind}`;
+        gates[1].resolve(kind === 'accepted'
+          ? { kind: 'accepted', completed: false, handoff: handoff({ code: successorCode, stage: 'review' }) }
+          : { kind: 'rejected', validationErrors: ['synthetic'], handoff: handoff({ code: successorCode, stage: 'review' }) });
+        await late;
+        const successor = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: successorCode,
+          response: answer({ code: successorCode, stage: 'review' }) });
+        assert(submitted === 2 && successor.status === 'unknown_handoff' && rowOf(engine, JOB_A)?.phase === 'host',
+          `${kind}: a late result cannot claim a successor on a current-null lane`);
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a watchdog-expired A read is fenced before its same-lane replacement wins',
+    run: async () => {
+      const firstRead = deferred(); const replacementRead = deferred(); let reads = 0;
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({ read: async () => (++reads === 1 ? firstRead.promise : replacementRead.promise) }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0, readWatchdogMs: 10,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await settle();
+      assert(reads === 1, 'A1 owns the initial read slot');
+      clock.advance(11);
+      await settle();
+      assert(reads === 2, 'A watchdog expiry starts same-lane replacement A2');
+      firstRead.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-A1-LATE', jobId: JOB_A }) });
+      await settle();
+      replacementRead.resolve({ kind: 'open', handoff: handoff({ code: 'HANDOFF-A2-WINNER', jobId: JOB_A }) });
+      const result = await served;
+      assert(result.status === 'served' && result.handoffCode === 'HANDOFF-A2-WINNER',
+        `late A1 cannot beat replacement A2 after watchdog expiry (${result.status}/${result.handoffCode ?? ''})`);
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a failed retained-A replay never sends or overwrites a later B response',
+    run: async () => {
+      let mode = 'initial'; const payloads = [];
+      const clock = createFakeClock();
+      const engine = createHandoffEngine({
+        source: source({
+          read: async () => ({ kind: 'open', handoff: handoff({ code: 'HANDOFF-A', stage: 'resume' }) }),
+          submit: async (_lane, payload) => {
+            payloads.push(payload);
+            if (mode === 'initial') return { kind: 'threw', code: 'EIO', stage: 'resume' };
+            if (mode === 'replay_fails') return { kind: 'threw', code: 'EIO', stage: 'resume' };
+            return { kind: 'accepted', completed: true };
+          },
+        }).api,
+        now: clock.now, timers: clock, random: () => Buffer.alloc(26, 7), holdMs: 0,
+      });
+      await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const responseA = answer({ code: served.handoffCode, stage: served.stage, extra: { note: 'synthetic-A' } });
+      const responseB = answer({ code: served.handoffCode, stage: served.stage, extra: { note: 'synthetic-B' } });
+      const responseB2 = answer({ code: served.handoffCode, stage: served.stage, extra: { note: 'synthetic-B2' } });
+      const initial = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: responseA });
+      assert(['retry', 'needs_user'].includes(initial.status) && payloads.length > 0,
+        `the initial A failure exhausts normal recovery without accepting (${initial.status}, ${payloads.length} calls)`);
+      assert(payloads.every(payload => payload.text === responseA), 'normal recovery only sends retained A text');
+
+      mode = 'replay_fails';
+      const replayFailure = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: responseB });
+      assert(['retry', 'needs_user'].includes(replayFailure.status),
+        `a retained-A replay failure remains retryable or held (${replayFailure.status})`);
+      assert(payloads.every(payload => payload.text === responseA), 'the first later B request replays A and never sends B');
+      if (replayFailure.status === 'needs_user') assert((await engine.resume({ jobId: JOB_A })).ok, 'resume reopens the retained A lane');
+
+      mode = 'accept';
+      const replayed = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: responseB2 });
+      assert(replayed.status === 'accepted' && payloads.every(payload => payload.text === responseA),
+        'the later B request replays and accepts A without ever overwriting retained text');
     },
   },
 );

@@ -19,7 +19,7 @@ import { enforceClipboardMarkdownCap, collapseEventBursts, collapseLogRepeats } 
 // which the live auth-window ring offers no seam for.
 import { buildAuthLifecycleTableMarkdown, buildNativeChallengeSessionMarkdown, formatAuthHistoryTruncationNote, selectAuthHistoryForReport } from '../../electron/ipc/bugReport.js';
 import { SAVED_REPORT_MAX_AGE_MS, SAVED_REPORT_RETENTION, __resetSavedBugReportPruneForTests, buildClipboardPointer, pruneSavedBugReports, savedBugReportDir, writeSavedBugReport } from '../../electron/ipc/bugReport/reportFile.js';
-import { ISSUE_REPORT_DESCRIPTION_MAX_LENGTH, validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
+import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 import { buildFilterSummaryMarkdown } from '../test-dependencies.js';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 // Imported directly rather than through test-dependencies.js (a file this
@@ -42,7 +42,7 @@ import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
-import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportPath, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
+import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
@@ -246,6 +246,9 @@ export default [
         assert(markdown.includes('## Local Application Paste Rejection Trace (durable)'),
           'the durable trace renders under its own heading');
         assert(markdown.includes('4 rejection(s) retained'), `all 4 durable rows are counted, got: ${markdown}`);
+        assert(/job #[0-9a-f]{10}/.test(markdown)
+          && !markdown.includes('Integration Engineer') && !markdown.includes('Micromart') && !markdown.includes(jobId),
+        'the durable trace must use a short correlation digest, never the job title, company, or full job id');
         assert(/longest same-cause run: 4 consecutive rejection\(s\).*stage `cover-letter`, check direct-welcome-closing \(752d8241\)/.test(markdown),
           `the true run length (4 — row 1's extra "redundancy" check must not break the run for direct-welcome-closing, which failed in every row) must be surfaced plainly, got: ${markdown}`);
         // "redundancy" itself only ever failed once (row 1), so it must never be
@@ -284,10 +287,12 @@ export default [
         } catch (error) {
           assert(false, `a corrupt sidecar must never throw, got ${error?.message || error}`);
         }
-        assert(markdown.includes('Missing Job') && markdown.includes('not retained (no rejection trace on disk'),
-          `a job with no sidecar at all renders "not retained" rather than an empty success, got: ${markdown}`);
-        assert(markdown.includes('Corrupt Job') && markdown.includes('not retained (rejection trace file could not be read'),
-          `a corrupt sidecar renders "not retained" rather than throwing or an empty success, got: ${markdown}`);
+        assert(markdown.includes('not retained (no rejection trace on disk')
+          && !markdown.includes('Missing Job') && !markdown.includes(missingJobId),
+        `a job with no sidecar renders a metadata-only "not retained" state, got: ${markdown}`);
+        assert(markdown.includes('not retained (rejection trace file could not be read')
+          && !markdown.includes('Corrupt Job') && !markdown.includes(corruptJobId),
+        `a corrupt sidecar renders a metadata-only "not retained" state rather than throwing, got: ${markdown}`);
         return { missingHandled: true, corruptHandled: true };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -470,6 +475,40 @@ export default [
     },
   },
   {
+    name: 'job diagnostics redact UUID-based durable run and hub identifiers while retaining a correlation digest',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-report-opaque-receipt-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = '123e4567-e89b-12d3-a456-426614174000';
+      const runId = `${hubId}-1700000000000`;
+      try {
+        const analysis = getJobAnalysisPaths(canvas, path.join(dir, 'analysis'), hubId);
+        fs.writeFileSync(analysis.jsonPath, JSON.stringify({
+          runId, sourceHubId: hubId, canvasFilePath: canvas, jobs: [{}],
+        }));
+        fs.writeFileSync(lastRunReceiptPathForCanvas(canvas, hubId), JSON.stringify({
+          runId, nodeId: hubId,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 1 },
+          cleanup: { attempted: true, cleared: true },
+        }));
+        const recovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        const assessment = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+        const report = `${recovery}\n${assessment}`;
+        assert(!report.includes(hubId) && !report.includes(runId)
+          && /run `#[a-f0-9]{10}`/.test(report)
+          && /hub `#[a-f0-9]{10}` is present in this canvas/.test(report)
+          && assessment.includes('Saved score-ready snapshot: 1 job(s)'),
+        'durable ownership and run joins remain structural while UUID-based source identifiers never leave the report');
+        const snapshotSource = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
+        assert(snapshotSource.includes('redactReportOpaqueIds(gaps.join'),
+          'completion-assessment disagreement prose applies the shared UUID redactor before rendering');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return { opaqueIdentifiersRedacted: true };
+    },
+  },
+  {
     // The 2026-09-24 defect: a report confirmed across 6 open Job Search hubs
     // fell straight to readReceiptForCurrentHubs' ambiguous branch and printed
     // INDETERMINATE, even though a connected Job Board had already resolved a
@@ -595,13 +634,13 @@ export default [
           { id: hubId, type: 'jobhub', data: {} }, { id: secondHubId, type: 'jobhub', data: {} }, board, twinBoard,
           { id: 'group-1', type: 'jobgroup', data: { hubId: boardId } }, { id: 'card-1', type: 'jobcard', data: { hubId: boardId } },
         ], longEdges);
-        const sourceLabels = [...boardReport.matchAll(/samepref…[a-f0-9]+/g)].map(match => match[0]);
-        const boardLabels = [...boardReport.matchAll(/- Board `([^`]+)`:/g)].map(match => match[1]);
+        const sourceLabels = [...boardReport.matchAll(/#[a-f0-9]{10}/g)].map(match => match[0]);
+        const boardLabels = [...boardReport.matchAll(/- Board `(#[a-f0-9]{10})`:/g)].map(match => match[1]);
         assert(boardReport.includes('connected=') && boardReport.includes('groups=1 · cards=1')
           && boardReport.includes('phase=awaiting-source') && boardReport.includes('recoverable-failure=recorded')
           && boardReport.includes('cancellation=recorded') && boardReport.includes('clear=recorded (prior results 4)')
           && boardReport.includes('combine-source-runs=1')
-          && new Set(sourceLabels).size >= 2
+          && new Set(sourceLabels).size >= 4
           && boardLabels.length === 2 && new Set(boardLabels).size === 2
           && !boardReport.includes(hubId) && !boardReport.includes(secondHubId)
           && !boardReport.includes(boardId) && !boardReport.includes(twinBoardId),
@@ -797,8 +836,8 @@ export default [
             connectedSourceHubIds: [sourceId], stale: false,
           },
         ], 3, new Set([sourceId]));
-        const labels = [...assessment.matchAll(/`(id…[a-f0-9]+)`/g)].map(match => match[1]);
-        const clearLabel = assessment.match(/deliberately cleared: `(id…[a-f0-9]+)`/)?.[1];
+        const labels = [...assessment.matchAll(/`(#[a-f0-9]{10})`/g)].map(match => match[1]);
+        const clearLabel = assessment.match(/deliberately cleared: `(#[a-f0-9]{10})`/)?.[1];
         assert(assessment.includes('BOARD REFRESH REQUIRED')
           && assessment.includes('was deliberately cleared after this run')
           && assessment.includes('deliberately cleared:')
@@ -916,10 +955,10 @@ export default [
         && rows.some(line => line.includes('scope=nested canvas 1 (depth 1)') && line.includes('groups=1 · cards=1 · hidden-children=1')),
       `nested Board/card/group facts must be rendered from their own canvas level, got:\n${report}`);
       const sourceLines = report.split('\n').filter(line => line.includes('  - Sources:'));
+      const sourceCorrelations = sourceLines.map(line => line.match(/#[a-f0-9]{10}/)?.[0]).filter(Boolean);
       assert(sourceLines.length === 2
-        && sourceLines.some(line => line.includes('…root-sou'))
-        && sourceLines.some(line => line.includes('…nested-s'))
-        && sourceLines.every(line => !line.includes('…root-sou`, `…nested-s')),
+        && sourceCorrelations.length === 2
+        && new Set(sourceCorrelations).size === 2,
       `same Board id in separate levels must not merge root/nested connections, got:\n${report}`);
       assert(!report.includes(sharedBoardId) && !report.includes(rootSourceId) && !report.includes(nestedSourceId),
         'nested diagnostics must retain the Board section’s opaque-id redaction');
@@ -1046,8 +1085,8 @@ export default [
           phase: 'awaiting-source', selectedSearchModuleIds: ['manual-source'], completedSourceRuns: {}, activeSourceId: 'manual-source',
         } },
       }], 'manual-source');
-      assert(manualProgress.includes('Board `…id`') && !manualProgress.includes(privateManualBoardId),
-        'manual handoff Board context redacts custom Board ids instead of using the raw short-id formatter');
+      assert(/Board `#[a-f0-9]{10}`/.test(manualProgress) && !manualProgress.includes(privateManualBoardId),
+        'manual handoff Board context retains only a stable digest correlation for custom Board ids');
       return { compactScopes: topology.boards.length, boundedNoBoard: true, getterSafe: true, rawSignatureLeak: false, handoffBoardRedacted: true };
     },
   },
@@ -1071,11 +1110,11 @@ export default [
       }))));
       const report = buildJobLinkSnapshot(root);
       assert(report.includes('## Job Listing Link Diagnostics')
-        && report.includes('Normal listing')
+        && report.includes('affected row 1')
         && report.includes('Inspection was bounded')
         && report.includes('depth budget')
         && report.includes('row budget'),
-      `cyclic/deep/oversized payload must produce bounded, explicit diagnostics, got:\n${report.slice(0, 3_000)}`);
+      `cyclic/deep/oversized payload must produce bounded, explicit metadata-only diagnostics, got:\n${report.slice(0, 3_000)}`);
       assert(!report.includes('token='),
         'bounded link diagnostics must preserve existing URL query/token redaction');
       return { bounded: true };
@@ -1801,10 +1840,9 @@ export default [
 
         const recovery = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
         assert(recovery.includes('Description-recovery checkpoints: 2 parseable, ownership-verified checkpoint(s)')
-          && recovery.includes('hub `…nt-hub-a` (present in this canvas)')
-          && recovery.includes('hub `…nt-hub-b` (present in this canvas)')
-          && recovery.includes('run `…23456789`')
-          && recovery.includes('run `…87654321`')
+          && /hub `#[a-f0-9]{10}` \(present in this canvas\)/.test(recovery)
+          && /run `#[a-f0-9]{10}`/.test(recovery)
+          && !recovery.includes(hubA) && !recovery.includes(hubB) && !recovery.includes(runA) && !recovery.includes(runB)
           && recovery.includes('created ') && recovery.includes('updated ')
           && recovery.includes('3 score-ready job(s) · 2 recovery-pool row(s)')
           && recovery.includes('1 score-ready job(s) · 4 recovery-pool row(s)'),
@@ -2204,12 +2242,13 @@ export default [
             bySource: { dice: { count: 16, providerGathered: 16, stopReason: 'empty-page' } },
             // Deliberately larger than the former clipboard cap. The full audit
             // must remain available alongside the completion assessment.
-            remoteRelevance: {
-              indeed: Array.from({ length: 300 }, (_, index) => ({
+            remoteRelevance: Object.fromEntries(Array.from({ length: 800 }, (_, index) => [
+              `provider-${index}`,
+              [{
                 title: `Cap fixture job ${index} ${'evidence '.repeat(24)}`,
                 company: 'Cap Fixture Co', matched: [{ query: 'Software Architect', matchedTerms: ['software', 'architect'], requiredMatches: 2 }],
-              })),
-            },
+              }],
+            ])),
           },
           resolves: {
             indeed: { ts: Date.now() - 8_000, hasMergeTelemetry: true, cumulativeMergeNet: 8, merge: { pendingBefore: 8, pendingAfter: 16 } },
@@ -2229,15 +2268,16 @@ export default [
         // and this path must keep every byte of it regardless.
         const report = generateMarkdown(reportPayload);
 
-        assert(report.markdown.length > 50_000 && !report.hardTruncated,
-          'uncapped completion assessment report exceeds the 50k clipboard ceiling without truncation');
+        assert(!report.hardTruncated,
+          'uncapped completion assessment report remains uncapped even when metadata-only privacy rendering is smaller');
         assert(report.markdown.includes('## Job Completion Assessment')
           && report.markdown.includes('✅ **VERIFIED COMPLETE**')
           && report.markdown.includes('8 initial score-ready + 8 recovered = 16 expected scoring input')
           && report.markdown.includes('input 16 → scored 16')
           && report.markdown.includes('terminal score-ready 16')
           && report.markdown.includes('Saved score-ready snapshot: 16 job(s)')
-          && report.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree on `completion-run-16`'),
+          && report.markdown.includes('Run correlation: ✅ pipeline + search + receipt + snapshot agree')
+          && !report.markdown.includes('Cap fixture job') && !report.markdown.includes('Software Architect'),
         'completion assessment reconciles search recovery, scoring, taxonomy, receipt, and saved snapshot in the full report');
         assert(report.markdown.indexOf('## Job Completion Assessment') < report.markdown.indexOf('## Job Search Pipeline')
           && report.markdown.includes('### Scoring'),
@@ -2927,7 +2967,7 @@ export default [
         nodeComponentStates: [], eventLogs: [], filterCode: 'FULL',
       }).markdown;
       const section = report.split('## Node Diagnostics')[1]?.split('\n## ')[0] || '';
-      assert(section.includes('appBundle: queued (01f8d94c)'), 'a live bundle shows its closed status and 8-hex id prefix');
+      assert(section.includes('appBundle: queued (#') && !section.includes(bundleId), 'a live bundle shows its closed status with a one-way correlation digest');
       assert(section.includes('appBundle: none'), 'a cleared pointer is stated, not omitted');
       assert(section.includes('appBundle: unknown ('), 'a status that is not a closed word is not echoed');
       assert(!section.includes('PRIVATE_FOLDER') && !section.includes('PRIVATE_STATUS'), 'no path or free text reaches the report');
@@ -2989,10 +3029,10 @@ export default [
           && section.includes('2 missing direct Apply-on URL(s) (1 retain a Google identity fallback)')
           && section.includes('3 legacy `ibp=htl;jobs`')
           && section.includes('3 blank raw search query')
-          && section.includes('"Missing Direct Link"')
+          && section.includes('affected row 1')
           && section.includes('public=missing-direct (Google fallback available)')
           && !section.includes('"Healthy Direct Link"'),
-        'FULL/JOBLINK must surface the structural Google link defect and dedupe card/board copies');
+        'FULL/JOBLINK must surface the structural Google link defect without exporting a job title and dedupe card/board copies');
         assert(!section.includes('SecretOpaqueId'),
           'job-link diagnostics must never export opaque query/fragment values');
       }
@@ -3022,7 +3062,8 @@ export default [
         eventLogs: [],
       };
       const fileReport = generateMarkdown(payload).markdown;
-      assert(nodes.every(node => fileReport.includes(`| \`${node.id}\``))
+      assert((fileReport.match(/\| `#[a-f0-9]{10}`/g) || []).length >= nodes.length
+        && !nodes.some(node => fileReport.includes(`| \`${node.id}\``))
         && !fileReport.includes('routine jobcard row(s) omitted'),
       'Save to file retains every routine jobcard row with no omission footer');
 
@@ -3033,7 +3074,7 @@ export default [
       // logs/event history ever render. Anomalous cards (an expanded hiring-fit
       // disclosure, here card0017-19) are never sampled away.
       const clipboardReport = generateMarkdown(payload, null, { maxChars: 1_000_000 }).markdown;
-      assert(clipboardReport.includes('| `card0014`')
+      assert((clipboardReport.match(/\| `#[a-f0-9]{10}`/g) || []).length >= 15
         && !clipboardReport.includes('| `card0015`')
         && clipboardReport.includes('reasoningExpanded')
         && clipboardReport.includes('scoreAuditExpanded')
@@ -3271,15 +3312,17 @@ export default [
       const distinctEvents = Array.from({ length: 50 }, (_, i) => `[12:01:${String(i % 60).padStart(2, '0')}.000] DISTINCT-${i} unique canvas activity`);
       const FOLD_SIGNATURE = /×\d+ \(id prefix/;
 
-      // Save to file is the uncapped artifact and the primary evidence for
-      // "my card disappeared" reports: every raw id must survive it verbatim.
+      // Save to file preserves each event as primary evidence, but report
+      // export must not reproduce opaque node identifiers verbatim.
       const savedToFile = generateMarkdown({
         description: 'Burst-fold save-to-file fidelity fixture.',
         nodes: [], edges: [], drawings: [], frontEndState: {},
         nodeInternals: [], nodeComponentStates: [], eventLogs: teardownBurst,
       }).markdown;
-      assert(teardownBurst.every((line) => savedToFile.includes(line)) && !FOLD_SIGNATURE.test(savedToFile),
-        'Save to file keeps every raw node-removed id: burst folding must never reach the uncapped export');
+      assert(teardownBurst.map(redactReportOpaqueIds).every((line) => savedToFile.includes(line))
+        && !savedToFile.includes(teardownStamp)
+        && !FOLD_SIGNATURE.test(savedToFile),
+      'Save to file keeps every node-removal event with opaque IDs redacted; burst folding must never reach the uncapped export');
 
       const roomyBurst = enforceClipboardMarkdownCap('# Bug Report\nbody\n', teardownBurst, logs, 1_000_000);
       assert(!roomyBurst.truncated && teardownBurst.every((line) => roomyBurst.markdown.includes(line))
@@ -3805,6 +3848,15 @@ export default [
         && !traces.includes('oauth=')
         && !traces.includes('token='),
       'session/auth report formatting keeps URL identity but never exports query/hash tokens');
+      const listingUrl = redactReportUrl('https://jobs.example.test/jobs/XJOBAUDIT-LISTING-IDENTIFIER?token=secret');
+      const jobSearchUrl = redactReportUrl('https://jobs.example.test/job-search/Principal-Privacy-Engineer-Toronto?token=secret');
+      const productUrl = redactReportUrl('https://market.example.test/item/Private-Product-Title?token=secret');
+      const statusUrl = redactReportUrl('https://jobs.example.test/settings/status?token=secret');
+      assert(listingUrl.endsWith('/<listing-path>') && !listingUrl.includes('XJOBAUDIT-LISTING-IDENTIFIER')
+        && jobSearchUrl.endsWith('/<listing-path>') && !jobSearchUrl.includes('Principal-Privacy-Engineer-Toronto')
+        && productUrl.endsWith('/<listing-path>') && !productUrl.includes('Private-Product-Title')
+        && statusUrl === 'https://jobs.example.test/settings/status',
+      'job and product listing paths are withheld while ordinary diagnostic routes remain structural');
       return { redacted: true };
     },
   },
@@ -3948,6 +4000,14 @@ export default [
         && !projectReportDiagnostic(freeDiagnostic).includes('token=')
         && closeReportDiagnostic(freeDiagnostic) === 'recorded',
       'trusted diagnostics redact paths/tokens while browser-derived diagnostics stay closed');
+      const opaqueId = '123e4567-e89b-12d3-a456-426614174000';
+      const opaqueDiagnostic = `stage=save jobId=${opaqueId} status=failed`;
+      assert(redactReportOpaqueIds(opaqueDiagnostic).includes('<opaque-id>')
+        && !redactReportOpaqueIds(opaqueDiagnostic).includes(opaqueId)
+        && projectReportDiagnostic(opaqueDiagnostic).includes('stage=save')
+        && projectReportDiagnostic(opaqueDiagnostic).includes('status=failed')
+        && !projectReportDiagnostic(opaqueDiagnostic).includes(opaqueId),
+      'opaque internal identifiers must be removed from direct report diagnostics without losing structural status');
       const secrets = redactReportLogSecrets('password: "Ada Lovelace 555-0116" | token: [Marisol Quenby 555-0117] | "apiKey":"example.com-555-0118" | Authorization-Key: example.com-555-0119 | Bearer eyJabcdefghijklmnopqrstuvwxyz.abcdefghijklmnopqrstuvwxyz.abcdefghijklmnopqrstuvwxyz');
       const escapedSecrets = redactReportLogSecrets(String.raw`{"password":"before \"Ada Lovelace 555-0121"} | token='before \'Marisol Quenby 555-0122'`);
       const bearerSecrets = redactReportLogSecrets('Authorization: Bearer "Ada Lovelace 555-0123" | Authorization: Bearer [Marisol Quenby 555-0124]');
@@ -3974,14 +4034,36 @@ export default [
       const rawPreference = 'PRIVATE PREFERENCE, SECOND VALUE';
       const rawDocumentId = 'PRIVATE-GOOGLE-JOBS-DOCUMENT-ID';
       const rawPath = '/Users/ada-lovelace/Desktop/example.com/555-0102.json';
+      const rawRoleGroupLabel = 'PRIVATE ROLE GROUP LABEL';
+      const rawSalaryGroupLabel = 'PRIVATE SALARY GROUP LABEL';
+      const rawCategoryGroupLabel = 'PRIVATE CATEGORY GROUP LABEL';
+      const rawBucketGroupLabel = 'PRIVATE BUCKET GROUP LABEL';
+      const rawBranchGroupLabel = 'PRIVATE BRANCH GROUP LABEL';
       const report = generateMarkdown({
         description: 'Event-history redaction fixture.', filterCode: 'FULL',
-        nodes: [], edges: [], drawings: [], frontEndState: {},
-        nodeInternals: [], nodeComponentStates: [],
+        nodes: [
+          { id: 'role-group-private', type: 'jobgroup', data: { kind: 'role', label: rawRoleGroupLabel, count: 2, expanded: true, childIds: [] } },
+          { id: 'salary-group-private', type: 'jobgroup', data: { kind: 'salary', label: rawSalaryGroupLabel, count: 2, expanded: false, childIds: [] } },
+          { id: 'category-group-private', type: 'jobgroup', data: { kind: 'category', label: rawCategoryGroupLabel, count: 3, expanded: true, childIds: [] } },
+          { id: 'bucket-group-private', type: 'jobgroup', data: { kind: 'bucket', label: rawBucketGroupLabel, count: 4, expanded: false, childIds: [] } },
+          { id: 'branch-group-private', type: 'jobgroup', data: { kind: 'branch', label: rawBranchGroupLabel, count: 5, expanded: true, childIds: [] } },
+        ], edges: [], drawings: [], frontEndState: {},
+        nodeInternals: [
+          { id: 'role-group-private', type: 'jobgroup', position: { x: 0, y: 0 }, measured: { width: 260, height: 80 } },
+          { id: 'salary-group-private', type: 'jobgroup', position: { x: 0, y: 100 }, measured: { width: 260, height: 80 } },
+          { id: 'category-group-private', type: 'jobgroup', position: { x: 0, y: 200 }, measured: { width: 260, height: 80 } },
+          { id: 'bucket-group-private', type: 'jobgroup', position: { x: 0, y: 300 }, measured: { width: 260, height: 80 } },
+          { id: 'branch-group-private', type: 'jobgroup', position: { x: 0, y: 400 }, measured: { width: 260, height: 80 } },
+        ], nodeComponentStates: [],
         eventLogs: [
           `[2026-09-13T04:00:00.000-04:00] [JobSearch] Starting USAJobs background search for query: "${rawQuery}"`,
           `[2026-09-13T04:00:01.000-04:00] [JobSearch] Target role set — skipping query variation generation and searching exactly "${rawRole}"`,
           `[2026-09-13T04:00:02.000-04:00] [JobTree] show more in role "${rawRole}" id=group-1 (now 8/20)`,
+          `[2026-09-13T04:00:02.250-04:00] [JobTree] expanded role "${rawRoleGroupLabel}" id=group-2`,
+          `[2026-09-13T04:00:02.500-04:00] [JobTree] collapsed salary "${rawSalaryGroupLabel}" id=group-3`,
+          `[2026-09-13T04:00:02.600-04:00] [JobTree] expanded category "${rawCategoryGroupLabel}" id=group-4`,
+          `[2026-09-13T04:00:02.700-04:00] [JobTree] collapsed bucket "${rawBucketGroupLabel}" id=group-5`,
+          `[2026-09-13T04:00:02.800-04:00] [JobTree] expanded branch "${rawBranchGroupLabel}" id=group-6`,
           `[2026-09-13T04:00:03.000-04:00] [JobCard] external-link requested id=card-1 q=${rawQuery} htidocid=${rawDocumentId} target=google-jobs`,
           `[2026-09-13T04:00:04.000-04:00] [JobSearch] source=usajobs stage=collecting request=${rawUrl}`,
           `[2026-09-13T04:00:04.500-04:00] [JobSearch] preferences=${rawPreference} stage=scoring`,
@@ -4000,6 +4082,11 @@ export default [
         rawPreference,
         rawDocumentId,
         rawPath,
+        rawRoleGroupLabel,
+        rawSalaryGroupLabel,
+        rawCategoryGroupLabel,
+        rawBucketGroupLabel,
+        rawBranchGroupLabel,
         // Catch partial leaks from comma-delimited values and a quote inside
         // a quoted target role, not merely the original whole value.
         'SECOND VALUE',
@@ -4011,12 +4098,19 @@ export default [
         && history.includes('Starting USAJobs background search for query: "[redacted query]"')
         && history.includes('searching exactly "[redacted target role]"')
         && history.includes('show more in role "[redacted role]"')
+        && history.includes('expanded role "[redacted taxonomy label]"')
+        && history.includes('collapsed salary "[redacted taxonomy label]"')
+        && history.includes('expanded category "[redacted taxonomy label]"')
+        && history.includes('collapsed bucket "[redacted taxonomy label]"')
+        && history.includes('expanded branch "[redacted taxonomy label]"')
         && history.includes('q=[redacted query] htidocid=[redacted document identifier] target=google-jobs')
         && history.includes('preferences=[redacted preferences] stage=scoring')
         && history.includes('target=<local-path>')
         && history.includes('source=indeed stage=scoring scored=3')
         && history.includes('q=present htidocid=missing target=google-jobs'),
-      'Event History retains timestamps, event type, stage, safe URL identity, and non-sensitive diagnostic structure');
+      'Event History and Node Diagnostics retain tree structure without exporting listing-derived taxonomy labels');
+      assert(['role', 'salary', 'category', 'bucket', 'branch'].every(kind => report.includes(`${kind}: label withheld`)),
+        'Node Diagnostics retain every taxonomy kind/count/expanded state without raw role, salary, category, bucket, or branch labels');
       return { redacted: true };
     },
   },
@@ -4109,10 +4203,10 @@ export default [
           measured: { width: 330, height: 813 },
         })),
       }).markdown;
-      assert(report.includes('| `emptyhub`')
+      assert(report.includes('| `#')
         && report.includes('careerIdentity: none, dropLock: none')
-        && report.includes('| `lockhub1`')
-        && report.includes('careerIdentity: present, dropLock: started'),
+        && report.includes('careerIdentity: present, dropLock: started')
+        && !report.includes('emptyhub') && !report.includes('lockhub1'),
       'FULL Node Diagnostics must show whether each copied Job Search can accept a career-file drop and why not');
       return { empty: 'unlocked', started: 'started' };
     },
@@ -4167,14 +4261,11 @@ export default [
       });
       assert(result.markdown.length > 50_000 && !result.truncated && !result.hardTruncated,
         'Report generation retains content larger than the former 50k clipboard ceiling');
-      // The FULL guidance must describe the CURRENT delivery model: both actions
-      // generate identical uncapped content, but Copy writes it to a file and
-      // clipboards a pointer while Save to file prompts for a location. The old
-      // wording ("export the same report") now reads as "the clipboard holds
-      // what Save produces", which is exactly what stopped being true.
+      // The two actions share the same uncapped rendering policy, but take
+      // separate live snapshots and therefore cannot promise identical bytes.
       assert(result.markdown.includes('EVT 0 ') && result.markdown.includes('EVT 2999 ')
-        && result.markdown.includes('byte-identical uncapped report content')
-        && result.markdown.includes('clipboards a short path pointer')
+        && result.markdown.includes('same uncapped rendering policy and content scope')
+        && result.markdown.includes('clipboards a path pointer')
         && !result.markdown.includes('Copy and Save to file export the same report.'),
       'both the oldest and newest retained event lines remain present with accurate export guidance');
       assert(result.markdown.indexOf('EVT 2999 ') < result.markdown.indexOf('EVT 0 ')
@@ -4228,8 +4319,9 @@ export default [
     name: 'clipboard report IPC saves the full report and clipboards only a pointer to it',
     run: async () => {
       const events = Array.from({ length: 3_000 }, (_, i) => `[12:00:${String(i % 60).padStart(2, '0')}.000] IPC EVT ${i} ${'evidence '.repeat(8)}`);
+      const fullDescription = `IPC pointer-delivery fixture. ${'intentional user context '.repeat(600)}END_OF_FULL_DESCRIPTION`;
       const payload = {
-        description: 'IPC pointer-delivery fixture.', filterCode: 'FULL',
+        description: fullDescription, filterCode: 'FULL',
         filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
         nodes: [], edges: [], drawings: [], frontEndState: {},
         nodeInternals: [], nodeComponentStates: [], eventLogs: events,
@@ -4261,32 +4353,35 @@ export default [
         && savedBody.length === direct.markdown.length,
       `the saved report file must be the full uncapped report (saved ${savedBody.length} vs direct ${direct.markdown.length})`);
 
-      // The load-bearing assertion, restated for the pointer design: what
-      // reaches the clipboard is a SHORT pointer that names the file — never
-      // the report body. A regression that reverted to pasting the report
-      // inline would fail on both the size and the body-content checks.
+      // The load-bearing assertion: generated report content stays file-backed
+      // while the intentional description is included in full. A regression
+      // that pasted diagnostics inline would fail the body-content checks.
       assert(viaIpc.clipboardText.includes(viaIpc.savedPath)
-        && viaIpc.clipboardText.length < 4_000
-        && viaIpc.clipboardText.length < savedBody.length / 10,
-      `the clipboard pointer must name the file and stay far smaller than it (pointer ${viaIpc.clipboardText.length} vs report ${savedBody.length})`);
+        && viaIpc.clipboardText.length < savedBody.length
+        && viaIpc.clipboardText.includes(fullDescription),
+      `the clipboard pointer must name the file and retain the full intentional description (pointer ${viaIpc.clipboardText.length} vs report ${savedBody.length})`);
       assert(!viaIpc.clipboardText.includes('IPC EVT 2999 ') && !viaIpc.clipboardText.includes('IPC EVT 0 '),
         'the clipboard pointer must not carry report body content');
-      assert(viaIpc.clipboardText.includes('IPC pointer-delivery fixture.')
+      assert(savedBody.includes(fullDescription)
+        && viaIpc.clipboardText.includes('END_OF_FULL_DESCRIPTION')
         && viaIpc.clipboardText.includes('retained across app restarts'),
-      'the pointer should carry the issue description and state that restart does not invalidate it');
+      'the saved report and pointer should carry the entire issue description and state that restart does not invalidate it');
 
       fs.rmSync(viaIpc.savedPath, { force: true });
       return { directLength: direct.markdown.length, pointerLength: viaIpc.clipboardText.length };
     },
   },
 {
-    name: 'issue reports accept an intentionally blank description while enforcing its IPC text contract',
+    name: 'issue reports accept intentional descriptions of any app-imposed size while enforcing their IPC text contract',
     run: async () => {
       const empty = validateIssueReportDescription('');
       assert(empty.ok && empty.value === '', 'an intentionally blank issue description must be valid');
-      for (const invalid of [null, 42, {}, 'x'.repeat(ISSUE_REPORT_DESCRIPTION_MAX_LENGTH + 1), 'bad\u0000control']) {
+      const overTwelveThousand = `LONG_DESCRIPTION_${'x'.repeat(12_500)}`;
+      assert(validateIssueReportDescription(overTwelveThousand).ok,
+        'an intentionally authored description beyond the retired UI/IPC cap must remain intact');
+      for (const invalid of [null, 42, {}, 'bad\u0000control']) {
         assert(!validateIssueReportDescription(invalid).ok,
-          `non-text, oversized, and control-character descriptions must be rejected: ${JSON.stringify(invalid)}`);
+          `non-text and control-character descriptions must be rejected: ${JSON.stringify(invalid)}`);
       }
 
       const payload = {
@@ -4309,7 +4404,7 @@ export default [
       const rejected = await invoke({ sender }, { ...payload, description: 'bad\u0000control' });
       assert(!rejected.success && /unsupported control character/i.test(rejected.error || ''),
         `the IPC boundary must reject unsafe descriptions, got ${JSON.stringify(rejected)}`);
-      return { maxDescriptionLength: ISSUE_REPORT_DESCRIPTION_MAX_LENGTH };
+      return { acceptedDescriptionLength: overTwelveThousand.length };
     },
   },
 {
@@ -4436,9 +4531,10 @@ export default [
         });
         const blockedSolveReport = buildJobsPipelineSnapshot(new Set(['linkedin-resolve-telemetry-test']), 901, null);
         assert(blockedSolveReport.includes('hit a guest wall')
-          && blockedSolveReport.includes('key may be IP, guest context, or fingerprint/session')
-          && blockedSolveReport.includes('Wait about 1 minute then Solve on this IP'),
-        'LinkedIn Solve report must present wait-or-switch guidance without asserting an IP-only limit');
+          && blockedSolveReport.includes('key may be egress, guest context, or fingerprint/session')
+          && blockedSolveReport.includes('Wait about 1 minute then Solve on this egress')
+          && !blockedSolveReport.includes('185.98.171.115'),
+        'LinkedIn Solve report must present wait-or-switch guidance without exposing an egress address');
 
         recordJobSourceProgress({ sourceId: 'linkedin', status: 'error', warning: { code: 'linkedin-rate-limited', severity: 'throttle' } });
         telemetry.pipeline = { ...telemetry.pipeline, phase: 'completed', active: false };
@@ -4649,9 +4745,11 @@ export default [
           edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
         }, 901).markdown;
         assert(local.includes('### Application Generation (last)')
-          && local.includes('Local Role @ Local Company')
+          && local.includes('Generation correlation: #')
+          && local.includes('Outcome: **completed**')
+          && !local.includes('Local Role') && !local.includes('Local Company')
           && !local.includes('Foreign Role'),
-        'a same-window application attempt must remain in the FULL report');
+        'a same-window application attempt must retain metadata-only lifecycle evidence in the FULL report');
       } finally {
         recordApplicationTelemetry(prior);
       }
@@ -4736,10 +4834,11 @@ export default [
         }, 901).markdown;
         assert(report.includes('Local AI handoff trace (app-authored event/hash/page measurements; AI-authored quality review) — showing the newest 12 of 14; 2 earlier event(s) omitted:'),
           'a handoff trace longer than the render bound must say plainly how many earlier events were left out');
-        assert(report.includes('synthetic-event-13') && report.includes('bundle-save-retry-required'),
-          'the bound must keep the NEWEST event, not drop it — the exact failure this report exists to catch');
+        assert(report.includes('bundle-save-retry-required') && report.includes('result sha1300000000000')
+          && report.includes('detail recorded'),
+        'the bound must keep the NEWEST event metadata, not drop it — the exact failure this report exists to catch');
         assert(!report.includes('synthetic-event-00') && !report.includes('synthetic-event-01'),
-          'events elided by the bound must not also appear verbatim elsewhere in the trace');
+          'withheld event details must not reappear elsewhere in the trace');
       } finally {
         recordApplicationTelemetry(prior);
       }
@@ -4831,8 +4930,11 @@ export default [
       }).markdown;
       assert(report.includes('### Local AI Job State (live card snapshot)')
         && report.includes('status: **invalid**')
-        && report.includes('qualityReview.resume.rationale cannot use page fit'),
-      'FULL/HANDOFF diagnostics expose the persisted Local AI validation error instead of only the prior measured feedback');
+        && report.includes('message recorded')
+        && !report.includes('qualityReview.resume.rationale cannot use page fit')
+        && !report.includes('Senior Backend Engineer')
+        && !report.includes('Acme'),
+      'FULL/HANDOFF diagnostics retain persisted validation-state metadata without exporting job or validation prose');
       return { localAiInvalidState: true };
     },
   },
@@ -5334,7 +5436,6 @@ export default [
           resumeRoleBlockSample: {
             found: true,
             roleCount: 3,
-            sample: '<article class="role"><div class="role-header meta-row"><p class="role-title-line"><span class="title">Security Officer</span></p><p class="role-dates">Oct 2024 – Present<span class="sep" aria-hidden="true">·</span>Memphis, TN</p></div><ul class="highlights"><li>One</li></ul></article>',
             truncated: false,
           },
           skillOpportunities: {
@@ -5366,17 +5467,18 @@ export default [
 
         assert(report.includes('Skill-opportunity analysis: 25 item(s) — 25 verify, 0 learn · histogram 3 role(s) · demand recorded after artifacts'),
           'Report must render the skill-opportunity counts and recordedAfterArtifacts flag');
-        assert(report.includes('"Skill 0" → "Infrastructure"') && report.includes('"Skill 19" → "Certifications"'),
-          'Report must render per-item canonical skill name → résumé category pairs');
+        assert(report.includes('20 verify-item detail row(s) captured (content withheld)')
+          && !report.includes('"Skill 0" → "Infrastructure"')
+          && !report.includes('"Skill 19" → "Certifications"'),
+          'Report must retain per-item capture counts without exporting career-derived skill labels');
         assert(report.includes('_5 additional verify item(s) omitted from this bounded sample._'),
           'Report must mark the verify-item sample as truncated with an exact count, not emit silently');
         assert(report.includes('Résumé variant: `data-print="ink-only" data-mono`'),
           'Report must render the captured variantAttrs as a structured field');
-        // The head slice dies inside the first role header, so without this
-        // block the Experience structure the fit loop edits is invisible.
-        assert(report.includes('Résumé role block (first of 3 `<article class="role">`')
-          && report.includes('<p class="role-dates">Oct 2024 – Present'),
-          'Report must render a whole role block so the shipped Experience structure is visible');
+        assert(report.includes('Résumé role-block structure found: 3 role(s).')
+          && !report.includes('Security Officer')
+          && !report.includes('Memphis, TN'),
+          'Report must retain role-block structural evidence without exporting career markup or location');
         assert(report.includes('AI editor output: 5600 chars · bullets 8'),
           'Report must expose the AI editor output without a source-order structural clamp');
         assert(report.includes('1 refute-weakened item(s) withheld from application prompts'),
@@ -5392,16 +5494,18 @@ export default [
           'Report must record the shipped baseline page count separately, obtained free from the baseline PDF render');
         assert(report.includes('length revision: 7000→5100 chars · bullets 9→6 · role summaries 3→0 · skill rows 4→4 · hash aaaaaaaaaaaa→bbbbbbbbbbbb'),
           'Report must show whether the length editor actually changed structure, not only that it was called');
-        assert(report.includes('Work-location confirmation required before Sync: candidate `Memphis, TN` → job `Charlotte, NC, United States`'),
-          'Report must expose a candidate/job city mismatch and the required confirmation gate');
-        assert(report.includes('<dl class="skills">') && report.includes('Terraform'),
-          'Report must include the résumé\'s Skills <dl> block, where skill-opportunity injection actually lands');
+        assert(report.includes('Work-location confirmation required before Sync (locations withheld).')
+          && !report.includes('Charlotte, NC, United States'),
+          'Report must expose the required confirmation gate without exporting either location');
+        assert(report.includes('Résumé Skills block found in final document.') && !report.includes('Terraform'),
+          'Report must retain Skills-block structure without including markup or skills');
         assert(report.includes('Cover-letter harness: needs available (3) · top need argued · 1 mapping(s) · plan retried once')
-          && report.includes('company-specificity: no research-sourced specific appears in the letter'),
-        'Report must surface the harness lifecycle and factual unmet-check observation');
-        assert(report.includes('Cover-letter argument plan')
-          && report.includes('Operational judgment is the relevant through-line.'),
-        'Report must include the persisted typed argument plan that explains the generated prose');
+          && report.includes('company-specificity: detail recorded')
+          && !report.includes('no research-sourced specific appears in the letter'),
+          'Report must surface the harness lifecycle and check ID without exporting its prose');
+        assert(report.includes('Cover-letter argument plan: captured')
+          && !report.includes('Operational judgment is the relevant through-line.'),
+          'Report must retain plan presence without exporting generated argument text');
 
         // A second generation whose résumé genuinely had no Skills section —
         // the report must say so explicitly rather than rendering nothing.
@@ -5609,8 +5713,9 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['linkedin-short-snapshot']), null, null);
         assert(report.includes('Completion telemetry disagrees with the legacy scoring snapshot')
-          && report.includes('Maintenance Technician II')
-          && report.includes('https://linkedin.example/jobs/short')
+          && report.includes('sample(s) recorded (details withheld)')
+          && !report.includes('Maintenance Technician II')
+          && !report.includes('https://linkedin.example/jobs/short')
           && report.includes('Do not treat this as a clean full-description finish'),
         'saved scoring input is authoritative and the report includes bounded title/URL evidence for the short row');
         assert(!report.includes('Residual: 0 below enrichment threshold'),
@@ -6063,7 +6168,7 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['glassdoor-resolve-diagnostics']), null, null);
         assert(report.includes('closed: recorded') && report.includes('extractor: recorded'),
           'job pipeline report retains the manual-close/extractor facts without exporting browser text');
-        assert(report.includes('final URL: `https://www.glassdoor.com/Job/jobs.htm`')
+        assert(report.includes('final URL: `https://www.glassdoor.com/<listing-path>`')
           && !report.includes('sc.keyword=Camera%20Operator'),
           'job pipeline report identifies the Solve destination without exporting query parameters');
         assert(report.includes('final title: captured') && !report.includes('Jobs in United States | Glassdoor'),
@@ -6103,7 +6208,8 @@ export default [
           linkedinEnrich: [], linkedinCooldown: null, indeedSession: null,
         });
         const report = buildJobsPipelineSnapshot(new Set(['redacted-evidence-fixture']), null, null);
-        assert(report.includes('https://www.google.com/search')
+        assert(report.includes('deferred listing · 0 chars')
+          && !report.includes('https://www.google.com/search')
           && !report.includes('?htidocid=')
           && !report.includes(opaque)
           && report.length < 8_000,
@@ -6148,12 +6254,12 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['resolved-quality-diagnostics']), null, null);
         assert(report.includes('score-safe returned 6')
           && report.includes('title-relevance-dropped 2')
-          && report.includes('Loss Prevention Associate')
           && report.includes('Resolve detail enrichment: attempted 4 of 6 deferred target(s) → recovered this attempt 3 → still empty 1')
           && report.includes('provider rows loaded 20 · complete source total 7 · **not in current provider list 1**')
           && report.includes('**Skip recommended after 2 unchanged full-list checks**')
-          && report.includes('unavailable now: "Expired Architect"')
-          && report.includes('https://jobs/missing-jd')
+          && report.includes('unavailable listing recorded (details withheld)')
+          && report.includes('missing listing recorded (details withheld)')
+          && !report.includes('Expired Architect') && !report.includes('https://jobs/missing-jd')
           && report.includes('detail postprocess: recorded'),
         'resolved-source diagnostics retain admission and detail-enrichment provenance');
       } finally {
@@ -6202,11 +6308,11 @@ export default [
           42,
           null,
         );
-        assert(report.includes('Source hub: `…12345678`'),
+        assert(/Source hub: `#[a-f0-9]{10}`/.test(report),
           'report attributes search/scoring to the originating Job Search hub');
-        assert(report.includes('Job Board node: `…87654321`'),
+        assert(/Job Board node: `#[a-f0-9]{10}`/.test(report),
           'report names the board that performed bucketing separately');
-        assert(!report.includes('Source hub: `…87654321`'),
+        assert(!report.includes('source-jobhub-12345678') && !report.includes('results-board-87654321'),
           'board node must never be rendered as the source hub');
 
         // A direct re-score is a new source-owned pipeline even when no fresh
@@ -6222,8 +6328,9 @@ export default [
         assert(telemetry.windowId === 77,
           'direct re-score scopes telemetry to its own sender window');
         report = buildJobsPipelineSnapshot(new Set(['direct-rescore-hub-abcdef12']), 77, null);
-        assert(report.includes('Source hub: `…abcdef12`') && !report.includes('Job Board node:'),
-          'direct re-score report shows only its source hub until a new board combines it');
+        assert(/Source hub: `#[a-f0-9]{10}`/.test(report) && !report.includes('Job Board node:')
+          && !report.includes('direct-rescore-hub-abcdef12'),
+        'direct re-score report shows only a redacted source-hub correlation until a new board combines it');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6275,12 +6382,10 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['google-query-diagnostics']), null, null);
-        assert(report.includes('Raw role queries (shared across sources):') && report.includes('`Camera Operator`'),
-          'report labels shared role queries as raw input, not exact per-source request strings');
-      assert(report.includes('Google keyword queries sent (canonical location appended when absent):')
-          && report.includes('`Camera Operator Toronto, ON jobs`')
-          && report.includes('`Film Editor Toronto jobs`'),
-        'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
+        assert(report.includes('2 role query/queries issued across sources (values withheld)')
+          && report.includes('2 Google keyword query/queries issued (values withheld)')
+          && !report.includes('Camera Operator') && !report.includes('Toronto, ON'),
+          'report retains query counts without exporting role or location input');
         assert(report.includes('Per source (provider returned → retained before target-role/history/evidence gates): google=3 → 2')
           && !report.includes('Per source (raw gathered)'),
         'per-source counts distinguish provider-returned candidates from the pre-target-role/history/evidence-gate rows');
@@ -6322,9 +6427,10 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['relevance-rejection-diagnostics']), null, null);
-        assert(report.includes('"Public Safety Officer" [matched officer — 1/2 required]')
-          && report.includes('"TRANSPORTATION ASSISTANT (PERSONAL PROPERTY)" [matched property+assistant, but not within one title phrase]'),
-        'rejected-title samples show the closest query’s observed failed gate check');
+        assert(report.includes('2 rejected title sample(s) recorded (title/query values withheld)')
+          && !report.includes('Public Safety Officer')
+          && !report.includes('TRANSPORTATION ASSISTANT'),
+        'rejected-title diagnostics retain bounded evidence without exporting titles or query terms');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6362,10 +6468,10 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['remoteok-feed-provenance-diagnostics']), null, null);
-        assert(report.includes('RemoteOK feed scopes: bare 100 received/100 new; tag:system 4 received/4 new; tag:architect 100 received/100 new')
-          && report.includes('tag scopes are derived from the raw role queries above')
-          && !report.includes('api?tag='),
-        'RemoteOK source admission reports compact feed provenance without exposing additional query text');
+        assert(report.includes('RemoteOK feed scopes: bare 100 received/100 new; tag scope recorded (value withheld) 4 received/4 new; tag scope recorded (value withheld) 100 received/100 new')
+          && report.includes('tag scopes are derived from role queries')
+          && !report.includes('api?tag=') && !report.includes('architect'),
+        'RemoteOK source admission reports compact feed provenance without exporting query text');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6733,9 +6839,11 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['remote-relevance-diagnostics']), null, null);
         assert(report.includes('All-source role relevance audit')
-          && report.includes('`Customer Service Coordinator` → [customer, service→support]/2 required')
-          && report.includes('tags: customer-service, support'),
-        'report records exact and synonym title evidence separately from RemoteOK tags');
+          && report.includes('[remoteok] 1 assessed row(s)')
+          && report.includes('values withheld')
+          && !report.includes('Customer Service Coordinator')
+          && !report.includes('customer-service'),
+        'report preserves per-source relevance accounting while withholding title and tag content');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6765,10 +6873,11 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['pinned-target-role-audit']), null, null);
-        assert(report.includes('target-role title gate → [system + architect]')
-          && report.includes('separate exact/synonym matching')
+        assert(report.includes('[usajobs] 1 assessed row(s) · post-hoc title audit')
+          && !report.includes('SYSTEMS ARCHITECTURE')
+          && !report.includes('system + architect')
           && !report.includes('no local query-title match; accepted from provider ranking by design'),
-        'a row retained by the pinned title gate reports that local evidence instead of falsely claiming provider-only admission');
+        'a pinned-title row remains accounted for without exposing title tokens or provider detail');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -6807,11 +6916,11 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['history-read-time-diagnostics']), null, null);
         assert(report.includes('History suppression evidence (1/1 bounded sample)')
-          && report.includes('matched URL key')
-          && report.includes('Customer Support Systems & Analytics Architect')
+          && report.includes('matched URL key (withheld)')
           && report.includes('seen_date=2026-08-16')
-          && report.includes('Customer Support Systems &amp; Analytics Architect'),
-        'FULL/JOBS report renders both the dropped row and matched history evidence');
+          && !report.includes('Customer Support Systems & Analytics Architect')
+          && !report.includes('Anywhere in the World'),
+        'FULL/JOBS report retains suppression provenance without listing title or location content');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -7096,9 +7205,10 @@ export default [
         let report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
         assert(report.includes('Seen-history persistence') && report.includes('Pre-results write') && report.includes('deferred until results are visible'),
           'report makes the deliberate pre-results history deferral explicit');
-        assert(report.includes('likely the same listing surfaced twice') && report.includes('htidocid=repeat')
-          && report.includes('kept:') && report.includes('skipped:'),
-        'report exposes collision identity and correctly distinguishes a duplicate query result from a bad history key');
+        assert(report.includes('likely the same listing surfaced twice') && report.includes('collision correlation #')
+          && report.includes('kept/skipped listing details withheld')
+          && !report.includes('htidocid=repeat') && !report.includes('Assistant Property Manager'),
+        'report exposes collision provenance while withholding listing identifiers and titles');
         assert(report.includes('Board-displayed write') && report.includes('5 new history row(s), 2 expired row(s) pruned'),
           'report renders the authoritative board-display history outcome');
 
@@ -7153,7 +7263,7 @@ export default [
     },
   },
   {
-    name: 'job pipeline report: taxonomy audit exposes salary placement and repairs',
+    name: 'job pipeline report: taxonomy audit preserves placement structure while withholding listing-derived salary labels',
     run: () => {
       const telemetry = getJobsTelemetry();
       const saved = {
@@ -7178,14 +7288,15 @@ export default [
       });
       try {
         let report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
-        assert(report.includes('Taxonomy validation repaired: canonicalized salary label "$120k process/yr"')
-          && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**')
-          && report.includes('salary range disclosed: $83,200–$104,000/yr. Kept the lower endpoint for deterministic placement.')
-          && !report.includes('⚠️ salary range disclosed: $83,200–$104,000/yr')
+        assert(report.includes('Taxonomy validation repaired: 1 repair record(s) (values withheld).')
+          && report.includes('salary recorded → annualized → salary range label withheld')
+          && report.includes('salary range bounds recorded; lower endpoint retained for deterministic placement.')
+          && report.includes('Salary ranges (second level): 1 label(s) recorded (values withheld).')
+          && !report.includes('$1.6K - $2.0K/wk') && !report.includes('$83,200') && !report.includes('$80k–$120k/yr')
           && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)')
           && report.includes('stage complete · 6/6 chunk(s) · max 24 jobs/request · 18 planning sample(s) · 11 role label(s) · provider `claude`')
           && !report.includes('stage complete · classification not started'),
-        'job pipeline report makes successful bounded progress, salary placement, repair evidence, and taxonomy fallback cause visible');
+        'job pipeline report keeps bounded progress, placement state, repair evidence, and taxonomy fallback cause without listing-derived salary values');
 
         telemetry.bucketing = {
           ...telemetry.bucketing,
@@ -7230,7 +7341,8 @@ export default [
           && report.includes('90/92 required entries received')
           && report.includes('missing [17, 91]')
           && report.includes('Usable role coverage: 89/92 placed')
-          && report.includes('#17 [google] "Solutions Architect"')
+          && report.includes('#17 [google] · scorer direction recorded (content withheld)')
+          && !report.includes('Solutions Architect') && !report.includes('Cloud Architecture')
           && !report.includes('deterministic likelihood'),
         'FULL/JOBS records a transactional abort plus bounded structural evidence, never a renderer fallback');
 
@@ -7271,14 +7383,17 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['scoring-audit-diagnostics']), null, null);
-        assert(report.includes('20-point cross-batch drift') && report.includes('Madison, AL')
-          && report.includes('Phoenix, AZ') && report.includes('https://jobs/1')
-          && report.includes('Transferable background.'),
-        'FULL/JOBS scoring section contains enough bounded evidence to diagnose score drift');
+        assert(report.includes('20-point cross-batch drift')
+          && report.includes('identical JD fingerprint `deadbeef` (listing details withheld)')
+          && report.includes('first/second diagnostic detail recorded (content withheld)')
+          && !report.includes('Madison, AL') && !report.includes('Phoenix, AZ')
+          && !report.includes('https://jobs/1') && !report.includes('Transferable background.'),
+        'FULL/JOBS scoring section retains drift evidence while withholding listing location, URL, and model prose');
         assert(report.includes('Scoring evidence (2/2 bounded row(s))')
-          && report.includes('score 55') && report.includes('Field Services')
-          && report.includes('input ') && report.includes('reason: "Transferable background."'),
-        'FULL/JOBS/SCORE reports preserve ordinary per-job score/direction/reason/input evidence, not only anomaly pairs');
+          && report.includes('score 55') && report.includes('[dice]')
+          && report.includes('input ') && report.includes('assessment detail recorded (content withheld)')
+          && !report.includes('Field Services'),
+        'FULL/JOBS/SCORE retains ordinary score/source/input accounting without per-job direction or reason content');
         assert(report.includes('Model fallback routes')
           && report.includes('preferred `gemini-3.7-flash`')
           && report.includes('served `gemini-2.5-flash`')
@@ -7333,11 +7448,14 @@ export default [
           && report.includes('glassdoor=6 empty/0 short')
           && report.includes('indeed=1 empty/0 short')
           && report.includes('linkedin=0 empty/1 short')
-          && report.includes('Security Officer 1')
-          && report.includes('https://jobs/glassdoor-empty-1')
-          && report.includes('https://jobs/indeed-empty')
-          && report.includes('https://jobs/short'),
-        'report separates successful model responses from full-description evidence with bounded per-source samples');
+          && report.includes('[glassdoor] low-evidence listing · 0 chars (details withheld)')
+          && report.includes('[indeed] low-evidence listing · 0 chars (details withheld)')
+          && report.includes('[linkedin] low-evidence listing · 22 chars (details withheld)')
+          && !report.includes('Security Officer 1')
+          && !report.includes('https://jobs/glassdoor-empty-1')
+          && !report.includes('https://jobs/indeed-empty')
+          && !report.includes('https://jobs/short'),
+        'report separates successful model responses from low-evidence counts without listing titles or URLs');
         assert(!report.includes('all received real model scores')
           && !report.includes('all genuinely analyzed')
           && !report.includes('all analyzed with full descriptions'),
@@ -7464,16 +7582,15 @@ export default [
           'salary coverage line reports the annualizer-measured unparseable count instead of "all monetary ✅"');
         assert(report.includes('salary unparseable: 4/10 (40%)'),
           'field-quality warning reports the annualizer-measured unparseable count/pct, not a looksLikeMoney count');
-        assert(report.includes('4 money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing'),
-          'field-quality warning reports the missing unit without claiming a recoverable source cadence');
-        assert(lostCadenceSamples.some(s => report.includes(`"${s}"`)),
-          'field-quality warning includes a real offending sample value, as the old garbage warning did');
-        assert(report.includes('recovered-description pay context exists for 1 bounded sample(s), so cadence reconciliation is possible without guessing')
-          && report.includes('raw "$19.75 - $19.75 / PH" ↔ JD "Pay: $19.75 - $19.75 per hour"'),
-        'FULL/QUALITY distinguishes a source-wide missing cadence from a list field whose same-job description already carries the recoverable unit');
+        assert(report.includes('4 money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing (values withheld)')
+          && lostCadenceSamples.every(s => !report.includes(s)),
+        'field-quality warning retains the useful failure classification and count without exporting listing salary samples');
+        assert(report.includes('recovered-description pay context exists for 1 bounded sample(s), so cadence reconciliation is possible without guessing (values withheld)')
+          && !report.includes('Pay: $19.75 - $19.75 per hour'),
+        'FULL/QUALITY retains recoverable-context evidence without exporting job-description prose');
         assert(report.includes('1 implausibly tiny explicit annual amount')
-          && report.includes('"$18.75 - $19.70 a year"'),
-        'field-quality warning identifies corrupt tiny annual pay separately from a missing cadence');
+          && !report.includes('$18.75 - $19.70 a year'),
+        'field-quality warning identifies corrupt tiny annual pay separately from a missing cadence without exporting it');
 
         // (1) A bare numeric range the real annualizer parses fine must never be
         // flagged, and its source must be reported healthy.
@@ -8110,12 +8227,12 @@ export default [
       try {
         const report = buildJobsPipelineSnapshot(new Set(['aggregate-detail-miss']), null, null);
         assert(report.includes('ziprecruiter (description-detail-miss/warn, 531 row(s) still returned)')
-          && report.includes('5 listings affected')
-          && report.includes('"Chief Architect"')
-          && report.includes('"Infrastructure Solutions Architect"')
-          && report.includes('"Third affected role"')
+          && report.includes('5 listings affected (values withheld)')
+          && !report.includes('Chief Architect')
+          && !report.includes('Infrastructure Solutions Architect')
+          && !report.includes('Third affected role')
           && !report.includes('Fourth affected role'),
-        'the FULL pipeline report shows the exact aggregate count and bounded title samples without changing the warning severity or source outcome');
+        'the FULL pipeline report preserves warning severity and aggregate impact without affected listing titles');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -8562,8 +8679,8 @@ export default [
         'the funnel stage and its detail line must name the AI role screen that actually produced the drops');
       assert(snapSrc.includes('it keeps anything it cannot tell'),
         'the report must state the screen fails OPEN, so a drop means the model positively judged the row a different kind of job');
-      assert(snapSrc.includes('x?.reason'),
-        "each sampled drop must carry the model's own stated reason -- with no rule text to print, the reason IS the evidence");
+      assert(snapSrc.includes('title/query values withheld') && !snapSrc.includes('x?.reason'),
+        'the role screen retains accountable row/source counts while withholding model rationale and title/query content');
 
       // The same run WITHOUT the stage registered is exactly the false alarm
       // this guards against.
@@ -8788,12 +8905,16 @@ export default [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['placeholder-audit-diagnostics']), null, null);
-        assert(report.includes('Late placeholder role') && report.includes('⚠️ placeholder (not analyzed)')
-          && report.includes('URL: https://jobs/placeholder') && report.includes('reason: "Unable to score"'),
-        'the first ten report evidence rows visibly identify the otherwise-late placeholder');
-        assert(report.includes('20-point cross-batch drift') && report.includes('https://jobs/ordinary-0')
-          && report.includes('https://jobs/ordinary-1'),
-        'anomaly rendering resolves rows by their original indices after placeholder prioritization');
+        assert(report.includes('⚠️ placeholder (not analyzed)')
+          && report.includes('[ziprecruiter]')
+          && report.includes('assessment detail recorded (content withheld)')
+          && !report.includes('Late placeholder role') && !report.includes('https://jobs/placeholder')
+          && !report.includes('Unable to score'),
+        'the first ten report evidence rows retain the placeholder state without job identity or rationale content');
+        assert(report.includes('20-point cross-batch drift')
+          && report.includes('listing details withheld')
+          && !report.includes('https://jobs/ordinary-0') && !report.includes('https://jobs/ordinary-1'),
+        'anomaly rendering preserves cross-batch detection without URLs');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -9852,17 +9973,21 @@ export default [
         null,
       );
       assert(report.includes('Browser card traversal (bounded batch summaries)')
-        && report.includes('Google for Jobs · strategy=list-card-panel · panel="span.OOyDTc, span.ejCXj" · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · blocking-popup-dismissed 2 · blocking-popup-dismiss-failed 1 · direct-apply 15/17 captured · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
-        && report.includes('#7 key=Systems Architect at Example reason=card-not-found')
-        && report.includes('#16 key=Principal Systems Architect at Example reason=panel-timeout')
+        && report.includes('Google for Jobs · strategy recorded · panel selector recorded (withheld) · q1/1 · p1 · attempted 17/25 · expanded 15/25 · missing-target 1 · panel-timeout 1 · selection-mismatches 1 · blocking-popup-dismissed 2 · blocking-popup-dismiss-failed 1 · direct-apply 15/17 captured · title-bypassed 96 (intentional, page-local) · aborted before #18 (user-cancelled)')
+        && report.includes('#7 identity recorded reason=card-not-found')
+        && report.includes('#16 identity recorded reason=panel-timeout')
         && report.includes('Blocking popup handling:')
-        && report.includes('#3 · stage=before-card · signature=glassdoor-job-alert · control=aria-label-close · outcome=dismissed')
-        && report.includes('⚠️ #4 · stage=after-card · signature=glassdoor-job-alert · control=none · outcome=missing-control')
-        && report.includes('#9 direct Apply-on URL missing · "Junior Solutions Architect" · preferred=Peraton Careers · visible candidates=none after bounded wait')
+        && report.includes('#3 · stage recorded · signature recorded · control recorded · outcome recorded')
+        && report.includes('⚠️ #4 · stage recorded · signature recorded · control recorded · outcome recorded')
+        && report.includes('#9 direct Apply-on URL missing · preferred=recorded (withheld) · visible candidates=none after bounded wait (listing details withheld)')
+        && !report.includes('Peraton Careers')
         && report.includes('Click transition samples (expected → hit):')
-        && report.includes('#1 · physical #1/108 expected key=google-card-1 title=First Systems Architect → hit key=google-card-1 title=First Systems Architect via primary → selected title=First Systems Architect [selection verified]')
-        && report.includes('⚠️ #2 · physical #5/108 · 3 physical cards skipped since previous expected key=google-card-2 title=Second Systems Architect → hit key=google-card-3 title=Third Systems Architect via data-share-url [MISMATCH] → selected title=Fourth Systems Architect [SELECTION MISMATCH]'),
-      'FULL/CARDWALK diagnostics must preserve physical positions, popup dismissal outcomes, post-click selection identity, failed positions, and cancellation context, not only a misleading expanded aggregate');
+        && report.includes('#1 · physical #1/108 expected identity recorded → hit identity recorded · lookup method recorded → selected identity recorded [selection verified]')
+        && report.includes('⚠️ #2 · physical #5/108 · 3 physical cards skipped since previous expected identity recorded → hit identity recorded · lookup method recorded [MISMATCH] → selected identity recorded [SELECTION MISMATCH]')
+        && !report.includes('Systems Architect at Example')
+        && !report.includes('Junior Solutions Architect')
+        && !report.includes('First Systems Architect'),
+      'FULL/CARDWALK diagnostics preserve positions, outcomes, identity state, and cancellation context without listing titles or keys');
       return { total: 25, attempted: 17, expanded: 15, titleBypassed: 96, selectionMismatches: 1, blockingModalsDismissed: 2, blockingModalFailures: 1, failures: 2, transitions: 2 };
     },
   },
@@ -9918,7 +10043,7 @@ export default [
       }, { updateActive: false });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['glassdoor-opportunity-modal-diagnostics']), null, null);
-        const walkLine = report.split('\n').find(line => line.includes('Glassdoor · strategy=list-card-panel')) || '';
+        const walkLine = report.split('\n').find(line => line.includes('Glassdoor · strategy recorded')) || '';
         assert(walkLine.includes('blocking-popup-dismissed 1')
           && walkLine.includes('blocking-popup-dismiss-failed 1')
           && walkLine.includes('missing-target 3')
@@ -9930,8 +10055,9 @@ export default [
           && walkLine.includes('json-description-fallback 1')
           && walkLine.includes('json-field-recovery salary=2,posted=1'),
         'FULL/CARDWALK distinguishes Glassdoor source throttling, same-request JSON recovery, and popup outcomes from stale card selectors');
-        assert(report.includes('#3 key=Jr/Int/Snr Naval Architect Technologist reason=blocking-popup-dismiss-failed'),
-          'the bounded failure samples retain the exact popup-close failure position and job identity');
+        assert(report.includes('#3 identity recorded reason=blocking-popup-dismiss-failed')
+          && !report.includes('Jr/Int/Snr Naval Architect Technologist'),
+        'the bounded failure samples retain the popup-close position and reason without job identity');
       } finally {
         Object.assign(telemetry, {
           nodeId: saved.nodeId,
@@ -9991,8 +10117,8 @@ export default [
       // heartbeats folded into the previous trail entry, keeping the ORIGINAL
       // start `t` but gaining `lastT`/`repeats`/`detail` from the newest one.
       const folded = formatSourceEvent({ t: 0, lastT: 188_000, repeats: 15, status: 'searching', detail: 'q3/12 · p2' });
-      assert(folded === 'searching@+0s→+188s ×15 (q3/12 · p2)',
-        'a folded entry must render its original start, the newest offset as a span, the repeat count, and the newest detail');
+      assert(folded === 'searching@+0s→+188s ×15 (detail recorded)',
+        'a folded entry must render its original start, newest offset, and repeat count without exporting producer detail');
       return { folded };
     },
   },
@@ -10048,8 +10174,9 @@ export default [
         );
         assert(report.includes('Live Search Stage') && report.includes('Pending source(s): `linkedin`'),
           'FULL/JOBS telemetry still identifies the live gather stage and the pending source');
-        assert(report.includes('`linkedin`: searching@+0s→+188s ×15 (q3/12 · p2)'),
-          'the Active source progress line must render the folded span, repeat count, and detail — not just the first heartbeat');
+        assert(report.includes('`linkedin`: searching@+0s→+188s ×15 (detail recorded)')
+          && !report.includes('q3/12 · p2'),
+          'the Active source progress line renders the folded span/repeat while withholding producer detail');
       } finally {
         telemetry.pipeline = priorPipeline;
         telemetry.sourceEvents = priorSourceEvents;
@@ -10067,7 +10194,7 @@ export default [
       const provenance = formatGlassdoorCacheProvenance({
         country: 'CA', verifiedAt: Date.now() - 65_000,
       });
-      assert(/country CA · verified 1m ago/.test(provenance)
+      assert(/country provenance present · verified 1m ago/.test(provenance)
         && !provenance.includes('ago ago')
         && !/\d{4,}h/.test(provenance),
       'Glassdoor cache provenance passes an epoch to formatAge and appends no duplicate age suffix');
@@ -10192,7 +10319,7 @@ export default [
     },
   },
 {
-    name: 'job pipeline report: Glassdoor Location Cache section names a skipped location, its failureKind, and cache absence',
+    name: 'job pipeline report: Glassdoor Location Cache retains skip category and cache absence without location text',
     run: () => {
       const telemetry = getJobsTelemetry();
       const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search };
@@ -10216,11 +10343,13 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['glassdoor-cache-diagnostics']), null, null);
         assert(report.includes('### Glassdoor Location Cache'),
           'a location-resolution-failed scrape event must render the Glassdoor Location Cache section');
-        assert(report.includes('Skipped `Glassdoor` for "Erie, PA" (no-match): no cached entry was present'),
-          'the section must name the skipped location, its failureKind, and state that no cached entry existed for it');
-        const phaseLine = (report.split('\n').find(line => line.includes('location-resolution-failed') && line.includes('Erie, PA')) || '');
-        assert(phaseLine.includes('kind=no-match') && phaseLine.includes('reason=autocomplete returned no verified exact match'),
-          'the Recent browser-scrape phases line for a location skip must surface kind= and reason=, not just the bare phase name');
+        assert(report.includes('Skipped `Glassdoor` for a configured location (no-match): no cached entry was present')
+          && !report.includes('Erie, PA'),
+        'the section must retain a location skip category and cache absence without naming the location');
+        const phaseLine = (report.split('\n').find(line => line.includes('location-resolution-failed') && line.includes('location=configured')) || '');
+        assert(phaseLine.includes('kind=no-match') && phaseLine.includes('reason=recorded')
+          && !phaseLine.includes('autocomplete returned no verified exact match'),
+          'the Recent browser-scrape phases line must retain failure categories without raw location or reason text');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -12028,14 +12157,18 @@ export default [
       try {
         const full = buildJobsPipelineSnapshot(new Set(['xjobaudit-diagnostics']), null, null);
         assert(full.includes('All-source role relevance audit (surviving jobs')
-          && full.includes('XJOBAUDIT Marker Role')
+          && full.includes('[remoteok] 1 assessed row(s)')
           && full.includes('Scoring evidence (1/1 bounded row(s))')
-          && full.includes('XJOBAUDIT Scoring Row')
-          && full.includes('Taxonomy placement audit (raw salary')
-          && full.includes('XJOBAUDIT Taxonomy Row')
+          && full.includes('assessment detail recorded (content withheld)')
+          && full.includes('Taxonomy placement audit (salary values withheld')
+          && full.includes('#0 [remoteok]')
           && full.includes('### Glassdoor Location Cache')
-          && full.includes('xjobaudit city cache key'),
-        'without XJOBAUDIT, all four per-job/per-location audit blocks render their full per-item detail');
+          && full.includes(`${expectedCacheCount} cached location resolution(s)`)
+          && !full.includes('XJOBAUDIT Marker Role')
+          && !full.includes('XJOBAUDIT Scoring Row')
+          && !full.includes('XJOBAUDIT Taxonomy Row')
+          && !full.includes('xjobaudit city cache key'),
+        'without XJOBAUDIT, per-job audit structure renders while listing and cache content remain withheld');
 
         const collapsed = buildJobsPipelineSnapshot(new Set(['xjobaudit-diagnostics']), null, null, [], true);
         assert(!collapsed.includes('XJOBAUDIT Marker Role')
@@ -12055,10 +12188,12 @@ export default [
           && collapsed.includes('Batches: 1 (0 failed)')
           && collapsed.includes('Hiring-fit bands')
           && collapsed.includes('Limited hiring fit (0–79)')
-          && collapsed.includes('Taxonomy validation repaired: XJOBAUDIT repair note')
-          && collapsed.includes('Skipped `Glassdoor` for "XJOBAUDIT City" (no-match)')
-          && collapsed.includes('XJOBAUDIT Role-Summary Sample'),
-        'XJOBAUDIT keeps the funnel numbers, per-source outcomes (incl. the Roles third-level bounded sample), and warnings untouched — only the per-job/per-location audit prose is removed');
+          && collapsed.includes('Taxonomy validation repaired: 1 repair record(s) (values withheld).')
+          && collapsed.includes('Skipped `Glassdoor` for a configured location (no-match)')
+          && !collapsed.includes('XJOBAUDIT City')
+          && collapsed.includes('1 listing title sample(s) recorded (content withheld)')
+          && !collapsed.includes('XJOBAUDIT Role-Summary Sample'),
+        'XJOBAUDIT keeps funnel numbers, per-source outcomes, and warnings while title samples remain withheld');
       } finally {
         Object.assign(telemetry, saved);
         scrapeTelemetry.events = savedEvents;
@@ -12404,11 +12539,12 @@ export default [
           && jobsSource.includes('terminalAt'),
         'timing receipts distinguish a UI searching announcement from actual HTTP/browser dispatch and terminal completion');
         assert(report.includes('### Source Scheduling & Throttle History')
-          && report.includes('hub `…-history` / `google`:')
-          && report.includes('run `run-3`: searching → error · ⚠️ http-429/throttle')
-          && report.includes('run `run-4`: searching → done')
+          && /hub `#[a-f0-9]{10}` \/ `google`/.test(report)
+          && (report.match(/run `#[a-f0-9]{10}`: searching → error · ⚠️ http-429\/throttle/g) || []).length === 1
+          && (report.match(/run `#[a-f0-9]{10}`: searching → done/g) || []).length === 1
+          && !report.includes('run-3') && !report.includes('run-4')
           && !report.includes('private retry timing must not be retained'),
-        'the JOBS/FULL/STALL pipeline snapshot renders both the retained warning and later clean terminal state without retaining arbitrary progress detail');
+        'the JOBS/FULL/STALL pipeline snapshot renders retained warning and clean terminal state through non-reversible correlations');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -12625,16 +12761,15 @@ export default [
         const wrongWindow = inContext(senderA, null, () => buildJobsPipelineSnapshot(
           new Set(['hub-a1', 'hub-a2']), senderB.id, null,
         ));
-        assert(reportA.includes('hub `hub-a1` / `google`: run `a1-run`')
-          && reportA.includes('hub `hub-a2` / `glassdoor`: run `a2-run`')
+        assert((reportA.match(/hub `#[a-f0-9]{10}` \/ `(?:google|glassdoor)`: run `#[a-f0-9]{10}`/g) || []).length === 2
           && reportA.includes('http-429/throttle')
           && reportA.includes('description-panel-http-error/warn')
-          && reportA.includes('Solve passes (run `a1-run`)')
+          && /Solve passes \(run `#[a-f0-9]{10}`\)/.test(reportA)
           && reportA.includes('Skip recommended')
           && reportA.includes('checkpoint saved')
           && reportA.includes('warning: description-detail-hard-block/block')
           && !reportA.includes('https://example.invalid/must-not-render')
-          && !reportA.includes('hub `hub-b1`')
+          && !reportA.includes('hub-a1') && !reportA.includes('hub-a2') && !reportA.includes('hub-b1')
           && !wrongWindow.includes('Source Scheduling & Throttle History'),
         'a multi-hub FULL/JOBS/STALL snapshot merges only current-window hub-local history, including non-blocking terminal warnings, while a mismatched report window receives none');
         return { currentWindowHubs: 2, foreignWindowHubs: 0 };
@@ -12737,14 +12872,14 @@ export default [
           payloadFor('FULL', [hubA1, hubA2]), senderB.id,
         ).markdown);
         const everyExpectedReport = [full, jobs, stall, resolve].every(report => report.includes('### Source Scheduling & Throttle History')
-          && report.includes('hub `…d-hub-a1` / `google`')
-          && report.includes('hub `…d-hub-a2` / `glassdoor`'));
+          && (report.match(/hub `#[a-f0-9]{10}` \/ `(?:google|glassdoor)`/g) || []).length === 2);
         assert(everyExpectedReport
-          && full.includes('Solve passes (run `…mbled-a1`)')
-          && resolve.includes('Solve passes (run `…mbled-a1`)')
+          && /Solve passes \(run `#[a-f0-9]{10}`\)/.test(full)
+          && /Solve passes \(run `#[a-f0-9]{10}`\)/.test(resolve)
           && resolve.includes('Skip recommended')
           && resolve.includes('checkpoint saved')
           && !full.includes('assembled-hub-b')
+          && !full.includes('assembled-hub-a1') && !full.includes('assembled-hub-a2')
           && !full.includes('untrusted-source-key')
           && !full.includes(secret)
           && !resolve.includes(secret)
@@ -12790,10 +12925,11 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['warn-detail-diagnostics']), null, null);
         assert(report.includes('returned results BUT flagged'),
           'a source that returned rows AND carried a warning is still surfaced');
-        assert(report.includes(`${longEvidence.slice(0, 219)}…`),
-          'over-length evidence is cut WITH a marker, so a mid-word ending reads as truncation and not corruption');
-        assert(report.includes('Suggested: Retry Glassdoor later.'),
-          'the warning suggestion reaches the report — it is the only line saying what happened to the affected rows');
+        assert(report.includes('detail recorded') && !report.includes(longEvidence)
+          && !report.includes('Framing Layout Lead'),
+        'free-form warning evidence is recorded as a bounded privacy-safe fact rather than rendered');
+        assert(report.includes('suggestion recorded') && !report.includes('Retry Glassdoor later.'),
+          'the warning retains suggestion provenance without exporting its free-form content');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -12840,9 +12976,9 @@ export default [
         const report = buildJobsPipelineSnapshot(new Set(['nation-tier-diagnostics']), null, null);
         assert(report.includes('Country scope not enforced'),
           'the caveat section reads the retained origins ring, not the ring that evicts');
-        const locLine = (report.split('\n').find(l => l.includes('Verified location filter')) || '');
-        assert(locLine.includes('nation-tier locId'),
-          'the runtime caveat rides the same line as the static claim it contradicts, not a distant section');
+        const locLine = (report.split('\n').find(l => l.includes('`glassdoor`: configured')) || '');
+        assert(locLine.includes('nation-tier locId') && !report.includes('United States'),
+          'the runtime caveat rides the redacted location-treatment fact without exposing the selected country');
       } finally {
         Object.assign(telemetry, saved);
         resetManualScraperTelemetry();
@@ -13173,10 +13309,10 @@ export default [
       const rollup = fs.readFileSync(path.resolve('electron/ipc/bugReport/marketplaceModuleRollup.js'), 'utf8');
       const sellHub = fs.readFileSync(path.resolve('electron/ipc/bugReport/sellHubPriceDropRollup.js'), 'utf8');
       const report = fs.readFileSync(path.resolve('electron/ipc/bugReport.js'), 'utf8');
-      assert(rollup.includes("clipReportText((r.summary || r.message || '').replace(/\\s+/g, ' ').trim(), 80).replace(/\\|/g, '\\\\|')"),
-        'the marketplace summary cell clips before escaping its pipes');
-      assert(sellHub.includes('escapeCell(clipReportText(productLabel(d), 70))'),
-        'the sell-hub item cell clips before escapeCell runs');
+      assert(rollup.includes("const summary = (r.summary || r.message) ? 'recorded (content withheld)' : '';"),
+        'the marketplace summary cell records presence without exporting free-form AI text');
+      assert(sellHub.includes('item correlation \\`') && sellHub.includes('reportCorrelationDigest(node.id)'),
+        'the sell-hub item cell uses a stable correlation rather than a product title');
       assert(report.includes("closeReportDiagnostic(duration.error, 'recorded')")
         && report.includes("d.title ? 'captured' : '—'"),
       'bugReport.js closes arbitrary error/title table cells instead of exporting them');
@@ -13185,8 +13321,8 @@ export default [
       // with '…' appended is no longer a value anyone can match or copy.
       const snap = fs.readFileSync(path.resolve('electron/ipc/bugReport/jobsSnapshot.js'), 'utf8');
       assert(snap.includes("isChallengePhase && e.pageState   ? 'signals=captured' : null")
-        && snap.includes('JSON.stringify(String(e.panelSelector).slice(0, 180))'),
-      'page-state blobs are closed while stable selectors retain their bounded identifier behavior');
+        && snap.includes("'panel selector recorded (withheld)'"),
+      'page-state blobs and card selectors are closed to protect browser-derived content');
       return { ok: true };
     },
   },
@@ -13500,11 +13636,13 @@ export default [
         assert(pipeline.includes('This search launched but never reached the funnel stage')
           && pipeline.includes('so no raw/deduped/kept counts exist'),
           'the aborted search states what it is missing rather than implying nothing ran');
-        assert(pipeline.includes('1 query: `System Architect`')
+        assert(pipeline.includes('1 query (values withheld)')
           && pipeline.includes('3 selected source(s): `google`, `linkedin`, `ziprecruiter`')
           && pipeline.includes('Posting date window: 2026-09-03 local midnight through launch time, inclusive')
           && pipeline.includes('provider retrieval horizon 400d')
-          && pipeline.includes('Location `United States`'),
+          && pipeline.includes('Location withheld')
+          && !pipeline.includes('System Architect')
+          && !pipeline.includes('United States'),
           `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
         assert(pipeline.includes('Last stage error: `recorded`')
           && !pipeline.includes('Node deleted'),
@@ -13633,7 +13771,7 @@ export default [
         assert(assessment.includes('Live search stage: not retained for this run'),
           'another hub’s phase is never presented as this run’s gather stage');
         // The board that actually consumed hub A must be the one assessed.
-        assert(/`board-of…[a-f0-9]+` is `empty`/.test(assessment)
+        assert(/`#[a-f0-9]{10}` is `empty`/.test(assessment)
           && !assessment.includes('board-of-a') && !assessment.includes('board-of-b'),
           `the connected board of the assessed hub is named through its redacted label, not the other hub’s board, got:\n${assessment}`);
         assert(assessment.includes('Combine can still render them without re-scraping'),
@@ -14046,8 +14184,9 @@ export default [
           && report.includes('Role-band lookup work (separate from market cohorts): 4 role-family lookup(s) = 2 researched + 2 cache hit(s) · 1 of researched lookup(s) failed.')
           && report.includes('Market cohorts (after role-band work): 3 job(s) → 2 cohort(s) → researched 1, failed 1.')
           && report.includes('Jobs assessed: 3 · cache hit(s): 1')
-          && report.split('salary range disclosed: $195,000–$230,000/yr. Kept the lower endpoint for deterministic placement.').length === 2,
-        'salary diagnostics reconcile the new role-band counters without conflating lookup work with market cohorts or repeating identical audit-detail lines');
+          && report.split('salary range bounds recorded; lower endpoint retained for deterministic placement.').length === 2
+          && !report.includes('$195k–$230k/yr') && !report.includes('$195,000') && !report.includes('$230,000'),
+        'salary diagnostics reconcile the new role-band counters without conflating lookup work with market cohorts, repeating identical audit-detail lines, or exporting salary values');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -14256,11 +14395,11 @@ export default [
     },
   },
 {
-    name: 'Clipboard pointer names the file and stays short instead of carrying the report',
+    name: 'Clipboard pointer names the file without carrying generated report content',
     run: () => {
       // The pointer exists so an AI reads the report from disk in segments. It
-      // must therefore say WHERE, HOW BIG, and its bounded retention policy —
-      // and must stay small enough that pasting it costs nothing.
+      // must therefore say WHERE, HOW BIG, and its bounded retention policy.
+      // The intentional user description is the one deliberate inline payload.
       const pointer = buildClipboardPointer({
         filePath: '/Users/jack/Library/Application Support/infinite-canvas/bug-reports/bug-report-2026-09-06T17-34-08-094Z.md',
         chars: 412_883,
@@ -14289,7 +14428,7 @@ export default [
         'the pointer should tell its reader to read the file in segments rather than inline');
       assert(pointer.includes('Check that everything completed smoothly as expected.'),
         'the pointer should carry the issue description so intent travels with the paste');
-      assert(pointer.length < 1_500, `the pointer must stay short, got ${pointer.length} chars`);
+      assert(pointer.length < 1_500, `the ordinary short-description pointer should remain compact, got ${pointer.length} chars`);
 
       // A path with spaces sits on its own backticked line so it survives both
       // markdown rendering and a copy/paste into a shell.
@@ -14312,8 +14451,9 @@ export default [
         filePath: '/tmp/bug-reports/bug-report-y.md', chars: 10, bytes: 10, lines: 1, eventLines: 2,
         filterCode: 'FULL', generatedAt: '2026-09-06T00:00:00.000Z', description: 'x'.repeat(2_000),
       });
-      assert(longDescription.length < 1_500,
-        `a runaway description must not turn the pointer back into a giant paste, got ${longDescription.length} chars`);
+      assert(longDescription.includes('x'.repeat(2_000))
+        && longDescription.endsWith('x'.repeat(2_000)),
+      'the pointer must retain a user-authored description beyond the former preview cap exactly');
       return { pointerLength: pointer.length };
     },
   },

@@ -350,9 +350,10 @@ export function useIssueReporter({
         if (!isMountedRef.current) return;
 
         if (res.success) {
-          // 'file-pointer' is the normal path: the full uncapped report was
-          // written to disk and the clipboard gets a short pointer, not the
-          // report body. 'inline-fallback' means the file write itself failed,
+          // 'file-pointer' is the normal path: generated report diagnostics
+          // are written to disk; the clipboard carries file metadata plus the
+          // full intentional issue description, not the report body.
+          // 'inline-fallback' means the file write itself failed,
           // so clipboardText is the old size-capped report text instead.
           const isFilePointer = res.delivery === 'file-pointer';
           try {

@@ -663,12 +663,15 @@ export default [
         assert(/0 remote-by-location,/.test(line),
           `the remote bucket is labelled by what it measures (location fields), got: ${line}`);
         assert(!/\d+ remote,/.test(line), `the bare "remote" census wording is gone, got: ${line}`);
-        const reach = keywordOnly.find(l => l.includes('Cross-border detection covers')) || '';
-        assert(/covers United States only/.test(reach) && /not "no foreign listings"/.test(reach),
-          `a Canada target states that its off-target check only recognizes US tokens, got: ${reach}`);
-        const caveat = keywordOnly.find(l => l.includes('rests entirely on keyword-only source(s)')) || '';
-        assert(/100% in-area/.test(caveat) && /\[google\]/.test(caveat) && /carried a Canada token/.test(caveat),
-          `a 100% in-area figure from keyword-only sources is presented as unconfirmed, got: ${caveat}`);
+        const renderedKeywordOnly = keywordOnly.join('\n');
+        assert(renderedKeywordOnly.includes('Target location: configured location')
+          && renderedKeywordOnly.includes('`google`: configured')
+          && renderedKeywordOnly.includes('Location adherence over 4 kept job(s)')
+          && !renderedKeywordOnly.includes('Canada')
+          && !renderedKeywordOnly.includes('Espanola')
+          && !renderedKeywordOnly.includes('Wawa')
+          && !renderedKeywordOnly.includes('Montreal'),
+        'location diagnostics retain target/adherence structure while withholding synthetic raw place values');
 
         // Negative control: one real-param source in the in-area tally means the
         // figure is no longer only the provider's own rendering.
@@ -680,8 +683,8 @@ export default [
         ], { google: LOCATION_TREATMENT.google, indeed: 'param: location=Canada' });
         assert(!withParamSource.some(l => l.includes('rests entirely on keyword-only source(s)')),
           'the keyword-only caveat must not fire when a location-param source contributed to the in-area count');
-        assert(withParamSource.some(l => l.includes('Cross-border detection covers United States only')),
-          'the detector-reach note is a property of the target, not of the sources');
+        assert(withParamSource.some(l => l.includes('Location adherence over 4 kept job(s)')),
+          'the aggregate adherence evidence remains useful when source treatment changes');
         return { ok: true, line };
       } finally {
         telemetry.nodeId = prior.nodeId;

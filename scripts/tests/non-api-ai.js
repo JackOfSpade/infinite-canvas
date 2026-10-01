@@ -1391,11 +1391,19 @@ export default [
         && semanticCorrection?.isCorrection === true
         && semanticCorrection.prompt.includes('failed the application\'s response checks'),
       'a schema-valid but semantically wrong paste is rejected by the caller-supplied validator before the invoke can settle');
+      for (const invalidIndex of [2, 3, 4]) {
+        const repeatedRejection = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index": ${invalidIndex}}` });
+        const repeatedCorrection = sent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+        assert(repeatedRejection.accepted === false
+          && repeatedCorrection?.requestId === request.requestId
+          && repeatedCorrection?.isCorrection === true,
+        `quality correction ${invalidIndex + 1} keeps the same request available instead of applying a rejection-pass cap`);
+      }
       const accepted = await submit({ sender }, { requestId: request.requestId, response: `{"handoffCode":"${request.handoffCode}","index": 0}` });
       const result = await run;
       assert(accepted.accepted === true && result.success === true && result.result?.index === 0,
-        'a corrected paste that satisfies both schema and validator settles the original callLLMText invocation with the validated value');
-      return { malformedCorrected: true, validated: true };
+        'a corrected paste after more than three quality rejections settles the original callLLMText invocation with the validated value');
+      return { malformedCorrected: true, qualityCorrections: 5, validated: true };
     },
   },
   {
@@ -2923,14 +2931,17 @@ export default [
         && receipt?.attemptKind === 'partial-recovery' && receipt?.rootBatchSize === 24
         && receipt?.replays === 1 && receipt?.outcome === 'accepted' && receipt?.acceptedAt && receipt?.settledAt,
       'the lifecycle records initial delivery, validation rejection/reissue, remount replay, acceptance, and final settlement');
+      const boardProgress = pendingReport.match(/Board `#[0-9a-f]{10}` searches · 1 selected · 0 completed · 2 active · 2 awaiting source resolution · this source active · this source awaiting resolution/);
       assert(matching.get('handoff-report-node')?.[0]?.task === 'job-taxonomy-classify'
         && wrongChannel.size === 0 && wrongRun.size === 0 && mixedControllers.size === 0
         && pendingReport.includes('⏳ awaiting manual response: job-taxonomy-classify')
         && pendingReport.includes('IPC `non-api-lifecycle-report-test`')
-        && pendingReport.includes('Board `…handoff-` searches · 1 selected · 0 completed · 2 active · 2 awaiting source resolution · this source active · this source awaiting resolution')
+        && boardProgress
         && !pendingReport.includes('handoff-report-board')
+        && !pendingReport.includes('other-active-source')
+        && !pendingReport.includes('other-pending-source')
         && !pendingReport.includes('TOP_SECRET_PROMPT'),
-      'an active controller is correlated only to the same-node, same-channel pending manual handoff, and FULL exposes only its redacted Board/source progress');
+      'an active controller is correlated only to the same-node, same-channel pending manual handoff, and FULL keeps Board/source counts behind a one-way digest');
       assert(markdown.includes('Non-API AI Handoff Lifecycle')
         && markdown.includes('1 paste rejection(s)')
         && markdown.includes('1 reissued')

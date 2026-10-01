@@ -1,4 +1,4 @@
-import { shortId, visitCanvasNodes, clipReportText } from './helpers.js';
+import { reportCorrelationDigest, visitCanvasNodes } from './helpers.js';
 
 function escapeCell(value) {
   return String(value ?? '—').replace(/\|/g, '\\|').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim();
@@ -15,11 +15,6 @@ function formatMoney(value) {
 function formatCadence(value) {
   const weeks = Number(value) || 0;
   return weeks > 0 ? `${weeks}wk` : 'off';
-}
-
-function productLabel(data) {
-  const p = data?.product || {};
-  return p.generated_title || p.title || [p.brand, p.model].filter(Boolean).join(' ') || data?.brand || '—';
 }
 
 export function buildSellHubPriceDropRollup(nodes) {
@@ -91,7 +86,7 @@ export function buildSellHubPriceDropRollup(nodes) {
     const due = dueCounts.get(node.id) || 0;
     const cardText = due > 0 ? `${cards} (${due} due)` : String(cards);
 
-    return `| \`${shortId(node.id)}\` | ${escapeCell(clipReportText(productLabel(d), 70))} | ${escapeCell(d.hubState || '—')} | ${formatCadence(d.priceDropReminderWeeks)} | ${escapeCell(d.priceDropMustSellDate || '—')} | ${formatMoney(target)} | ${formatMoney(start)} | ${escapeCell(d.priceDropStartingTier || '—')} | ${cardText} | ${escapeCell(flags)} |`;
+    return `| \`${reportCorrelationDigest(node.id)}\` | item correlation \`${reportCorrelationDigest(node.id)}\` | ${escapeCell(d.hubState || '—')} | ${formatCadence(d.priceDropReminderWeeks)} | ${escapeCell(d.priceDropMustSellDate || '—')} | ${formatMoney(target)} | ${formatMoney(start)} | ${escapeCell(d.priceDropStartingTier || '—')} | ${cardText} | ${escapeCell(flags)} |`;
   });
 
   const summary = [

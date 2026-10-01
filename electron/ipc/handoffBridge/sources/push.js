@@ -63,7 +63,6 @@ export function assertPushTaskPolicy(knownTasks) {
 const HANDOFF_CODE_RE = /^HANDOFF-[2-9A-HJ-NP-Z]{6}$/i;
 const STAMP_RE = /\bHANDOFF-[2-9A-HJ-NP-Z]{6}\b/gi;
 const MAX_RESPONSE_BYTES = 1_000_000;
-const REJECTION_CAP = 3;
 const TOMBSTONE_CAP = 500;
 const VERDICT_TTL_MS = 60_000;
 const SUCCESSOR_GRACE_MS = 15_000;
@@ -145,7 +144,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       return typeof key === 'string' && /^[a-f0-9]{64}$/.test(key) ? key : null;
     } catch { return null; }
   }
-  function state(epoch = 'default') { const key = typeof epoch === 'string' && epoch ? epoch : 'default'; if (!epochs.has(key)) epochs.set(key, { served: new Map(), byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, waits: 0, remaining: { ready: 0, working: 0, needsYou: 0 } }); return epochs.get(key); }
+  function state(epoch = 'default') { const key = typeof epoch === 'string' && epoch ? epoch : 'default'; if (!epochs.has(key)) epochs.set(key, { served: new Map(), byCode: new Map(), tombstones: new Map(), verdicts: new Map(), rejections: new Map(), commitFailures: new Map(), held: new Map(), budgeted: new Set(), lastAccept: null, waits: 0, remaining: { ready: 0, working: 0, needsYou: 0 } }); return epochs.get(key); }
   function enabledTasks() { return new Set(Object.entries(PUSH_TASK_POLICY).filter(([, item]) => item.mode === 'release_one').map(([task]) => task)); }
   function selectedHubs() { return new Set([...selected.values()].map(item => item.nodeId)); }
   function selectionKey({ windowId, nodeId }) { return `${windowId}\u0000${nodeId}`; }
@@ -237,6 +236,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
   function removeServed(value, requestId) {
     const served = value.served.get(requestId); if (!served) return;
     value.served.delete(requestId);
+    value.rejections.delete(requestId);
+    value.commitFailures.delete(requestId);
     const handoffCodeGuard = requireCodeGuard();
     const canonical = canonicalCode(served.handoffCode);
     const key = handoffCodeGuard.key(canonical);
@@ -322,11 +323,10 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
   function precheck(served, response) { const normalized = responseText(response); if (!normalized.ok || !normalized.text.trim() || (served.codeEnforced && ['', '{}', '[]', 'null', '""'].includes(normalized.text.trim()))) return { status: 'junk', text: normalized.text }; if (Buffer.byteLength(normalized.text, 'utf8') > MAX_RESPONSE_BYTES) return { status: 'too_large', text: normalized.text }; const stamps = normalized.text.match(STAMP_RE) || []; const handoffCodeGuard = requireCodeGuard(); if (stamps.some(stamp => !handoffCodeGuard.equal(canonicalCode(stamp), canonicalCode(served.handoffCode)))) return { status: 'misrouted', text: normalized.text }; return { status: null, text: normalized.text }; }
   function mapVerdict(value, served, verdict) {
     switch (verdict?.outcome) {
-      case 'accepted': tombstone(value, served.requestId, served.handoffCode); removeServed(value, served.requestId); value.rejections.delete(served.requestId); value.lastAccept = { windowId: served.windowId, nodeId: served.nodeId, runId: served.runId, at: Number(now()) }; return result('accepted');
+      case 'accepted': tombstone(value, served.requestId, served.handoffCode); removeServed(value, served.requestId); value.lastAccept = { windowId: served.windowId, nodeId: served.nodeId, runId: served.runId, at: Number(now()) }; return result('accepted');
       case 'rejected': {
         const rejections = (value.rejections.get(served.requestId) || 0) + 1;
         value.rejections.set(served.requestId, rejections);
-        if (rejections >= REJECTION_CAP) { value.held.set(served.requestId, 'rejection_cap'); return result('needs_user', { reason: 'rejection_cap' }); }
         const validationCode = typeof verdict.validationCode === 'string' ? verdict.validationCode : null;
         if (validationCode === 'HANDOFF_CODE_MISMATCH' || validationCode === 'HANDOFF_CODE_MISSING') {
           return result('rejected', { handoffCode: served.handoffCode, attempt: Number.isInteger(verdict.attempt) ? verdict.attempt : rejections + 1, validationCode, note: `The handoffCode must be exactly ${served.handoffCode} both as the argument and as the handoffCode property inside the JSON.`, caution: CAUTION });
@@ -337,7 +337,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         return result('rejected', { handoffCode: served.handoffCode, attempt: Number.isInteger(verdict.attempt) ? verdict.attempt : rejections + 1, validationCode, correction: typeof verdict.correction === 'string' ? verdict.correction : '', isCorrection: verdict.isCorrection === true, caution: CAUTION });
       }
       case 'busy': return result('retry', { reason: 'busy' });
-      case 'commit_failed': { const failures = (value.rejections.get(served.requestId) || 0) + 1; value.rejections.set(served.requestId, failures); if (failures >= 2) { value.held.set(served.requestId, 'commit_failed'); return result('needs_user', { reason: 'commit_failed' }); } return result('retry', { reason: 'save_failed' }); }
+      case 'commit_failed': { const failures = (value.commitFailures.get(served.requestId) || 0) + 1; value.commitFailures.set(served.requestId, failures); if (failures >= 2) { value.held.set(served.requestId, 'commit_failed'); return result('needs_user', { reason: 'commit_failed' }); } return result('retry', { reason: 'save_failed' }); }
       case 'cancelled_during_save':
       case 'not_pending': removeServed(value, served.requestId); return result('superseded');
       case 'ineligible': { const reason = verdict.exclusion === 'person_editing' ? 'person_editing' : verdict.exclusion === 'node_not_allowed' ? 'hub_not_selected' : 'task_disabled'; value.held.set(served.requestId, reason); return result('held', { reason }); }

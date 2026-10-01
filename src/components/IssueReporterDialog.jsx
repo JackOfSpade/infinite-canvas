@@ -4,7 +4,7 @@ import { Clipboard, Save, Sparkles, Copy, AlertTriangle } from 'lucide-react';
 import { EventLogger } from '../utils/EventLogger';
 import { previewBugReportCode, buildAiPrompt } from '../utils/bugReportCodes';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
-import { ISSUE_REPORT_DESCRIPTION_MAX_LENGTH, validateIssueReportDescription } from '../utils/issueReportDescription';
+import { validateIssueReportDescription } from '../utils/issueReportDescription';
 
 // Persist the in-progress description across dialog open/close cycles but NOT
 // across app restarts/exit.
@@ -116,7 +116,6 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
             placeholder="Optional: describe the bug and steps to reproduce…"
             value={description}
             onChange={e => setDescription(e.target.value)}
-            maxLength={ISSUE_REPORT_DESCRIPTION_MAX_LENGTH}
           />
           {!descriptionValidation.ok && (
             <p className="text-xs text-amber-300 px-0.5">{descriptionValidation.error}</p>

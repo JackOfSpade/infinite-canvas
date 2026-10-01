@@ -3613,12 +3613,15 @@ export default [
       'an ambiguous report must never assert that nothing was recorded');
       // The block at the centre of the incident: three Continue clicks on the
       // BLOCKED hub, printed under that hub rather than merged into a funnel.
+      const hubDigests = [...snapshot.matchAll(/^- Hub `(#[0-9a-f]{10})`$/gm)].map((match) => match[1]);
       assert(snapshot.includes('### Per-hub records (no single hub owns the funnel above)')
-        && snapshot.includes('- Hub `hub-blk`')
-        && snapshot.includes('- Hub `hub-ok`')
+        && hubDigests.length === 2
+        && new Set(hubDigests).size === 2
+        && !snapshot.includes('hub-blk')
+        && !snapshot.includes('hub-ok')
         && snapshot.includes('    - `indeed` (3 attempts):')
         && (snapshot.match(/`native-challenge`\u2192closed/g) || []).length === 3,
-      `the per-hub block must render each hub's own Continue trail under its hub id, got ${snapshot.slice(0, 5000)}`);
+      `the per-hub block must render each hub's own Continue trail under distinct one-way hub digests, got ${snapshot.slice(0, 5000)}`);
       // Naming only whichever hub wrote telemetry last is what sent the original
       // investigation at the healthy run's preflight. Both must be attributable.
       assert(!snapshot.includes('/blocked/profile') && !snapshot.includes('/healthy/profile')
@@ -3848,10 +3851,12 @@ export default [
         assert(rendered.assessment.includes('- Search + recovery: not attributable — 2 current Job Search hubs each hold their own live telemetry in this process, so no single hub owns this section; no hub held an independently attributable record either, so no per-hub records are listed.')
           && !rendered.assessment.includes('listed in Job Search Pipeline'),
         `the completion assessment must apply the same conditional, got ${rendered.assessment.slice(0, 3000)}`);
-        assert(rendered.snapshot.includes('Solve passes (run `run-x`): 3 recorded · 2 rendered · ⚠️ 1 carried an outcome this report does not recognise and is not rendered.')
+        assert(/Solve passes \(run `#[0-9a-f]{10}`\): 3 recorded · 2 rendered · ⚠️ 1 carried an outcome this report does not recognise and is not rendered\./.test(rendered.snapshot)
+          && !rendered.snapshot.includes('run-x')
+          && !rendered.snapshot.includes('run-y')
           && !rendered.snapshot.includes('all retained')
           && !rendered.snapshot.includes('deferred-to-next-run'),
-        `an allowlist-shortened Solve trail must state both counts and mark the drop, got ${rendered.snapshot.slice(0, 4000)}`);
+        `an allowlist-shortened Solve trail must state both counts and mark the drop without exporting a raw run identifier, got ${rendered.snapshot.slice(0, 4000)}`);
         return { danglingPointers: 0, unrecognisedPasses: 1 };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });

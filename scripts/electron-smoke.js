@@ -665,7 +665,7 @@ try {
       direct: { status: direct.status, contentType: direct.headers.get('content-type'), bytes: (await direct.arrayBuffer()).byteLength },
       svg: { status: svg.status, contentType: svg.headers.get('content-type'), bytes: svgText.length, movedMarker: svgText.includes('fill="red"') },
       // The clipboard path no longer returns the report body — it writes the
-      // full report to an app-managed file and returns a short pointer. Hand
+      // full report to an app-managed file and returns a file-backed pointer. Hand
       // the pointer contract back to Node, which can actually read that file;
       // this is the only place the redesigned flow runs in a real Electron
       // process against a real userData directory.
@@ -693,7 +693,7 @@ try {
     `the clipboard pointer should name the saved file: ${savedReport.clipboardText.slice(0, 400)}`);
   assert.ok(savedReport.clipboardText.length < 4_000
     && savedReport.clipboardText.length < savedReportBody.length,
-  `the clipboard pointer should stay far smaller than the report it points at (pointer ${savedReport.clipboardText.length} vs report ${savedReportBody.length})`);
+  `the file-backed pointer without a user description should stay far smaller than the report it points at (pointer ${savedReport.clipboardText.length} vs report ${savedReportBody.length})`);
   const relinkDiagnostics = savedReportBody
     .split('\n')
     .filter(line => line.includes('product-photo') || line.includes('[local-file]'))

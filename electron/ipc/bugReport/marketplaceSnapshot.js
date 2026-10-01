@@ -1,6 +1,6 @@
 import { getMarketplaceTelemetry } from '../marketplace.js';
 import { MARKETPLACE_TEST_MODE } from '../../../src/utils/compSourceScope.js';
-import { ago, modelTag, pipelineScope, overPricedSoldFlag, shortId } from './helpers.js';
+import { ago, modelTag, pipelineScope, overPricedSoldFlag, reportCorrelationDigest } from './helpers.js';
 
 // Verdict for what the token-budget comp ceiling actually dropped — does it skew the
 // price? Two facts matter. (1) Compare the TYPICAL dropped comp (its median) to
@@ -111,7 +111,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
   const stageNode = (stageNodeId) => (stageNodeId && headlineNode && stageNodeId !== headlineNode ? stageNodeId : null);
   const nodeTag = (stageNodeId) => {
     const foreign = stageNode(stageNodeId);
-    return foreign ? ` ⚠️ from node \`${shortId(foreign)}\` — not the headline node \`${shortId(headlineNode)}\`` : '';
+    return foreign ? ` ⚠️ from node \`${reportCorrelationDigest(foreign)}\` — not the headline node \`${reportCorrelationDigest(headlineNode)}\`` : '';
   };
   // Drive the concurrency WARNING off the pricing stages only. scrape, synthesis,
   // bundle and fit are all reset to null at each scrape start, so a foreign one of
@@ -126,7 +126,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
   }
   if (overlapNodes.size > 0) {
     lines.push(
-      `> ⚠️ **Overlapping price checks** — the stages below span MORE THAN ONE run. Headline node \`${shortId(headlineNode)}\` is the most recent to touch the pipeline, but stage(s) tagged below belong to other node(s) (${[...overlapNodes].map(n => `\`${shortId(n)}\``).join(', ')}) whose run was still finishing when this one started. This is expected: only the browser scrape serializes (marketplaceBrowserLock); synthesis/bundle/fit run unlocked, so a second check's scrape begins as soon as the first releases the browser — while the first finishes pricing. Read each stage as belonging to its TAGGED node, not the headline.`,
+      `> ⚠️ **Overlapping price checks** — the stages below span MORE THAN ONE run. Headline node \`${reportCorrelationDigest(headlineNode)}\` is the most recent to touch the pipeline, but stage(s) tagged below belong to other node(s) (${[...overlapNodes].map(n => `\`${reportCorrelationDigest(n)}\``).join(', ')}) whose run was still finishing when this one started. This is expected: only the browser scrape serializes (marketplaceBrowserLock); synthesis/bundle/fit run unlocked, so a second check's scrape begins as soon as the first releases the browser — while the first finishes pricing. Read each stage as belonging to its TAGGED node, not the headline.`,
     );
   }
 
@@ -140,10 +140,8 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     const a = t.analyze;
     lines.push(`### Product analysis${ago(a.ts)}${nodeTag(a.nodeId)}`);
     const condition = a.condition ? ` · condition: \`${a.condition}\`` : '';
-    const cleanup = a.titleCleaned && a.rawTitle
-      ? ` · cleaned from raw title "${a.rawTitle}"`
-      : '';
-    lines.push(`- ${a.photos} photo(s) → "${a.title}"${condition}${cleanup}${modelTag(a.model, a.fallback)}`);
+    const cleanup = a.titleCleaned && a.rawTitle ? ' · title normalization applied' : '';
+    lines.push(`- ${a.photos} photo(s) → product title captured (withheld)${condition}${cleanup}${modelTag(a.model, a.fallback)}`);
   }
 
   if (t.scrape) {
@@ -175,20 +173,20 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       lines.push(`- ⚠️ **Browser contention** — a captcha-resolve window closed the shared stealth browser mid-scrape, detaching ${det.length} in-flight source(s)${det.length ? ` (${det.join(', ')})` : ''}. Their \`task-failed\` results are INTERNAL contention, NOT anti-bot — they would have succeeded had this run been alone. Sell-side price checks now serialize via marketplaceBrowserLock; a hit here means a JOB-side captcha-resolve overlapped (these are NOT gated by that lock).`);
     }
     if (Array.isArray(s.itemDetails) && s.itemDetails.length > 1) {
-      lines.push('- Per-item scrape results _(q = the query scraped AND fed to the price model as the ITEM):_');
+      lines.push('- Per-item scrape results _(query values withheld):_');
       for (const item of s.itemDetails) {
         const warnings = Array.isArray(item.warnings) && item.warnings.length
           ? ` · warnings: ${item.warnings.map(w => `${w.sourceId}:${w.code}`).join(', ')}`
           : '';
-        const labelPart = item.label ? ` — "${item.label}"` : '';
+        const labelPart = item.label ? ' · item label captured' : '';
         // Flag a query that names product terms the item's own title doesn't —
         // the title and the priced query may describe different products (e.g. a
         // stale bundle-wide search_query). See queryTitleDrift.
         const drift = queryTitleDrift(item.query, item.label);
         const driftFlag = drift.length
-          ? ` ⚠️ query term(s) absent from the title (${drift.join(', ')}) — title vs priced query may describe different products`
+          ? ' ⚠️ priced query does not match the captured product title — title/query values withheld'
           : '';
-        lines.push(`  - Item ${item.index + 1}${labelPart} · q="${item.query}" → ${item.sold} sold + ${item.active} active${warnings}${driftFlag}`);
+        lines.push(`  - Item ${item.index + 1}${labelPart} · query recorded → ${item.sold} sold + ${item.active} active${warnings}${driftFlag}`);
       }
     } else if (Array.isArray(s.itemDetails) && s.itemDetails.length === 1) {
       // Single-item run: the per-item block above (which carries the drift flag)
@@ -200,7 +198,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       const only = s.itemDetails[0];
       const drift = queryTitleDrift(only.query, only.label);
       if (drift.length) {
-        lines.push(`- ⚠️ Title vs priced query may describe different products: the scraped query names term(s) absent from the title "${only.label}" (${drift.join(', ')}). Priced q="${only.query}". Usually a self-inconsistent photo analysis (generated_title vs search_query) or a stale search_query — off-target comps downstream are expected when this fires.`);
+        lines.push('- ⚠️ Title vs priced query may describe different products (values withheld). Usually a self-inconsistent photo analysis or stale query; off-target comps downstream are expected when this fires.');
       }
     }
     if (s.bySource && Object.keys(s.bySource).length > 0) {
@@ -255,7 +253,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // Spell out each flagged source's evidence (e.g. "extractor produced 0
       // items (expected ≥ 3)" = stale selectors / empty vs. a tiny-body block).
       for (const [id, w] of Object.entries(sw)) {
-        lines.push(`  - \`${id}\` (${w.severity}): ${w.evidence}`);
+        lines.push(`  - \`${id}\` (${w.severity}): evidence recorded (content withheld)`);
       }
       // Sample of the actual extracted comp TITLES per source (last bundle item).
       // Counts alone can't reveal an OFF-TARGET match — a source can report a
@@ -267,12 +265,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       const samples = s.samplesBySource || {};
       const sampleIds = Object.keys(samples).filter(id => Array.isArray(samples[id]) && samples[id].length > 0);
       if (sampleIds.length > 0) {
-        lines.push('- Sample of extracted comps per source _(top few titles actually returned — spot off-target matches a count can\'t reveal):_');
+        lines.push('- Sample of extracted comps per source _(title values withheld):_');
         for (const id of sampleIds) {
-          const shown = samples[id]
-            .map(c => `"${c.title}"${c.price != null ? ` $${c.price}` : ''}`)
-            .join(' · ');
-          lines.push(`  - \`${id}\`: ${shown}`);
+          lines.push(`  - \`${id}\`: ${samples[id].length} comp title(s) recorded (values withheld)`);
         }
       }
       // Conservative partial-drift hint: a source that dropped MORE cards to
@@ -313,9 +308,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // not completed sales). Shown as data, NOT auto-flagged: some sold sources
       // legitimately lack the literal token (PriceCharting's `type=prices` IS sold
       // data), so the URL is surfaced for a human to judge rather than mis-warned.
-      lines.push(`- ${s.items > 1 ? 'Last-item scrape provenance' : 'Scrape provenance'} (URL read · claimed category — a \`sold\` source whose URL has no sold/completed filter is serving ACTIVE prices):`);
+      lines.push(`- ${s.items > 1 ? 'Last-item scrape provenance' : 'Scrape provenance'} (URL values withheld; claimed category retained):`);
       for (const [id, p] of Object.entries(s.provenanceBySource)) {
-        lines.push(`  - \`${id}\` claims **${p.category}** ← ${p.url}`);
+        lines.push(`  - \`${id}\` claims **${p.category}** · URL recorded (withheld)`);
       }
     }
     if (s.apiQueryBySource && Object.keys(s.apiQueryBySource).length > 0) {
@@ -326,9 +321,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // product-catalog search — so its count is shaped by that rewrite. Surfacing
       // query + URL tells "normalizer over-stripped / wrong product" apart from
       // "the catalog genuinely has only N matching variants".
-      lines.push(`- ${s.items > 1 ? 'Last-item API source query' : 'API source query'} (the string actually searched — pricecharting normalizes the title; a surprising count is read against THIS, not the raw product name):`);
+      lines.push(`- ${s.items > 1 ? 'Last-item API source query' : 'API source query'} (query values withheld):`);
       for (const [id, q] of Object.entries(s.apiQueryBySource)) {
-        lines.push(`  - \`${id}\` q="${q.query}"${q.url ? ` → ${q.url}` : ''}`);
+        lines.push(`  - \`${id}\` query recorded${q.url ? ' · URL recorded' : ''} (values withheld)`);
       }
     }
     if (s.blocked > 0) {
@@ -372,7 +367,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
 
   for (const s of synthesisEntries) {
     const itemTag = synthesisEntries.length > 1
-      ? ` — ${s.itemLabel || s.query || s.itemKey || 'item'}`
+      ? ' — item correlation withheld'
       : '';
     lines.push(`\n### Price synthesis${itemTag}${ago(s.ts)}${nodeTag(s.nodeId)}`);
     if (s.junkRejected > 0) {
@@ -382,7 +377,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // chargers, screen protectors — the bulk, esp. from Poshmark) and eBay
       // internal test listings. Keep the description in sync with the filter so
       // the example never contradicts the explanation.
-      lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ` (e.g. "${s.junkExample}")` : ''} — accessories for the item (cases/chargers/etc.) and eBay internal test listings, not real comps.`);
+      lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ' (example recorded, content withheld)' : ''} — accessories for the item (cases/chargers/etc.) and eBay internal test listings, not real comps.`);
     }
     if (s.offTargetRejected > 0) {
       lines.push(`- Rejected ${s.offTargetRejected} grossly off-target listing(s) before pricing because even the source's best result barely matched the item${s.offTargetRejectedSources?.length ? `: ${s.offTargetRejectedSources.join(', ')}` : ''}.`);
@@ -392,7 +387,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     } else {
       const capped = s.soldFound > s.soldUsed || s.activeFound > s.activeUsed;
       if (s.userNotesChars > 0) {
-        lines.push(`- Seller pricing notes sent to the model (${s.userNotesChars} chars): "${String(s.userNotesPreview || '').replace(/"/g, '\\"')}${s.userNotesChars > 240 ? '...' : ''}"`);
+        lines.push(`- Seller pricing notes sent to the model (${s.userNotesChars} chars; content withheld).`);
       }
       lines.push(
         `- Comps fed to the model: ${s.soldUsed}/${s.soldFound} sold + ${s.activeUsed}/${s.activeFound} active` +

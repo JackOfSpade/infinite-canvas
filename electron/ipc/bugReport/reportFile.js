@@ -5,10 +5,9 @@
 // wouldn't blow up whatever consumed the paste. That capping was already a
 // lossy compromise (see bugReport.js). The real fix: generate the FULL
 // uncapped report (same content "Save to file" produces), write it to an
-// app-managed file, and hand the clipboard a SHORT pointer at that path. An
-// AI reading the pasted report can then read the file from disk in segments
-// instead of receiving one giant paste that either gets silently truncated
-// downstream or burns most of a context window in one message.
+// app-managed file, and hand the clipboard a file-backed pointer at that
+// path. The report body stays on disk for segmented reading, while the
+// intentionally user-authored issue description is included inline in full.
 //
 // The saved-report directory is a short-lived handoff archive. A clipboard
 // pointer may be consumed after Electron restarts (for example, an assistant
@@ -190,9 +189,9 @@ export async function writeSavedBugReport(markdown, meta = {}) {
 
 // Pure — no fs, no electron — so the exact clipboard pointer text is
 // trivially unit-testable without touching disk. This is deliberately the
-// ONLY thing an AI reading the clipboard paste sees inline; the entire point
-// of the redesign is that this stays short while the real content lives in
-// the file it points at.
+// report metadata plus any intentionally user-authored issue description an
+// AI reading the clipboard paste sees inline; generated diagnostic content
+// remains in the file it points at.
 export function buildClipboardPointer(info = {}) {
   // Retention cleanup is triggered at startup and on every write. It is
   // best-effort, so a pointer is durable across restarts but cannot promise
@@ -210,12 +209,13 @@ export function buildClipboardPointer(info = {}) {
     : ` · event log ${formatCount(eventLines)} line(s)`;
   const code = String(filterCode || '').trim() || 'FULL';
 
-  const trimmedDescription = typeof description === 'string' ? description.trim() : '';
-  const boundedDescription = trimmedDescription.length > 500
-    ? `${trimmedDescription.slice(0, 500)}…`
-    : trimmedDescription;
-  const descriptionSection = boundedDescription
-    ? `\n\n## Issue Description\n${boundedDescription}`
+  // The description is intentional user-authored handoff context, not a
+  // diagnostic sample. The saved report and its clipboard pointer must agree
+  // on it exactly; a preview cap here made an AI act on an incomplete issue
+  // even though the file retained the rest.
+  const fullDescription = typeof description === 'string' ? description : '';
+  const descriptionSection = fullDescription
+    ? `\n\n## Issue Description\n${fullDescription}`
     : '';
 
   return `# Bug Report — saved to a file (not pasted inline)

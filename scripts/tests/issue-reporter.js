@@ -40,6 +40,9 @@ export default [
 
             const form = window.document.querySelector('form');
             assert(form, 'the issue reporter must render its delivery form');
+            const textarea = window.document.querySelector('textarea');
+            assert(textarea?.maxLength === -1,
+              'the issue reporter must not impose a browser maxlength on intentional user-authored context');
             await bundle.module.act(async () => {
               form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
             });

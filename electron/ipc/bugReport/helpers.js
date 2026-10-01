@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 // Shared utilities for bug-report markdown generation. Each is used by at
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
 // they live here rather than being duplicated or buried in one module.
@@ -10,6 +12,21 @@ let reportRedactedHostPatterns = [];
 
 function escapeReportRedactedHostForRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function reportUrlPath(parsed) {
+  const pathname = parsed.pathname || '/';
+  const parts = pathname.split('/').filter(Boolean);
+  // Providers use several path families for listing/product slugs. Those
+  // slugs routinely contain a role, employer, item title, or location even
+  // when the query string has already been removed.
+  const listingSegments = new Set([
+    'job', 'jobs', 'job-search', 'search', 'career', 'careers',
+    'position', 'positions', 'listing', 'listings', 'item', 'items', 'product', 'products',
+  ]);
+  const listingIndex = parts.findIndex(part => listingSegments.has(part.toLowerCase()));
+  if (listingIndex >= 0 && parts.length > listingIndex + 1) return '/<listing-path>';
+  return pathname;
 }
 
 /**
@@ -76,7 +93,7 @@ export function redactReportUrl(value) {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return redactConfiguredReportHosts(`${redactedReportOrigin(parsed)}${parsed.pathname}`);
+      return redactConfiguredReportHosts(`${redactedReportOrigin(parsed)}${reportUrlPath(parsed)}`);
     }
     return '<redacted-url>';
   } catch {
@@ -110,12 +127,24 @@ export function redactReportLocalPathsInText(value) {
   return String(value ?? '').replace(LOCAL_REPORT_PATH, '$1<local-path>');
 }
 
+// Node, job, and run UUIDs are opaque internal correlation tokens. Reports do
+// not need their source spelling: a full identifier can be reused to join a
+// support export to local state, while the surrounding event/status remains
+// actionable without it.
+export function redactReportOpaqueIds(value) {
+  return String(value ?? '').replace(
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+    '<opaque-id>',
+  );
+}
+
 /**
  * Project trusted app-authored diagnostics into bounded report text. URLs,
- * paths, and credential-bearing forms are removed before the text is rendered.
+ * paths, credential-bearing forms, and opaque internal identifiers are removed
+ * before the text is rendered.
  */
 export function projectReportDiagnostic(value, fallback = 'not recorded', max = 240) {
-  const normalized = redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value)))
+  const normalized = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))))
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/`/g, "'")
@@ -150,7 +179,7 @@ const SAFE_EVENT_DIAGNOSTIC_VALUES = new Set([
   'present', 'missing', 'empty', 'unknown', 'invalid', 'none', 'yes', 'no', 'true', 'false', '?',
 ]);
 
-const EVENT_SENSITIVE_ASSIGNMENT = /\b(q|query|rawquery|searchquery|careerquery|targetrole|careertarget|preferences?|htidocid|documentid|document|docid)(\s*(?:=|:)\s*)("[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|.*?)(?=(?:\s*(?:[,;|]\s*)?[A-Za-z][A-Za-z0-9_-]{0,40}\s*[=:])|[\r\n]|$)/gi;
+const EVENT_SENSITIVE_ASSIGNMENT = /\b(q|query|rawquery|searchquery|careerquery|targetrole|careertarget|preferences?|htidocid|documentid|document|docid|title|company|location|jobtitle|joblocation)(\s*(?:=|:)\s*)("[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|.*?)(?=(?:\s*(?:[,;|]\s*)?[A-Za-z][A-Za-z0-9_-]{0,40}\s*[=:])|[\r\n]|$)/gi;
 
 function eventSensitiveValueKind(key) {
   return /^(?:htidocid|documentid|document|docid)$/i.test(key)
@@ -178,7 +207,7 @@ export function redactReportEventHistoryLine(value) {
   // Match the old event export's String(value) coercion exactly; malformed
   // mocked/legacy rows remain visible as "null"/"undefined" rather than
   // silently disappearing from a timeline.
-  let text = redactReportLocalPathsInText(redactReportUrlsInText(String(value)));
+  let text = redactReportOpaqueIds(redactReportLocalPathsInText(redactReportUrlsInText(String(value))));
 
   // These are the prose forms emitted by JobSearchNode / JobGroupNode. Match
   // only an explicit sensitive cue and quoted value; ordinary quoted event
@@ -188,8 +217,10 @@ export function redactReportEventHistoryLine(value) {
     // `"Staff" engineer`), so consume through the last quote on this event
     // line rather than exposing the suffix after its first embedded quote.
     .replace(/(\b(?:for\s+query|search\s+query)\s*:\s*)"[^\r\n]*"/gi, '$1"[redacted query]"')
+    .replace(/(\b(?:job\s+)?(?:title|company|location)\s*:\s*)"[^\r\n]*"/gi, '$1"[redacted value]"')
     .replace(/(\bsearching\s+exactly\s*)"[^\r\n]*"/gi, '$1"[redacted target role]"')
     .replace(/(\bshow\s+more\s+in\s+role\s*)"[^\r\n]*"/gi, '$1"[redacted role]"')
+    .replace(/(\b(?:expanded|collapsed)\s+(?:role|salary|category|bucket|branch)\s*)"[^\r\n]*"/gi, '$1"[redacted taxonomy label]"')
     // FIX 10: JobSearchNode's Search-Brief-driven title resolution logs
     // "...skipping query generation and searching them directly: <titles>"
     // with the resolved titles UNQUOTED and comma-joined, running to end of
@@ -287,6 +318,15 @@ export const shortId = (id) => {
   return `…${s.slice(-8)}`;                           // timestamp-prefixed: show suffix
 };
 
+// Reports need to relate rows from the same export without publishing a node,
+// job, or run token that can be joined back to local state.  Keep this here so
+// every report renderer uses the same stable, one-way label rather than
+// accidentally reintroducing a UUID prefix through `shortId`.
+export const reportCorrelationDigest = (value, fallback = 'not recorded') => {
+  if (typeof value !== 'string' || !value) return fallback;
+  return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
+};
+
 // Decides whether a pipeline's telemetry belongs to the current canvas window
 // and produces the section-header note that explains the attribution. The
 // telemetry singletons (jobs/marketplace) are shared across every open window
@@ -309,7 +349,7 @@ export const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId, 
     };
   }
   if (!nodeId) return { foreign: false, note: '' };
-  const short = shortId(nodeId);
+  const short = reportCorrelationDigest(nodeId);
   const deleted = currentNodeIds && currentNodeIds.size > 0 && !currentNodeIds.has(nodeId);
   const label = options.label || 'Source node';
   const deletedNoun = options.deletedNoun || 'hub';

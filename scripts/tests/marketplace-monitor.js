@@ -548,15 +548,15 @@ export default [
       }];
       const md = buildMarketplaceModuleRollup(nodes);
       assert(md.includes('Flagged items'), 'renders a flagged-items detail section');
-      assert(md.includes('Thanks. If change price'), 'includes the verbatim evidence the model quoted');
-      assert(md.includes('Buyer message about price'), 'includes the item headline');
+      assert(md.includes('evidence: “evidence recorded”') && !md.includes('Thanks. If change price'), 'retains evidence presence without exporting its text');
+      assert(md.includes('headline recorded') && !md.includes('Buyer message about price'), 'retains the item-headline signal without exporting it');
       // Per-flagged-item source URL: shows which watch URL each flag came from, and
       // explicitly flags a dead jump-to-source link (the "link did not take me to source").
-      assert(md.includes('src: https://www.ebay.com/sh/lst/active'), 'a flagged item with a sourceUrl shows which hub URL it came from');
+      assert(md.includes('src: recorded (withheld)'), 'a flagged item retains source presence without exposing its URL');
       assert(md.includes('jump-to-source link is dead'), 'a flagged item with NO sourceUrl is marked as a dead jump-to-source link');
       assert(/\b4r\/1u\b/.test(md), 'read/unread column shows 4r/1u');
       assert(md.includes('read-state'), 'notes that read-state was detected');
-      assert(md.includes('$50 \\| OBO'), 'literal pipe in summary is escaped so the table row keeps its 7 cells');
+      assert(md.includes('recorded (content withheld)'), 'summary presence is retained without exporting buyer text');
       // Masking case: a platform reads OK overall but one of its watch URLs logged
       // out. "Any ok source wins" (deriveHubScanStatus) hides that, so the rollup
       // must surface a blocked tally AND withhold the all-clear line.
@@ -591,12 +591,22 @@ export default [
         } },
       }]);
       assert(/Blocked \/ unreadable hub sources/.test(blockedMd), 'renders a blocked-source reason section when a hub source is non-ok');
-      assert(/Anti-bot challenge.*session is still logged in/.test(blockedMd), 'surfaces the Cloudflare/anti-bot block reason (retry, not logout)');
+      assert(/`unknown` ×2: detail recorded/.test(blockedMd), 'retains grouped blocked-source status without exporting free-form reasons');
       assert(/`unknown` ×2/.test(blockedMd), 'identical block reasons are deduped with a ×N tally');
-      assert(/Empty or near-empty response/.test(blockedMd), 'surfaces the empty client-rendered shell reason distinctly from the anti-bot one');
-      assert(/title="Just a moment\.\.\."/.test(blockedMd), 'blocked native read source surfaces captured title');
+      assert((blockedMd.match(/detail recorded/g) || []).length >= 2, 'retains distinct grouped blocked-source diagnostics without free text');
+      assert(/title captured \(withheld\)/.test(blockedMd), 'blocked native read source retains title capture without exposing it');
       assert(/apple-events-off/.test(blockedMd), 'blocked native read source surfaces Apple Events disabled flag');
       assert(/ · challenge/.test(blockedMd), 'blocked native read source surfaces anti-bot challenge flag');
+      // Multi-module labels must not leak a raw durable node-id prefix merely
+      // because the report needs to distinguish the otherwise identical rows.
+      const opaqueModuleId = '123e4567-e89b-12d3-a456-426614174000';
+      const multiMd = buildMarketplaceModuleRollup([
+        { id: opaqueModuleId, type: 'marketplacestatus', data: { platformStatus: { ebay: { status: 'ok', attention: [], sources: [] } } } },
+        { id: '987e6543-e21b-12d3-a456-426614174999', type: 'marketplacestatus', data: { platformStatus: { mercari: { status: 'ok', attention: [], sources: [] } } } },
+      ]);
+      assert(!multiMd.includes(opaqueModuleId) && !multiMd.includes(opaqueModuleId.slice(0, 6))
+        && /\| #[a-f0-9]{10}\/ebay \|/.test(multiMd),
+      'multi-module diagnostics retain a one-way correlation label without exposing a raw node-id prefix');
       // A fully-clean platform (all sources ok) must NOT appear in the blocked section.
       assert(!/Blocked \/ unreadable hub sources/.test(md), 'no blocked section when every source read ok');
       // No marketplacestatus node → empty (unchanged behavior).
@@ -626,7 +636,7 @@ export default [
       ]);
       assert(md.includes('SellHub Price-Drop Plans'), 'renders the compact SellHub price-drop section');
       assert(md.includes('**$0**') && /\| \$0 \|/.test(md), 'zero target is rendered as $0, not omitted as empty/off');
-      assert(md.includes('Table Lamp \\| Blue'), 'markdown table delimiters in item titles are escaped');
+      assert(md.includes('item correlation'), 'the price-drop table uses a stable correlation instead of an item title');
       assert(/\| 2 \(1 due\) \|/.test(md), 'connected marketplace cards and due reminders are summarized');
       assert(buildSellHubPriceDropRollup([{ id: 'hub-empty', type: 'sellhub', data: { hubState: 'priced' } }]) === '',
         'unplanned sellhubs do not add a noisy report section');
@@ -645,7 +655,7 @@ export default [
           },
         },
       ]);
-      assert(nested.includes('Buried Lamp'), 'rollup descends into grouped sub-canvases (shared visitCanvasNodes recursion)');
+      assert(nested.includes('item correlation') && nested.includes('$12'), 'rollup descends into grouped sub-canvases without exporting the item title');
       return { ok: true };
     },
   },
