@@ -76,7 +76,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
+    "@vitejs/plugin-react": "^6.1.1",
     "@xyflow/react": "^12.10.2",
     "electron": "^42.2.0",
     "electron-builder": "^26.8.1",
