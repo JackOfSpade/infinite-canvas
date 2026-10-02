@@ -2,7 +2,7 @@
    build/bullet-redundancy-gate-doc-test.js — static regression for
    the one-accomplishment-one-bullet rule (STYLE.md §5.3, SKILL.md
    "## Do not let one bullet restate another" + its negative-space
-   line, readme.md "### Bullet ordering: relevance to the job, not
+   line, CONTENT_RULES.md "### Bullet ordering: relevance to the job, not
    chronology").
 
    Guards the DOCS, not a render: fails if a future edit drops the
@@ -37,10 +37,12 @@ function norm(s) { return s.replace(/\s+/g, ' '); }
 
 var skill = read('SKILL.md');
 var style = read('STYLE.md');
+var readme = read('CONTENT_RULES.md');
 var engineering = read('ENGINEERING.md');
 
 var skillN = norm(skill);
 var styleN = norm(style);
+var readmeN = norm(readme);
 
 console.log('SKILL.md — "## Do not let one bullet restate another"');
 assert(/## Do not let one bullet restate another/.test(skillN),
@@ -95,6 +97,28 @@ assert(/is padding, never a repair for a short page/.test(section53),
 assert(/source-supported accomplishment the page doesn't carry yet/.test(section53),
   'STYLE.md §5.3 still prescribes a source-supported accomplishment as the repair',
   'the source-supported-accomplishment repair is missing from STYLE.md §5.3');
+
+console.log('\nCONTENT_RULES.md — "Bullet ordering" section');
+var roStart = readmeN.indexOf('### Bullet ordering: relevance to the job, not chronology');
+var roEnd = readmeN.indexOf('### Cover letter opening');
+var roSection = roStart !== -1 && roEnd > roStart ? readmeN.slice(roStart, roEnd) : '';
+assert(roSection.length > 0, 'CONTENT_RULES.md "Bullet ordering" section is found',
+  '"### Bullet ordering: relevance to the job, not chronology" section not found');
+assert(/One accomplishment gets one bullet/.test(roSection),
+  'CONTENT_RULES.md states "One accomplishment gets one bullet" in the Bullet ordering section',
+  'the one-accomplishment-one-bullet statement is missing from CONTENT_RULES.md');
+assert(/Do not let a project section restate the bullets/.test(roSection),
+  'CONTENT_RULES.md cross-references SKILL.md\'s "Do not let a project section restate the bullets"',
+  'no cross-reference to the project-restatement test found in CONTENT_RULES.md');
+assert(/internal-tools hub/.test(roSection),
+  'CONTENT_RULES.md cites the shipped internal-tools-hub case as the worked example',
+  'the internal-tools-hub example is missing from CONTENT_RULES.md');
+assert(/subject is the previous bullet's object/.test(roSection),
+  'CONTENT_RULES.md names the "subject is the previous bullet\'s object" tell',
+  'the previous-bullet-object symptom check is missing from CONTENT_RULES.md');
+assert(/never the fix for a short page/.test(roSection),
+  'CONTENT_RULES.md states splitting a bullet is never the fix for a short page',
+  'no "never the fix for a short page" language found in CONTENT_RULES.md');
 
 console.log('\nENGINEERING.md test index');
 assert(/bullet-redundancy-gate-doc-test\.js/.test(engineering),

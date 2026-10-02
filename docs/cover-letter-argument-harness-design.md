@@ -484,7 +484,7 @@ with the field values pasted in.
 
 ### 6.4 Where the rubric lives
 
-`getEditorialRubric()` (~line 142) reads **`SKILL.md` + `readme.md`** from
+`getEditorialRubric()` (~line 142) reads **`SKILL.md` + `CONTENT_RULES.md`** from
 `Job Application Design System/` — **not `STYLE.md`**. Writing this standard into `STYLE.md` §11 would never
 reach the prompt. If the standard belongs in the design system, it goes in `SKILL.md`; otherwise keep
 it in code. Either is acceptable — just do not put it somewhere that silently never loads.

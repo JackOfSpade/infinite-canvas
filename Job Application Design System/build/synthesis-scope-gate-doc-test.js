@@ -3,7 +3,7 @@
    §11.2.3 Rule 6 gate: evidence-scoped, earned synthesis and explicit
    paragraph transitions (STYLE.md §11.2.3 Rule 6, §11.4; SKILL.md
    §The pipeline step 4 "evidence-synthesis gate" and "Prose fields
-   obey the synthesis rules too"; readme.md prose-shape sections).
+   obey the synthesis rules too"; CONTENT_RULES.md prose-shape sections).
 
    Guards the DOCS, not a render: fails if a future edit drops the
    requirement that a generalization name its concrete connector, the
@@ -29,6 +29,7 @@ function read(p) { return fs.readFileSync(path.join(ROOT, p), 'utf8'); }
 
 var style = read('STYLE.md');
 var skill = read('SKILL.md');
+var readme = read('CONTENT_RULES.md');
 var engineering = read('ENGINEERING.md');
 
 // Rule 6's own block, so "shape"/"pattern" hits elsewhere in STYLE.md
@@ -164,6 +165,24 @@ assert(/never by\s+inserting a filler transition/i.test(skill),
   'no filler-transition prohibition in SKILL.md');
 assert(/synthesis-scope-gate-doc-test\.js/.test(skill),
   'SKILL.md files table lists this test', 'test not listed in the SKILL.md files table');
+
+console.log('\nCONTENT_RULES.md coverage');
+assert(/unearned generalization/i.test(readme),
+  'CONTENT_RULES.md documents the generalization rule alongside the other prose-shape rules',
+  'no "unearned generalization" language in CONTENT_RULES.md');
+assert(/Five prose failures/i.test(readme),
+  'CONTENT_RULES.md prose-shape section counts five banned shapes',
+  'CONTENT_RULES.md still counts four prose failures');
+assert(/exactly one plausible antecedent/i.test(readme),
+  'CONTENT_RULES.md states the one-antecedent rule for paragraph transitions',
+  'no antecedent rule in CONTENT_RULES.md');
+assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme),
+  'CONTENT_RULES.md documents natural prior-employer reference',
+  'no natural prior-employer reference guidance in CONTENT_RULES.md');
+assert(/repeat the\s+precise noun phrase instead/i.test(readme) &&
+  /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme),
+  'CONTENT_RULES.md defines the explicit-transition repair without prescribing copy',
+  'semantic transition repair missing in CONTENT_RULES.md');
 
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering),

@@ -5,10 +5,10 @@ is produced, what is tested and by what, and how the folder should be
 packaged.
 
 **This file is deliberately outside the editorial rubric.** `SKILL.md`
-and `readme.md` are read *whole* into every résumé and cover-letter
+and `CONTENT_RULES.md` are read *whole* into every résumé and cover-letter
 generation prompt, so anything in them is paid for on every request and
 acted on as if it were an editorial rule. Build mechanics are neither.
-Keep developer prose here; keep `readme.md` to *why the writing is the
+Keep developer prose here; keep `CONTENT_RULES.md` to *why the writing is the
 way it is*.
 
 ---
@@ -57,7 +57,7 @@ Everything in the folder, current as of this audit pass.
 |------|------------|
 | `STYLE.md` | Every design decision, fully documented. **Read first.** |
 | `SKILL.md` | Agent prompt — pipeline + per-company variant selection. |
-| `readme.md` | Philosophy, content rules, caveats (the *why*). |
+| `CONTENT_RULES.md` | Philosophy, content rules, caveats (the *why*). |
 | `styles.css` | Public entry point for consumers — re-exports the token closure via one `@import`. The two shipped documents link `colors_and_type.css` + their own component sheet directly, so this file is a convenience for consumers, not a build step. |
 | `colors_and_type.css` | Design tokens — colour, typography, spacing, page geometry, all variants. |
 | `resume.css` | Page chrome, paged-media model, header, sections, roles, bullets, projects, skills. Also carries the cross-document layer (page geometry, `@page`, letterhead, `.sep`) that the letter reuses — see "Known debt". |
@@ -88,7 +88,7 @@ Run in this order by the `test` script:
 | `page-policy-doc-test.js` | The one-page default and its explicit-override language. |
 | `parallelism-gate-doc-test.js` | §11.2.3 Rule 5 (parallel construction) survives in all three docs. |
 | `synthesis-scope-gate-doc-test.js` | §11.2.3 Rule 6 (earned generalization) survives in all three docs. |
-| `bullet-redundancy-gate-doc-test.js` | The one-accomplishment-one-bullet rule (STYLE.md §5.3, SKILL.md "Do not let one bullet restate another" + its negative-space line, readme.md "Bullet ordering") survives in all three docs. |
+| `bullet-redundancy-gate-doc-test.js` | The one-accomplishment-one-bullet rule (STYLE.md §5.3, SKILL.md "Do not let one bullet restate another" + its negative-space line, CONTENT_RULES.md "Bullet ordering") survives in all three docs. |
 | `fixture-safety-test.js` | Handoff/upload HTML fixtures use the documented synthetic identity and inert sync capability; no production-looking bearer token or live endpoint can be committed there. |
 
 ### Browser checks — `build/MANUAL-CHECKS.md`
@@ -107,7 +107,7 @@ manual check and when to run it.
 |------|------------|
 | `preview/*.html` | Design-system reference cards (type, colour, spacing, components, variants, anti-patterns). Rendered as the design-system card grid; not used at generation time. Cards read live tokens — never hardcode a token value in one. |
 | `preview/variant-contract-check.html` | Not a card: a manual regression sheet for the root-only variant contract, with an expectation table. |
-| `handoff/` | Frozen implementation reference for the integrated paginated screen preview: `README.md` (the contract), `Application-paginated-example.html` (a sanitized generated snapshot), `pagination-contract-check.js` (narrow Playwright suite, not wired). The host implementation itself has wired Chromium coverage in `scripts/electron-smoke.js`; no shipped code reads this folder. |
+| `handoff/` | Frozen implementation reference for the integrated paginated screen preview: `Application-paginated-example.html` (a sanitized generated snapshot), `pagination-contract-check.js` (narrow Playwright suite, not wired). The host implementation itself has wired Chromium coverage in `scripts/electron-smoke.js`; no shipped code reads this folder. |
 | `assets/`, `uploads/` | Design references, screenshots, and sanitized sample inputs. Inputs, not runtime. Never retain a real candidate résumé, contact details, or live application-sync capability here. |
 
 ---
@@ -152,7 +152,7 @@ equivalent), copy the **runtime read set**, not the tree. At generation
 time the app reads:
 
 ```
-SKILL.md  readme.md  STYLE.md
+SKILL.md  CONTENT_RULES.md  STYLE.md
 colors_and_type.css  resume.css  cover-letter.css
 resume.html  cover-letter.html
 build/dual-mode-pdf.js
@@ -180,6 +180,6 @@ including sample PDFs and reference PNGs.
   the Node suites, the browser fixtures — and builds nothing. Same
   reason: the host hardcodes `build/dual-mode-pdf.js`.
 - **The dash-punctuation table is duplicated across `STYLE.md`,
-  `SKILL.md` and `readme.md` on purpose.** Each of those files is read
+  `SKILL.md` and `CONTENT_RULES.md` on purpose.** Each of those files is read
   independently by a different consumer, and two doc gates assert the
   language is present in all three. Do not de-duplicate it.

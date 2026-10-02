@@ -443,7 +443,7 @@ The prefix must stay **byte-stable across calls** or the Claude cache marker mis
   whose key order varies between calls silently destroys the cache hit. Serialize through an
   explicit field-order helper.
 - **The editorial rubric**, read at runtime from `Job Application Design System/SKILL.md` and
-  `Job Application Design System/readme.md` and injected **whole**. Do not parse sections by heading —
+  `Job Application Design System/CONTENT_RULES.md` and injected **whole**. Do not parse sections by heading —
   heading text is exactly what changes when the design system is replaced. If the files are absent,
   skip the injection rather than failing generation.
 
@@ -624,7 +624,7 @@ Mitigation: a print-hidden hint bar plus an Export button that calls `window.pri
 "download edited copy" affordance. There is a mature `contenteditable` pattern in the repo already
 (`src/nodes/TextNode.jsx:151`, `src/utils/nativeTextUndo.js:28`) to model on.
 
-Note `Job Application Design System/readme.md:15-19` documents the opposite intent — *"No human interactive
+Note `Job Application Design System/CONTENT_RULES.md:15-19` documents the opposite intent — *"No human interactive
 surface. No editor."* That doc is design-owned and must not be edited; record the deliberate
 divergence here instead, so a future instance does not "fix" the editor away.
 
@@ -816,7 +816,7 @@ Rules:
 | 4 | `jobApplication.js:127-134` | prompt's class enumeration + policy rules |
 | 5 | `resumeHtml.js:112-189` | **cover-letter markup — the largest surface** |
 | 6 | `resumeHtml.js:48-55` | `extractVariantAttrs` — `data-print` / `data-mono` / `data-page` semantics |
-| 7 | new | rubric doc filenames (`SKILL.md`, `readme.md`) |
+| 7 | new | rubric doc filenames (`SKILL.md`, `CONTENT_RULES.md`) |
 
 Row 5 deserves attention: unlike the résumé, the cover letter's markup is **not** LLM-authored —
 `buildCoverLetterDocument` constructs it programmatically and hardcodes **19**

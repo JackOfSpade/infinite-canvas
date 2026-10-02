@@ -42,7 +42,7 @@
         "to": "Job Application Design System",
         "filter": [
           "SKILL.md",
-          "readme.md",
+          "CONTENT_RULES.md",
           "STYLE.md",
           "colors_and_type.css",
           "resume.css",

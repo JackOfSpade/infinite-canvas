@@ -155,11 +155,13 @@ header('documentation — Education removed, §5.8 documented');
 assert(/### 5\.8 Header subtitle/.test(read('STYLE.md')), 'STYLE.md documents §5.8 Header subtitle');
 [['STYLE.md', '`.edu-school`'],
  ['STYLE.md', '"Education". **Never**'],
- ['SKILL.md', 'skills, education']
+ ['SKILL.md', 'skills, education'],
+ ['CONTENT_RULES.md', 'skills, education'],
+ ['CONTENT_RULES.md', '**Skills**, **Education**']
 ].forEach(function (pair) {
   assert(read(pair[0]).indexOf(pair[1]) === -1, pair[0] + ' no longer says "' + pair[1] + '"');
 });
-['STYLE.md', 'SKILL.md'].forEach(function (doc) {
+['STYLE.md', 'SKILL.md', 'CONTENT_RULES.md'].forEach(function (doc) {
   assert(/no Education section/i.test(read(doc)),
     doc + ' states that no Education section exists');
 });

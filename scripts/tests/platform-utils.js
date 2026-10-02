@@ -1805,7 +1805,7 @@ export default [
       const { assertDesignSystemIntact, getDesignSystemDir, inlineDesignCssUrls } = await import('../../electron/ipc/resumeHtml.js');
       const result = assertDesignSystemIntact();
       const required = [
-        'SKILL.md', 'readme.md', 'STYLE.md',
+        'SKILL.md', 'CONTENT_RULES.md', 'STYLE.md',
         'colors_and_type.css', 'resume.css', 'cover-letter.css',
         'resume.html', 'cover-letter.html', 'build/dual-mode-pdf.js',
       ];

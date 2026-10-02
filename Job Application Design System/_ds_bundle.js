@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"5b91bd85f313","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ca30a05cdd8a","build/parallelism-gate-doc-test.js":"29ff6cbdef9c","build/synthesis-scope-gate-doc-test.js":"0e3fef74ec33","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"JobApplicationDesignSystem_895a4b","components":[],"sourceHashes":{"build/annotation-budget-test.js":"645527f59d68","build/annotation-typography-test.js":"45b5e4e71b74","build/ats-parse-test.js":"af76ec3b3614","build/bullet-redundancy-gate-doc-test.js":"49389a6e6d00","build/css-tokens.js":"cd9a99afed16","build/dual-mode-pdf.js":"2baecfd80478","build/education-placement-test.js":"4f7e567ccf91","build/fixture-safety-test.js":"1d283c401808","build/harness.js":"ed3529261dc9","build/page-policy-doc-test.js":"ed9f21c03ff5","build/parallelism-gate-doc-test.js":"97da1de7fa75","build/synthesis-scope-gate-doc-test.js":"58c28bf21c4f","build/test.js":"3b6f0b1d06e0","build/token-sync-test.js":"0c4b05fcada9","handoff/pagination-contract-check.js":"ea0805ee741d"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -1415,10 +1415,10 @@ if (exists('_ds_manifest.json')) {
 }
 header('documentation — Education removed, §5.8 documented');
 assert(/### 5\.8 Header subtitle/.test(read('STYLE.md')), 'STYLE.md documents §5.8 Header subtitle');
-[['STYLE.md', '`.edu-school`'], ['STYLE.md', '"Education". **Never**'], ['SKILL.md', 'skills, education'], ['readme.md', 'skills, education'], ['readme.md', '**Skills**, **Education**']].forEach(function (pair) {
+[['STYLE.md', '`.edu-school`'], ['STYLE.md', '"Education". **Never**'], ['SKILL.md', 'skills, education'], ['CONTENT_RULES.md', 'skills, education'], ['CONTENT_RULES.md', '**Skills**, **Education**']].forEach(function (pair) {
   assert(read(pair[0]).indexOf(pair[1]) === -1, pair[0] + ' no longer says "' + pair[1] + '"');
 });
-['STYLE.md', 'SKILL.md', 'readme.md'].forEach(function (doc) {
+['STYLE.md', 'SKILL.md', 'CONTENT_RULES.md'].forEach(function (doc) {
   assert(/no Education section/i.test(read(doc)), doc + ' states that no Education section exists');
 });
 assert(/highest completed degree/i.test(read('SKILL.md')), 'SKILL.md pipeline names the highest-completed-degree subtitle pattern');
@@ -1598,7 +1598,7 @@ function read(p) {
 }
 var skill = read('SKILL.md');
 var style = read('STYLE.md');
-var readme = read('readme.md');
+var readme = read('CONTENT_RULES.md');
 
 // ---- forbidden: title-based / two-page-default language ----------------
 var FORBIDDEN = [[/2\s+for\s+principal/i, 'SKILL.md'], [/1\.4\s+pages/i, 'STYLE.md'], [/2\.0\s+pages/i, 'STYLE.md'], [/does not\*\* compress content to fit one page/i, 'STYLE.md'], [/staff\+\s+candidates have content/i, 'STYLE.md'], [/not a one-pager/i, 'STYLE.md']];
@@ -1668,7 +1668,7 @@ function read(p) {
 }
 var style = read('STYLE.md');
 var skill = read('SKILL.md');
-var readme = read('readme.md');
+var readme = read('CONTENT_RULES.md');
 console.log('§11.2.3 failure-mode count');
 assert(/(Five|Six) failure modes/i.test(style), 'STYLE.md §11.2.3 counts at least five failure modes', 'expected "Five" or "Six failure modes" — count did not update alongside the new rule');
 assert(!/Four failure modes/i.test(style), 'STYLE.md §11.2.3 no longer says "Four failure modes"', 'stale "Four failure modes" language found');
@@ -1689,9 +1689,9 @@ assert(/broken parallel(ism)?/i.test(style) && /\u00a75\.3/.test(style), 'STYLE.
 console.log('\nSKILL.md pipeline coverage');
 assert(/no coordinated (phrase|construction)/i.test(skill), 'SKILL.md mentions the coordinated-phrase / parallelism check', 'no "no coordinated phrase/construction" language found in SKILL.md');
 assert(/noun phrase spliced to a gerund phrase/i.test(skill), 'SKILL.md names the grammatical mismatch without embedding a domain-specific specimen', 'general mismatch description missing in SKILL.md');
-console.log('\nreadme.md coverage');
-assert(/broken parallelism|coordinated (phrase|construction)/i.test(readme), 'readme.md documents the parallelism rule alongside the other prose-shape rules', 'no parallelism language found in readme.md');
-assert(!/^### Colon dumps, overloaded sentences, metaphors\s*$/im.test(readme) || /broken parallelism/i.test(readme), 'readme.md\'s colon/overload/metaphor section covers parallelism too', 'readme.md section header not updated to include parallelism');
+console.log('\nCONTENT_RULES.md coverage');
+assert(/broken parallelism|coordinated (phrase|construction)/i.test(readme), 'CONTENT_RULES.md documents the parallelism rule alongside the other prose-shape rules', 'no parallelism language found in CONTENT_RULES.md');
+assert(!/^### Colon dumps, overloaded sentences, metaphors\s*$/im.test(readme) || /broken parallelism/i.test(readme), 'CONTENT_RULES.md\'s colon/overload/metaphor section covers parallelism too', 'CONTENT_RULES.md section header not updated to include parallelism');
 H.report();
 })(); } catch (e) { __ds_ns.__errors.push({ path: "build/parallelism-gate-doc-test.js", error: String((e && e.message) || e) }); }
 
@@ -1702,7 +1702,7 @@ try { (() => {
    §11.2.3 Rule 6 gate: evidence-scoped, earned synthesis and explicit
    paragraph transitions (STYLE.md §11.2.3 Rule 6, §11.4; SKILL.md
    §The pipeline step 4 "evidence-synthesis gate" and "Prose fields
-   obey the synthesis rules too"; readme.md prose-shape sections).
+   obey the synthesis rules too"; CONTENT_RULES.md prose-shape sections).
 
    Guards the DOCS, not a render: fails if a future edit drops the
    requirement that a generalization name its concrete connector, the
@@ -1732,7 +1732,7 @@ function read(p) {
 }
 var style = read('STYLE.md');
 var skill = read('SKILL.md');
-var readme = read('readme.md');
+var readme = read('CONTENT_RULES.md');
 var engineering = read('ENGINEERING.md');
 
 // Rule 6's own block, so "shape"/"pattern" hits elsewhere in STYLE.md
@@ -1791,12 +1791,12 @@ assert(/plausible\s+antecedent/i.test(skill), 'SKILL.md gate step names the one-
 assert(/Do not repeat a prior employer’s full name merely from\s+habit/i.test(skill), 'SKILL.md avoids mechanical prior-employer repetition', 'no prior-employer repetition guidance in the pipeline');
 assert(/never by\s+inserting a filler transition/i.test(skill), 'SKILL.md forbids the filler-transition non-repair', 'no filler-transition prohibition in SKILL.md');
 assert(/synthesis-scope-gate-doc-test\.js/.test(skill), 'SKILL.md files table lists this test', 'test not listed in the SKILL.md files table');
-console.log('\nreadme.md coverage');
-assert(/unearned generalization/i.test(readme), 'readme.md documents the generalization rule alongside the other prose-shape rules', 'no "unearned generalization" language in readme.md');
-assert(/Five prose failures/i.test(readme), 'readme.md prose-shape section counts five banned shapes', 'readme.md still counts four prose failures');
-assert(/exactly one plausible antecedent/i.test(readme), 'readme.md states the one-antecedent rule for paragraph transitions', 'no antecedent rule in readme.md');
-assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme), 'readme.md documents natural prior-employer reference', 'no natural prior-employer reference guidance in readme.md');
-assert(/repeat the\s+precise noun phrase instead/i.test(readme) && /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme), 'readme.md defines the explicit-transition repair without prescribing copy', 'semantic transition repair missing in readme.md');
+console.log('\nCONTENT_RULES.md coverage');
+assert(/unearned generalization/i.test(readme), 'CONTENT_RULES.md documents the generalization rule alongside the other prose-shape rules', 'no "unearned generalization" language in CONTENT_RULES.md');
+assert(/Five prose failures/i.test(readme), 'CONTENT_RULES.md prose-shape section counts five banned shapes', 'CONTENT_RULES.md still counts four prose failures');
+assert(/exactly one plausible antecedent/i.test(readme), 'CONTENT_RULES.md states the one-antecedent rule for paragraph transitions', 'no antecedent rule in CONTENT_RULES.md');
+assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme), 'CONTENT_RULES.md documents natural prior-employer reference', 'no natural prior-employer reference guidance in CONTENT_RULES.md');
+assert(/repeat the\s+precise noun phrase instead/i.test(readme) && /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme), 'CONTENT_RULES.md defines the explicit-transition repair without prescribing copy', 'semantic transition repair missing in CONTENT_RULES.md');
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering), 'ENGINEERING.md automated-suites index lists this test', 'test not listed in the ENGINEERING.md automated-suites index');
 H.report();

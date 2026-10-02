@@ -590,7 +590,7 @@ const _assetDataUrlCache = new Map();
 // but it remains part of the packaged runtime contract and reconnect audit.
 const RUNTIME_DESIGN_FILES = [
   'SKILL.md',
-  'readme.md',
+  'CONTENT_RULES.md',
   'STYLE.md',
   ...CSS_FILES,
   'resume.html',
@@ -1680,7 +1680,7 @@ function documentMarkupFingerprint(markup) {
 /**
  * Build the toolbar/banner markup + behavior script injected into `<body>`.
  *
- * Edit mode (§5.5): `Job Application Design System/readme.md:15-19` documents the
+ * Edit mode (§5.5): `Job Application Design System/CONTENT_RULES.md:15-19` documents the
  * OPPOSITE intent — "No human interactive surface. No editor." That doc is
  * design-owned and must not be edited, so the divergence is recorded HERE
  * instead: once PDF generation retired, the shipped artifact IS the file the
