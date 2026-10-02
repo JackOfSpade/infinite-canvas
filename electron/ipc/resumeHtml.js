@@ -1529,7 +1529,10 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
       pairs.push({
         key: skillLabelKey(pairMatch[1]),
         ddCloseIndex: pairMatch.index + pairMatch[0].length - '</dd>'.length,
-        blank: !new JSDOM(pairMatch[2]).window.document.body.textContent?.trim(),
+        // This runs once per existing skill row. A fragment preserves HTML
+        // parsing/entity decoding without allocating a full Window realm for
+        // every pair (which can retain substantial memory until a later GC).
+        blank: !JSDOM.fragment(pairMatch[2]).textContent?.trim(),
       });
     }
 

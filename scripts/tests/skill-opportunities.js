@@ -374,6 +374,42 @@ export default [
     },
   },
   {
+    name: 'résumé workspace: many skill pairs preserve blank and populated merge semantics without Window-per-pair parsing',
+    run: () => {
+      // Keep this deliberately larger than a normal skills block: the merge
+      // inspection runs per pair, so it must remain fragment-only while
+      // retaining the blank/nonblank distinction that controls separators.
+      const pairCount = 180;
+      const pairs = Array.from({ length: pairCount }, (_, index) => {
+        const body = index === 0 ? '&nbsp;' : index === 1 ? '<span>Existing skill</span>' : '<span></span>';
+        return `<dt>Category ${index}</dt><dd>${body}</dd>`;
+      }).join('');
+      const html = buildResumeDocument({
+        resumeMainHtml: resumeWithSkills(pairs),
+        docId: 'many-skill-pairs-test',
+        skillInsights: {
+          items: [
+            item({ id: 'blank-skill', canonicalSkillName: 'Blank merge', suggestedResumeText: 'Blank merge', resumeCategory: 'Category 0' }),
+            item({ id: 'populated-skill', canonicalSkillName: 'Populated merge', suggestedResumeText: 'Populated merge', resumeCategory: 'Category 1' }),
+          ],
+        },
+      });
+      // The generated workspace is normally a whole document; parse it as a
+      // fragment here too, so the regression exercises the compact parser path.
+      const root = JSDOM.fragment(html);
+      const blankDt = findDtByText(root, 'Category 0');
+      const populatedDt = findDtByText(root, 'Category 1');
+      const blankDd = blankDt?.nextElementSibling;
+      const populatedDd = populatedDt?.nextElementSibling;
+      assert(root.querySelectorAll('dl.skills dt').length === pairCount, 'every existing skill category survives the multi-pair merge');
+      assert(blankDd?.querySelector('[data-ic-inferred-skill="blank-skill"]'), 'an entity-only <dd> accepts the inferred skill');
+      assert(!blankDd?.querySelector('[data-ic-inferred-separator="join"]'), 'an entity-only <dd> is blank and receives no join separator');
+      assert(populatedDd?.querySelector('[data-ic-inferred-skill="populated-skill"]'), 'a populated <dd> accepts the inferred skill');
+      assert(populatedDd?.querySelector('[data-ic-inferred-separator="join"]'), 'a populated <dd> retains its join separator');
+      return { pairs: pairCount };
+    },
+  },
+  {
     name: 'résumé workspace: verify skill creates a new category row inside the existing skills list when nothing matches',
     run: () => {
       const resumeMainHtml = resumeWithSkills('<dt>Languages</dt><dd>Python</dd>');
