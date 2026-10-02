@@ -1,11 +1,20 @@
 # The application, including every shipped design-system resource, is analyzed
 # in full. In particular, `Job Application Design System/build/dual-mode-pdf.js`
 # is packaged and evaluated by the Electron PDF renderer, so it must never be
-# excluded here.
-#
-# These paths contain only test fixtures, test stubs, or disposable protocol
-# experiments; they are not shipped application code.
+# excluded here. The design-system paths below are generated bundles, uploaded
+# fixtures, previews/examples, and test/checker assets; none appears in the
+# package.json `extraResources` allowlist. Do not replace these with a broad
+# design-system or `build/**` exclusion.
 paths-ignore:
   - scripts/tests/**
   - scripts/test-stubs/**
   - scripts/chatgpt-handoff-spike/**
+  - "Job Application Design System/_ds_bundle.js"
+  - "Job Application Design System/preview/**"
+  - "Job Application Design System/handoff/**"
+  - "Job Application Design System/uploads/**"
+  - "Job Application Design System/build/*-test.js"
+  - "Job Application Design System/build/*-check.html"
+  - "Job Application Design System/build/test.js"
+  - "Job Application Design System/build/harness.js"
+  - "Job Application Design System/build/css-tokens.js"

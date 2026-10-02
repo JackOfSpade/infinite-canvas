@@ -1010,6 +1010,12 @@ export default [
       // the character the expected side carries — the comparator has to reach a
       // fixpoint, not just call the decoder once.
       const doubled = assessDetailSelection(decoded, '.NET Software Architect &amp;#8211; Vancouver,BC');
+      // Scraped headings are untrusted too. Entity decoding is comparison-only:
+      // an encoded tag must remain plain title text and never be reparsed into
+      // the live provider document while we choose the matching heading.
+      const hostileTitle = 'Security Engineer <img src=x onerror="globalThis.detailTitleXss=1">';
+      const hostileEncoded = 'Security Engineer &lt;img src=x onerror=&quot;globalThis.detailTitleXss=1&quot;&gt;';
+      const hostileMatch = assessDetailSelection(hostileTitle, hostileEncoded);
       // Decoding must not blunt the guard into accepting anything: a genuinely
       // different heading stays a mismatch even when it also carries entities.
       const stillMismatched = assessDetailSelection(decoded, 'Warehouse Associate &#8211; Vancouver,BC');
@@ -1021,9 +1027,16 @@ export default [
         'a named-entity heading must verify against its decoded job title');
       assert(doubled.selectionVerified && !doubled.selectionMismatch,
         'a double-encoded heading must decode to a fixpoint before being compared');
+      assert(hostileMatch.selectionVerified && !hostileMatch.selectionMismatch,
+        'hostile entity-encoded title text is compared as inert text, never inserted into a DOM parser');
       assert(stillMismatched.selectionMismatch && !stillMismatched.selectionVerified,
         'entity decoding must not stop a genuinely different heading from being a mismatch');
-      return { numeric: numeric.selectionVerified, doubled: doubled.selectionVerified };
+      const scraperSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(!scraperSource.includes('DOMParser')
+        && scraperSource.includes('inertDescriptionText')
+        && scraperSource.includes('matchingDetailTitle'),
+      'raw JSON-LD/Next-data and headings must cross into the inert main-process normalizers, never a detached HTML parser');
+      return { numeric: numeric.selectionVerified, doubled: doubled.selectionVerified, hostile: hostileMatch.selectionVerified };
     },
   },
 {

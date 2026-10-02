@@ -374,6 +374,36 @@ export default [
     },
   },
   {
+    name: 'résumé workspace: malformed script-like category markup is parser-normalized and remains inert',
+    run: () => {
+      const html = buildResumeDocument({
+        resumeMainHtml: resumeWithSkills('<dt>Safety Response</dt><dd>Conflict De-escalation</dd>'),
+        docId: 'parser-category-test',
+        skillInsights: {
+          // In HTML parsing, the unclosed script opener changes the remainder
+          // into script data. A regex tag-stripper instead joins the surrounding
+          // text and incorrectly merges this label into "Safety Response".
+          items: [item({
+            id: 'parser-category',
+            canonicalSkillName: 'CPR',
+            suggestedResumeText: 'CPR',
+            resumeCategory: 'Safety <script>&lt; Response',
+          })],
+        },
+      });
+      const root = JSDOM.fragment(html);
+      const existing = findDtByText(root, 'Safety Response');
+      const created = root.querySelector('dt[data-ic-inferred-label]');
+      assert(!existing?.nextElementSibling?.querySelector('[data-ic-inferred-skill="parser-category"]'),
+        'parser-distinct malformed markup must not merge into the existing category');
+      assert(created?.nextElementSibling?.querySelector('[data-ic-inferred-skill="parser-category"]'),
+        'parser-distinct malformed markup must create its own category');
+      assert(!created?.querySelector('script') && created?.textContent.includes('<Script>'),
+        'malformed category markup must remain text, never an executable element');
+      return { ok: true };
+    },
+  },
+  {
     name: 'résumé workspace: many skill pairs preserve blank and populated merge semantics without Window-per-pair parsing',
     run: () => {
       // Keep this deliberately larger than a normal skills block: the merge

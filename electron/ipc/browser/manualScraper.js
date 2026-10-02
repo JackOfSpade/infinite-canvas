@@ -1081,6 +1081,23 @@ function normalizedDetailTitle(title) {
   return text.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 }
 
+// Page-owned JSON-LD/Next data and programmatically-written headings are
+// untrusted scraped text. Keep their interpretation out of the page: the pure
+// normalizers below never create DOM nodes or treat that text as executable
+// markup. This also keeps the title comparison identical for every source.
+function inertDescriptionText(value) {
+  return stripHtmlToText(String(value || '')).trim();
+}
+
+function matchingDetailTitle(expectedTitle, candidates) {
+  const expected = normalizedDetailTitle(expectedTitle);
+  if (!expected || !Array.isArray(candidates)) return '';
+  return candidates.find((candidate) => {
+    const normalized = normalizedDetailTitle(candidate);
+    return normalized && (normalized === expected || normalized.includes(expected) || expected.includes(normalized));
+  }) || '';
+}
+
 /**
  * A missing detail heading is ordinary Google markup variation and must not
  * turn a good panel read into a false miss. When both titles are present,
@@ -3589,8 +3606,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               for (const d of candidates) {
                 if (!d || !matchesType(d['@type'])) continue;
                 if (!desc && d[field]) {
-                  const parsed = new DOMParser().parseFromString(String(d[field]), 'text/html');
-                  desc = parsed.body?.innerText?.trim() || '';
+                  // Return the raw string across CDP. The main process strips
+                  // markup with its inert, pure normalizer rather than parsing
+                  // untrusted listing text into a detached browser document.
+                  desc = String(d[field]);
                 }
                 // schema.org JobPosting standardizes on `datePosted`; some feeds
                 // emit `datePublished` — accept either.
@@ -3630,7 +3649,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
               return { desc, datePosted, baseSalary, company };
             }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null, company: '' }));
-            text = ld.desc;
+            text = inertDescriptionText(ld.desc);
             if (text) descriptionCapture = 'json-ld-job-description';
             jsonLdDate = ld.datePosted;
             jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
@@ -3649,10 +3668,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                   node = node[p];
                 }
                 if (!node || typeof node !== 'string') return '';
-                const parsed = new DOMParser().parseFromString(node, 'text/html');
-                return parsed.body?.innerText?.trim() || '';
+                // Do not parse provider-owned text as HTML in the page. It is
+                // normalized after this evaluate call in the main process.
+                return node;
               } catch { return ''; }
             }, cfg.nextDataField).catch(() => '');
+            text = inertDescriptionText(text);
             if (text) descriptionCapture = 'next-data-job-description';
           }
           if (!text && !isExternalZipDetail) {
@@ -3708,10 +3729,6 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               .then(() => true)
               .catch(() => false);
             const delayed = await fetchPage.evaluate((sel, jsonLdType, jsonLdField, nextDataField) => {
-              const asText = (html) => {
-                const parsed = new DOMParser().parseFromString(String(html || ''), 'text/html');
-                return parsed.body?.innerText?.trim() || '';
-              };
               const matchesType = (value) => Array.isArray(value) ? value.includes(jsonLdType) : value === jsonLdType;
               if (jsonLdType && jsonLdField) {
                 for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
@@ -3722,7 +3739,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                       const nodes = [root, ...(Array.isArray(root?.['@graph']) ? root['@graph'] : [])];
                       for (const node of nodes) {
                         if (node && matchesType(node['@type']) && node[jsonLdField]) {
-                          const value = asText(node[jsonLdField]);
+                          const value = typeof node[jsonLdField] === 'string' ? node[jsonLdField] : '';
                           if (value) return { text: value, source: 'json-ld' };
                         }
                       }
@@ -3734,7 +3751,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 try {
                   let node = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null');
                   for (const part of nextDataField.split('.')) node = node?.[part];
-                  const value = typeof node === 'string' ? asText(node) : '';
+                  const value = typeof node === 'string' ? node : '';
                   if (value) return { text: value, source: 'next-data' };
                 } catch { /* absent/partial Next hydration */ }
               }
@@ -3749,7 +3766,9 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return { text: '', source: '' };
             }, cfg.panelSelector, cfg.jsonLdType || '', cfg.jsonLdField || '', cfg.nextDataField || '')
               .catch(() => ({ text: '', source: '' }));
-            text = delayed.text;
+            text = ['json-ld', 'next-data'].includes(delayed.source)
+              ? inertDescriptionText(delayed.text)
+              : delayed.text;
             if (text) {
               descriptionCapture = delayed.source === 'json-ld'
                 ? 'json-ld-job-description'
@@ -4542,7 +4561,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             panelModalFailure = pendingModal;
             return null;
           }
-          const panel = await page.evaluate((panelSel, panelMulti, panelSourceId, expectedTitle) => {
+          const panel = await page.evaluate((panelSel, panelMulti, panelSourceId) => {
             if (panelMulti) {
               const text = Array.from(document.querySelectorAll(panelSel))
                 // Google leaves old/preloaded panels mounted. CSS-hidden .ejCXj
@@ -4550,7 +4569,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 // valid, but nothing below an aria-hidden=true panel may count.
                 .filter(e => e.matches('span') && !e.closest('[aria-hidden="true"]'))
                 .map(e => e.textContent?.trim()).filter(Boolean).join('\n\n').trim();
-              return { text, selectedTitle: '' };
+              return { text, selectedTitleCandidates: [] };
             }
             const active = Array.from(document.querySelectorAll(panelSel))
               .find(el => !el.closest('[aria-hidden="true"]'));
@@ -4558,51 +4577,28 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // The list cards carry data-jobid. Limit the title probe to the
             // active description's own ancestor chain so a matching title on
             // the left list cannot validate a stale right panel.
-            let selectedTitle = '';
-            if (panelSourceId === 'glassdoor' && active && expectedTitle) {
-              // Decode before comparing, for the same reason the Google heading
-              // probe does: a heading written into the DOM programmatically can
-              // still read `&#8211;` where the parsed list card reads `–`. Here
-              // the failure is quieter than Google's — no match simply leaves
-              // selectedTitle empty, which marks the panel UNVERIFIED — but an
-              // unverified title is exactly what stops a legitimately repeated
-              // Glassdoor description from being accepted, turning a correct
-              // panel read into a false timeout.
-              const decodeEntities = (raw) => {
-                let out = String(raw || '');
-                for (let pass = 0; pass < 3; pass++) {
-                  const next = new DOMParser().parseFromString(out, 'text/html').documentElement.textContent || '';
-                  if (next === out) break;
-                  out = next;
-                }
-                return out;
-              };
-              const expected = decodeEntities(expectedTitle).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
-              const equivalent = (value) => {
-                const title = String(value || '').replace(/\s+/g, ' ').trim();
-                const normalized = decodeEntities(title).toLocaleLowerCase();
-                return title && (normalized === expected || normalized.includes(expected) || expected.includes(normalized));
-              };
+            const selectedTitleCandidates = [];
+            if (panelSourceId === 'glassdoor' && active) {
+              // Capture candidate text only. The main process applies bounded
+              // entity decoding before comparison: a programmatically-written
+              // heading can still read `&#8211;` where the parsed list card read
+              // `–`. No provider text is parsed as page HTML here.
               let scope = active.parentElement;
               for (let depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
-                const matching = Array.from(scope.querySelectorAll('[data-test*="job-title" i], [data-testid*="job-title" i], h1, h2, h3, [role="heading"]'))
+                selectedTitleCandidates.push(...Array.from(scope.querySelectorAll('[data-test*="job-title" i], [data-testid*="job-title" i], h1, h2, h3, [role="heading"]'))
                   .filter(el => !el.closest?.('[aria-hidden="true"]') && !el.closest?.('[data-jobid]'))
                   .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
-                  .find(equivalent);
-                if (matching) {
-                  selectedTitle = matching;
-                  break;
-                }
+                  .filter(Boolean));
               }
             }
-            return { text, selectedTitle };
-          }, cfg.panelSelector, cfg.panelMulti || false, sourceId, String(job.title || '')).catch(() => ({ text: '', selectedTitle: '' }));
+            return { text, selectedTitleCandidates };
+          }, cfg.panelSelector, cfg.panelMulti || false, sourceId).catch(() => ({ text: '', selectedTitleCandidates: [] }));
           const decision = assessDescriptionPanelUpdate({
             sourceId,
             previousText: prevPanelText,
             currentText: panel.text,
             expectedTitle: job.title,
-            selectedTitle: panel.selectedTitle,
+            selectedTitle: matchingDetailTitle(job.title, panel.selectedTitleCandidates),
           });
           if (decision.accepted) return panel.text;
         }
@@ -4683,38 +4679,25 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // a second independent identity before accepting text into this job. A
       // missing heading is tolerated (markup varies); an explicit different
       // heading is not.
-      const readSelectedGoogleTitle = () => page.evaluate((expectedTitle) => {
+      const readSelectedGoogleTitles = () => page.evaluate(() => {
         // Same asymmetry as `normalizedDetailTitle` in this module: the expected
         // title arrives entity-decoded from the pipeline while a heading's
         // textContent can still read `&#8211;` when Google double-encodes it.
-        // Left unhandled, the correct heading fails this match and the picker
-        // falls through to `headings[0]` — handing the verdict a heading that
-        // belongs to a different job. A detached <textarea> is the standard
-        // in-page decoder and never executes scripts; the bounded repeat
-        // unwraps `&amp;#8211;`, which one pass leaves as `&#8211;`.
-        const decodeEntities = (raw) => {
-          let out = String(raw || '');
-          for (let pass = 0; pass < 3; pass++) {
-            const next = new DOMParser().parseFromString(out, 'text/html').documentElement.textContent || '';
-            if (next === out) break;
-            out = next;
-          }
-          return out;
-        };
-        const normalize = (raw) => decodeEntities(raw).replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+        // Return only visible text. The main process does the bounded entity
+        // decoding without ever reparsing provider-owned text as HTML.
         const headings = Array.from(document.querySelectorAll('[aria-hidden="false"]'))
           .flatMap(region => Array.from(region.querySelectorAll('h1, h2, h3, [role="heading"]')))
           .filter(el => !el.closest('[aria-hidden="true"]'))
           .filter(el => !el.closest('[data-share-url]'))
           .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
           .filter(Boolean);
-        const expected = normalize(expectedTitle);
-        return headings.find((heading) => {
-          const value = normalize(heading);
-          return expected && (value === expected || value.includes(expected) || expected.includes(value));
-        }) || headings[0] || '';
-      }, job.title).catch(() => '');
-      let selectedTitle = sourceId === 'google' ? await readSelectedGoogleTitle() : '';
+        return headings;
+      }).catch(() => []);
+      const selectedGoogleTitle = async () => {
+        const headings = await readSelectedGoogleTitles();
+        return matchingDetailTitle(job.title, headings) || headings[0] || '';
+      };
+      let selectedTitle = sourceId === 'google' ? await selectedGoogleTitle() : '';
       let selectionAssessment = assessDetailSelection(job.title, selectedTitle);
       // Google can paint the new description before replacing the old detail
       // heading. An explicit mismatch is meaningful only after a short settle
@@ -4723,7 +4706,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         const selectionDeadline = Date.now() + 1000;
         while (Date.now() < selectionDeadline) {
           await new Promise(r => setTimeout(r, 160));
-          selectedTitle = await readSelectedGoogleTitle();
+          selectedTitle = await selectedGoogleTitle();
           selectionAssessment = assessDetailSelection(job.title, selectedTitle);
           if (!selectionAssessment.selectionMismatch) break;
         }

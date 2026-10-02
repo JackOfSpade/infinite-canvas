@@ -802,6 +802,29 @@ export default [
     },
   },
 {
+    name: 'text encoding: markup tokenizer handles hostile tags without changing entity semantics',
+    run: () => {
+      assert(stripHtmlToText('<p data-note=">">Visible</p>') === 'Visible',
+        'a quoted attribute containing > does not leak part of the tag into the text');
+      assert(stripHtmlToText('<p title="><script>alert(1)</script>">Safe</p>') === 'Safe',
+        'tag-looking content inside a quoted attribute is never parsed as a second tag or emitted');
+      assert(stripHtmlToText('<script data-end=">">secret</script><p>Shown</p>') === 'Shown',
+        'raw script content is discarded even when its opening tag contains a quoted >');
+      assert(stripHtmlToText('Before<script>unterminated secret') === 'Before',
+        'an unterminated raw-text element cannot leak the remainder of a scraped payload');
+      assert(stripHtmlToText('<style>.hidden { display: none }</style><p>Shown</p>') === 'Shown',
+        'raw style content is discarded by the same tokenizer path');
+      assert(stripHtmlToText('A <!-- unfinished <b>comment') === 'A',
+        'an unterminated comment cannot expose its markup-looking payload');
+      assert(stripHtmlToText('Salary < 5 > 3 and literal <unfinished') === 'Salary < 5 > 3 and literal <unfinished',
+        'comparison prose and unterminated literal fragments are not mistaken for HTML tags');
+      assert(stripHtmlToText('&amp;lt;script&amp;gt;') === '&lt;script&gt;'
+        && stripHtmlToText('&lt;script&gt;alert(1)&lt;/script&gt;') === '<script>alert(1)</script>',
+      'entities are decoded exactly once after tag tokenization, leaving escaped markup as text');
+      return { hostileTags: true, inertEntities: true };
+    },
+  },
+{
     name: 'scrapeOrder: EMA fold + manual-verification-first ordering',
     run: () => {
       // EMA fold: first sample seeds, then moves toward new samples.

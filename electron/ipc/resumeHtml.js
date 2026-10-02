@@ -50,7 +50,6 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { logger } from '../logger.js';
 import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger.js';
-import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 // One definition of the `<dt>` casing rule, shared with the structured-résumé
 // renderer: a created row here sits in the same `<dl class="skills">` as the
 // rows that module rendered, so a second spelling of the rule would show up as
@@ -1392,18 +1391,17 @@ function normaliseSkillHistogram(raw) {
 }
 
 // Normalize a chunk of (possibly tagged) HTML into a bare lowercase
-// letters+digits key: strip tags, decode the handful of entities the model
-// or the design system might use for a label ("Safety &amp; Response" /
-// "Safety &#39;n&#39; Response" etc.), lowercase, collapse whitespace, then
-// drop everything that isn't alphanumeric. Used BOTH to key a group's display
+// letters+digits key. Parse the fragment rather than attempting to remove tags
+// with a regex: malformed or overlapping tag markers can otherwise change
+// meaning as replacements join their surrounding text. Fragment textContent
+// also decodes entities ("Safety &amp; Response" / "Safety &#39;n&#39; Response"
+// etc.) without creating a Window realm. Used BOTH to key a group's display
 // label for de-duplication and to read an existing `<dt>`'s inner HTML for
 // merge matching, so "Safety &amp; Response" (model-escaped) and "Safety &
 // Response" (already-decoded résumé markup) resolve to the identical key
 // regardless of case, punctuation, or nested tags.
 function skillLabelKey(raw) {
-  return decodeHtmlEntities(String(raw || '')
-    .replace(/<[^>]*>/g, '')
-  )
+  return String(JSDOM.fragment(String(raw || '')).textContent || '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim()
