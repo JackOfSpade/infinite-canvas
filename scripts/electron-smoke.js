@@ -1230,8 +1230,18 @@ try {
   assert.equal(await nodeCount(page, 'link'), 1, 'link placement should create a node');
   const linkEditor = page.locator('.react-flow__node-link [contenteditable="true"]');
   await linkEditor.fill('Example');
+  const linkId = await linkEditor.evaluate((element) => element.closest('.react-flow__node')?.getAttribute('data-id'));
+  assert.ok(linkId, 'the new link editor should belong to a React Flow node with a stable data-id');
   await linkEditor.press('Escape');
-  await openNodeMenu(page, page.locator('.react-flow__node-link'));
+  // Escape commits the contentEditable value, then React Flow may reconcile its
+  // type class and measurement. Reacquire the known node by ID only after that
+  // commit, rather than racing a transient `.react-flow__node-link` wrapper.
+  await page.waitForFunction((id) => {
+    const node = document.querySelector(`.react-flow__node[data-id="${id}"]`);
+    const editor = node?.querySelector('[contenteditable]');
+    return editor?.getAttribute('contenteditable') === 'false' && editor.innerText === 'Example';
+  }, linkId);
+  await openNodeMenu(page, page.locator(`.react-flow__node[data-id="${linkId}"]`));
   await page.locator('.context-menu-enter').getByText('Edit URL', { exact: true }).click();
   await page.getByRole('heading', { name: 'Edit URL', exact: true }).waitFor();
   await page.getByPlaceholder('https://...').fill('example.com');
