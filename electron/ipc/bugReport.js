@@ -30,7 +30,7 @@ import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../src/utils/jobSearchDateWindow.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
-import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
+import { buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -45,7 +45,7 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
@@ -2146,7 +2146,8 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
   const rejectedSource = sourceRejection?.telemetry === true;
   const observedClientAuth = clientAuth?.telemetry === true;
   const queue = getBridgeQueueDiagnostic();
-  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth && !queue) return '';
+  const chatCopies = getBridgeChatCopyDiagnostic();
+  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth && !queue && chatCopies.length === 0) return '';
   let queueMarkdown = '';
   if (queue) {
     const laneAge = seconds => seconds === null ? 'unknown' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
@@ -2209,9 +2210,19 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
 - Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · recorded ${at}
   - ${verdict}.`;
   }
+  const chatCopyMarkdown = chatCopies.length === 0 ? '' : `
+- Starter/Continue interactions retained: ${chatCopies.length} (newest last; closed metadata only)
+${chatCopies.map(entry => {
+    const at = Number.isFinite(entry.at) ? new Date(entry.at).toISOString() : 'not recorded';
+    const restart = entry.restartPath === 'ui-ack' || entry.restartPath === 'native'
+      ? ` · restart acknowledgement \`${entry.restartPath}\`` : '';
+    const ordinal = Number.isSafeInteger(entry.chatOrdinal) && entry.chatOrdinal >= 1 && entry.chatOrdinal <= 999
+      ? ` · chat ${entry.chatOrdinal}` : '';
+    return `  - ${at} · action \`${entry.action}\` · outcome \`${entry.outcome}\`${restart}${ordinal}`;
+  }).join('\n')}`;
   return `
 ## Handoff Bridge Diagnostics
-${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}
+${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${chatCopyMarkdown}
 `;
 }
 
@@ -2649,8 +2660,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // after the restart where crash/quit recovery is being diagnosed. FULL and
   // RECOVERY therefore read only the compact sidecar/snapshot metadata here.
   // This remains useful even when the live pipeline section self-gates to ''.
+  let jobRecoveryOfferMarkdown = '';
   let jobRecoveryMarkdown = '';
   if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE')) {
+    try { jobRecoveryOfferMarkdown = buildJobRecoveryOfferSnapshot(payload.jobRecoveryOfferStates); }
+    catch { jobRecoveryOfferMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Offer Diagnostics', new Error('could not inspect renderer recovery admission state')); }
     try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds, currentJobHubIds, reportWindowId); }
     catch { jobRecoveryMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Diagnostics', new Error('could not inspect recovery sidecars')); }
   }
@@ -2856,7 +2870,7 @@ ${viewportLine}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${pasteRejectionTraceMarkdown}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

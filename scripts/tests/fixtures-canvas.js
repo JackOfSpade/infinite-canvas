@@ -1,4 +1,5 @@
 import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { getRecentLogs } from '../../electron/logger.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery } from '../test-dependencies.js';
@@ -13,10 +14,59 @@ import {
 import { completionTimestampIso, formatCompletionTimestamp, normalizeCompletionTimestamp } from '../../src/utils/completionTimestamp.js';
 import { QUIT_COMMIT_SETTLE_FALLBACK_MS, settlePreFenceCanvasBatches } from '../../src/utils/quitCommitSettle.js';
 
-import { JOBHUB_CAREER_IDENTITY_FIELDS, acceptIndeedScoreSafeDescription, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, isIndeedScoreSafeDescription, mergeExpandedJobDetail, mergeGlassdoorPanelDetail, needsIndeedDescriptionRetry, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, selectGoogleApplyUrl } from '../test-dependencies.js';
+import { JOBHUB_CAREER_IDENTITY_FIELDS, acceptIndeedScoreSafeDescription, assessDescriptionPanelUpdate, assessDetailSelection, buildDescriptionCardTargets, buildHubHoverState, buildJobHubCareerClearPatch, buildPhysicalCardWalkPlan, createRunOwnershipGuard, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, extractGlassdoorPanelResponseDetail, extractGoogleApplyCandidatesFromDocument, filePayloadFromDraggedNodes, glassdoorPanelResponseIdentity, hubHasAcceptedInitialDrop, inspectDescriptionCardTargetAvailability, inspectGlassdoorOpportunityModal, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, isIndeedScoreSafeDescription, indeedQueryPageEnd, mergeExpandedJobDetail, mergeGlassdoorPanelDetail, needsIndeedDescriptionRetry, readActiveGoogleDetailTitle, readDescriptionCardDomKey, readDescriptionPanelText, recordIndeedEnrichmentAttempt, resolveIndeedPageBudgets, selectGoogleApplyUrl } from '../test-dependencies.js';
 import { getManualScraperTelemetry, recordManualScraperTelemetry, resetManualScraperTelemetry, scrapeManualSources } from '../test-dependencies.js';
 
 export default [
+{
+    name: 'Indeed Auto page resume never extends its original finite query budget',
+    run: () => {
+      assert(indeedQueryPageEnd(0, 4) === 4 && indeedQueryPageEnd(2, 4) === 4 && indeedQueryPageEnd(17, 4) === 17,
+        'fresh and resumed Indeed queries must never walk beyond their original allocated page ceiling');
+      const original = resolveIndeedPageBudgets(13, {}, null, false);
+      const suffix = original.slice(5);
+      const resumed = resolveIndeedPageBudgets(suffix.length, {}, suffix, true);
+      assert(original.reduce((sum, value) => sum + value, 0) === 40
+        && resumed.join(',') === suffix.join(',')
+        && resumed.reduce((sum, value) => sum + value, 0) === 24,
+      'a >4-query Continue preserves the original suffix allocation instead of redistributing Auto’s 40 pages');
+      const legacy = resolveIndeedPageBudgets(suffix.length, {}, null, true);
+      assert(legacy.every(value => value === 1), 'a legacy Continue without stored allocations takes the conservative one-page-per-query path');
+      const explicit = resolveIndeedPageBudgets(3, { pagesPerPlatform: 7 }, null, false);
+      assert(resolveIndeedPageBudgets(3, { pagesPerPlatform: 7 }, explicit, true).join(',') === '7,7,7',
+        'an explicit per-query Pages override survives Continue unchanged');
+      const wideOriginal = resolveIndeedPageBudgets(53, {}, null, false);
+      const zeroBudgetSuffix = wideOriginal.slice(40);
+      const wideResumed = resolveIndeedPageBudgets(zeroBudgetSuffix.length, {}, zeroBudgetSuffix, true);
+      assert(wideOriginal.reduce((sum, value) => sum + value, 0) === 40
+        && zeroBudgetSuffix.every(value => value === 0)
+        && wideResumed.join(',') === zeroBudgetSuffix.join(','),
+      'a >40-query Auto Continue must retain its legitimate zero-page suffix instead of minting one fallback page per query');
+      const browserTasks = buildJobTasks(
+        Array.from({ length: 53 }, (_, index) => `Role ${index + 1}`),
+        21,
+        { onlySources: new Set(['ziprecruiter']) },
+      );
+      const taskBudgets = browserTasks.map(task => task.options?.maxPages);
+      assert(taskBudgets.length === 53
+        && taskBudgets.reduce((sum, value) => sum + value, 0) === 40
+        && taskBudgets.slice(40).every(value => value === 0),
+      'Auto task planning must retain zero-budget suffixes so the manual scraper can skip them without exceeding its aggregate browser-page cap');
+      const indeedSource = fs.readFileSync(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8');
+      const manualSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
+      assert(indeedSource.includes('value >= 0 && value <= 1_000')
+        && indeedSource.includes('filter(entry => entry.startPage < entry.maxPages)')
+        && indeedSource.indexOf('const queryList = Array.isArray(queries)') < indeedSource.indexOf('const reservation = getSharedProfileReservationInfo()')
+        && indeedSource.includes('resumeState: { remainingQueries: queryList, startPage, pageBudgets }'),
+      'Indeed Continue must preserve zero allocations and serialize the resolved policy vector before retryable profile-reservation returns');
+      const zeroBudgetGuard = manualSource.indexOf('const taskPageBudget = task.options?.maxPages ?? resolvePageCeiling(null);');
+      const manualPacing = manualSource.indexOf('if (qi > 0)', zeroBudgetGuard);
+      assert(zeroBudgetGuard >= 0 && manualPacing > zeroBudgetGuard
+        && manualSource.includes("phase: 'query-skipped-page-budget'"),
+      'manual zero-budget query tasks must be skipped before pacing or navigation while retaining bounded cap telemetry');
+      return { fresh: 4, resumedEnd: 4, suffixTotal: resumed.reduce((sum, value) => sum + value, 0), zeroBudgetSuffix: wideResumed.length };
+    },
+  },
 {
     name: 'eBay sold fixture',
     run: () => runExtractorFixtureTest({
@@ -1059,6 +1109,39 @@ export default [
     },
   },
 {
+    name: 'Indeed placeholder diagnostics deduplicate repeated DOM and JSON/Mosaic sightings',
+    run: () => {
+      // A placeholder can be present in all three independent representations
+      // that one response exposes: __NEXT_DATA__, window Mosaic, and multiple
+      // DOM cards. It must never pass through any path, while its diagnostic is
+      // emitted once so a long page walk does not fill the log ring with copies.
+      const key = '890abcdef0123456';
+      const placeholder = { title: 'Synthetic JSON filler', company: 'Template Co', location: 'Toronto, ON', jobkey: key };
+      const html = `<html><body>
+        <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { results: [placeholder] } } })}</script>
+        <div class="job_seen_beacon" data-jk="${key}">
+          <h2 class="jobTitle"><a data-jk="${key}" href="/rc/clk?jk=${key}">Synthetic DOM filler</a></h2>
+          <span data-jk="${key}">Nested provider attribute</span>
+          <span data-testid="company-name">Template Co</span>
+          <div data-testid="text-location">Toronto, ON</div>
+        </div>
+        <div class="job_seen_beacon" data-jk="${key}">
+          <h2 class="jobTitle"><a href="/rc/clk?jk=${key}">Duplicate synthetic DOM filler</a></h2>
+          <span data-testid="company-name">Template Co</span>
+          <div data-testid="text-location">Toronto, ON</div>
+        </div>
+      </body></html>`;
+      const logStart = getRecentLogs().length;
+      const jobs = extractIndeedJobsFromHtml(html, [placeholder]);
+      const messages = getRecentLogs().slice(logStart)
+        .filter(entry => entry.level === 'debug' && entry.message.includes(`placeholder-shaped`) && entry.message.includes(`"${key}"`));
+      assert(jobs.length === 0, 'placeholder-shaped JSON, Mosaic, and DOM records must remain excluded');
+      assert(messages.length === 1,
+        `one response must emit one placeholder diagnostic per key, got ${messages.length}`);
+      return { rejectedRows: messages.length };
+    },
+  },
+{
     name: 'Indeed enrichment diagnostics: per-job attempt trail is bounded',
     run: () => {
       const job = {};
@@ -1650,8 +1733,8 @@ export default [
       assert(source.includes('snapshot: moduleRunSnapshot') && source.includes('const displayedApplicationRun = queuedApplicationRun')
         && source.includes('const hasApplicationRun = displayedApplicationRun.state !== \'idle\';')
         && source.includes('applicationSubmissionRef.current || hasApplicationRun || localJobPending')
-        && source.includes('disabled={hasApplicationRun || localJobPending || !!data.locked}'),
-      'the global queue snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
+        && source.includes('disabled={hasApplicationRun || localJobPending || effectiveLock}'),
+      'the application-lane snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
       assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
         && canvasSource.includes('currentFile, getCurrentFile'),
       'Canvas navigation must expose a stable latest-file accessor for queued Save As operations');
@@ -5298,33 +5381,44 @@ export default [
       'an empty persisted hub still discards a recovery manifest only when peekJobRun proved that offer belongs to this exact hub');
       assert(source.includes('const careerClearWatermarkRef = useRef(normalizeJobAnalysisClearWatermark(data.jobAnalysisClearedAt))')
         && source.includes('careerClearWatermarkRef.current = jobAnalysisClearedAt')
+        && source.includes('const recoveryPeekKey = JSON.stringify([')
+        && source.includes('const [recoveryPeek, setRecoveryPeek] = useState(null);')
+        && source.includes("status: 'pending'")
+        && source.includes("status: 'resolved'")
+        && source.includes('isProtectedIncompleteJobRunOffer(info, id)')
         && source.includes('const staleClearedOwnedRun = info?.found')
         && source.includes('info?.nodeId === id')
         && source.includes('startedAt <= clearedAt')
         && source.includes('discardJobRun?.({ canvasFilePath, nodeId: id, runId: info.runId })')
-        && source.includes("[canvasFilePath, id, data.jobAnalysisClearedAt]"),
-      'startup recovery quietly retires only an exact owned manifest older than the persisted clear boundary, including a peek that settles just after Clear');
+        && source.includes('[canvasFilePath, id, recoveryPeekKey]'),
+      'startup recovery waits for its keyed exact checkpoint inspection and quietly retires only an owned manifest older than the persisted Clear boundary');
 
-      // With the offer left standing, the Resume button is the only thing left
-      // to degrade — and handleResumeRun DESTROYS the staged run when either the
-      // profile or the run's queries are missing, so the button must not be
-      // offered without both.
+      // An owner-unknown legacy offer has no safe resume owner. It remains
+      // visible only so Clear career data can retire it deliberately; a failed
+      // Resume eligibility check must never become an implicit discard.
       assert(source.includes('const resumeRunActionable = canResumeOffer')
         && source.includes('peekJobRun({ canvasFilePath, nodeId: id })')
         && source.includes('resumeOffer?.nodeId === id')
         && source.includes('(info?.nodeId === id || !info?.nodeId)')
-        && source.includes('const legacyUnknownOwner = !resumeOffer?.nodeId;')
+        && source.includes('const unknownOwnerResumeRunId = resumeOffer?.found === true && !resumeOffer?.nodeId')
         && source.includes('discardUnknownOwnerJobRun')
+        && source.includes('Clear career data is the sole explicit action')
         && source.includes('hasReusableCareerProfile')
-        && source.includes('((resumeOffer?.queries?.length ?? 0) > 0)'),
-      'only the matching hub can resume/discard a modern recovery; an owner-unknown legacy offer exposes a separate Start fresh-only path, and Resume still requires a career profile and staged queries');
+        && source.includes('((resumeOffer?.queries?.length ?? 0) > 0)')
+        && source.includes('A failed eligibility check is not permission to erase the checkpoint.'),
+      'only the matching hub can Resume a modern recovery; an owner-unknown legacy offer can be retired only by Clear career data, and missing profile/query eligibility keeps every checkpoint intact');
       assert(source.includes('resumeRunId: offer.runId || null'),
         'the crash-resume IPC request carries the offered run token for backend ownership validation');
       assert(source.includes('{!boardRecoveryOwnsActions && resumeRunActionable && <button'),
         'the standalone Resume button must be rendered off resumeRunActionable, not the location-only canResumeOffer; connected or still-reserved Board recoveries defer continuation to their Board');
-      assert(source.includes(' Start fresh — this run cannot be resumed from this module.')
-        && !source.includes('this hub no longer has career files'),
-      'the banner must report the observation (this run cannot be resumed here) rather than asserting a history a virgin hub never had — the only cross-hub case is an owner-unknown legacy offer');
+      const resumeBannerStart = source.indexOf('const resumeBanner = showUnfinishedRunBanner ? (');
+      const resumeBannerEnd = source.indexOf('const pausedManualAiRecovery', resumeBannerStart);
+      const resumeBanner = source.slice(resumeBannerStart, resumeBannerEnd);
+      assert(resumeBannerStart >= 0 && resumeBannerEnd > resumeBannerStart
+        && resumeBanner.includes('This checkpoint remains protected and cannot be resumed from this module. Use Clear career data only if you intentionally want to remove it.')
+        && !resumeBanner.includes('Start fresh')
+        && !resumeBanner.includes('this hub no longer has career files'),
+      'the owner-unknown banner must report only that Resume is unavailable and name Clear career data as the deliberate removal path, without inventing a history for a virgin hub');
       return { guardedBehaviours: guarded.length };
     },
   },
@@ -5471,19 +5565,29 @@ export default [
         && completionWriter.includes('patch.lastSearchCoverageStartedAt = normalizeCompletionTimestamp(')
         && completionWriter.includes('patch.pendingCollectionCompletion = null')
         && !completionWriter.includes('nextSearchWindowMode')
-        && completionWriter.includes('} else recordFinalizationState(false);')
+        && completionWriter.includes('} else {')
+        && completionWriter.includes('recordFinalizationState(false);')
         && collectionWriter.includes('normalizeCompletionTimestamp(searchResult?.collectionCompletedAt) ?? Date.now()')
+        && collectionWriter.includes("searchResult?.collectionDisposition === 'user-finished-partial'")
+        && collectionWriter.includes('|| searchResult?.hasUnfinishedSources === true')
+        && collectionWriter.includes('pendingCollectionCompletion?.runId === runId')
+        && collectionWriter.includes('? { pendingCollectionCompletion: null }')
+        && collectionWriter.includes('partialCollectionRunId: runId')
+        && collectionWriter.includes('partialCollectionRunId: null')
         && collectionWriter.includes('pendingCollectionCompletion: {')
         && collectionWriter.includes('runId: searchResult?.runId || null')
         && collectionWriter.includes('collectionStartedAt,')
         && !collectionWriter.includes('lastCompletedRunAt')
         && collectionWriter.includes('isCancelled?.()')
         && collectionBackendSource.includes('const gatheredStageUpdatedAt = Date.now();')
-        && collectionBackendSource.includes('const collectionCompletedAt = resumeGatheredOnly')
+        && collectionBackendSource.includes('skipProviderCollection = finishSavedRecoveryRequested || resumeGatheredOnly;')
+        && collectionBackendSource.includes('const collectionCompletedAt = collectionDisposition === \'user-finished-partial\'')
+        && collectionBackendSource.includes(': resumeGatheredOnly')
         && collectionBackendSource.includes('const collectionStartedAt = Number.isSafeInteger(persistedRunStartedAt)')
         && collectionBackendSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
-        && collectionBackendSource.includes('collectionCompletedAt,'),
-      'the run coverage interval is staged per run, then becomes the displayed completion and no-gap rescan anchors only after that run receives a successful completed receipt');
+        && collectionBackendSource.includes('collectionCompletedAt,')
+        && collectionBackendSource.includes('collectionDisposition,'),
+      'a clean gathered recovery preserves its original coverage boundary, while Finish with saved listings skips providers but marks a partial collection that never advances the full-coverage completion anchor');
 
       // The hub rests at 'done' after every successful run, so the clear-data
       // action has to be reachable from there too — otherwise changing career
@@ -5505,9 +5609,9 @@ export default [
       const sourcesReadyEnd = source.indexOf("hubState === 'done'", sourcesReadyStart);
       const sourcesReadyWiring = source.slice(sourcesReadyStart, sourcesReadyEnd);
       assert(sourcesReadyWiring.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
-        && sourcesReadyState.includes('Clear career files')
+        && sourcesReadyState.includes('Clear career data')
         && /!locked && onClearCareerFiles/.test(sourcesReadyState),
-      'an unlocked paused search exposes a wired Clear career files action, while locked and durable-Board-reserved cards render no dead control');
+      'an unlocked paused search exposes the wired Clear career data action, while locked and durable-Board-reserved cards render no dead control');
 
       const clearConfirm = fs.readFileSync(path.resolve('src/hooks/useConfirmDialog.js'), 'utf8');
       assert(clearConfirm.includes('This removes unlocked content from the current canvas.')
@@ -5586,12 +5690,16 @@ export default [
         && !jobsSource.includes('expectedBatchId'),
       'the Batch API sidecar/finalizer machinery must not linger now that there is no async batch transport to reconcile');
       assert(jobsSource.includes('const throwIfSearchAborted = async () =>')
-        && jobsSource.includes("reason.message === 'Node deleted'")
+        && jobsSource.includes('if (shouldDiscardJobRunAfterAbort(reason) && activeRunId)')
+        && jobsSource.includes("const CHECKPOINT_PRESERVING_ABORT_CAUSES = new Set([")
+        && jobsSource.includes("'job-source-card-removed'")
+        && jobsSource.includes('!CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
         && jobsSource.includes("phase: 'aborted'")
-        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageUpdatedAt = Date.now();\n    const collectionCompletedAt = resumeGatheredOnly') >= 0
+        && jobsSource.indexOf('await throwIfSearchAborted();\n    const gatheredStageUpdatedAt = Date.now();\n    const collectionCompletedAt = collectionDisposition') >= 0
+        && jobsSource.includes("collectionDisposition === 'user-finished-partial'")
         && jobsSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
         && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),
-      'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered');
+      'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered, including the partial saved-listings completion branch');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
   },
 },
@@ -5614,11 +5722,26 @@ export default [
         'legacy auto-start needs a mounted-session latch instead of clearing the retry input on failure');
       assert(autoStart.includes("const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
         && autoStart.includes('autoStartedFilePathRef.current === autoStartPath')
+        && autoStart.includes('if (!recoveryPeekResolved) return;')
+        && autoStart.includes('if (recoveryPeekHasProtectedCheckpoint) {')
+        && autoStart.includes('saved checkpoint is available for Resume')
         && autoStart.includes('autoStartedFilePathRef.current = autoStartPath')
         && autoStart.includes('Promise.resolve(startProcessing(autoStartPath))')
         && autoStart.includes('blockedByDeletion')
         && autoStart.includes('claimedByBoard'),
-      'auto-start must launch each exact persisted path once, while allowing a genuinely changed path to launch');
+      'auto-start must wait for the exact recovery peek, then launch each clear persisted path once while allowing a genuinely changed path to launch');
+
+      const freshAdmissionAt = pipeline.indexOf('Every fresh admission gets its own exact, hub-scoped inspection');
+      const freshAdmissionProbeAt = pipeline.indexOf('await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: currentId })', freshAdmissionAt);
+      const freshAdmissionBlockAt = pipeline.indexOf('Fresh admission blocked by saved checkpoint', freshAdmissionAt);
+      const destructiveSetupAt = pipeline.indexOf('// Destructive fresh-run setup belongs after queue admission.');
+      assert(freshAdmissionAt >= 0
+        && freshAdmissionProbeAt > freshAdmissionAt
+        && freshAdmissionBlockAt > freshAdmissionProbeAt
+        && pipeline.includes('isProtectedIncompleteJobRunOffer(currentOffer, currentId)')
+        && pipeline.includes("return searchRunOutcome('recovery-inspection-failed', { error: message });")
+        && destructiveSetupAt > freshAdmissionBlockAt,
+      'manual Re-scan, direct startProcessing, and a newly accepted file must inspect the exact hub checkpoint and fail closed before fresh-run UI setup');
 
       const rerunStart = source.indexOf('const handleRerun = useCallback');
       const rerunEnd = source.indexOf('const handleClearCareerFiles', rerunStart);
@@ -5981,8 +6104,8 @@ export default [
         && Number.isFinite(resolvePageCeiling({ pagesPerPlatform: 999 })),
       'resolvePageCeiling: ALWAYS returns a finite number, regardless of input shape');
       const describedDefault = describeJobCollectionLimits();
-      assert(describedDefault.jobs === 'all' && describedDefault.pages === `all (backstop ${JOB_COLLECTION_PAGE_CEILING})`,
-        `describeJobCollectionLimits: default breadth must read as "all", got ${JSON.stringify(describedDefault)}`);
+      assert(describedDefault.jobs === 'auto (500)' && describedDefault.pages === 'auto (10/query, 40/platform)',
+        `describeJobCollectionLimits: default breadth must read as finite Auto, got ${JSON.stringify(describedDefault)}`);
       const describedExplicit = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
       assert(describedExplicit.jobs === '12' && describedExplicit.pages === '3',
         `describeJobCollectionLimits: explicit numbers render as plain strings, got ${JSON.stringify(describedExplicit)}`);
@@ -6520,6 +6643,11 @@ export default [
       const twoQueryTasks = buildJobTasks(['Architect', 'Engineer'], 21, { onlySources: new Set(['ziprecruiter']) });
       assert(twoQueryTasks.length === 2 && twoQueryTasks[0].options.onPageScraped !== twoQueryTasks[1].options.onPageScraped,
         'each query must get its own onPageScraped instance, not a shared closure');
+      const resumedAuto = buildJobTasks(['Architect'], 21, {
+        onlySources: new Set(['ziprecruiter']), startPageBySource: { ziprecruiter: 7 },
+      })[0];
+      assert(resumedAuto?.options?.startPageNum === 7 && resumedAuto.options.maxPages === JOB_COLLECTION_PAGE_CEILING,
+        'Auto resume may consume only pages remaining under its original ten-page allocation, never a new ten-page continuation');
       return { browserTasks: tasks.length, pages: requested.pagesPerPlatform, jobs: requested.jobsPerPlatform };
     },
   },

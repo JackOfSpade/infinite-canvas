@@ -293,7 +293,7 @@ export const CODE_DEFINITIONS = {
 
   APPLICATION: {
     label: 'Application Generation',
-    description: 'Local application handoff audit — queued-job lifecycle, pasted JSON acceptance/rejection metadata, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, a pasted AI response is rejected, no document/PDF is produced, or artifacts cannot save. Included automatically in FULL.',
+    description: 'Local application handoff audit — queued-job lifecycle, pasted JSON acceptance/rejection metadata, content-free chronology validation receipt, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, a pasted AI response is rejected, a role-date/current-employment check is disputed, no document/PDF is produced, or artifacts cannot save. Included automatically in FULL.',
     logFilter: line =>
       /\[LocalAI(?:-Fallback)?\]|queue-local-application|get-local-application-status|import-local-application|save-application|ApplicationSync|JobApplication.*(?:Saved|import)|fit-feedback|result\.json|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
@@ -325,7 +325,7 @@ export const CODE_DEFINITIONS = {
 
   RECOVERY: {
     label: 'Job Recovery After Restart',
-    description: 'Job Search restart/completion audit — durable last-run terminal receipt plus saved run manifest/staging-ledger health and current/last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste, or to establish whether a prior-process run completed; never includes job contents or AI prompt/response text. Included automatically in FULL.',
+    description: 'Job Search restart/completion audit — durable last-run terminal receipt plus saved run manifest/staging-ledger health, redacted mounted recovery-peek/banner/actionability state, and current/last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste, or when a saved checkpoint did not visibly offer Resume; never includes job contents or AI prompt/response text. Included automatically in FULL.',
     logFilter: line =>
       /\[JobSearch\]|\[Jobs\]|job.?run|jobs?.(?:staging|run)|saved (?:AI prompt|scrape)|resume(?:d|ing)? (?:job|saved|search)|manual ai|non-api-ai|copy\/?paste|cancel.?node.?task/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
@@ -352,7 +352,7 @@ export const CODE_DEFINITIONS = {
 
   BRIDGE: {
     label: 'ChatGPT Bridge & OAuth',
-    description: 'ChatGPT bridge setup, tunnel, pairing, and OAuth diagnostics — including closed cross-origin refusal receipts in the main-process report. Use after plugin pairing, authorization, or tunnel failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
+    description: 'ChatGPT bridge setup, tunnel, pairing, OAuth, and starter/Continue copy diagnostics — including closed cross-origin refusal and copy-interaction receipts in the main-process report. Use after plugin pairing, authorization, tunnel, or starter-copy failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
     logFilter: line =>
       /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],

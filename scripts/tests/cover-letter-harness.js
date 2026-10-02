@@ -2329,9 +2329,9 @@ This specific position within AWS Identity Center team represents an opportunity
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 44, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 45, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,repeated-transfer-carrier,dangling-demonstrative',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,anchor-relevance,target-claim-scope,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -3705,7 +3705,7 @@ This specific position within AWS Identity Center team represents an opportunity
       ];
       assert(repaired[2] !== ezra[2] && battery(repaired).every(check => check.passed),
         `the minimal repair clears the whole battery (failed=${battery(repaired).filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')})`);
-      assert(battery(repaired).length === 44, 'the repaired letter is graded by every check, not by a shortened battery');
+      assert(battery(repaired).length === 45, 'the repaired letter is graded by every check, not by a shortened battery');
       // Swapping only the verb or only the noun of the shipped sentence is not a rotation.
       const verbOnly = [ezra[0], ezra[1], ezra[2].replace('That judgment would support', 'That practice would help')];
       assert(!checkRepeatedTransferCarrier(verbOnly).passed
@@ -3964,14 +3964,14 @@ This specific position within AWS Identity Center team represents an opportunity
     },
   },
   {
-    name: 'cover letter harness: both new checks are appended after the established battery and reported as prose checks',
+    name: 'cover letter harness: appended checks remain reportable prose checks',
     run: () => {
       const checks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['I built it.', 'It ran.'], evidence: {}, jobText: '', researchText: '' });
-      assert(checks.slice(-2).map(check => check.id).join(',') === 'repeated-transfer-carrier,dangling-demonstrative',
-        'the two checks are the last two the battery returns, so the established order is unmoved');
-      assert(checks.slice(-2).every(check => check.passed && typeof check.detail === 'string' && check.detail.length > 0),
+      assert(checks.slice(-3).map(check => check.id).join(',') === 'repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment',
+        'the appended checks are last in the battery, so the established order is unmoved');
+      assert(checks.slice(-3).every(check => check.passed && typeof check.detail === 'string' && check.detail.length > 0),
         'each returns the result(id, passed, detail) contract with a detail on a pass');
-      return { ids: checks.slice(-2).map(check => check.id) };
+      return { ids: checks.slice(-3).map(check => check.id) };
     },
   },
 ];

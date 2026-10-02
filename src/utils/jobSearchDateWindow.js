@@ -100,7 +100,19 @@ export function jobSearchHistoricalAnchor(data, nodeId) {
   if (coverageStartedAt != null) return { timestamp: coverageStartedAt, source: 'last-coverage-start' };
   const completedAt = normalizeCompletionTimestamp(data?.lastCompletedRunAt);
   if (completedAt != null) return { timestamp: completedAt, source: 'last-completed' };
+  // A current-format run id embeds its start timestamp, which is a useful
+  // compatibility fallback for old *fully completed* canvases. It must not
+  // manufacture history for a run deliberately finished with only saved
+  // listings: that run's remaining providers were never collected, so the
+  // next full search needs its ordinary first-run/lookback boundary instead.
+  // Tie the marker to the live result token so stale data from an older run
+  // cannot suppress the safe legacy fallback for a later normal completion.
+  const partialRunId = typeof data?.partialCollectionRunId === 'string'
+    ? data.partialCollectionRunId
+    : '';
+  const partialCurrentRun = !!partialRunId && partialRunId === data?.jobRunId;
   const legacyStartedAt = data?.hubState === 'done'
+    && !partialCurrentRun
     ? legacyJobRunStartedAt(data?.jobRunId, nodeId)
     : null;
   if (legacyStartedAt != null) return { timestamp: legacyStartedAt, source: 'legacy-run-start' };

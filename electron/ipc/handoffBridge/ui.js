@@ -3,6 +3,8 @@ import { IPC_CHANNELS, IPC_EVENTS } from './contracts.js';
 import { CONSTANTS } from './constants.js';
 import { buildContinueMessage, buildStarterMessage } from './framing.js';
 import { sanitizeActivityItem } from './log.js';
+import { createUiRestartContext } from './restartContext.js';
+import { recordBridgeChatCopyResult } from './telemetry.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DOCK_STATES = new Set(['awaiting', 'working', 'blocked', 'broken', 'unreadable']);
@@ -585,14 +587,27 @@ export function registerHandoffBridgeUi({
     return success(result?.released !== undefined ? { released: result.released } : undefined);
   }
   async function chatWithClipboard(method, window, sender) {
-    if (!window) return fixed('NO_WINDOW');
-    if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+    const action = method === 'newChat' ? 'new' : 'continue';
+    const statusAtPress = currentStatus();
+    const finish = result => recordBridgeChatCopyResult({
+      telemetry: statusAtPress?.config?.telemetryInBugReports === true,
+      action,
+      // The status is main-owned and is read before preparation. This fixed
+      // marker says the guarded UI press acknowledged a restart hold; it
+      // retains no dialog text, sender, path, key, or job identity.
+      restartPath: statusAtPress?.hold === 'restart' ? 'ui-ack' : undefined,
+      result,
+    });
+    if (!window) return finish(fixed('NO_WINDOW'));
+    if (!stillOwnsWindow(sender, window)) return finish(fixed('NO_WINDOW'));
     // The engine's prepare/commit split is the safety boundary: no successful
     // epoch rotation is allowed before the main-owned clipboard write works.
-    // This opaque context is created only after the IPC sender has passed the
-    // canvas guard. It stays in main process memory: it is neither status nor
-    // an IPC value, and lets a deferred restart sheet remain on this canvas.
-    const restartContext = Object.freeze({ sender });
+    // This opaque capability is created only after the IPC sender has passed
+    // the canvas guard. A Copy starter/Continue press is the user's explicit
+    // authorization to restart the chat, so it suppresses only that routine
+    // restart sheet. It stays in main-process memory and is neither status nor
+    // an IPC value; arbitrary renderer payloads cannot forge it.
+    const restartContext = createUiRestartContext();
     const prepared = await safeCall(controller, 'prepareChat', {
       kind: method === 'newChat' ? 'new' : 'continue',
       restartContext,
@@ -602,11 +617,11 @@ export function registerHandoffBridgeUi({
     // capability before it can touch the clipboard or rotate the chat epoch.
     if (!stillOwnsWindow(sender, window)) {
       await safeCall(controller, 'abandonChat', prepared?.commitToken);
-      return fixed('NO_WINDOW');
+      return finish(fixed('NO_WINDOW'));
     }
     // Never fall back to the legacy combined call: it rotates the epoch before
     // the clipboard write and turns a clipboard failure into a lost old chat.
-    if (!prepared || typeof prepared !== 'object') return fixed('NOT_READY');
+    if (!prepared || typeof prepared !== 'object') return finish(fixed('NOT_READY'));
     const result = prepared;
     const abandonPrepared = () => safeCall(controller, 'abandonChat', prepared?.commitToken);
     let text = typeof result?.starter === 'string' ? result.starter : typeof result?.text === 'string' ? result.text : null;
@@ -616,19 +631,19 @@ export function registerHandoffBridgeUi({
         text = method === 'newChat'
           ? buildStarterMessage({ pluginName, sessionCode: result.sessionCode })
           : buildContinueMessage({ sessionCode: result.sessionCode });
-      } catch { await abandonPrepared(); return fixed('CLIPBOARD_FAILED'); }
+      } catch { await abandonPrepared(); return finish(fixed('CLIPBOARD_FAILED')); }
     }
     if (!text) {
       await abandonPrepared();
-      return fixed(fixedCode(result?.code || (result?.status === 'unlinked' ? 'NOT_LINKED' : 'NO_CHAT'), 'NO_CHAT'));
+      return finish(fixed(fixedCode(result?.code || (result?.status === 'unlinked' ? 'NOT_LINKED' : 'NO_CHAT'), 'NO_CHAT')));
     }
     if (text) {
       try { if (typeof clipboard?.writeText !== 'function') throw new TypeError('clipboard unavailable'); clipboard.writeText(text); }
-      catch { await abandonPrepared(); return fixed('CLIPBOARD_FAILED'); }
+      catch { await abandonPrepared(); return finish(fixed('CLIPBOARD_FAILED')); }
       const committed = await safeCall(controller, 'commitChat', prepared?.commitToken);
       if (!acknowledged(committed)) {
         await abandonPrepared();
-        return resultFailure(committed, 'INTERNAL');
+        return finish(resultFailure(committed, 'INTERNAL'));
       }
       // ONE pending clear. Every copy replaces the clipboard, so an earlier
       // press's timer would only wipe a later (possibly byte-identical, e.g. a
@@ -643,7 +658,7 @@ export function registerHandoffBridgeUi({
         timer?.unref?.();
       } catch { /* write succeeded; clear is best effort */ }
     }
-    return success({ chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0, copied: true, ...(result?.recopied === true ? { recopied: true } : {}) });
+    return finish(success({ chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0, copied: true, ...(result?.recopied === true ? { recopied: true } : {}) }));
   }
   async function release(sender, window, payload) {
     if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > CONSTANTS.MAX_LANES || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');

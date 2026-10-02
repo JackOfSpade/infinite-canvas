@@ -23,7 +23,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -100,6 +100,52 @@ function syntheticTimers(start = 0) {
 }
 
 export default [{
+  name: 'handoff bridge: privacy: FULL and BRIDGE reports retain only closed starter/Continue interaction receipts',
+  run: () => {
+    const privateAction = 'PRIVATE_STARTER_ACTION';
+    const privateOutcome = 'PRIVATE_STARTER_OUTCOME';
+    const privateRestart = 'PRIVATE_RESTART_PATH';
+    const base = {
+      description: 'Copy starter confirmation did not behave as expected.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+    };
+    try {
+      recordBridgeChatCopyDiagnostic({
+        telemetry: true, action: privateAction, outcome: privateOutcome,
+        restartPath: privateRestart, chatOrdinal: 1000, at: 1_000,
+      });
+      recordBridgeChatCopyDiagnostic({
+        telemetry: true, action: 'new', outcome: 'copied', restartPath: 'native', chatOrdinal: 3, at: 2_000,
+      });
+      recordBridgeChatCopyDiagnostic({
+        telemetry: true, action: 'continue', outcome: 'clipboard-failed', chatOrdinal: 9999, at: 3_000,
+      });
+      const hostileReply = { success: false, code: privateOutcome, sessionCode: privateAction, detail: privateRestart };
+      assert(recordBridgeChatCopyResult({ telemetry: true, action: 'new', result: hostileReply, at: 4_000 }) === hostileReply,
+        'the IPC result wrapper preserves the reply while projecting only a closed outcome');
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      for (const report of [full, bridge, focused]) {
+        for (const secret of [privateAction, privateOutcome, privateRestart]) {
+          assert(!report.includes(secret), `starter/Continue diagnostics must reject non-enum data (${secret})`);
+        }
+      }
+      assert(full.includes('Starter/Continue interactions retained: 3')
+        && full.includes('action `new` · outcome `copied` · restart acknowledgement `native` · chat 3')
+        && full.includes('action `continue` · outcome `clipboard-failed`')
+        && full.includes('action `new` · outcome `internal`')
+        && !full.includes('chat 9999')
+        && bridge.includes('Starter/Continue interactions retained: 3')
+        && !focused.includes('Starter/Continue interactions retained:'),
+      'FULL and BRIDGE retain only bounded action/outcome metadata, while unrelated report scopes omit it');
+      clearBridgeChatCopyDiagnostic();
+      recordBridgeChatCopyDiagnostic({ telemetry: false, action: 'new', outcome: 'copied', chatOrdinal: 1 });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Starter/Continue interactions retained:'),
+        'telemetry opt-out cannot retain a later starter/Continue interaction');
+      return { full: true, bridge: true, privacySafe: true };
+    } finally { clearBridgeChatCopyDiagnostic(); }
+  },
+}, {
   name: 'handoff bridge: privacy: FULL reports retain only opted-in closed failed-start diagnostics',
   async run() {
     const base = {

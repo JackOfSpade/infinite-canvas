@@ -179,6 +179,75 @@ export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, 
 
 export function getClientAuthDiagnostic() { return latestClientAuth; }
 
+// Copying a starter or continuation is a user-visible bridge transition, but
+// neither the clipboard payload nor the prepared-chat capability is safe
+// report data. Retain a short, opt-in trace of only the action and its closed
+// terminal result. In particular this deliberately has no session code,
+// prompt, path, job/lane identity, renderer input, or failure text.
+const CHAT_COPY_ACTIONS = new Set(['new', 'continue']);
+const CHAT_COPY_OUTCOMES = new Set([
+  'copied', 'clipboard-failed', 'declined', 'no-window', 'not-ready',
+  'not-linked', 'paused', 'internal',
+]);
+const CHAT_COPY_RESTART_PATHS = new Set(['ui-ack', 'native']);
+const CHAT_COPY_TRACE_LIMIT = 20;
+let chatCopyTrace = [];
+
+export function clearBridgeChatCopyDiagnostic() { chatCopyTrace = []; }
+
+export function recordBridgeChatCopyDiagnostic({ telemetry = false, action, outcome, restartPath, chatOrdinal, at = Date.now() } = {}) {
+  if (telemetry !== true || !CHAT_COPY_ACTIONS.has(action) || !CHAT_COPY_OUTCOMES.has(outcome)) return null;
+  const entry = Object.freeze({
+    at: finite(at) ?? Date.now(),
+    action,
+    outcome,
+    ...(CHAT_COPY_RESTART_PATHS.has(restartPath) ? { restartPath } : {}),
+    ...(Number.isSafeInteger(chatOrdinal) && chatOrdinal >= 1 && chatOrdinal <= 999 ? { chatOrdinal } : {}),
+  });
+  chatCopyTrace = [...chatCopyTrace, entry].slice(-CHAT_COPY_TRACE_LIMIT);
+  return entry;
+}
+
+// ui.js keeps the IPC reply shape stable. It can pass that reply here without
+// expanding the trace boundary: this mapper reads only the fixed success/code
+// fields, projects them to the vocabulary above, and returns the original
+// reply untouched. Any error detail or unexpected field is discarded.
+function chatCopyOutcomeFromReply(reply) {
+  try {
+    if (reply?.success === true && reply?.copied === true) return 'copied';
+    switch (reply?.code) {
+      case 'CLIPBOARD_FAILED': return 'clipboard-failed';
+      case 'DECLINED': return 'declined';
+      case 'NO_WINDOW': return 'no-window';
+      case 'NOT_LINKED': return 'not-linked';
+      case 'PAUSED': return 'paused';
+      case 'NOT_READY': case 'NO_CHAT': case 'TUNNEL_NOT_READY':
+      case 'TUNNEL_NOT_SERVING': case 'UNAVAILABLE': case 'DISABLED': case 'BUSY': return 'not-ready';
+      default: return 'internal';
+    }
+  } catch { return 'internal'; }
+}
+
+export function recordBridgeChatCopyResult({ telemetry = false, action, restartPath, result, at = Date.now() } = {}) {
+  let chatOrdinal;
+  try {
+    chatOrdinal = result?.success === true && result?.copied === true ? result.chatOrdinal : undefined;
+  } catch { chatOrdinal = undefined; }
+  recordBridgeChatCopyDiagnostic({
+    telemetry,
+    action,
+    restartPath,
+    outcome: chatCopyOutcomeFromReply(result),
+    chatOrdinal,
+    at,
+  });
+  return result;
+}
+
+export function getBridgeChatCopyDiagnostic() {
+  return Object.freeze(chatCopyTrace.map(entry => ({ ...entry })));
+}
+
 // The live supervisor owns a redacted output ring, but a failed startup tears
 // that owner down before the renderer can ask for it.  Preserve a short
 // *structured* substitute rather than copying arbitrary child output into a

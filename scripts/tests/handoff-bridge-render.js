@@ -205,7 +205,6 @@ export default [
       assert(!panel.includes('<details') && !panel.includes('safetyDetails') && !panel.includes('BRIDGE_COPY.hygiene') && !panel.includes('BRIDGE_COPY.dockNote') && !panel.includes('BRIDGE_COPY.keepAwake'), 'panel must not render or reference the removed safety and privacy notes');
       for (const className of ['bridge-button-primary', 'bridge-button-secondary', 'bridge-button-danger']) assert(new RegExp(`\\.${className}(?:,|\\s*\\{)`).test(styles), `${className} must have a shared CSS definition`);
       for (const rule of ['display: inline-flex', 'max-width: 100%', 'min-height: 2.25rem', 'overflow-wrap: anywhere', ':disabled']) assert(styles.includes(rule), `bridge buttons must retain the compact responsive rule ${rule}`);
-      assert(!panel.includes('now || Date.now()'), 'new-chat confirmation must use state time, never a wall-clock fallback');
       assert(panel.includes("if (id === 'open-pairing')") && panel.includes('openBridgeSetup(3)')
         && !panel.includes("'open-pairing': 'handoffBridgeOpenPairing'"),
       'the panel renewal action must enter the setup surface that owns the direct pairing-code response');
@@ -217,7 +216,10 @@ export default [
       assert(setup.includes("onClick={() => void call('handoffBridgeForgetSetup')}") && !setup.includes("confirm === 'forget'"), 'Forget setup must use the single authoritative main-process confirmation');
       for (const count of ['getServed', 'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'stallNotices', 'tunnelRestarts']) assert(panel.includes(`status.counts.${count}`), `panel counts must include ${count}`);
       for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
-      assert(panel.includes("status.chat.state !== 'awaiting-first-call'") && panel.includes('BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName)') && panel.includes('result.recopied === true'), 'the panel skips the new-chat confirmation for an unused chat and words a re-copy from main\'s recopied answer');
+      assert(!panel.includes("setConfirm('new')") && !panel.includes('confirm === \'new\'')
+        && !source('src/components/BridgeProgress.jsx').includes('confirmNew')
+        && panel.includes('BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName)') && panel.includes('result.recopied === true'),
+      'Copy starter must directly invoke main from both renderer surfaces while main alone decides re-copy wording');
     },
   },
   {
@@ -1177,7 +1179,7 @@ export default [
           },
         });
 
-        await scenario('awaiting-first-call: a second press re-copies without any confirmation', {
+        await scenario('awaiting-first-call: a second press re-copies without a renderer confirmation', {
           status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: clock - 5000, firstCallAt: null, outstanding: null }),
           item: { jobId: JOB, stage: 'evidence-plan' },
           api: { handoffBridgeNewChat: async () => ({ success: true, copied: true, recopied: true, chatOrdinal: 1 }) },
@@ -1224,15 +1226,10 @@ export default [
             assert(live(window).textContent.includes('Needs attention') && live(window).textContent.includes('ChatGPT has been quiet for 9 min'), 'stalled is worded and toned in text, with the real quiet age (served 9 minutes ago)');
             assert(/for 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
             const start = button(window, 'Copy chat starter'); assert(start, 'stalled offers Copy chat starter');
-            await act(async () => { start.click(); await Promise.resolve(); });
-            assert(calls.length === 0 && text(window).includes('Copy a starter for a new chat?'), 'a chat that called under two minutes ago must be confirmed first, exactly as the panel does');
-            await act(async () => { button(window, 'Keep chat 1').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
-            assert(calls.length === 0 && !text(window).includes('Copy a starter for a new chat?'), `Keep chat must close the dialog and call nothing: ${calls}`);
-            await act(async () => { button(window, 'Copy chat starter').click(); await Promise.resolve(); });
-            assert(text(window).includes('Copy a starter for a new chat?'), 'the confirmation opens again');
-            await act(async () => { button(window, 'Copy starter').click(); await new Promise(resolve => setTimeout(resolve, 260)); });
-            assert(calls.join() === 'new', `confirming calls handoffBridgeNewChat: ${calls}`);
-            assert(!text(window).includes('Copy a starter for a new chat?'), 'confirming must close the dialog');
+            await act(async () => { start.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.join() === 'new', `Copy chat starter directly calls handoffBridgeNewChat for an active chat: ${calls}`);
+            assert(!text(window).includes('Copy a starter for a new chat?') && !text(window).includes('Keep chat 1'),
+              'an active chat never produces a renderer confirmation');
           },
         });
 

@@ -1,15 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
-import { ConfirmDialog } from './ConfirmDialog';
-import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
-import { describeChat } from '../utils/handoffBridgeView';
+import { BRIDGE_PROGRESS_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import { deriveBridgeJobProgress, progressTimeLines } from '../utils/bridgeJobProgress';
 
 // Live progress for one application the ChatGPT bridge holds, drawn inside the
 // dock's bridge-held state. It only READS the status the dock already has, and
 // its one button drives the SAME renderer IPC calls the bridge panel's chat
-// section uses (handoffBridgeNewChat / handoffBridgeContinueChat), with the same
-// "a chat called under 2 minutes ago" confirmation. No IPC channel is added.
+// section uses (handoffBridgeNewChat / handoffBridgeContinueChat). Copy starter
+// is immediate in both surfaces; no IPC channel is added.
 
 const TONE_CLASS = Object.freeze({
   neutral: 'border-white/10 bg-white/[0.03]',
@@ -57,7 +55,6 @@ function invoke(method) {
 export function BridgeProgress({ status, item }) {
   const [now, setNow] = useState(() => Date.now());
   const [notice, setNotice] = useState('');
-  const [confirmNew, setConfirmNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const mountedRef = useRef(true);
   // Set synchronously so a second click in the same tick is refused before
@@ -119,23 +116,15 @@ export function BridgeProgress({ status, item }) {
   // The panel's gate for both chat buttons.
   const canStartChat = status?.enabled === true && status?.serving === 'live' && status?.paused !== true
     && status?.setup?.tunnelReachable === true && status?.setup?.linked === true;
-  const chatSummary = describeChat(chat, now);
   const requestNewChat = () => {
-    const referenceNow = now || status?.at || 0;
-    const age = Number.isFinite(chat.lastCallAt) && referenceNow >= chat.lastCallAt
-      ? referenceNow - chat.lastCallAt
-      : Infinity;
-    // An unused chat (no call yet) is never ended by a starter press: main
-    // hands back the same starter, so there is nothing to confirm.
-    if (chat.ordinal && chat.state !== 'awaiting-first-call' && age < 120000) setConfirmNew(true);
-    else void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew(pluginName));
+    void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew(pluginName));
   };
   const onAction = () => {
     if (busyRef.current) return;
     if (view.action === 'continue-chat') void run('handoffBridgeContinueChat', BRIDGE_PROGRESS_COPY.copiedContinue);
     else if (view.action === 'start-chat') requestNewChat();
   };
-  const actionDisabled = busy || !canStartChat || (view.action === 'continue-chat' && !chatSummary.ordinal);
+  const actionDisabled = busy || !canStartChat || (view.action === 'continue-chat' && !chat.ordinal);
   const toneLabel = BRIDGE_PROGRESS_COPY.toneLabel[view.tone];
 
   return (
@@ -188,21 +177,6 @@ export function BridgeProgress({ status, item }) {
       )}
 
       {notice && <p role="status" className="mt-2 text-[11px] text-amber-200">{notice}</p>}
-
-      {confirmNew && (
-        <ConfirmDialog
-          title={BRIDGE_UI_COPY.confirmNewTitle}
-          message={BRIDGE_UI_COPY.confirmNewMessage(chatSummary.ordinal, chatSummary.lastCall || BRIDGE_UI_COPY.recently)}
-          confirmLabel={BRIDGE_UI_COPY.confirmNew}
-          cancelLabel={BRIDGE_UI_COPY.keepChat(chatSummary.ordinal)}
-          onConfirm={() => {
-            if (busyRef.current) return;
-            setConfirmNew(false);
-            void run('handoffBridgeNewChat', BRIDGE_PROGRESS_COPY.copiedNew(pluginName));
-          }}
-          onCancel={() => setConfirmNew(false)}
-        />
-      )}
     </section>
   );
 }

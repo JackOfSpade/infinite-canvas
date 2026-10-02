@@ -1046,6 +1046,86 @@ export default [
       assert(result.warning?.code === 'scrape-failed' && result.warning?.severity === 'block' && result.warning.evidence.includes('418'),
         `first-page no-warning failure must get a safe blocking warning, got ${JSON.stringify(result.warning)}`);
       return { requests, warning: result.warning.code };
+  },
+},
+{
+    name: 'Dice pager: fan-out searches get a 25s bounded transport signal without retrying a provider block',
+    run: async () => {
+      let requests = 0;
+      let transport = null;
+      const result = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async (_url, context) => {
+          requests++;
+          transport = context;
+          return {
+            ok: false,
+            status: 429,
+            warning: { code: 'http-429', severity: 'throttle', evidence: 'Dice throttled this request' },
+            json: null,
+          };
+        },
+      });
+      assert(transport?.timeoutMs === 25_000
+        && transport?.signal instanceof AbortSignal,
+      `Dice fan-out searches must receive the 25s bounded transport signal, got ${JSON.stringify({ timeoutMs: transport?.timeoutMs, hasSignal: !!transport?.signal })}`);
+      assert(requests === 1 && result.truncated && result.warning?.code === 'http-429'
+        && result.stopReasons.at(-1)?.stopReason === 'page-error',
+      `a provider throttle must remain one request and explicit partial coverage, got ${JSON.stringify({ requests, warning: result.warning, truncated: result.truncated, stopReasons: result.stopReasons })}`);
+
+      let blockedRequests = 0;
+      const blocked = await fetchDiceListings('engineer', '', null, 7, null, {
+        interPageDelayMs: 0,
+        requestPage: async () => {
+          blockedRequests++;
+          return {
+            ok: false,
+            status: 503,
+            warning: { code: 'http-503', severity: 'block', evidence: 'Dice Cloudflare block' },
+            json: null,
+          };
+        },
+      });
+      assert(blockedRequests === 1 && blocked.warning?.code === 'http-503'
+        && blocked.truncated && blocked.stopReasons.at(-1)?.stopReason === 'page-error',
+      `a provider block must bypass Dice transient retries and key refresh, got ${JSON.stringify({ blockedRequests, warning: blocked.warning, truncated: blocked.truncated, stopReasons: blocked.stopReasons })}`);
+
+      const cancelled = new AbortController();
+      let cancelledRequests = 0;
+      let cancellationCaught = false;
+      try {
+        await fetchDiceListings('engineer', '', cancelled.signal, 7, null, {
+          // A full first page makes the walker enter the paced second-page
+          // delay. Cancellation must wake that delay rather than wait 5s or
+          // dispatch a second request.
+          interPageDelayMs: 5000,
+          requestPage: async (url) => {
+            cancelledRequests++;
+            if (Number(new URL(url).searchParams.get('page')) === 1) {
+              setTimeout(() => cancelled.abort(), 0);
+              return {
+                ok: true,
+                status: 200,
+                json: {
+                  data: Array.from({ length: 400 }, (_, index) => ({
+                    id: `cancel-${index}`,
+                    title: `Engineer ${index}`,
+                    companyName: 'Acme',
+                    postedDate: 'today',
+                  })),
+                  meta: { totalHits: 800 },
+                },
+              };
+            }
+            return { ok: true, status: 200, json: { data: [] } };
+          },
+        });
+      } catch (error) {
+        cancellationCaught = error?.message === 'Aborted';
+      }
+      assert(cancellationCaught && cancelledRequests === 1,
+        `cancelling during Dice pacing must stop before page two, got ${JSON.stringify({ cancellationCaught, cancelledRequests })}`);
+      return { timeoutMs: transport.timeoutMs, requests, cancelledRequests };
     },
   },
 {
@@ -1059,7 +1139,7 @@ export default [
         postedDate: 'today',
       });
       const fullPage = (offset) => Array.from({ length: 400 }, (_, index) => row(offset + index));
-      const explicit = await fetchDiceListings('engineer', '', null, 7, { pagesPerPlatform: 2 }, {
+      const explicit = await fetchDiceListings('engineer', '', null, 7, { jobsPerPlatform: 1_000, pagesPerPlatform: 2 }, {
         interPageDelayMs: 0,
         requestPage: async (url) => {
           const page = Number(new URL(url).searchParams.get('page'));
@@ -1080,7 +1160,7 @@ export default [
         },
       });
       assert(!defaultBackstop.truncated && defaultBackstop.pagesFetched === 2 && defaultBackstop.stopReasons.at(-1)?.stopReason === 'empty-page' && defaultBackstop.cap === null,
-        `unlimited pages must not invent a configured cap, got ${JSON.stringify({ truncated: defaultBackstop.truncated, pagesFetched: defaultBackstop.pagesFetched, stopReasons: defaultBackstop.stopReasons, cap: defaultBackstop.cap })}`);
+        `an exhausted Auto walk must not claim a cap it did not reach, got ${JSON.stringify({ truncated: defaultBackstop.truncated, pagesFetched: defaultBackstop.pagesFetched, stopReasons: defaultBackstop.stopReasons, cap: defaultBackstop.cap })}`);
       return { explicitPages: explicit.pagesFetched, defaultPages: defaultBackstop.pagesFetched };
     },
   },

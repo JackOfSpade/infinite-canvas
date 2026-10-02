@@ -26,6 +26,7 @@ export function JobSearchSourcesReadyState({
   solveAllProgress = null,
   onSolveAll = null,
   onStopSolveAll = null,
+  onRetryRemaining = null,
 }) {
   // A Board-owned recovery may leave the Search visible while the Board is
   // settling its durable plan. In that state the Search handler correctly
@@ -36,6 +37,7 @@ export function JobSearchSourcesReadyState({
     && jobsAvailable > 0
     && typeof onScoreCurrent === 'function';
   const canSolveAll = !locked && solvableCount > 0 && typeof onSolveAll === 'function';
+  const canRetryRemaining = !locked && typeof onRetryRemaining === 'function';
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1.5">
@@ -85,6 +87,19 @@ export function JobSearchSourcesReadyState({
         </button>
       )}
 
+      {canRetryRemaining && !solveAllRunning && (
+        <button
+          type="button"
+          onClick={onRetryRemaining}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-2 w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-full bg-blue-500/15 text-blue-200 hover:bg-blue-500/25 text-[11px] font-medium transition-colors border border-blue-400/25"
+          title="After signing in, retry only the sources still unfinished in this saved search. Completed and staged work stays intact."
+        >
+          <Play size={11} />
+          Retry remaining sources
+        </button>
+      )}
+
       {canScoreCurrent && (
         <button
           onClick={onScoreCurrent}
@@ -102,9 +117,9 @@ export function JobSearchSourcesReadyState({
           onClick={onClearCareerFiles}
           onPointerDown={(e) => e.stopPropagation()}
           className="nodrag mt-1 w-full px-2 py-1.5 rounded-full bg-white/5 text-white/45 hover:bg-white/10 hover:text-white/70 text-[11px] font-medium transition-colors border border-white/10"
-          title="Abandon this paused search and remove its career files."
+          title="Clear career data and remove this paused search."
         >
-          Clear career files
+          Clear career data
         </button>
       )}
     </div>

@@ -223,6 +223,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const measuredHeight = useStore(
     useCallback((store) => store.nodeLookup.get(id)?.measured?.height ?? null, [id])
   );
+  // Cards are already mounted when their owning Job Board can become locked.
+  // Read that board through the reactive store (as JobGroupNode does), rather
+  // than relying only on this card's persisted flag or a click-time lookup.
+  const owningBoardLocked = useStore(
+    useCallback((store) => !!store.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
+  );
+  // This deliberately excludes module-run activity: an active Job Search is
+  // independent from application generation and must not disable Generate.
+  const effectiveLock = !!data.locked || owningBoardLocked;
   const previousMeasuredHeightRef = useRef(measuredHeight);
   const preserveTreeLayoutOnRestore = Boolean(data[JOB_TREE_LAYOUT_RESTORE_KEY]);
 
@@ -491,11 +500,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // and the right-click context menu alike). deleteElements below is what
   // triggers that handler, so redoing the reflow/stats write here too would
   // write the board's stats twice from two different node snapshots — a
-  // race, not a redundancy. Lock is checked at click time against BOTH this
-  // card and the owning board — a render-time read would go stale on
-  // already-mounted cards.
+  // race, not a redundancy. The reactive effective lock covers both this card
+  // and its Board while mounted; the live click-time Board read closes the
+  // narrow render-to-click race.
   const dismissCard = useCallback(async () => {
-    if (data.locked || getLiveNode(data.hubId)?.data?.locked) return;
+    if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
     // A hidden/collapsed card may unmount while it remains a canvas node, so
     // unmount is not cancellation. Explicit dismissal is: remove only this
     // card's waiting lease; an already-running IPC operation is left intact.
@@ -507,7 +516,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // this id, even for the instant before deleteElements' async cleanup runs.)
     cancelQueuedRunsForNode(id, 'Job card dismissed before generation started');
     await deleteElements({ nodes: [{ id }] });
-  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);
+  }, [id, effectiveLock, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);
 
   // A completed Local AI job is converted into the exact same capability-bound
   // workspace that the API flow creates, then saved through saveApplication.
@@ -874,7 +883,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // the existing polling/import path validates and saves the final bundle.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
-    if (getLiveNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
+    // The reactive effective lock gives mounted cards immediate feedback; the
+    // live read remains the race-safe fence if a Board locks after that render.
+    if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
     const originHubId = data.originHubId || data.hubId;
     // Fast, non-queued validation prevents a known-invalid card from taking a
     // queue turn. This is intentionally re-read after the lease as well: the
@@ -920,10 +931,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
     setApplicationRun({ state: 'generating', position: null });
     try {
-      // Handoff creation uses the same app-wide capacity-one queue as searches
-      // and marketplace runs. Crucially, every mutable input below is read
-      // only after the lease starts, so queued work sees the latest canvas
-      // state before it materializes its durable job folder.
+      // Handoff creation uses the dedicated capacity-one 'application' lane,
+      // so it queues only behind other application creations. Crucially, every
+      // mutable input below is read only after the lease starts, so queued work
+      // sees the latest canvas state before it materializes its durable job folder.
       lease = await acquireModuleRun({
         nodeId: id,
         kind: 'application',
@@ -1114,7 +1125,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       applicationSubmissionRef.current = false;
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, updateGlobal]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.googleCardUrl, data.source, data.posted, data.language, data.reasoning, data.matchScore, additionalNotes, id, getLiveNode, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
 
   return (
     <div
@@ -1147,10 +1158,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           )}
 
           <button
-            onClick={data.locked ? undefined : () => dismissCard()}
-            disabled={!!data.locked}
+            onClick={effectiveLock ? undefined : () => dismissCard()}
+            disabled={effectiveLock}
             className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/70 transition-all ${
-              data.locked ? 'hidden' : 'text-white/30 hover:text-red-400 hover:bg-white/10'
+              effectiveLock ? 'hidden' : 'text-white/30 hover:text-red-400 hover:bg-white/10'
             }`}
             title="Dismiss Job"
             aria-label="Dismiss job"
@@ -1390,7 +1401,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           onPointerDown={(e) => e.stopPropagation()}
           onChange={(e) => setAdditionalNotes(e.target.value)}
           onBlur={() => updateGlobal(id, { additionalNotes: additionalNotes.trim() })}
-          disabled={!!data.locked || hasApplicationRun || localJobPending}
+          disabled={effectiveLock || hasApplicationRun || localJobPending}
           className="nodrag nowheel mt-1.5 block w-full resize-y rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-relaxed text-white/75 placeholder:text-white/25 outline-none transition-colors focus:border-blue-400/60 focus:ring-1 focus:ring-blue-400/30 disabled:cursor-default disabled:opacity-50"
         />
       </div>
@@ -1491,10 +1502,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           the employer's site; this disposable hierarchy tracks no application state. */}
       <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
-          onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
-          disabled={hasApplicationRun || localJobPending || !!data.locked}
+          onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
+          disabled={hasApplicationRun || localJobPending || effectiveLock}
           className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
-            data.locked
+            effectiveLock
               ? 'bg-white/5 text-white/20 cursor-default'
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}

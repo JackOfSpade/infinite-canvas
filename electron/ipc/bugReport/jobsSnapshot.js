@@ -22,7 +22,7 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // import into electron/ from src/ is an established pattern (electron/ipc/
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
-import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
+import { JOB_COLLECTION_AUTO_LIMITS } from '../../../src/utils/jobCollectionLimits.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
@@ -83,6 +83,22 @@ export function formatChallengeTextEvidence(entry) {
   }
   if (markers.length) bits.push(`matched ${markers.length} verification marker(s)`);
   return bits.join(' · ');
+}
+
+/**
+ * Render the card-owned breadth contract identically for a finished funnel and
+ * a still-running launch intent. A missing stored limit is the current UI's
+ * finite Auto setting, rather than absent diagnostic data.
+ */
+function formatCollectionLimitsLine(collectionLimits) {
+  if (!collectionLimits || typeof collectionLimits !== 'object') return null;
+  const jobs = Number.isFinite(collectionLimits.jobsPerPlatform) && collectionLimits.jobsPerPlatform > 0
+    ? `${Math.floor(collectionLimits.jobsPerPlatform)} job(s)/platform`
+    : `Auto: up to ${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform} job(s)/platform`;
+  const pages = Number.isFinite(collectionLimits.pagesPerPlatform) && collectionLimits.pagesPerPlatform > 0
+    ? `${Math.floor(collectionLimits.pagesPerPlatform)} browser page(s)/search`
+    : `Auto: up to ${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery} browser page(s)/query, ${JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform}/platform`;
+  return `**Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform; Auto divides its browser-page budget deterministically across generated queries. Explicit page depth applies to each generated browser query and to paginated API requests.`;
 }
 
 // JOBLINK is assembled synchronously on the main process from renderer-supplied
@@ -619,7 +635,7 @@ function readArtifactReceiptSnapshot(artifact) {
   return receiptSnapshotFromRaw(parsed.value);
 }
 
-function readReceiptForCurrentHubs(canvasFilePath, currentJobHubIds, preferredOwner = null) {
+function readReceiptForCurrentHubs(canvasFilePath, currentJobHubIds, preferredOwner = null, activePreferredOwner = false, preferredRunId = null) {
   const owners = [...new Set([preferredOwner, ...(currentJobHubIds instanceof Set ? currentJobHubIds : currentJobHubIds || [])]
     .map(safeOwnerId)
     .filter(Boolean))]
@@ -642,11 +658,26 @@ function readReceiptForCurrentHubs(canvasFilePath, currentJobHubIds, preferredOw
   }
   const preferred = safeOwnerId(preferredOwner);
   const selected = preferred ? observed.find(entry => entry.ownerId === preferred) : null;
+  const activeRunId = activePreferredOwner ? recordedRunToken(preferredRunId) : null;
   // The compact completion assessment is about exactly one terminal
   // generation. Preserve the selected scope so its saved snapshot can only be
   // joined by exact owner + run ID below; never let a different current hub's
   // newest snapshot fill in this receipt's counts.
-  if (selected) return { ...selected.state, selectedOwnerId: selected.ownerId };
+  if (selected && (!activePreferredOwner || (activeRunId && selected.state?.receipt?.runId === activeRunId))) {
+    return { ...selected.state, selectedOwnerId: selected.ownerId };
+  }
+  // An actively live owner is already an exact selection for the compact assessment,
+  // even before it has a terminal receipt. Do not let older, unrelated hub
+  // receipts turn that known in-progress run into an ambiguous generation.
+  // The caller renders its live phase (and this missing receipt) as incomplete;
+  // ambiguity remains the fail-closed result when no live owner is known.
+  // Keep the legacy unscoped receipt fallback below for old single-hub
+  // canvases. The live owner only suppresses *other scoped owners*; a legacy
+  // receipt is considered below only when its recorded owner proves it belongs
+  // to the live hub (or it is the sole current hub).
+  if (preferred && activePreferredOwner && observed.length > 0) {
+    return { exists: false, selectedOwnerId: preferred, liveOwnerWithoutTerminalReceipt: true };
+  }
   if (observed.length === 1) return { ...observed[0].state, selectedOwnerId: observed[0].ownerId };
   if (observed.length > 1) {
     return {
@@ -658,9 +689,19 @@ function readReceiptForCurrentHubs(canvasFilePath, currentJobHubIds, preferredOw
       ownerIds: observed.map(entry => entry.ownerId).slice(0, MAX_RECOVERY_ARTIFACT_SCOPES),
     };
   }
-  return hasBasenameCanvasCollision(jobRunPathScopeForCanvas(canvasFilePath))
+  const legacy = hasBasenameCanvasCollision(jobRunPathScopeForCanvas(canvasFilePath))
     ? { exists: false }
     : readLastRunReceiptSnapshot(canvasFilePath);
+  if (!preferred || !activePreferredOwner) return legacy;
+  const legacyOwner = safeOwnerId(legacy?.receipt?.nodeId);
+  const legacyMatchesLiveOwner = !!activeRunId
+    && legacy?.receipt?.runId === activeRunId
+    && (legacyOwner
+      ? legacyOwner === preferred
+      : owners.length === 1 && owners[0] === preferred);
+  return legacyMatchesLiveOwner
+    ? { ...legacy, selectedOwnerId: preferred }
+    : { exists: false, selectedOwnerId: preferred, liveOwnerWithoutTerminalReceipt: true };
 }
 
 function receiptIdentifier(value, fallback = 'not recorded') {
@@ -907,7 +948,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       if (Number.isFinite(Number(source.providerTotal))) {
         parts.push(`${source.providerGathered} of ${source.providerTotal} candidate identities advertised by the provider`);
       }
-      const configuredCaps = configuredSourceCaps(source, source.stopReason);
+      const collectionCaps = collectionBoundCaps(source, source.stopReason);
       const stops = String(source.stopReason || '').split('/').map(reason => reason.trim().toLowerCase()).filter(Boolean);
       // Receipts written before the explicit `truncated` flag was added can
       // still preserve ZipRecruiter's verified headline total.  An empty page
@@ -919,7 +960,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
         Number(source.providerGathered),
         stops,
       );
-      if ((source.truncated === true || legacyZipTotalShortfall) && configuredCaps.length === 0) {
+      if ((source.truncated === true || legacyZipTotalShortfall) && collectionCaps.length === 0) {
         const truncation = stops.includes('page-error')
           ? '⚠️ walk truncated after an API page request failed'
           : stops.includes('query-error')
@@ -934,18 +975,12 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
         parts.push(truncation);
       }
       for (const cap of sourceCaps(source)) {
-        const capLabel = cap.type === 'jobs-per-platform'
-          ? 'Jobs per platform cap'
-          : cap.type === 'per-platform'
-            ? 'per-platform job cap'
-            : cap.type === 'pages-per-platform'
-              ? 'Pages per platform cap'
-              : cap.type === 'source-internal'
-                ? (sourceId === 'linkedin'
-                  ? "app's internal LinkedIn per-query collection ceiling/enrichment budget"
-                  : 'app-internal collection ceiling')
-            : 'configured job cap';
-        parts.push(`${capLabel} ${cap.limit}`);
+        const capLabel = cap.type === 'source-internal'
+          ? (sourceId === 'linkedin'
+            ? "app's internal LinkedIn per-query collection ceiling/enrichment budget"
+            : 'app-internal collection ceiling')
+          : collectionCapSummary([cap], { withCapWord: true });
+        parts.push(`${capLabel}${cap.type === 'source-internal' ? ` ${cap.limit}` : ''}`);
       }
       if (source.sponsoredDropped) parts.push(`${source.sponsoredDropped} sponsored-dropped`);
       if (source.stopReason) {
@@ -1504,21 +1539,43 @@ function descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds) {
   if (checkpoints.length === 0) {
     lines.push('- Description-recovery checkpoints: none valid for this canvas.');
   } else {
+    const stateCount = state => checkpoints.filter(checkpoint => checkpoint?.state === state).length;
+    const parsedCount = stateCount('parseable');
+    const metadataOnlyCount = stateCount('metadata-only');
+    const legacyPrefixCount = stateCount('legacy-prefix');
     const shown = checkpoints.slice(0, MAX_DESCRIPTION_RECOVERY_CHECKPOINT_ROWS);
     const displayLimit = checkpoints.length > shown.length
       ? (discoveryBounded ? `; ${shown.length} shown from a bounded discovery sample` : `; newest ${shown.length} shown`)
       : '';
-    lines.push(`- Description-recovery checkpoints: ${checkpoints.length} parseable, ownership-verified checkpoint(s)${displayLimit}.`);
+    const summary = [
+      parsedCount ? `${parsedCount} fully parsed + ownership-verified` : null,
+      metadataOnlyCount ? `${metadataOnlyCount} bounded-envelope + ownership-verified` : null,
+      legacyPrefixCount ? `${legacyPrefixCount} legacy bounded-prefix (payload not yet validated)` : null,
+    ].filter(Boolean).join(' · ');
+    lines.push(`- Description-recovery checkpoints: ${summary || `${checkpoints.length} unclassified metadata record(s)`}${displayLimit}.`);
     for (const checkpoint of shown) {
       // Defense in depth: listDescriptionRecoveryCheckpointsSync already
       // whitelists these opaque identifiers, but never interpolate a future or
       // mocked metadata producer directly into a FULL/JOBRESOLVE report.
       const hubId = receiptIdentifier(checkpoint?.sourceHubId, '');
       const runId = receiptIdentifier(checkpoint?.runId, '');
-      const scoreReady = Math.max(0, Math.floor(Number(checkpoint?.scoreReadyCount) || 0));
-      const recoveryRows = Math.max(0, Math.floor(Number(checkpoint?.descriptionRecoveryCount) || 0));
+      const knownCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+      const scoreReady = knownCount(checkpoint?.scoreReadyCount);
+      const recoveryRows = knownCount(checkpoint?.descriptionRecoveryCount);
       const hubState = hubId && currentNodeIds?.has?.(hubId) ? 'present in this canvas' : 'not present in this canvas';
-      lines.push(`  - hub \`${hubId ? reportCorrelationDigest(hubId) : 'not recorded'}\` (${hubState}) · run \`${runId ? reportCorrelationDigest(runId) : 'not recorded'}\` · parseable + ownership verified · created ${recoveryTimestampLabel(checkpoint?.createdAt)} · updated ${recoveryTimestampLabel(checkpoint?.updatedAt)} · ${scoreReady} score-ready job(s) · ${recoveryRows} recovery-pool row(s)`);
+      const state = checkpoint?.state;
+      const stateLabel = state === 'metadata-only'
+        ? 'bounded metadata envelope + ownership verified; exact load will revalidate payload'
+        : state === 'legacy-prefix'
+          ? 'legacy bounded prefix; exact load will revalidate payload'
+          : state === 'parseable'
+            ? 'fully parsed + ownership verified'
+            : 'metadata state unrecognised; exact load will revalidate payload';
+      const counts = state === 'legacy-prefix'
+        ? `payload counts: ${scoreReady == null ? 'score-ready unavailable' : `${scoreReady} score-ready`} · ${recoveryRows == null ? 'recovery-pool unavailable' : `${recoveryRows} recovery-pool`}`
+        : `${scoreReady == null ? 'score-ready count unavailable' : `${scoreReady} score-ready job(s)`} · ${recoveryRows == null ? 'recovery-pool count unavailable' : `${recoveryRows} recovery-pool row(s)`}`;
+      const byteCount = knownCount(checkpoint?.checkpointBytes);
+      lines.push(`  - hub \`${hubId ? reportCorrelationDigest(hubId) : 'not recorded'}\` (${hubState}) · run \`${runId ? reportCorrelationDigest(runId) : 'not recorded'}\` · ${stateLabel} · created ${recoveryTimestampLabel(checkpoint?.createdAt)} · updated ${recoveryTimestampLabel(checkpoint?.updatedAt)}${byteCount == null ? '' : ` · checkpoint ${byteCount} bytes`} · ${counts}`);
     }
   }
   const ignoredBits = [
@@ -1754,7 +1811,7 @@ function boardStaleReasonFact(value) {
     : null;
 }
 
-function configuredSourceCap(cap, stopReason) {
+function collectionBoundCap(cap, stopReason) {
   if (!cap || typeof cap !== 'object' || Array.isArray(cap)) return null;
   const type = String(cap.type || '').trim();
   // Match receipt persistence: a cap accepted as proof must be an actual,
@@ -1762,21 +1819,24 @@ function configuredSourceCap(cap, stopReason) {
   const limit = typeof cap.limit === 'number' && Number.isSafeInteger(cap.limit) && cap.limit > 0
     ? cap.limit
     : null;
-  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform'].includes(type) || limit == null) return null;
+  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform'].includes(type) || limit == null) return null;
   const expectedStops = type === 'per-platform'
     ? new Set(['per-source-cap'])
-    : type === 'jobs-per-platform'
-      ? new Set(['jobs-per-platform'])
-      : new Set(['pages-per-platform', 'page-cap', 'page-ceiling']);
+    : type === 'jobs-per-platform' || type === 'auto-jobs-per-platform'
+      ? new Set(type === 'auto-jobs-per-platform' ? ['auto-jobs-per-platform', 'per-source-cap'] : ['jobs-per-platform'])
+      : new Set([type === 'auto-pages-per-platform' ? 'auto-page-budget' : 'pages-per-platform', 'page-cap', 'page-ceiling']);
   const stops = String(stopReason || '').split('/').map(reason => reason.trim()).filter(Boolean);
-  // A structured cap is user-configured evidence only when the walk says it
-  // actually stopped for that cap and no error/duplicate-page reason is mixed
-  // in. A page safety backstop with no matching structured cap remains a gap.
-  // Fan-out can truthfully retain nested configured caps alongside the outer
+  // A structured bound is valid collection-boundary evidence only when the
+  // walk says it actually stopped for that bound and no error/duplicate-page
+  // reason is mixed in. This includes the finite Auto policy as well as an
+  // explicit setting; a page safety backstop with no matching structured cap
+  // remains a gap. Fan-out can truthfully retain nested collection caps alongside the outer
   // aggregate cap (for example Dice's per-query jobs cap plus the final
   // per-platform slice). They are compatible evidence, unlike a page/query
   // error or a repeated page, which must still invalidate a green cap claim.
   const normalSiblingStops = new Set([
+    'auto-jobs-per-platform',
+    'auto-page-budget',
     'provider-total', 'short-page', 'empty-page', 'end-of-results',
     'per-source-cap', 'jobs-per-platform', 'pages-per-platform', 'page-cap',
   ]);
@@ -1784,6 +1844,24 @@ function configuredSourceCap(cap, stopReason) {
     && stops.every(reason => expectedStops.has(reason) || normalSiblingStops.has(reason))
     ? { type, limit }
     : null;
+}
+
+function collectionCapTypeLabel(type) {
+  switch (type) {
+    case 'auto-jobs-per-platform': return 'Auto Jobs per platform';
+    case 'auto-pages-per-platform': return 'Auto browser-page platform budget';
+    case 'jobs-per-platform': return 'Jobs per platform';
+    case 'pages-per-platform': return 'Pages per platform';
+    case 'per-platform': return 'per-platform job';
+    default: return 'collection';
+  }
+}
+
+function collectionCapSummary(caps, { withCapWord = false } = {}) {
+  return caps.map(cap => (withCapWord
+    ? `${collectionCapTypeLabel(cap.type)} cap ${cap.limit}`
+    : `${collectionCapTypeLabel(cap.type)}=${cap.limit}`
+  )).join(' + ');
 }
 
 function sourceCaps(source) {
@@ -1795,9 +1873,9 @@ function sourceCaps(source) {
       ? cap.limit
       : null;
     // 'source-internal' is displayed but is deliberately NOT accepted by
-    // configuredSourceCap below: it is an app collection/enrichment budget,
+    // collectionBoundCap below: it is an app collection/enrichment budget,
     // not a user-selected cap or proof of provider exhaustion.
-    if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(type) || limit == null) continue;
+    if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal'].includes(type) || limit == null) continue;
     const key = `${type}:${limit}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1806,10 +1884,25 @@ function sourceCaps(source) {
   return caps.slice(0, 3);
 }
 
-function configuredSourceCaps(source, stopReason) {
+function collectionBoundCaps(source, stopReason) {
   return sourceCaps(source)
-    .map(cap => configuredSourceCap(cap, stopReason))
+    .map(cap => collectionBoundCap(cap, stopReason))
     .filter(Boolean);
+}
+
+// Null stored limits resolve to the product's finite Auto policy.  They are
+// deliberately accepted as bounded coverage above, but must never be called
+// an *explicit* user configuration in diagnostics.
+function isAutoCollectionCap(cap) {
+  return String(cap?.type || '').startsWith('auto-');
+}
+
+function collectionCapLabel(cap, { assignment = false } = {}) {
+  const type = collectionCapTypeLabel(cap?.type);
+  const limit = cap?.limit;
+  return assignment
+    ? `${type}=${limit}`
+    : `${type} cap ${limit}`;
 }
 
 // ZipRecruiter is the sole browser source whose headline corpus count is
@@ -2099,7 +2192,13 @@ export function buildJobCompletionAssessment(
   // boardResolvedSourceHubId's comment for the incident this recovers.
   const boardResolvedOwner = telemetry?.nodeId ? null : boardResolvedSourceHubId(jobBoardStates);
   const receiptState = canvasFilePath
-    ? readReceiptForCurrentHubs(canvasFilePath, hubIds, telemetry?.nodeId || boardResolvedOwner)
+    ? readReceiptForCurrentHubs(
+      canvasFilePath,
+      hubIds,
+      telemetry?.nodeId || boardResolvedOwner,
+      telemetry?.pipeline?.active === true,
+      telemetry?.pipeline?.runId || null,
+    )
     : { exists: false };
   const receipt = receiptState?.receipt || null;
   // Distinguish the two ways a >1-hub report can still name exactly one
@@ -2479,11 +2578,11 @@ export function buildJobCompletionAssessment(
             existing.unavailableDetailDropped = Math.max(existing.unavailableDetailDropped || 0, unavailableDetailDropped);
           }
           if (source?.locationScopeUnenforced === true) existing.locationScopeUnenforced = true;
-          const configuredCaps = configuredSourceCaps(source, stopReason);
-          if (configuredCaps.length > 0) {
+          const collectionCaps = collectionBoundCaps(source, stopReason);
+          if (collectionCaps.length > 0) {
             existing.configuredCaps = [...new Map([
               ...(existing.configuredCaps || []),
-              ...configuredCaps,
+              ...collectionCaps,
             ].map(cap => [`${cap.type}:${cap.limit}`, cap])).values()];
             existing.configuredCap = existing.configuredCaps[0] || null;
           }
@@ -2503,8 +2602,8 @@ export function buildJobCompletionAssessment(
           warning,
           countrySkipped,
           locationScopeUnenforced: source?.locationScopeUnenforced === true,
-          configuredCaps: configuredSourceCaps(source, stopReason),
-          configuredCap: configuredSourceCaps(source, stopReason)[0] || null,
+          configuredCaps: collectionBoundCaps(source, stopReason),
+          configuredCap: collectionBoundCaps(source, stopReason)[0] || null,
         });
       }
     }
@@ -2527,7 +2626,7 @@ export function buildJobCompletionAssessment(
     ))
   ));
   const unprovenSources = applicableCoverageSources.filter(source => source.total == null && !source.truncated && !source.isExhausted);
-  const configuredCapSources = applicableCoverageSources.filter(source => (source.configuredCaps || []).length > 0);
+  const collectionCapSources = applicableCoverageSources.filter(source => (source.configuredCaps || []).length > 0);
   const unprovenUncappedSources = unprovenSources.filter(source => !source.configuredCap);
   // A completed terminal receipt can legitimately follow a user's explicit
   // Skip/Continue on a source card. Keep that source warning visible in the
@@ -2562,7 +2661,7 @@ export function buildJobCompletionAssessment(
   // rather than calling it VERIFIED and qualifying it only later in prose.
   const hasCollectionQualifications = acceptedSourceLimitations.length > 0
     || regionUnverifiedSources.length > 0
-    || configuredCapSources.length > 0
+    || collectionCapSources.length > 0
     || unprovenSources.length > 0
     // A perfect downstream count reconciliation cannot prove an unrecorded
     // gather. Likewise, country-skipped sources must remain visible as a scope
@@ -2617,6 +2716,8 @@ export function buildJobCompletionAssessment(
   if (pipelinePhase && pipelinePhase !== 'completed' && !foreignLiveRun) gaps.push(`live search stage is \`${pipelinePhase}\``);
   if (receiptState.ambiguous) {
     gaps.push('multiple terminal receipt generations are present; no single run was selected for compact reconciliation');
+  } else if (receiptState.liveOwnerWithoutTerminalReceipt) {
+    gaps.push('the selected live run has not recorded a terminal receipt');
   } else if (receiptState.exists && !receiptCompleted) {
     gaps.push('terminal receipt is not completed');
   }
@@ -2746,8 +2847,16 @@ export function buildJobCompletionAssessment(
       : ' The board-displayed seen-history write was not retained in this process, so this verdict does not prove those listings were recorded as seen.';
   const hasExhaustedReachable = applicableCoverageSources.some(source => source.isExhausted
     && (source.total == null || source.gathered < source.total));
-  const configuredCapQualifier = configuredCapSources.length > 0
-    ? ` ${configuredCapSources.length} source(s) stopped at an explicit configured collection cap (${configuredCapSources.map(source => `\`${source.id}\` ${(source.configuredCaps || []).map(cap => `${cap.type}=${cap.limit}`).join(' + ')}`).join(', ')}); this verdict covers the collected output, not the provider's full corpus.`
+  const explicitCapSources = collectionCapSources.filter(source =>
+    (source.configuredCaps || []).some(cap => !isAutoCollectionCap(cap)));
+  const autoCapSources = collectionCapSources.filter(source =>
+    (source.configuredCaps || []).some(isAutoCollectionCap));
+  const configuredCapQualifier = collectionCapSources.length > 0
+    ? `${explicitCapSources.length > 0
+      ? ` ${explicitCapSources.length} source(s) stopped at an explicit configured collection cap (${explicitCapSources.map(source => `\`${source.id}\` ${(source.configuredCaps || []).filter(cap => !isAutoCollectionCap(cap)).map(cap => collectionCapLabel(cap, { assignment: true })).join(' + ')}`).join(', ')});`
+      : ''}${autoCapSources.length > 0
+      ? ` ${autoCapSources.length} source(s) stopped at the finite Auto collection policy (${autoCapSources.map(source => `\`${source.id}\` ${(source.configuredCaps || []).filter(isAutoCollectionCap).map(cap => collectionCapLabel(cap, { assignment: true })).join(' + ')}`).join(', ')});`
+      : ''} this verdict covers the collected output, not the provider's full corpus.`
     : '';
   // A durable receipt can prove both that the saved score-ready output was
   // written and that collection stopped short. Keep those claims separate:
@@ -2786,7 +2895,7 @@ export function buildJobCompletionAssessment(
   const boardClearQualifier = deliberatelyClearedBoards.length > 0
     ? ` ${deliberatelyClearedBoards.map(board => `Job Board \`${boardLabel(board)}\` was deliberately cleared after this run${board.clearProvenance.priorResultCount != null ? ` (prior results ${board.clearProvenance.priorResultCount})` : ''}; its result cards are no longer present`).join('; ')}.`
     : '';
-  const coverageQualifier = configuredCapSources.length > 0
+  const coverageQualifier = collectionCapSources.length > 0
     ? `${configuredCapQualifier}${unprovenUncappedSources.length > 0
       ? ` Gather completeness is also unproven for ${unprovenUncappedSources.length} uncapped source(s) (${unprovenUncappedSources.map(source => `\`${source.id}\``).join(', ')}): they reported no corpus size.`
       : ''}`
@@ -2834,7 +2943,9 @@ export function buildJobCompletionAssessment(
       ? `- Taxonomy: not attributable — ${telemetryAmbiguity}.`
       : '- Taxonomy: not retained in this process.'
     : `- Taxonomy: input ${taxonomyInput ?? '?'} · missing ${taxonomyMissing ?? '?'} · duplicated ${taxonomyDuplicated ?? '?'}${taxonomy.error ? ' · ⚠️ error recorded' : ''}${unionTaxonomyBoard ? ` · input is Job Board \`${boardLabel(unionTaxonomyBoard)}\`'s union across ${unionTaxonomyBoard.combinedSourceHubIds.length} source hub(s), so it exceeds this hub's ${scored ?? '?'} scored job(s) by design` : ''}.`;
-  const receiptLine = !receiptState.exists
+  const receiptLine = receiptState.liveOwnerWithoutTerminalReceipt
+    ? '- Terminal receipt: not recorded for the selected live run — it is incomplete until a terminal receipt is written.'
+    : !receiptState.exists
     ? '- Terminal receipt: absent — prior-process completion cannot be proven.'
     : receiptState.ambiguous
       ? `- Terminal receipt: ⚠️ ambiguous across ${receiptState.count || 2} current Job Search hubs — no receipt/snapshot generation was selected or joined.`
@@ -2904,7 +3015,7 @@ export function buildJobCompletionAssessment(
     const regionQualifier = source.locationScopeUnenforced
       ? ' · country scope is region-unverified (retained rows were not discarded)'
       : '';
-    if ((source.configuredCaps || []).length > 0) return `ℹ️ \`${source.id}\` stopped at configured ${(source.configuredCaps || []).map(cap => `${cap.type} cap ${cap.limit}`).join(' + ')} — collection intentionally bounded${regionQualifier}`;
+    if ((source.configuredCaps || []).length > 0) return `ℹ️ \`${source.id}\` stopped at ${(source.configuredCaps || []).map(collectionCapLabel).join(' + ')} — collection intentionally bounded${regionQualifier}`;
     const retainedDetail = source.retained != null && source.gathered != null && source.retained !== source.gathered
       ? ` · ${source.retained} usable row(s) retained`
       : '';
@@ -3743,6 +3854,75 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
   return `\n${lines.join('\n')}\n`;
 }
 
+// Renderer-only recovery admission state. The durable manifest section below
+// establishes what is on disk; this compact companion establishes whether the
+// mounted Job Search card actually observed it and rendered an actionable
+// continuation. Every accepted value is an enum/boolean/count — never a query,
+// location, profile fingerprint, run token, or listing value.
+const RECOVERY_OFFER_PEEK_STATES = new Set(['not-started', 'pending', 'resolved', 'failed', 'unavailable']);
+const RECOVERY_OFFER_OWNERS = new Set(['none', 'current-hub', 'other-hub', 'unknown']);
+const RECOVERY_OFFER_STAGES = new Set(['searching', 'gathered', 'unknown']);
+const RECOVERY_HUB_STATES = new Set([
+  'empty', 'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
+  'evaluating-preferences', 'scoring', 'sources-ready', 'done', 'error',
+]);
+const RECOVERY_OFFER_REASONS = new Set([
+  'no-offer', 'manual-ai-recovery-priority', 'module-queued', 'terminal-finalization',
+  'job-board-recovery-owner', 'hub-not-idle', 'owner-mismatch',
+  'location-mismatch-or-missing', 'profile-unavailable',
+  'checkpoint-profile-metadata-missing', 'current-profile-metadata-missing',
+  'profile-mismatch', 'queries-missing', 'job-board-owns-action', 'controls-locked',
+  'already-finished-with-saved-listings', 'no-saved-listings',
+]);
+
+function recoveryOfferEnum(value, allowed, fallback = 'unknown') {
+  return typeof value === 'string' && allowed.has(value) ? value : fallback;
+}
+
+function recoveryOfferReasons(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(reason => typeof reason === 'string' && RECOVERY_OFFER_REASONS.has(reason)))].slice(0, 8);
+}
+
+/**
+ * Render mounted Job Search recovery UI state supplied by the renderer. This
+ * intentionally lives beside durable recovery diagnostics so RECOVERY and FULL
+ * can distinguish a stale manifest from a peek/UI-admission failure.
+ */
+export function buildJobRecoveryOfferSnapshot(states = []) {
+  if (!Array.isArray(states) || states.length === 0) return '';
+  const rows = states
+    .filter(state => typeof state?.id === 'string' && state.id.length > 0 && state.id.length <= 1_000)
+    .slice(0, 64)
+    .map((state) => {
+      const offer = state?.recoveryOffer && typeof state.recoveryOffer === 'object' && !Array.isArray(state.recoveryOffer)
+        ? state.recoveryOffer
+        : null;
+      const hubState = recoveryOfferEnum(state?.hubState, RECOVERY_HUB_STATES);
+      if (state?.mounted !== true || !offer) {
+        return `- Hub \`${reportCorrelationDigest(state.id)}\` · state=\`${hubState}\` · renderer recovery state **not mounted at capture** (durable sidecars are assessed below).`;
+      }
+      const peek = recoveryOfferEnum(offer.peek, RECOVERY_OFFER_PEEK_STATES);
+      const owner = recoveryOfferEnum(offer.owner, RECOVERY_OFFER_OWNERS);
+      const stage = recoveryOfferEnum(offer.stage, RECOVERY_OFFER_STAGES);
+      const bannerSuppressedBy = recoveryOfferReasons(offer.bannerSuppressedBy);
+      const resumeBlockedBy = recoveryOfferReasons(offer.resumeBlockedBy);
+      const finishBlockedBy = recoveryOfferReasons(offer.finishBlockedBy);
+      const action = (name, visible, enabled, reasons) => {
+        const stateLabel = visible === true ? (enabled === true ? 'enabled' : 'disabled') : 'not offered';
+        return `${name}=${stateLabel}${reasons.length ? ` (${reasons.join(', ')})` : ''}`;
+      };
+      return `- Hub \`${reportCorrelationDigest(state.id)}\` · state=\`${hubState}\` · peek=\`${peek}\` · offer=${offer.found === true ? 'found' : 'none'} · owner=\`${owner}\` · stage=\`${stage}\` · saved-listing finish=${offer.finishedWithSavedListings === true ? 'already selected' : 'not selected'} · banner=${offer.bannerVisible === true ? 'visible' : `not visible${bannerSuppressedBy.length ? ` (${bannerSuppressedBy.join(', ')})` : ''}`} · ${action('resume', offer.resumeVisible === true, offer.resumeEnabled === true, resumeBlockedBy)} · ${action('finish', offer.finishVisible === true, offer.finishEnabled === true, finishBlockedBy)}.`;
+    });
+  if (rows.length === 0) return '';
+  return `
+## Job Recovery Offer Diagnostics
+> Renderer-side, redacted recovery admission state captured for each Job Search hub. It contains only fixed status/reason codes; the durable manifest, staging ledger, and terminal receipts are in the next section.
+
+${rows.join('\n')}
+`;
+}
+
 /**
  * File-backed crash/quit recovery facts for FULL and the focused RECOVERY
  * report lens.  Never render a prompt, AI response, job title, or job body:
@@ -3849,7 +4029,11 @@ export function formatSourceEvent(event) {
   const lastSeen = event?.lastT == null ? start : Math.round(event.lastT / 1000);
   const span = lastSeen !== start ? `→+${lastSeen}s` : '';
   const repeats = event?.repeats > 1 ? ` ×${event.repeats}` : '';
-  const detail = event?.detail ? ' (detail recorded)' : '';
+  // Free-form details can contain the generated query, URL, or job data. The
+  // q/p structural progress tokens are safe and make a live crawl auditable.
+  const progress = String(event?.detail || '').match(/\bq\s*(\d+)\s*\/\s*(\d+)\b[^\n]*?\bp\s*(\d+)\b/i);
+  const detail = progress ? ` · q ${progress[1]}/${progress[2]} · p ${progress[3]}`
+    : event?.detail ? ' (detail recorded)' : '';
   return `${status}${code}@+${start}s${span}${repeats}${detail}`;
 }
 
@@ -4699,6 +4883,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         initial: 'Initial career-file run',
         'rerun-button': 'Re-run Search button',
         'job-board-scan': 'Job Board scan',
+        'manual-ai-resume': 'Resume saved job search',
         'crash-resume': 'Crash-recovery Resume',
         unknown: 'Unknown/legacy caller',
       }[p.runOrigin] || String(p.runOrigin || 'Unknown/legacy caller');
@@ -4885,16 +5070,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // as one: old telemetry retained only the provider's relative-age input.
       lines.push(`- **Legacy provider age input: ${s.maxAgeDays} day(s)** — this run predates exact automatic-window telemetry, so its local-midnight boundary and completion anchor were not retained.`);
     }
-    const collectionLimits = s.collectionLimits;
-    if (collectionLimits && typeof collectionLimits === 'object') {
-      const jobs = Number.isFinite(collectionLimits.jobsPerPlatform) && collectionLimits.jobsPerPlatform > 0
-        ? `${Math.floor(collectionLimits.jobsPerPlatform)} job(s)/platform`
-        : 'unlimited jobs/platform';
-      const pages = Number.isFinite(collectionLimits.pagesPerPlatform) && collectionLimits.pagesPerPlatform > 0
-        ? `${Math.floor(collectionLimits.pagesPerPlatform)} browser page(s)/search`
-        : `all browser pages/search (safety backstop ${JOB_COLLECTION_PAGE_CEILING})`;
-      lines.push(`- **Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform; page depth applies to each generated browser query and to paginated API requests (API page totals are summed across fan-out queries, not treated as one deepest page).`);
-    }
+    const collectionLimitsLine = formatCollectionLimitsLine(s.collectionLimits);
+    if (collectionLimitsLine) lines.push(`- ${collectionLimitsLine}`);
     if (s.ageBySource && Object.keys(s.ageBySource).length > 0) {
       lines.push(`- Per-source age outcome (dropped → kept · oldest surviving posting):`);
       for (const [k, a] of Object.entries(s.ageBySource)) {
@@ -5292,12 +5469,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           flag = ' ⚠️ (successive API pages produced no new rows; pagination stopped to avoid repeats, so later coverage is unproven.)';
         } else if (apiStops.has('page-ceiling') && !sourceCaps(v).some(cap => cap.type === 'pages-per-platform')) {
           flag = ' ⚠️ (the API request-page safety ceiling ended this query before provider exhaustion was proven.)';
-        } else if (apiStops.has('jobs-per-platform') || apiStops.has('pages-per-platform')) {
+        } else if (apiStops.has('jobs-per-platform') || apiStops.has('pages-per-platform') || apiStops.has('auto-jobs-per-platform') || apiStops.has('auto-page-budget')) {
           const capLabels = sourceCaps(v)
-            .filter(cap => (cap.type === 'jobs-per-platform' && apiStops.has('jobs-per-platform'))
-              || (cap.type === 'pages-per-platform' && apiStops.has('pages-per-platform')))
-            .map(cap => `${cap.type === 'jobs-per-platform' ? 'Jobs' : 'Pages'} per platform limit (${cap.limit})`);
-          flag = ` ⚠️ (stopped by the configured ${capLabels.length ? capLabels.join(' + ') : 'collection limit'}; this is a user cap, not provider exhaustion.)`;
+            .filter(cap => (['jobs-per-platform', 'auto-jobs-per-platform'].includes(cap.type) && (apiStops.has('jobs-per-platform') || apiStops.has('auto-jobs-per-platform')))
+              || (['pages-per-platform', 'auto-pages-per-platform'].includes(cap.type) && (apiStops.has('pages-per-platform') || apiStops.has('auto-page-budget'))))
+            .map(cap => `${cap.type.startsWith('auto-') ? 'Auto ' : ''}${cap.type.includes('jobs') ? 'Jobs' : 'Pages'} per platform limit (${cap.limit})`);
+          flag = ` ⚠️ (stopped by the ${capLabels.length ? capLabels.join(' + ') : 'collection limit'}; this is a bounded collection policy, not provider exhaustion.)`;
         } else if (apiStops.has('provider-total')) {
           flag = ' ℹ️ (API pagination reached the provider-reported total; page count is summed across fan-out queries, not a deepest page.)';
         } else if (apiStops.has('short-page')) {
@@ -5984,6 +6161,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - Run \`${reportOpaqueIdentifier(intent.runId)}\` · origin \`${receiptIdentifier(intent.runOrigin, 'unknown')}\` · career input \`${receiptIdentifier(intent.profileInputMode, 'unknown')}\``);
       lines.push(`  - ${nonnegativeCount(intent.queries) ?? '?'} quer${intent.queries === 1 ? 'y' : 'ies'} (values withheld)`);
       lines.push(`  - ${intentSources.length} selected source(s)${intentSources.length ? `: ${intentSources.map(id => `\`${id}\``).join(', ')}` : ''}`);
+      const intentCollectionLimitsLine = formatCollectionLimitsLine(intent.collectionLimits);
+      if (intentCollectionLimitsLine) lines.push(`  - ${intentCollectionLimitsLine}`);
       const intentWindowLine = automaticDateWindowLine(intent.searchWindow, 'launch time');
       if (intentWindowLine) {
         lines.push(`  - ${intentWindowLine}`);
@@ -7497,6 +7676,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             lines.push(`    - AI-authored quality review: ${formatReview('résumé', qualityReview.resume)}; ${formatReview('cover letter', qualityReview.coverLetter)}`);
           }
         }
+      }
+      // A chronology finding can contain names, dates, and letter prose in its
+      // repair detail. The Local AI producer projects only this fixed check's
+      // aggregate receipt, and this renderer refuses every other shape so a
+      // hand-edited telemetry object cannot turn a bug report into content
+      // export.
+      const chronology = a.localAi?.chronology;
+      if (chronology?.checkId === 'ended-role-current-employment') {
+        const status = chronology.status === 'pass' ? 'passed'
+          : chronology.status === 'issue' ? 'failed'
+            : 'not recorded';
+        const boundedCount = value => Number.isInteger(value) && value >= 0
+          ? Math.min(value, 999)
+          : null;
+        const referenceMonth = /^\d{4}-(?:0[1-9]|1[0-2])$/u.test(String(chronology.referenceMonth || ''))
+          ? chronology.referenceMonth
+          : null;
+        const endedRoleCount = boundedCount(chronology.endedRoleCount);
+        const failureCount = boundedCount(chronology.failureCount);
+        const finalArtifact = chronology.finalArtifactPassedHostCheck === true
+          ? 'passed'
+          : chronology.finalArtifactPassedHostCheck === false ? 'did not pass' : 'not recorded';
+        lines.push(`- Ended-role/current-employment host check \`ended-role-current-employment\`: **${status}**${referenceMonth ? ` · frozen reference month ${referenceMonth}` : ''}${endedRoleCount != null ? ` · explicitly ended roles ${endedRoleCount}` : ''}${failureCount != null ? ` · failure count ${failureCount}` : ''} · final accepted artifact ${finalArtifact}.`);
       }
     }
     // A generation failure commonly happens before any document markup exists

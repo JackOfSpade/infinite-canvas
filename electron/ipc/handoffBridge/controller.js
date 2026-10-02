@@ -1,6 +1,7 @@
 import { CONSTANTS } from './constants.js';
 import { STATUS_SNAPSHOT_EXAMPLE } from './contracts.js';
 import { sanitizeActivityItem } from './log.js';
+import { isUiRestartContext } from './restartContext.js';
 
 // The controller deliberately has no Electron, filesystem, network, or timer
 // imports.  Its ports are supplied by index.js (and, more importantly, by the
@@ -654,6 +655,16 @@ export function createHandoffBridgeController(options = {}) {
   } = {}) {
     if (!currentRuntime(generation, activeEngine)) return false;
     if (restartConfirmed) return true;
+    // Only ui.js can mint this capability, and only after its sender/window
+    // guard. A UI New/Continue press is already the affirmative action, so do
+    // not turn Copy starter into a second confirmation. Direct controller and
+    // internal callers lack this identity and retain the native restart sheet.
+    if (isUiRestartContext(dialogContext)) {
+      restartConfirmed = true;
+      humanAction();
+      change();
+      return true;
+    }
     const details = await restartDetails(laneOrds, { generation, activeEngine });
     if (!currentRuntime(generation, activeEngine)) return false;
     const accepted = await confirm('restart', details, dialogContext);
@@ -1454,7 +1465,9 @@ export function createHandoffBridgeController(options = {}) {
     // `restartContext` is an opaque main-process capability created by ui.js
     // after its sender/window guard. It is never copied into an engine call,
     // status, audit record, or IPC result.
-    const dialogContext = args?.restartContext && typeof args.restartContext === 'object'
+    // Do not trust an object supplied to this public controller port. Only the
+    // main-owned identity minted by ui.js may suppress the restart sheet.
+    const dialogContext = isUiRestartContext(args?.restartContext)
       ? args.restartContext : null;
     const generation = lifecycleGeneration;
     const activeEngine = engine;

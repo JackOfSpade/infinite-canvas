@@ -1,5 +1,18 @@
 import { jobTitleCompanyLocationKey, jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
 
+// A running Search temporarily drops out of the Board's terminal input
+// signature. Keep this canonical list beside the snapshot policy so the Board
+// cannot accidentally treat a queued or scoring Search as a completed input.
+export const ACTIVE_JOB_SEARCH_STATES = new Set([
+  'queued',
+  'parsing',
+  'interpreting-preferences',
+  'querying',
+  'searching',
+  'evaluating-preferences',
+  'scoring',
+]);
+
 /**
  * Merge the scored-job arrays from several Job Search Modules into one deduped
  * list for the Job Board Module. Pure + unit-tested (no ReactFlow runtime).
@@ -593,6 +606,56 @@ export function combineSignature(modules) {
   return requiresStructuredFormat
     ? `8:${JSON.stringify(entries)}`
     : legacySignature;
+}
+
+/**
+ * Keep an already-valid Board cascade available while one of the same
+ * connected Searches is in a transient run state. The terminal signature
+ * deliberately represents such a Search as `state:<hubState>` while it is
+ * working; that is not yet proof that the previously combined cards are
+ * obsolete. Once every Search is terminal, ordinary signature staleness
+ * applies again.
+ *
+ * A topology change must still hide immediately, even if another Search is
+ * active. Compare the exact connected id set to the last successful Combine
+ * before preserving the snapshot.
+ */
+export function shouldKeepCompletedBoardSnapshotVisible({
+  boardHubState = '',
+  boardStale = false,
+  boardLocked = false,
+  combineSignature: priorSignature = null,
+  completedModules = [],
+  connectedModules = [],
+} = {}) {
+  if (boardHubState !== 'done' || boardStale || boardLocked || isLegacyCombineSignature(priorSignature)) return false;
+  const parsed = parseCombineSignature(priorSignature);
+  if (!parsed.valid || parsed.entries.length === 0) return false;
+
+  const priorById = new Map(parsed.entries);
+  const connected = Array.isArray(connectedModules) ? connectedModules : [];
+  const completedById = new Map(
+    (Array.isArray(completedModules) ? completedModules : [])
+      .filter(module => typeof module?.id === 'string' && !!module.id)
+      .map(module => [module.id, module]),
+  );
+  // Exact topology must match; duplicate/malformed module records fail closed.
+  if (priorById.size !== parsed.entries.length || priorById.size !== connected.length) return false;
+  const seenConnectedIds = new Set();
+  let hasActiveSearch = false;
+  for (const module of connected) {
+    if (!module?.id || seenConnectedIds.has(module.id) || !priorById.has(module.id)) return false;
+    seenConnectedIds.add(module.id);
+    if (ACTIVE_JOB_SEARCH_STATES.has(module.hubState)) {
+      hasActiveSearch = true;
+      continue;
+    }
+    // An active sibling must not conceal a completed Search whose output
+    // already changed; that remains ordinary stale-input evidence.
+    const completed = completedById.get(module.id);
+    if (!completed || completed.fingerprint !== priorById.get(module.id)) return false;
+  }
+  return hasActiveSearch;
 }
 
 /**

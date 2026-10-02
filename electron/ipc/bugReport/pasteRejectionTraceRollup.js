@@ -61,6 +61,14 @@ const MAX_TRACE_FILE_BYTES = 512_000;
 // (localAiApplication.js's own PASTE_REJECTION_TRACE_FILE), restated for the
 // same reason.
 const PASTE_REJECTION_TRACE_FILE = 'Paste Rejections.json';
+const HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
+const PASTE_APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
+const PASTE_REJECTION_REASONS = new Set([
+  'STALE_HANDOFF_ECHO',
+  'DOMAIN_VALIDATION_FAILED',
+  'VALIDATION_FAILED',
+  'SCHEMA_INVALID',
+]);
 
 function boundedInt(value, max) {
   const n = Number(value);
@@ -93,14 +101,19 @@ function boundedCheckFingerprints(value, allowedIds) {
 function boundedRow(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const atMs = typeof raw.at === 'string' ? Date.parse(raw.at) : NaN;
-  const stage = typeof raw.stage === 'string' ? raw.stage.slice(0, 40) : '';
+  const stage = typeof raw.stage === 'string' && PASTE_APPLICATION_STAGES.has(raw.stage) ? raw.stage : '';
   if (!Number.isFinite(atMs) || !stage) return null;
   const checkIds = boundedCheckIds(raw.checkIds);
   return {
-    at: raw.at,
+    // Normalize rather than rendering an arbitrary parseable date string from
+    // disk. The writer uses ISO already; this keeps a hand-edited receipt
+    // from smuggling whitespace or extra text through a date-shaped field.
+    at: new Date(atMs).toISOString(),
     atMs,
     stage,
-    reason: typeof raw.reason === 'string' ? raw.reason.slice(0, 60) : 'unknown',
+    // Rejection reasons are protocol codes. Do not preserve arbitrary text
+    // from a hand-edited sidecar/receipt merely because it fits a length cap.
+    reason: PASTE_REJECTION_REASONS.has(raw.reason) ? raw.reason : 'unknown',
     revision: boundedInt(raw.revision, 1_000_000),
     errorCount: boundedInt(raw.errorCount, 10_000),
     uncodedErrors: boundedInt(raw.uncodedErrors, 10_000),
@@ -172,28 +185,91 @@ function longestRun(rowsOldestFirst) {
   };
 }
 
-// Reads and bounds one job's durable trace. Every failure mode — absent file,
-// a symlink where a regular file belongs, a file too large to trust, an
-// unparsable or non-array body — collapses to the same 'unreadable'/'absent'
-// state rather than throwing or rendering an empty-but-successful list: a
-// report must never let "the sidecar could not be read" read as "nothing
-// happened" (this file's own header rule, restated at the call site below).
-function readJobTrace(traceFilePath) {
+// A report may inspect a canvas supplied by someone else. Do not treat lexical
+// containment as ownership: an ancestor `.local-ai`, `jobs`, or
+// `handoff-receipts` symlink redirects an otherwise-safe looking filename
+// outside the canvas. This is deliberately shared by the live sidecar and
+// completed-save receipt readers so their privacy boundary cannot drift.
+function ownedTraceFileState(canvasRoot, ownedRoot, filePath) {
+  const resolvedCanvasRoot = path.resolve(canvasRoot);
+  const resolvedOwnedRoot = path.resolve(ownedRoot);
+  const resolvedFilePath = path.resolve(filePath);
+  if (!isWithinDirectory(resolvedCanvasRoot, resolvedOwnedRoot)
+    || !isWithinDirectory(resolvedOwnedRoot, resolvedFilePath)) return { state: 'unreadable' };
+  try {
+    const canvasStat = fs.lstatSync(resolvedCanvasRoot);
+    if (!canvasStat.isDirectory() || canvasStat.isSymbolicLink()) return { state: 'unreadable' };
+    let current = resolvedCanvasRoot;
+    const relativeRoot = path.relative(resolvedCanvasRoot, resolvedOwnedRoot);
+    for (const component of relativeRoot ? relativeRoot.split(path.sep) : []) {
+      if (!component || component === '.' || component === '..') return { state: 'unreadable' };
+      current = path.join(current, component);
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return { state: 'unreadable' };
+    }
+  } catch (error) {
+    return { state: error?.code === 'ENOENT' ? 'absent' : 'unreadable' };
+  }
   let stat;
   try {
-    stat = fs.lstatSync(traceFilePath);
+    stat = fs.lstatSync(resolvedFilePath);
   } catch (error) {
     return { state: error?.code === 'ENOENT' ? 'absent' : 'unreadable' };
   }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_TRACE_FILE_BYTES) return { state: 'unreadable' };
+  try {
+    const realCanvasRoot = fs.realpathSync(resolvedCanvasRoot);
+    const realOwnedRoot = fs.realpathSync(resolvedOwnedRoot);
+    const realFilePath = fs.realpathSync(resolvedFilePath);
+    if (!isWithinDirectory(realCanvasRoot, realOwnedRoot)
+      || !isWithinDirectory(realOwnedRoot, realFilePath)) return { state: 'unreadable' };
+  } catch {
+    return { state: 'unreadable' };
+  }
+  return { state: 'ok', path: resolvedFilePath };
+}
+
+// Reads and bounds one job's durable trace. Every failure mode — absent file,
+// a symlink at any owned-path boundary, a file too large to trust, an
+// unparsable or non-array body — collapses to the same 'unreadable'/'absent'
+// state rather than throwing or rendering an empty-but-successful list: a
+// report must never let "the sidecar could not be read" read as "nothing
+// happened" (this file's own header rule, restated at the call site below).
+function readJobTrace(canvasRoot, jobsRoot, traceFilePath) {
+  const trusted = ownedTraceFileState(canvasRoot, jobsRoot, traceFilePath);
+  if (trusted.state !== 'ok') return trusted;
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(traceFilePath, 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(trusted.path, 'utf8'));
   } catch {
     return { state: 'unreadable' };
   }
   if (!Array.isArray(parsed)) return { state: 'unreadable' };
   return { state: 'ok', rows: parsed.map(boundedRow).filter(Boolean) };
+}
+
+// Successful Local-AI saves intentionally remove the private job directory.
+// Since receipt v2, the app carries a strict metadata-only projection of its
+// rejection trace in the terminal receipt so the current card remains
+// diagnosable after that cleanup. This reader never discovers files by
+// directory enumeration and validates both the receipt's canvas ownership and
+// the same row whitelist used for the live sidecar above.
+function readSavedReceiptTrace(canvasRoot, ownerCanvasFilePath, jobId) {
+  const resolvedCanvasRoot = path.resolve(canvasRoot);
+  const localAiRoot = path.join(resolvedCanvasRoot, '.local-ai');
+  const receiptsRoot = path.join(localAiRoot, HANDOFF_RECEIPTS_DIR);
+  const receiptPath = path.join(receiptsRoot, `${jobId}.json`);
+  const trusted = ownedTraceFileState(resolvedCanvasRoot, receiptsRoot, receiptPath);
+  if (trusted.state !== 'ok') return trusted;
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(trusted.path, 'utf8')); }
+  catch { return { state: 'unreadable' }; }
+  if (!receipt || typeof receipt !== 'object' || receipt.version !== 2 || receipt.jobId !== jobId
+    || receipt.status !== 'imported' || typeof receipt.canvasFilePath !== 'string'
+    || path.resolve(receipt.canvasFilePath) !== path.resolve(ownerCanvasFilePath)) return { state: 'absent' };
+  const trace = receipt.pasteRejectionTrace;
+  if (!trace || typeof trace !== 'object' || trace.version !== 1 || !Array.isArray(trace.rows)) return { state: 'absent' };
+  return { state: 'ok', rows: trace.rows.map(boundedRow).filter(Boolean), source: 'terminal-receipt' };
 }
 
 function formatRow(row) {
@@ -287,10 +363,14 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
     }
     let trace;
     try {
-      trace = readJobTrace(traceFilePath);
+      trace = readJobTrace(canvasRoot, jobsRoot, traceFilePath);
     } catch {
       trace = { state: 'unreadable' };
     }
+    // A completed save removes the live sidecar along with private career
+    // context. Its receipt is an exact job+canvas-bound fallback, not a
+    // broader scan or a trust of the card's requested output path.
+    if (trace.state === 'absent') trace = readSavedReceiptTrace(canvasRoot, ownerCanvasFilePath, jobId);
     if (trace.state === 'absent') {
       lines.push(`- ${jobLabel(item)}: not retained (no rejection trace on disk — either no paste round for this job was ever rejected, or the job folder is gone).`);
       continue;
@@ -304,7 +384,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
     const runLabel = run.length > 1
       ? `longest same-cause run: ${run.length} consecutive rejection(s) — stage \`${run.row.stage}\`, check${run.row.checkIds.length > 1 ? 's' : ''} ${run.row.checkIds.map(id => `${id}${run.row.checkFingerprints[id] ? ` (${run.row.checkFingerprints[id]})` : ''}`).join(', ')}`
       : 'no repeated cause — every retained rejection differs in stage, check id, or branch';
-    lines.push(`- ${jobLabel(item)} · ${rows.length} rejection(s) retained · ${runLabel}`);
+    lines.push(`- ${jobLabel(item)} · ${rows.length} rejection(s) retained${trace.source === 'terminal-receipt' ? ' · preserved with successful save' : ''} · ${runLabel}`);
     const newestFirst = [...rows].sort((a, b) => b.atMs - a.atMs).slice(0, MAX_ROWS_PER_JOB);
     for (const row of newestFirst) lines.push(formatRow(row));
     if (rows.length > newestFirst.length) {
@@ -314,7 +394,7 @@ export function buildPasteRejectionTraceMarkdown(canvasFilePath, localApplicatio
 
   return `
 ## Local Application Paste Rejection Trace (durable)
-> Reads each current job card's own \`Paste Rejections.json\` sidecar (localAiApplication.js's PASTE_REJECTION_TRACE_FILE) — a durable, per-job record that survives an app restart, unlike the process-local Lifecycle section above. It exists to answer one question a restart mid-loop otherwise erases: is a paste handoff stuck repeating the SAME cause? "Longest same-cause run" is recomputed from these rows directly rather than trusted from any single row's own stored counter, because that counter is kept in a process-local map a restart resets.
+> Reads each current job card's own \`Paste Rejections.json\` sidecar (localAiApplication.js's PASTE_REJECTION_TRACE_FILE), with a metadata-only terminal-save receipt fallback after successful cleanup removes the private job folder. It exists to answer one question a restart mid-loop otherwise erases: is a paste handoff stuck repeating the SAME cause? "Longest same-cause run" is recomputed from these rows directly rather than trusted from any single row's own stored counter, because that counter is kept in a process-local map a restart resets.
 > Metadata only: at/stage/reason/revision/errorCount/checkIds/checkFingerprints/rejectionStreak. Never the letter text, prompts, pasted responses, handoff codes, or validation detail text — the same privacy rule pasteHandoffDiagnostics.js states for the process-local section above.
 - Scanned ${jobs.length} of ${candidates.length} current job card(s) carrying a Local AI id (cap ${MAX_JOBS_SCANNED})${scanNote} · rows shown newest-first, capped at ${MAX_ROWS_PER_JOB} per job.
 ${lines.join('\n')}

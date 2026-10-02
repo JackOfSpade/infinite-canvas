@@ -41,7 +41,7 @@ import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
-import { buildJobBoardDiagnostics, buildJobLinkSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import { buildJobBoardDiagnostics, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
 import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
@@ -187,6 +187,124 @@ export default [
         return { shapeBackstop: true };
       } finally {
         _resetPasteHandoffDiagnostics();
+      }
+    },
+  },
+  {
+    name: 'the durable paste rejection trace survives successful Local-AI cleanup through its metadata-only terminal receipt',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-receipt-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '55555555-5555-4555-8555-555555555555';
+      const receiptDir = path.join(dir, '.local-ai', 'handoff-receipts');
+      fs.mkdirSync(receiptDir, { recursive: true });
+      fs.writeFileSync(path.join(receiptDir, `${jobId}.json`), JSON.stringify({
+        version: 2, jobId, status: 'imported', canvasFilePath: canvas,
+        pasteRejectionTrace: {
+          version: 1,
+          rows: [{
+            at: '2026-10-01T18:20:54.929Z', stage: 'cover-letter', reason: 'PRIVATE_REASON_MUST_NOT_RENDER', revision: 2,
+            errorCount: 2, uncodedErrors: 0, rejectionStreak: 1,
+            checkIds: ['compound-hyphenation', 'repeated-phrase'],
+            checkFingerprints: { 'compound-hyphenation': 'fb56f51c', 'repeated-phrase': '4d80f5b8' },
+            response: 'PRIVATE_RESPONSE_MUST_NOT_RENDER',
+          }],
+        },
+      }));
+      try {
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [{
+          nodeId: 'saved-card', title: 'Private Role', company: 'Private Employer',
+          localApplication: { id: jobId, canvasFilePath: canvas, status: 'saved' },
+        }]);
+        assert(markdown.includes('1 rejection(s) retained · preserved with successful save')
+          && markdown.includes('compound-hyphenation (fb56f51c)')
+          && !markdown.includes('PRIVATE_REASON_MUST_NOT_RENDER')
+          && !markdown.includes('PRIVATE_RESPONSE_MUST_NOT_RENDER')
+          && !markdown.includes('Private Role') && !markdown.includes(jobId),
+        `a saved card must retain only its whitelisted rejection metadata after cleanup, got: ${markdown}`);
+        return { receiptFallback: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'the saved Local-AI rejection receipt never follows a symlinked receipt directory',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-receipt-link-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-receipt-outside-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '56565656-5656-4565-8565-565656565656';
+      const receiptsLink = path.join(dir, '.local-ai', 'handoff-receipts');
+      try {
+        fs.mkdirSync(path.dirname(receiptsLink), { recursive: true });
+        try {
+          fs.symlinkSync(outside, receiptsLink, 'dir');
+        } catch (error) {
+          // Windows may deny symlink creation without Developer Mode/admin
+          // rights. The reader remains covered on platforms that support the
+          // fixture; do not turn unavailable OS capability into a suite fail.
+          if (['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) return { skipped: 'symlink creation unavailable' };
+          throw error;
+        }
+        fs.writeFileSync(path.join(outside, `${jobId}.json`), JSON.stringify({
+          version: 2, jobId, status: 'imported', canvasFilePath: canvas,
+          pasteRejectionTrace: {
+            version: 1,
+            rows: [{
+              at: '2026-10-01T18:20:54.929Z', stage: 'cover-letter', reason: 'PRIVATE_REASON_MUST_NOT_RENDER',
+              checkIds: ['redundancy'], response: 'PRIVATE_RESPONSE_MUST_NOT_RENDER',
+            }],
+          },
+        }));
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [{
+          nodeId: 'saved-card', localApplication: { id: jobId, canvasFilePath: canvas, status: 'saved' },
+        }]);
+        assert(markdown.includes('not retained (rejection trace file could not be read')
+          && !markdown.includes('preserved with successful save')
+          && !markdown.includes('PRIVATE_REASON_MUST_NOT_RENDER')
+          && !markdown.includes('PRIVATE_RESPONSE_MUST_NOT_RENDER'),
+        `a receipt directory that resolves outside its canvas must be unreadable, got: ${markdown}`);
+        return { symlinkRejected: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'the live Local-AI rejection sidecar never follows a symlinked jobs directory',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-jobs-link-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-paste-rejection-jobs-outside-'));
+      const canvas = path.join(dir, 'canvas.canvas');
+      const jobId = '57575757-5757-4575-8575-575757575757';
+      const jobsLink = path.join(dir, '.local-ai', 'jobs');
+      try {
+        fs.mkdirSync(path.dirname(jobsLink), { recursive: true });
+        try {
+          fs.symlinkSync(outside, jobsLink, 'dir');
+        } catch (error) {
+          if (['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) return { skipped: 'symlink creation unavailable' };
+          throw error;
+        }
+        const outsideJobDir = path.join(outside, jobId);
+        fs.mkdirSync(outsideJobDir, { recursive: true });
+        fs.writeFileSync(path.join(outsideJobDir, 'Paste Rejections.json'), JSON.stringify([{
+          at: '2026-10-01T18:20:54.929Z', stage: 'cover-letter', reason: 'PRIVATE_REASON_MUST_NOT_RENDER',
+          checkIds: ['redundancy'], response: 'PRIVATE_RESPONSE_MUST_NOT_RENDER',
+        }]));
+        const markdown = buildPasteRejectionTraceMarkdown(canvas, [{
+          nodeId: 'queued-card', localApplication: { id: jobId, canvasFilePath: canvas, status: 'queued' },
+        }]);
+        assert(markdown.includes('not retained (rejection trace file could not be read')
+          && !markdown.includes('PRIVATE_REASON_MUST_NOT_RENDER')
+          && !markdown.includes('PRIVATE_RESPONSE_MUST_NOT_RENDER'),
+        `a jobs directory that resolves outside its canvas must be unreadable, got: ${markdown}`);
+        return { symlinkRejected: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
       }
     },
   },
@@ -460,6 +578,78 @@ export default [
           && !ambiguous.includes('terminal receipt is not completed')
           && !ambiguous.includes('12 job(s)'),
         'multiple completed current receipts must state ambiguity rather than borrowing either hub’s snapshot or claiming one failed');
+
+        // A currently gathering third hub has an exact live owner/run but no
+        // terminal receipt yet. Historical terminal receipts must not obscure
+        // that active incomplete run by making this compact assessment ambiguous.
+        const liveHub = 'receipt-snapshot-live-hub';
+        const liveRun = 'receipt-snapshot-live-run';
+        const telemetry = getJobsTelemetry();
+        Object.assign(telemetry, {
+          nodeId: liveHub, search: null, resolves: {}, scoring: null, bucketing: null, history: null,
+          pipeline: { runId: liveRun, phase: 'gathering-sources', active: true },
+        });
+        try {
+          const live = buildJobCompletionAssessment(canvas, new Set([hubA, hubB, liveHub]), [], 0, new Set([hubA, hubB, liveHub]));
+          assert(live.includes('⚠️ **INDETERMINATE**')
+            && live.includes('live search stage is `gathering-sources`')
+            && live.includes('Terminal receipt: not recorded for the selected live run')
+            && live.includes('the selected live run has not recorded a terminal receipt')
+            && !live.includes('ambiguous across')
+            && !live.includes('multiple terminal receipt generations'),
+          `a known active hub must stay selected and incomplete despite historical receipts, got:\n${live}`);
+        } finally {
+          __resetJobsTelemetryForTests();
+        }
+
+        // Legacy receipts are unscoped filenames. A different recorded owner
+        // in that old format is still not evidence for the current live hub.
+        const legacyCanvas = path.join(dir, 'legacy-owner-mismatch.canvas');
+        fs.writeFileSync(lastRunReceiptPathForCanvas(legacyCanvas), JSON.stringify({
+          runId: 'legacy-owner-a-run', nodeId: hubA,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 3 }, cleanup: { attempted: true, cleared: true },
+        }));
+        const legacyTelemetry = getJobsTelemetry();
+        Object.assign(legacyTelemetry, {
+          nodeId: liveHub, search: null, resolves: {}, scoring: null, bucketing: null, history: null,
+          pipeline: { runId: liveRun, phase: 'gathering-sources', active: true },
+        });
+        try {
+          const legacyMismatch = buildJobCompletionAssessment(legacyCanvas, new Set([hubA, liveHub]), [], 0, new Set([hubA, liveHub]));
+          assert(legacyMismatch.includes('Terminal receipt: not recorded for the selected live run')
+            && !legacyMismatch.includes('legacy-owner-a-run')
+            && !legacyMismatch.includes('Terminal receipt: completed'),
+          `a multi-hub legacy receipt for another owner must not be borrowed by the live run, got:\n${legacyMismatch}`);
+        } finally {
+          __resetJobsTelemetryForTests();
+        }
+
+        // A same-hub rerun is also a different generation. Neither the modern
+        // owner-scoped receipt nor its legacy predecessor may certify a live
+        // run just because the owner happens to match.
+        writeGeneration(liveHub, 'live-hub-prior-run', 7);
+        const sameOwnerTelemetry = getJobsTelemetry();
+        Object.assign(sameOwnerTelemetry, {
+          nodeId: liveHub, search: null, resolves: {}, scoring: null, bucketing: null, history: null,
+          pipeline: { runId: liveRun, phase: 'gathering-sources', active: true },
+        });
+        try {
+          const sameOwnerScoped = buildJobCompletionAssessment(canvas, new Set([liveHub]), [], 0, new Set([liveHub]));
+          assert(sameOwnerScoped.includes('Terminal receipt: not recorded for the selected live run')
+            && !sameOwnerScoped.includes('Terminal receipt: completed'),
+          `a prior scoped receipt for the same live hub must not certify its rerun, got:\n${sameOwnerScoped}`);
+
+          fs.writeFileSync(lastRunReceiptPathForCanvas(legacyCanvas), JSON.stringify({
+            runId: 'live-hub-prior-run', nodeId: liveHub,
+            terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 7 }, cleanup: { attempted: true, cleared: true },
+          }));
+          const sameOwnerLegacy = buildJobCompletionAssessment(legacyCanvas, new Set([liveHub]), [], 0, new Set([liveHub]));
+          assert(sameOwnerLegacy.includes('Terminal receipt: not recorded for the selected live run')
+            && !sameOwnerLegacy.includes('Terminal receipt: completed'),
+          `a prior legacy receipt for the same live hub must not certify its rerun, got:\n${sameOwnerLegacy}`);
+        } finally {
+          __resetJobsTelemetryForTests();
+        }
 
         // A selected live hub is the only admissible path to a matching
         // generation; matching by owner alone is insufficient after a rerun.
@@ -1151,6 +1341,60 @@ export default [
     },
   },
 {
+    name: 'job recovery reports pair durable sidecars with redacted renderer offer/actionability state',
+    run: () => {
+      const nodeId = 'recovery-offer-hub-private-id';
+      const states = [{
+        id: nodeId,
+        mounted: true,
+        hubState: 'empty',
+        recoveryOffer: {
+          peek: 'resolved', found: true, owner: 'current-hub', stage: 'searching',
+          finishedWithSavedListings: false, bannerVisible: true, bannerSuppressedBy: [],
+          resumeVisible: true, resumeEnabled: false, resumeBlockedBy: ['controls-locked', 'PRIVATE_QUERY'],
+          finishVisible: false, finishEnabled: false,
+          finishBlockedBy: ['no-saved-listings', 'PRIVATE_FINGERPRINT'],
+          query: 'PRIVATE QUERY', profileFingerprint: 'PRIVATE FINGERPRINT', runId: 'PRIVATE RUN ID',
+        },
+      }, {
+        id: 'nested-unmounted-hub-private-id', mounted: false, hubState: 'done', recoveryOffer: null,
+      }];
+      const direct = buildJobRecoveryOfferSnapshot(states);
+      assert(direct.includes('## Job Recovery Offer Diagnostics')
+        && direct.includes('peek=`resolved`')
+        && direct.includes('banner=visible')
+        && direct.includes('resume=disabled (controls-locked)')
+        && direct.includes('finish=not offered (no-saved-listings)')
+        && direct.includes('renderer recovery state **not mounted at capture**'),
+      'the renderer offer snapshot states peek, banner, actions, blockers, and unmounted nested hubs');
+      for (const secret of ['PRIVATE QUERY', 'PRIVATE FINGERPRINT', 'PRIVATE RUN ID', nodeId, 'nested-unmounted-hub-private-id']) {
+        assert(!direct.includes(secret), `recovery offer diagnostics must redact or reject ${secret}`);
+      }
+
+      const base = {
+        description: 'Saved recovery did not offer Resume.',
+        nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+        frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+        jobRecoveryOfferStates: states,
+      };
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({
+        ...base,
+        filterCode: 'RECOVERY',
+        nodes: [],
+        filterStats: {
+          hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], currentJobHubIds: [nodeId],
+          omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+        },
+      }).markdown;
+      assert(full.includes('## Job Recovery Offer Diagnostics')
+        && focused.includes('## Job Recovery Offer Diagnostics')
+        && focused.includes('resume=disabled (controls-locked)'),
+      'FULL and RECOVERY retain renderer recovery admission diagnostics after generic component states are excluded');
+      return { hubs: states.length };
+    },
+  },
+{
     name: 'job recovery diagnostics survive restart without in-memory pipeline telemetry',
     run: () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-recovery-report-'));
@@ -1830,27 +2074,85 @@ export default [
           sourceHubId: hostileNodeId, nodeId: hostileNodeId, runId: hostileRunId,
           createdAt: '2026-09-05T16:08:00.000Z', jobs: [], descriptionRecoveryJobs: [],
         }), 'utf8');
+        const modernOversizedRun = 'checkpoint-modern-oversized';
+        const modernOversizedMetadata = {
+          schemaVersion: 1, createdAt: '2026-09-05T16:09:00.000Z', canvasFilePath: canvas,
+          sourceHubId: hubA, nodeId: hubA, runId: modernOversizedRun,
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryJobCount: 1,
+        };
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, modernOversizedRun, path.join(dir, 'unsaved-analysis')),
+          `{"reportMetadata":${JSON.stringify(modernOversizedMetadata)},"jobs":[{}],"descriptionRecoveryJobs":[{}],"payload":"${'x'.repeat(600 * 1024)}"}`, 'utf8');
+        const legacyOversizedRun = 'checkpoint-legacy-oversized';
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, legacyOversizedRun, path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          createdAt: '2026-09-05T16:10:00.000Z', canvasFilePath: canvas, sourceHubId: hubB, nodeId: hubB,
+          runId: legacyOversizedRun, gatheredJobCount: 1, payload: 'x'.repeat(600 * 1024),
+        }), 'utf8');
+        // This is the old writer's production-shaped order: compact ownership
+        // fields first, then a resume/location object, then counts and the
+        // large job payload. The bounded reader must not scan beyond that
+        // root object merely to manufacture payload counts.
+        const legacyObjectBeforeCountsRun = 'checkpoint-legacy-object-before-counts';
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, legacyObjectBeforeCountsRun, path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          version: 1, createdAt: '2026-09-05T16:10:30.000Z', nodeId: hubB, sourceHubId: hubB,
+          runId: legacyObjectBeforeCountsRun, canvasFilePath: canvas,
+          resumeSummary: { source: 'legacy production shape' },
+          locationSnapshot: { preferredLocation: 'not inspected' },
+          gatheredJobCount: 1, candidatePoolJobCount: 1, descriptionRecoveryCount: 1,
+          payload: 'x'.repeat(600 * 1024),
+        }), 'utf8');
+        const foreignCanvas = path.join(dir, 'other-canvas.json');
+        const foreignEnvelopeRun = 'checkpoint-envelope-foreign-canvas';
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, foreignEnvelopeRun, path.join(dir, 'unsaved-analysis')),
+          `{"reportMetadata":${JSON.stringify({
+            ...modernOversizedMetadata, canvasFilePath: foreignCanvas, runId: foreignEnvelopeRun,
+          })},"payload":"${'x'.repeat(600 * 1024)}"}`, 'utf8');
+        const foreignLegacyRun = 'checkpoint-legacy-foreign-canvas';
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, foreignLegacyRun, path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          createdAt: '2026-09-05T16:11:00.000Z', canvasFilePath: foreignCanvas, sourceHubId: hubB, nodeId: hubB,
+          runId: foreignLegacyRun, gatheredJobCount: 1, payload: 'x'.repeat(600 * 1024),
+        }), 'utf8');
+        const nestedSpoofRun = 'checkpoint-legacy-nested-spoof';
+        fs.writeFileSync(getJobDescriptionRecoveryCheckpointPath(canvas, nestedSpoofRun, path.join(dir, 'unsaved-analysis')), JSON.stringify({
+          payload: {
+            canvasFilePath: canvas, sourceHubId: hubA, nodeId: hubA, runId: nestedSpoofRun,
+            createdAt: '2026-09-05T16:12:00.000Z', gatheredJobCount: 1,
+          },
+          padding: 'x'.repeat(600 * 1024),
+        }), 'utf8');
 
         const listed = listDescriptionRecoveryCheckpointsSync(canvas);
-        assert(listed.checkpoints.length === 2 && listed.ignored.metadataInvalid === 1
+        assert(listed.checkpoints.length === 5 && listed.ignored.metadataInvalid === 1 && listed.ignored.oversized === 3
+          && listed.checkpoints.some(checkpoint => checkpoint.runId === modernOversizedRun && checkpoint.state === 'metadata-only' && checkpoint.checkpointBytes > 512 * 1024)
+          && listed.checkpoints.some(checkpoint => checkpoint.runId === legacyOversizedRun && checkpoint.state === 'legacy-prefix' && checkpoint.scoreReadyCount == null && checkpoint.descriptionRecoveryCount == null)
+          && listed.checkpoints.some(checkpoint => checkpoint.runId === legacyObjectBeforeCountsRun
+            && checkpoint.state === 'legacy-prefix' && checkpoint.gatheredJobCount == null
+            && checkpoint.sourceGatheredCount == null && checkpoint.scoreReadyCount == null
+            && checkpoint.descriptionRecoveryCount == null)
+          && !listed.checkpoints.some(checkpoint => [foreignEnvelopeRun, foreignLegacyRun, nestedSpoofRun].includes(checkpoint.runId))
           && !JSON.stringify(listed).includes(secret)
           && !JSON.stringify(listed).includes(hostileNodeId)
           && !JSON.stringify(listed).includes(hostileRunId),
-        'the synchronous checkpoint metadata boundary rejects hostile ownership tokens before a report can render them');
+        'the synchronous checkpoint metadata boundary rejects hostile ownership tokens while safely surfacing modern-envelope and legacy-prefix oversized recovery records');
 
         const recovery = buildJobRecoverySnapshot(canvas, new Set([hubA, hubB]));
-        assert(recovery.includes('Description-recovery checkpoints: 2 parseable, ownership-verified checkpoint(s)')
+        assert(recovery.includes('2 fully parsed + ownership-verified')
+          && recovery.includes('1 bounded-envelope + ownership-verified')
+          && recovery.includes('2 legacy bounded-prefix (payload not yet validated)')
           && /hub `#[a-f0-9]{10}` \(present in this canvas\)/.test(recovery)
           && /run `#[a-f0-9]{10}`/.test(recovery)
           && !recovery.includes(hubA) && !recovery.includes(hubB) && !recovery.includes(runA) && !recovery.includes(runB)
           && recovery.includes('created ') && recovery.includes('updated ')
           && recovery.includes('3 score-ready job(s) · 2 recovery-pool row(s)')
-          && recovery.includes('1 score-ready job(s) · 4 recovery-pool row(s)'),
-        'recovery diagnostics show separate, metadata-only hub/run checkpoints with created/updated ages and safe row counts');
-        assert(recovery.includes('Ignored checkpoint file(s): 1 malformed, 1 ownership-invalid, 1 path-invalid, 1 unsafe metadata')
+          && recovery.includes('1 score-ready job(s) · 4 recovery-pool row(s)')
+          && recovery.includes('bounded metadata envelope + ownership verified; exact load will revalidate payload')
+          && recovery.includes('legacy bounded prefix; exact load will revalidate payload')
+          && recovery.includes('payload counts: score-ready unavailable · recovery-pool unavailable'),
+        'recovery diagnostics render full, bounded-envelope, and legacy-prefix checkpoint confidence levels and never invent unavailable legacy payload counts');
+        assert(recovery.includes('Ignored checkpoint file(s): 1 malformed, 1 ownership-invalid, 1 path-invalid, 1 unsafe metadata, 3 over the safe metadata-read limit')
           && !recovery.includes(secret) && !recovery.includes(hostileNodeId) && !recovery.includes(hostileRunId)
+          && !recovery.includes(foreignCanvas)
           && !recovery.includes('malformed.json'),
-        'malformed, stale, and hostile checkpoint metadata are counted without exposing their content, identifiers, filenames, or paths');
+        'malformed, stale, cross-canvas, and nested-spoof checkpoint metadata are counted without exposing their content, identifiers, filenames, or paths');
 
         const base = {
           description: 'Google Solve says recovery checkpoint is not ready.', nodes: [{ id: hubA, type: 'jobhub', data: {} }, { id: hubB, type: 'jobhub', data: {} }], edges: [], drawings: [],
@@ -1864,12 +2166,15 @@ export default [
             omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
           },
         }).markdown;
-        assert(full.includes('Description-recovery checkpoints: 2 parseable')
+        assert(full.includes('Description-recovery checkpoints: 2 fully parsed + ownership-verified')
           && jobResolve.includes('## Job Recovery Diagnostics')
-          && jobResolve.includes('Description-recovery checkpoints: 2 parseable')
+          && jobResolve.includes('1 bounded-envelope + ownership-verified')
+          && jobResolve.includes('2 legacy bounded-prefix (payload not yet validated)')
+          && jobResolve.includes('exact load will revalidate payload')
           && !full.includes(secret) && !jobResolve.includes(secret)
-          && !full.includes(hostileNodeId) && !jobResolve.includes(hostileRunId),
-        'FULL and JOBRESOLVE retain only safe checkpoint metadata even when JOBRESOLVE drops node payloads');
+          && !full.includes(hostileNodeId) && !jobResolve.includes(hostileRunId)
+          && !full.includes(modernOversizedRun) && !jobResolve.includes(legacyOversizedRun),
+        'FULL and JOBRESOLVE retain only redacted safe metadata for full, envelope, and legacy oversized checkpoints even when JOBRESOLVE drops node payloads');
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -4577,6 +4882,77 @@ export default [
     },
   },
 {
+    name: 'FULL and APPLICATION reports retain only aggregate ended-role chronology validation evidence',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'chronology-validation-report-test', nodeId: 'chronology-validation-card', windowId: 901,
+          source: 'local-ai', jobTitle: 'Private Target Role', company: 'Private Target Employer', status: 'completed',
+          localAi: {
+            jobId: '123e4567-e89b-42d3-a456-426614174000',
+            chronology: {
+              checkId: 'ended-role-current-employment', status: 'pass', referenceMonth: '2026-10',
+              endedRoleCount: 2, failureCount: 0, finalArtifactPassedHostCheck: true,
+              // Deliberately hostile extras: the report must render none of
+              // these content-bearing fields even if memory is hand-edited.
+              detail: 'I currently work at Private Prior Employer.',
+              employer: 'Private Prior Employer', endMonths: ['2026-06'],
+            },
+          },
+        });
+        const payload = {
+          description: 'Check chronology validation.',
+          nodes: [{ id: 'chronology-validation-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        };
+        const full = generateMarkdown(payload, 901).markdown;
+        const application = generateMarkdown({ ...payload, filterCode: 'APPLICATION' }, 901).markdown;
+        const expected = 'Ended-role/current-employment host check `ended-role-current-employment`: **passed** · frozen reference month 2026-10 · explicitly ended roles 2 · failure count 0 · final accepted artifact passed.';
+        assert(full.includes(expected) && application.includes(expected),
+          'FULL and the existing APPLICATION filter must retain the fixed chronology check, frozen month, aggregate counts, and final host verdict');
+        assert(!full.includes('Private Target Role')
+          && !full.includes('Private Target Employer')
+          && !full.includes('Private Prior Employer')
+          && !full.includes('I currently work at'),
+        'Chronology diagnostics must never export job/employer names or document prose');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { existingFilter: 'APPLICATION', privateFieldsWithheld: 4 };
+    },
+  },
+{
+    name: 'Local AI application telemetry reports an originating card correlation and cached achievement-ledger summary without ledger content',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          source: 'local-ai', attemptId: 'local-report-correlation', nodeId: 'local-ai-origin-card',
+          status: 'completed', phase: 'imported', localAi: { jobId: '123e4567-e89b-42d3-a456-426614174000' },
+          achievements: {
+            source: 'reused', kept: 4,
+            stats: { mined: 7, droppedByRefute: 2, demotedByCheck: 1, evidenceMisses: 0, claimFigureLeaks: 0, dateMisses: 0, directionMisses: 0 },
+          },
+        });
+        const markdown = generateMarkdown({
+          description: 'Check Local AI application diagnostics.',
+          nodes: [{ id: 'local-ai-origin-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }, 901).markdown;
+        assert(/Generation correlation: #[0-9a-f]{10}/.test(markdown)
+          && !markdown.includes('Generation correlation: not recorded')
+          && markdown.includes('Achievement ledger: reused from hub cache · kept 4 item(s)')
+          && markdown.includes('mined 7 → dropped-by-refute 2, demoted-by-check 1, evidence-misses 0')
+          && !markdown.includes('123e4567-e89b-42d3-a456-426614174000'),
+        `the report must retain correlation and aggregate ledger facts without raw ids or ledger content, got: ${markdown}`);
+        return { correlated: true, ledgerItems: 4 };
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+    },
+  },
+{
     name: 'Application failure telemetry and APPLICATION filter remain diagnosable',
     run: () => {
       const prior = getApplicationTelemetry();
@@ -4950,6 +5326,7 @@ export default [
           manifest: [
             { name: 'Application.html', readable: true, bytes: 1200, sha256: 'abc123', matchesSource: true, htmlStructureValid: true, syncConfigValid: true },
             { name: 'Cover Letter.pdf', readable: true, bytes: 800, sha256: 'def456', matchesSource: true, pdfParsed: true, pageCount: 1, firstPagePoints: '612x792' },
+            { name: 'Generation Audit.json', exists: true, readable: true, bytes: 640, sha256: '0123456789abcdef', matchesSource: true, integrityVerified: true },
           ],
         });
         const local = buildJobsPipelineSnapshot([], 901, '/tmp/canvas-a/canvas.json');
@@ -4957,8 +5334,10 @@ export default [
           && local.includes('completed + integrity verified')
           && local.includes('Document: cover letter')
           && local.includes('PDF parse valid (1p, 612x792pt)')
-          && local.includes('source bytes exact'),
-        'a FULL report must retain the local Sync outcome and exact-byte/structural readback evidence');
+          && local.includes('source bytes exact')
+          && local.includes('Generation Audit.json: readable · 640 bytes · sha256 0123456789abcdef · source bytes exact')
+          && !local.includes('Generation Audit.json: NOT readable · 0 bytes'),
+        'a FULL report must retain truthful metadata for every verified Sync artifact, including Generation Audit.json');
 
         const foreign = buildJobsPipelineSnapshot([], 901, '/tmp/canvas-b/canvas.json');
         assert(!foreign.includes('### Application Sync (last)') && !foreign.includes('sync-report-test'),
@@ -7243,7 +7622,7 @@ export default [
         && !searchRenderer.slice(finishStart, finishEnd).includes('appendJobsHistory'),
       'scoring completion alone does not write seen-history');
       const resumeStart = searchRenderer.indexOf('const resumeScoring = useCallback');
-      const resumeEnd = searchRenderer.indexOf('const handleDiscardResume', resumeStart);
+      const resumeEnd = searchRenderer.indexOf('const handleResumeRun = useCallback', resumeStart);
       const resumePath = searchRenderer.slice(resumeStart, resumeEnd);
       assert(resumePath.includes('const requestedJobRunId = jobRunIdRef.current || requestedData.jobRunId || null')
         && resumePath.includes('activeJobRunId = continuationRunId;')
@@ -7646,8 +8025,8 @@ export default [
           'the report must retain the exact card-owned collection limits used by the run');
         telemetry.search.collectionLimits = { jobsPerPlatform: null, pagesPerPlatform: null };
         const unboundedReport = buildJobsPipelineSnapshot(new Set(['collection-limit-diagnostics']), null, null);
-        assert(unboundedReport.includes(`Collection limits: unlimited jobs/platform; all browser pages/search (safety backstop ${JOB_COLLECTION_PAGE_CEILING})`),
-          'the report identifies an all-pages run and its shared finite safety backstop');
+        assert(unboundedReport.includes('Collection limits: Auto: up to 500 job(s)/platform; Auto: up to 10 browser page(s)/query, 40/platform'),
+          'the report identifies Auto’s finite shared budgets');
         assert(unboundedReport.includes('dedup / age / history drops are by-design')
           && !unboundedReport.includes('title-relevance / dedup / age / history drops are by-design'),
         'a current provider-trust run does not imply title drops when none occurred');
@@ -7921,6 +8300,16 @@ export default [
       runGuard.retireActive();
       assert(!runGuard.accepts('run-a') && runGuard.accepts('run-b') && !runGuard.accepts('run-a'),
         'Source progress run guard rejects late terminal events from a retired run after reset while accepting the next run');
+      const stoppedRunGuard = createSourceProgressRunGuard();
+      assert(stoppedRunGuard.accepts('stopped-run'),
+        'a Stop path first binds source progress to the exact running token');
+      stoppedRunGuard.retireActive();
+      assert(!stoppedRunGuard.accepts('stopped-run')
+        && stoppedRunGuard.resume('stopped-run')
+        && stoppedRunGuard.accepts('stopped-run')
+        && !stoppedRunGuard.accepts('other-run')
+        && stoppedRunGuard.resume(null) === false,
+      'only verified Stop → Resume may reopen its exact retired token; unrelated generations and missing tokens stay fenced');
       assert(terminal.completed === 0 && terminal.total === 10, 'Source progress merge: completed/total should stay sticky when omitted');
       const advanced = mergeSourceProgress(terminal, { status: 'searching', count: 12, completed: 4, total: 10 });
       assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
@@ -7993,8 +8382,9 @@ export default [
       const jobSearchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       assert(sourceCard.includes('progressRunGuardRef.current.accepts(payload?.jobRunId)')
         && sourceCard.includes('progressRunGuardRef.current.retireActive()')
-        && jobSearchRenderer.includes('jobRunId: jobRunIdRef.current || null'),
-      'source cards and warning-sync seeds reject late progress from retired runs and keep the current token on a resolved card');
+        && jobSearchRenderer.includes('jobRunId: jobRunIdRef.current || null')
+        && jobSearchRenderer.includes('resumeSourceProgress(offer.runId || null);'),
+      'source cards and warning-sync seeds reject late progress from retired runs, while the exact Resume path reopens its verified token');
       const usaJobsStart = jobSearchRenderer.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
       const usaJobsEnd = jobSearchRenderer.indexOf('const handleJobsSettingsChange = useCallback', usaJobsStart);
       const usaJobsBackground = jobSearchRenderer.slice(usaJobsStart, usaJobsEnd);
@@ -10117,8 +10507,12 @@ export default [
       // heartbeats folded into the previous trail entry, keeping the ORIGINAL
       // start `t` but gaining `lastT`/`repeats`/`detail` from the newest one.
       const folded = formatSourceEvent({ t: 0, lastT: 188_000, repeats: 15, status: 'searching', detail: 'q3/12 · p2' });
-      assert(folded === 'searching@+0s→+188s ×15 (detail recorded)',
-        'a folded entry must render its original start, newest offset, and repeat count without exporting producer detail');
+      assert(folded === 'searching@+0s→+188s ×15 · q 3/12 · p 2',
+        'a folded entry must safely render structural query/page progress');
+      const secret = 'https://private.example/search?token=never-export';
+      const hostile = formatSourceEvent({ t: 0, status: 'searching', detail: `q3/12 ${secret} p2` });
+      assert(hostile === 'searching@+0s · q 3/12 · p 2' && !hostile.includes(secret),
+        'source-event progress extracts only numeric q/p structure and never exports free-form detail');
       return { folded };
     },
   },
@@ -10174,9 +10568,8 @@ export default [
         );
         assert(report.includes('Live Search Stage') && report.includes('Pending source(s): `linkedin`'),
           'FULL/JOBS telemetry still identifies the live gather stage and the pending source');
-        assert(report.includes('`linkedin`: searching@+0s→+188s ×15 (detail recorded)')
-          && !report.includes('q3/12 · p2'),
-          'the Active source progress line renders the folded span/repeat while withholding producer detail');
+        assert(report.includes('`linkedin`: searching@+0s→+188s ×15 · q 3/12 · p 2'),
+          'the Active source progress line renders folded structural query/page progress');
       } finally {
         telemetry.pipeline = priorPipeline;
         telemetry.sourceEvents = priorSourceEvents;
@@ -11344,17 +11737,17 @@ export default [
       // dismiss via the X button would write the board's stats twice from two
       // different node snapshots — a race, not a redundancy.
       const dismissStart = card.indexOf('const dismissCard = useCallback(async () => {');
-      const dismissEnd = card.indexOf('\n  }, [id, data.locked, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);');
+      const dismissEnd = card.indexOf('\n  }, [id, effectiveLock, data.hubId, deleteElements, getLiveNode, cancelQueuedRunsForNode]);');
       const dismissScope = card.slice(dismissStart, dismissEnd);
-      assert(dismissStart >= 0 && dismissEnd > dismissStart, 'dismissCard must still exist with its expected cancel-lease + delete dependency list');
+      assert(dismissStart >= 0 && dismissEnd > dismissStart, 'dismissCard must still exist with its effective-lock cancel-lease + delete dependency list');
       assert(dismissScope.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
         && dismissScope.includes('await deleteElements({ nodes: [{ id }] });')
         && !dismissScope.includes('deriveBoardCardStats')
         && !dismissScope.includes('computeJobTreeView')
         && !dismissScope.includes('updateGlobal('),
       'dismissCard must not independently recompute or write board stats — that is now the shared handler\'s job alone');
-      assert(dismissScope.includes('if (data.locked || getLiveNode(data.hubId)?.data?.locked) return;'),
-      'dismissCard must keep gating on both its own lock and its board\'s lock');
+      assert(dismissScope.includes('if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;'),
+      'dismissCard must keep its reactive effective lock plus its live board-lock race fence');
       return { ok: true };
     },
   },
@@ -11533,11 +11926,12 @@ export default [
         && jobSearchSource.slice(terminalZeroStart, terminalZeroEnd).includes('gatheredCount: gatheredCount ?? 0')
         && jobsBackendSource.includes('rawCount: relevanceFunnel.raw'),
       'terminal empty job searches clear stale jobCount while preserving the provider-level gathered funnel');
-      assert(jobSearchSource.includes("runOrigin: 'rerun-button'")
+      assert(jobSearchSource.includes("runOrigin = 'rerun-button'")
+        && jobSearchSource.includes("runOrigin: 'manual-ai-resume'")
         && jobSearchSource.includes('Re-scan requested; career input=')
         && jobsBackendSource.includes('runOrigin: normalizedRunOrigin')
         && jobsBackendSource.includes('profileInputMode: normalizedProfileInputMode'),
-      'Re-scan carries explicit button and career-input provenance into main-process diagnostics');
+      'fresh re-scans and saved manual-AI recovery carry distinct, explicit provenance into main-process diagnostics');
       return { reason: staleReason(previous, completedZero), zeroSignature: combineSignature(completedZero) };
     },
   },
@@ -13627,7 +14021,7 @@ export default [
               capReason: null,
               anchorSource: 'last-completed',
             },
-            collectionLimits: {}, location: 'United States',
+            collectionLimits: { jobsPerPlatform: 10, pagesPerPlatform: 2 }, location: 'United States',
           },
         });
         const pipeline = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
@@ -13638,12 +14032,17 @@ export default [
           'the aborted search states what it is missing rather than implying nothing ran');
         assert(pipeline.includes('1 query (values withheld)')
           && pipeline.includes('3 selected source(s): `google`, `linkedin`, `ziprecruiter`')
+          && pipeline.includes('Collection limits: 10 job(s)/platform; 2 browser page(s)/search')
           && pipeline.includes('Posting date window: 2026-09-03 local midnight through launch time, inclusive')
           && pipeline.includes('provider retrieval horizon 400d')
           && pipeline.includes('Location withheld')
           && !pipeline.includes('System Architect')
           && !pipeline.includes('United States'),
           `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
+        telemetry.searchIntent.collectionLimits = { jobsPerPlatform: null, pagesPerPlatform: null };
+        const unlimitedPipeline = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(unlimitedPipeline.includes('Collection limits: Auto: up to 500 job(s)/platform; Auto: up to 10 browser page(s)/query, 40/platform'),
+          `an active intent with blank controls must render the same Auto contract as a completed funnel, got:\n${unlimitedPipeline.slice(0, 1200)}`);
         assert(pipeline.includes('Last stage error: `recorded`')
           && !pipeline.includes('Node deleted'),
           'a provider/runtime failure is retained structurally without exporting its free-form text');
@@ -13676,12 +14075,13 @@ export default [
         && ipcUtilsSource.includes("return cancellationError('Node deleted', cause);"),
         'the cancel sentinel keeps its load-bearing message while identifying itself as an abort');
       assert(jobsSource.includes('CANCEL_CAUSE_LABELS[reason?.cancelCause]')
-        && jobsSource.includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'"),
-        'the pipeline stage error prefers the stated cause over the shared sentinel');
-      assert(/\? 'reanalysis-cancelled'\s*:\s*'user-reset';/.test(jobSearchSource)
+        && jobsSource.includes("'user-reset': 'Cancelled by user — clicked Reset on this hub'")
+        && jobsSource.includes("'job-source-card-removed': 'Source card removed — saved checkpoint retained for Resume'"),
+        'the pipeline stage error prefers the stated cause over the shared sentinel, including a checkpoint-preserving source-card removal');
+      assert(/cancellationReason = preserveRecovery\s*\? 'user-stopped'\s*:\s*\(reanalysisRestoreRef\.current\s*\? 'reanalysis-cancelled'\s*:\s*'user-reset'\)/.test(jobSearchSource)
         && jobSearchSource.includes('cancelNodeTask?.(id, cancellationReason)')
         && jobSearchSource.includes("cancelNodeTask?.(id, 'career-files-cleared')"),
-        'Job Search names why both acknowledged and fire-and-forget cancellations happened');
+        'Job Search names Stop, re-analysis, Reset, and career-clear cancellation causes for both acknowledged and fire-and-forget cancellation paths');
       // Every cancel site must name a cause, or that hub's aborted run falls
       // back to the shared sentinel and reports a Reset as a deleted node.
       const sellHubSource = fs.readFileSync(path.resolve('src/nodes/SellHubNode.jsx'), 'utf8');
@@ -14007,7 +14407,7 @@ export default [
         });
         const bounded = buildJobCompletionAssessment(canvas, new Set([nodeId]));
         assert(bounded.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
-          && bounded.includes('stopped at an explicit configured collection cap (`dice` jobs-per-platform=3)')
+          && bounded.includes('stopped at an explicit configured collection cap (`dice` Jobs per platform=3)')
           && bounded.includes('collection intentionally bounded'),
         'a structured configured cap with its matching sole stop reason verifies collected output while qualifying full-corpus coverage');
 
@@ -14019,9 +14419,20 @@ export default [
         };
         const outerBounded = buildJobCompletionAssessment(canvas, new Set([nodeId]));
         assert(outerBounded.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
-          && outerBounded.includes('stopped at an explicit configured collection cap (`dice` jobs-per-platform=3)')
+          && outerBounded.includes('stopped at an explicit configured collection cap (`dice` Jobs per platform=3)')
           && outerBounded.includes('collection intentionally bounded'),
         'a final API aggregate slice must keep the same Jobs-per-platform cap and stop token even when each query itself stayed below that limit');
+
+        telemetry.search.bySource.dice = {
+          count: 3, providerGathered: 40, providerTotal: 99,
+          stopReason: 'auto-page-budget', cap: { type: 'auto-pages-per-platform', limit: 40 },
+        };
+        const autoBounded = buildJobCompletionAssessment(canvas, new Set([nodeId]));
+        assert(autoBounded.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
+          && autoBounded.includes('stopped at the finite Auto collection policy (`dice` Auto browser-page platform budget=40)')
+          && autoBounded.includes('stopped at Auto browser-page platform budget cap 40')
+          && !autoBounded.includes('explicit configured collection cap (`dice` Auto'),
+        'a finite Auto cap qualifies collected coverage without falsely claiming that the user explicitly configured it');
 
         telemetry.search.bySource.dice = {
           count: 3, providerGathered: 12, providerTotal: 99,
@@ -14031,8 +14442,8 @@ export default [
         };
         const mixedExplicitCaps = buildJobCompletionAssessment(canvas, new Set([nodeId]));
         assert(mixedExplicitCaps.includes('✅ **COMPLETED WITH COLLECTION QUALIFICATIONS**')
-          && mixedExplicitCaps.includes('`dice` jobs-per-platform=3 + pages-per-platform=2')
-          && mixedExplicitCaps.includes('configured jobs-per-platform cap 3 + pages-per-platform cap 2'),
+          && mixedExplicitCaps.includes('`dice` Jobs per platform=3 + Pages per platform=2')
+          && mixedExplicitCaps.includes('Jobs per platform cap 3 + Pages per platform cap 2'),
         'distinct finite Dice Jobs and Pages caps across fan-out queries remain independently visible and qualify collected output');
 
         telemetry.search.bySource.dice = {
@@ -14095,8 +14506,8 @@ export default [
         });
         const report = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);
         assert(report.includes('`dice`: successfully fetched 6 pages across API fan-out queries → stopped: jobs-per-platform')
-          && report.includes('stopped by the configured Jobs per platform limit (50); this is a user cap, not provider exhaustion'),
-        'API pagination reports summed fan-out request pages and explains the configured cap without calling it an exhausted provider');
+          && report.includes('stopped by the Jobs per platform limit (50); this is a bounded collection policy, not provider exhaustion'),
+        'API pagination reports summed fan-out request pages and explains the bounded cap without calling it exhausted');
 
         telemetry.search.bySource.dice = {
           ...telemetry.search.bySource.dice,
@@ -14106,7 +14517,7 @@ export default [
         };
         const pageCapReport = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);
         assert(pageCapReport.includes('`dice`: successfully fetched 6 pages across API fan-out queries → stopped: pages-per-platform')
-          && pageCapReport.includes('stopped by the configured Pages per platform limit (2); this is a user cap, not provider exhaustion'),
+          && pageCapReport.includes('stopped by the Pages per platform limit (2); this is a bounded collection policy, not provider exhaustion'),
         'an explicit API Pages cap is also counted as successfully fetched fan-out pages, not a browser walk');
         telemetry.search.bySource.dice.stopReason = 'provider-total/page-error';
         const mixedStopReport = buildJobsPipelineSnapshot(new Set(['dice-api-pages']), null, null);

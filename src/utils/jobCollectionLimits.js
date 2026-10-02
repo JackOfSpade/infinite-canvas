@@ -1,13 +1,14 @@
 /**
  * User-configurable job-collection breadth, stored on the Job Search hub.
  *
- * BOTH fields are "All" by default (stored as `null`, rendered as a blank input
- * with an "All" placeholder):
- *   - `jobsPerPlatform: null` — no aggregate result cap.
- *   - `pagesPerPlatform: null` — no page ceiling: a browser board keeps paging
- *     until it runs out of results, until its listings fall outside the hub's
- *     automatic date window (see makeJobPageStop in electron/ipc/jobPageStop.js),
- *     or until the JOB_COLLECTION_PAGE_CEILING backstop below.
+ * A blank/null value is the safe **Auto** policy (kept as null on disk for
+ * backwards compatibility):
+ *   - at most 500 jobs per platform;
+ *   - at most 10 pages for one generated query;
+ *   - at most 40 browser pages for that platform across every generated query.
+ *
+ * A positive number remains an explicit user override. It may intentionally be
+ * deeper than Auto and is never silently narrowed by Auto's aggregate budget.
  * Feed sources (RemoteOK, WeWorkRemotely) are single un-paginated requests and
  * have no page count to limit. Dice, however, walks its API `page` parameter
  * and honors pagesPerPlatform directly (with the finite backstop below when
@@ -23,15 +24,16 @@ export const JOB_COLLECTION_LIMITS_MAX = Object.freeze({
   pagesPerPlatform: 1_000,
 });
 
-/**
- * Hard backstop applied when pagesPerPlatform is "All". Unlimited means "walk
- * until the data says stop" (empty page / out-of-window page / a pager that has
- * stopped serving new rows), NOT "loop forever": a board with a broken pager
- * that re-serves page 1 indefinitely would otherwise never terminate. Same
- * number as the max a user can type, so "All" is never narrower than an
- * explicit setting.
- */
-export const JOB_COLLECTION_PAGE_CEILING = JOB_COLLECTION_LIMITS_MAX.pagesPerPlatform;
+/** The effective limits for a blank/null (Auto) collection policy. */
+export const JOB_COLLECTION_AUTO_LIMITS = Object.freeze({
+  jobsPerPlatform: 500,
+  pagesPerQuery: 10,
+  pagesPerPlatform: 40,
+});
+
+// Compatibility name retained for callers/report fixtures that describe the
+// resolved no-number policy. It is no longer a pathological 1,000-page cap.
+export const JOB_COLLECTION_PAGE_CEILING = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
 
 function positiveInteger(value, fallback, maximum) {
   if (value == null || value === '') return fallback;
@@ -49,25 +51,56 @@ export function normalizeJobCollectionLimits(value) {
   };
 }
 
-/** True when the hub asks a browser board to page without a user-set ceiling. */
+/** True when Pages is using Auto rather than an explicit page count. */
 export function isUnlimitedPages(limits) {
   return normalizeJobCollectionLimits(limits).pagesPerPlatform == null;
 }
 
+export function isAutoJobCollection(limits) {
+  const normalized = normalizeJobCollectionLimits(limits);
+  return normalized.jobsPerPlatform == null && normalized.pagesPerPlatform == null;
+}
+
+/** Effective per-platform row cap. Null on disk means Auto's finite row cap. */
+export function resolveJobsPerPlatform(limits) {
+  return normalizeJobCollectionLimits(limits).jobsPerPlatform ?? JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform;
+}
+
 /**
- * The FINITE page ceiling every walker loop should use. Callers must never
- * branch on null themselves — `limits.pagesPerPlatform || 10` (the old idiom)
- * silently turns "All" back into the retired 10-page default.
+ * The FINITE per-query ceiling every walker loop should use. A blank setting
+ * resolves to Auto's 10 pages; an explicit number is used verbatim.
  */
 export function resolvePageCeiling(limits) {
-  return normalizeJobCollectionLimits(limits).pagesPerPlatform ?? JOB_COLLECTION_PAGE_CEILING;
+  return normalizeJobCollectionLimits(limits).pagesPerPlatform ?? JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
+}
+
+/**
+ * Allocate Auto's platform-wide browser-page budget across generated queries.
+ * Earlier queries receive one extra page when division is uneven, which makes
+ * the allocation deterministic and preserves the first-query resume contract.
+ * Explicit page values intentionally opt out of this aggregate Auto budget.
+ */
+export function resolveBrowserPageBudgets(limits, queryCount) {
+  const count = Math.max(0, Math.floor(Number(queryCount) || 0));
+  if (count === 0) return [];
+  const explicit = normalizeJobCollectionLimits(limits).pagesPerPlatform;
+  if (explicit != null) return Array(count).fill(explicit);
+  const total = Math.min(
+    JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform,
+    JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery * count,
+  );
+  const base = Math.floor(total / count);
+  const remainder = total % count;
+  return Array.from({ length: count }, (_unused, index) => base + (index < remainder ? 1 : 0));
 }
 
 /** Human-readable breadth for logs, diagnostics and bug reports. */
 export function describeJobCollectionLimits(limits) {
   const { jobsPerPlatform, pagesPerPlatform } = normalizeJobCollectionLimits(limits);
   return {
-    jobs: jobsPerPlatform == null ? 'all' : String(jobsPerPlatform),
-    pages: pagesPerPlatform == null ? `all (backstop ${JOB_COLLECTION_PAGE_CEILING})` : String(pagesPerPlatform),
+    jobs: jobsPerPlatform == null ? `auto (${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform})` : String(jobsPerPlatform),
+    pages: pagesPerPlatform == null
+      ? `auto (${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery}/query, ${JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform}/platform)`
+      : String(pagesPerPlatform),
   };
 }

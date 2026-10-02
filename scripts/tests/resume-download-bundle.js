@@ -7,9 +7,12 @@ import {
   __normaliseApplicationSyncWorkspaceForTests,
   __readApplicationSyncWorkspaceHtmlForTests,
   __resetApplicationSyncWorkspacesForTests,
+  __withSyncedGenerationAuditSavedArtifactsForTests,
+  __queryFanOutForTests,
   __verifyApplicationSyncWorkspaceIdentityForTests,
   __withApplicationSyncWorkspaceLockForTests,
   buildResumeDocument,
+  createModuleRunQueue,
   embedApplicationSyncConfig,
   extractVariantAttrs,
   fs,
@@ -864,6 +867,100 @@ export default [
     },
   },
   {
+    name: 'application Sync refreshes only the current durable Generation Audit siblings',
+    run: () => {
+      const priorHtml = '<!doctype html><html><body>prior application</body></html>';
+      const syncedHtml = '<!doctype html><html><body>synced application</body></html>';
+      const priorResumePdf = Buffer.from('%PDF-1.4\nprior resume');
+      const syncedResumePdf = Buffer.from('%PDF-1.4\nsynced resume');
+      const coverPdfHash = 'c'.repeat(64);
+      const listingHash = 'd'.repeat(64);
+      const audit = {
+        version: GENERATION_AUDIT_VERSION,
+        schema: 'infinite-canvas-generation-audit',
+        jobId: '123e4567-e89b-42d3-a456-426614174000',
+        createdAt: '2026-10-01T17:00:00.000Z',
+        scope: { hashSemantics: 'finalArtifacts is provenance; savedArtifacts is the durable bundle.' },
+        finalArtifacts: {
+          resultSha256: 'e'.repeat(64),
+          resumeContentSha256: 'f'.repeat(64),
+          coverLetterContentSha256: 'a'.repeat(64),
+          stagedApplicationHtmlSha256: sha256('<!doctype html><html><body>producer stage</body></html>'),
+          resumePdfSha256: sha256(priorResumePdf),
+          coverLetterPdfSha256: coverPdfHash,
+          originalJobListingSha256: listingHash,
+        },
+        savedArtifacts: {
+          applicationHtmlSha256: sha256(priorHtml),
+          resumePdfSha256: sha256(priorResumePdf),
+          coverLetterPdfSha256: coverPdfHash,
+          originalJobListingSha256: listingHash,
+        },
+        writerAudit: { retained: 'producer provenance' },
+      };
+      const refreshed = JSON.parse(__withSyncedGenerationAuditSavedArtifactsForTests(
+        `${JSON.stringify(audit, null, 2)}\n`,
+        { applicationHtml: syncedHtml, pdf: syncedResumePdf, documentKind: 'resume' },
+      ));
+      assert(JSON.stringify(refreshed.finalArtifacts) === JSON.stringify(audit.finalArtifacts)
+        && JSON.stringify(refreshed.scope) === JSON.stringify(audit.scope)
+        && JSON.stringify(refreshed.writerAudit) === JSON.stringify(audit.writerAudit),
+      'Sync must retain immutable producer provenance and audit detail verbatim');
+      assert(refreshed.savedArtifacts.applicationHtmlSha256 === sha256(syncedHtml)
+        && refreshed.savedArtifacts.resumePdfSha256 === sha256(syncedResumePdf)
+        && refreshed.savedArtifacts.coverLetterPdfSha256 === coverPdfHash
+        && refreshed.savedArtifacts.originalJobListingSha256 === listingHash,
+      'Sync must rebind exactly Application.html and the PDF it regenerated, retaining untouched durable sibling hashes');
+      const coverPdf = Buffer.from('%PDF-1.4\nsynced cover letter');
+      const coverRefreshed = JSON.parse(__withSyncedGenerationAuditSavedArtifactsForTests(
+        `${JSON.stringify(refreshed, null, 2)}\n`,
+        { applicationHtml: syncedHtml, pdf: coverPdf, documentKind: 'cover' },
+      ));
+      assert(coverRefreshed.savedArtifacts.resumePdfSha256 === sha256(syncedResumePdf)
+        && coverRefreshed.savedArtifacts.coverLetterPdfSha256 === sha256(coverPdf),
+      'a later cover Sync must retain the already-bound résumé hash and replace only the cover PDF hash');
+      // A durable bundle can legitimately have been exported before one of its
+      // optional PDFs was available. Sync must be able to generate the other
+      // PDF without treating that truthful null as a malformed audit receipt.
+      const missingCoverAudit = {
+        ...audit,
+        finalArtifacts: { ...audit.finalArtifacts, coverLetterPdfSha256: null },
+        savedArtifacts: { ...audit.savedArtifacts, coverLetterPdfSha256: null },
+      };
+      const resumeWithMissingCover = JSON.parse(__withSyncedGenerationAuditSavedArtifactsForTests(
+        `${JSON.stringify(missingCoverAudit, null, 2)}\n`,
+        { applicationHtml: syncedHtml, pdf: syncedResumePdf, documentKind: 'resume' },
+      ));
+      assert(resumeWithMissingCover.savedArtifacts.resumePdfSha256 === sha256(syncedResumePdf)
+        && resumeWithMissingCover.savedArtifacts.coverLetterPdfSha256 === null
+        && resumeWithMissingCover.finalArtifacts.coverLetterPdfSha256 === null,
+      'a Sync that creates a résumé PDF must retain a truthful missing cover-PDF audit binding');
+      let malformedRejected = false;
+      try {
+        __withSyncedGenerationAuditSavedArtifactsForTests('{not JSON', {
+          applicationHtml: syncedHtml, pdf: syncedResumePdf, documentKind: 'resume',
+        });
+      } catch (error) {
+        malformedRejected = /not valid JSON/.test(error.message);
+      }
+      assert(malformedRejected,
+        'a present receipt that cannot be truthfully rebound must abort before Sync promotes a partially-audited revision');
+      let malformedStructureRejected = false;
+      try {
+        const partial = { ...audit, finalArtifacts: { ...audit.finalArtifacts } };
+        delete partial.finalArtifacts.resultSha256;
+        __withSyncedGenerationAuditSavedArtifactsForTests(JSON.stringify(partial), {
+          applicationHtml: syncedHtml, pdf: syncedResumePdf, documentKind: 'resume',
+        });
+      } catch (error) {
+        malformedStructureRejected = /not a supported durable application audit/.test(error.message);
+      }
+      assert(malformedStructureRejected,
+        'a present audit missing any required provenance/durable hash must abort before Sync promotes the sibling revision');
+      return { provenanceRetained: true, refreshedSiblings: 2, documentKinds: 2, missingCoverRetained: true, malformedRejected, malformedStructureRejected };
+    },
+  },
+  {
     name: 'application Sync serializes edits within one workspace while allowing unrelated workspaces to proceed',
     run: async () => {
       const order = [];
@@ -903,6 +1000,7 @@ export default [
       assert(workspace?.applicationPath === '/tmp/company/application/Application.html', 'persisted state must never select a caller-provided HTML path');
       assert(workspace?.resumePdfPath === '/tmp/company/application/Resume.pdf', 'resume destination must be a canonical sibling');
       assert(workspace?.coverLetterPdfPath === '/tmp/company/application/Cover Letter.pdf', 'cover destination must be a canonical sibling');
+      assert(workspace?.generationAuditPath === '/tmp/company/application/Generation Audit.json', 'the audit destination must be the same fixed workspace sibling as its bound artifacts');
       assert(__normaliseApplicationSyncWorkspaceForTests({ token: 'not-a-token', workspaceDir: '/tmp/company/application' }) === null, 'invalid capabilities must be discarded before serving sync');
 
       const tempRoot = await fs.promises.mkdtemp('/tmp/infinite-canvas-sync-identity-');
@@ -993,6 +1091,174 @@ export default [
       } finally {
         await __resetApplicationSyncWorkspacesForTests();
         await fs.promises.unlink(stateFile).catch(() => {});
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'module run lanes: Job Search and completed-card application generation run independently',
+    run: async () => {
+      const queue = createModuleRunQueue();
+      const started = [];
+      const [jobSearchLease, applicationLease] = await Promise.all([
+        queue.acquireModuleRun({
+          nodeId: 'active-search', kind: 'jobsearch', lane: 'job-search',
+          onStart: () => started.push('job-search'),
+        }),
+        queue.acquireModuleRun({
+          nodeId: 'completed-job-card', kind: 'application', lane: 'application',
+          onStart: () => started.push('application'),
+        }),
+      ]);
+      const simultaneous = queue.getSnapshot();
+      assert(
+        simultaneous.lanes['job-search']?.active?.nodeId === 'active-search'
+          && simultaneous.lanes.application?.active?.nodeId === 'completed-job-card'
+          && started.includes('job-search') && started.includes('application'),
+        `the production job-search and application lanes must both acquire independently, got ${JSON.stringify(simultaneous)}`,
+      );
+
+      jobSearchLease.release();
+      const applicationStillActive = queue.getSnapshot();
+      assert(
+        applicationStillActive.lanes['job-search'] == null
+          && applicationStillActive.lanes.application?.active?.nodeId === 'completed-job-card',
+        `releasing Job Search must not release the completed card's application lease, got ${JSON.stringify(applicationStillActive)}`,
+      );
+      applicationLease.release();
+      assert(Object.keys(queue.getSnapshot().lanes).length === 0,
+        'releasing the application lease must clean up its own independently-held lane');
+      return { simultaneousLanes: ['job-search', 'application'], independentlyReleased: true };
+    },
+  },
+  {
+    name: 'Generate is scoped to the application lane, never a global Job Search activity guard',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const card = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const applicationRunStart = card.indexOf('const queuedApplicationRun =');
+      const applicationRunEnd = card.indexOf('\n  const localJobPending =', applicationRunStart);
+      const applicationRunState = card.slice(applicationRunStart, applicationRunEnd);
+      const lockStart = card.indexOf('const owningBoardLocked = useStore(');
+      const lockEnd = card.indexOf('\n  const previousMeasuredHeightRef =', lockStart);
+      const effectiveLock = card.slice(lockStart, lockEnd);
+      const generateStart = card.indexOf('const generateApplication = useCallback(async () => {');
+      const generateEnd = card.indexOf('\n\n  return (', generateStart);
+      const generate = card.slice(generateStart, generateEnd);
+      const dismissStart = card.indexOf('onClick={effectiveLock ? undefined : () => dismissCard()}');
+      const dismissEnd = card.indexOf('\n          </button>', dismissStart);
+      const dismissButton = card.slice(dismissStart, dismissEnd);
+      const notesStart = card.indexOf('id={`job-notes-${id}`}');
+      const notesEnd = card.indexOf('\n        />', notesStart);
+      const notes = card.slice(notesStart, notesEnd);
+      const buttonStart = card.indexOf('{/* Generate the application bundle.', generateEnd);
+      const buttonEnd = card.indexOf('\n\n      </div>', buttonStart);
+      const generateButton = card.slice(buttonStart, buttonEnd);
+
+      assert(search.includes('moduleRunQueue.acquireModuleRun({') && search.includes("lane: 'job-search'"),
+        'JobSearchNode must acquire the production job-search lane');
+      assert(card.includes('acquireModuleRun({') && card.includes("kind: 'application'") && card.includes("lane: 'application'"),
+        'JobCardNode Generate must acquire the production application lane');
+      assert(applicationRunState.includes("moduleRunSnapshot.activeRuns?.some((entry) => entry.nodeId === id && entry.kind === 'application')")
+        && !applicationRunState.includes('moduleRunSnapshot.active)'),
+      'the completed card may observe only its own application entry, never the queue\'s globally-preferred active entry');
+      assert(effectiveLock.includes('useCallback((store) => !!store.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])')
+        && effectiveLock.includes('const effectiveLock = !!data.locked || owningBoardLocked;')
+        && !effectiveLock.includes('moduleRunSnapshot') && !effectiveLock.includes("lane: 'job-search'"),
+      'the effective lock must react to the owning Job Board only; an active Job Search is not a card lock');
+      assert(generate.includes('if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;')
+        && generate.includes('if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;')
+        && !generate.includes("lane: 'job-search'")
+        && !generate.includes('moduleRunSnapshot.active'),
+      'Generate\'s guard must use the effective board lock plus a live race fence, never active Job Search work');
+      assert(dismissButton.includes('disabled={effectiveLock}')
+        && notes.includes('disabled={effectiveLock || hasApplicationRun || localJobPending}')
+        && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}')
+        && generateButton.includes('disabled={hasApplicationRun || localJobPending || effectiveLock}')
+        && !generateButton.includes('job-search') && !generateButton.includes('activeRuns'),
+      'dismiss, notes, and Generate must share the effective owning-board lock while Generate stays enabled during an unrelated active Job Search module');
+      return { jobSearchLane: true, applicationLane: true, effectiveBoardLock: true, generateScopedToApplication: true };
+    },
+  },
+  {
+    // A save is allowed to spend time validating an app-owned generated
+    // workspace, but it must not hold a process-wide lane that prevents an
+    // unrelated Job Search source from making progress.  Promise barriers make
+    // the overlap observable without relying on scheduler timing or sleeps.
+    name: 'application save: a blocked workspace verification does not serialize an unrelated Job Search fan-out',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-save-search-overlap-'));
+      const sourceDir = path.join(root, 'source');
+      const outputRoot = path.join(root, 'applications');
+      const resumeHtmlPath = path.join(sourceDir, 'Application.html');
+      const jobListingPath = path.join(sourceDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">Independent application save</main></section><section data-ic-document-panel="cover"><main class="page">Independent cover letter</main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Platform Engineer\n\nIndependent application listing.\n';
+      const senderId = 914;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      let releaseSaveVerification;
+      const saveVerification = new Promise(resolve => { releaseSaveVerification = resolve; });
+      let signalSaveVerificationEntered;
+      const saveVerificationEntered = new Promise(resolve => { signalSaveVerificationEntered = resolve; });
+      let releaseScrape;
+      const scrapeDeferred = new Promise(resolve => { releaseScrape = resolve; });
+      let signalScrapeStarted;
+      const scrapeStarted = new Promise(resolve => { signalScrapeStarted = resolve; });
+      let saveOutcome = 'pending';
+      try {
+        await Promise.all([
+          fs.promises.mkdir(sourceDir, { recursive: true }),
+          fs.promises.mkdir(outputRoot, { recursive: true }),
+        ]);
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml),
+          fs.promises.writeFile(jobListingPath, jobListing),
+        ]);
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        assert(typeof saveApplication === 'function', 'the application save handler must be registered for the overlap fixture');
+        registerPendingApplicationWorkspace({
+          workDir: sourceDir, senderId, company: 'Overlap Co', applicationRoot: outputRoot,
+          resumeHtmlPath, jobListingPath,
+          cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml, jobListing },
+          onBeforeSave: async () => {
+            signalSaveVerificationEntered();
+            await saveVerification;
+          },
+        });
+        const savePromise = saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, generationLogPath: null, workDir: sourceDir,
+          jobTitle: 'Platform Engineer', location: 'Toronto, ON',
+          canvasFilePath: path.join(root, 'canvas.json'), suppressReveal: true,
+        }).then(
+          result => { saveOutcome = 'fulfilled'; return result; },
+          error => { saveOutcome = 'rejected'; throw error; },
+        );
+        await saveVerificationEntered;
+        assert(saveOutcome === 'pending', 'save must remain blocked at its explicit workspace-verification barrier');
+
+        const scrapePromise = __queryFanOutForTests(['independent scrape'], async () => {
+          signalScrapeStarted();
+          await scrapeDeferred;
+          return { items: [{ title: 'Independent scrape result', company: 'Search Co', url: 'https://jobs.example.test/independent' }] };
+        });
+        await scrapeStarted;
+        assert(saveOutcome === 'pending', 'an unrelated scrape must dispatch while application verification remains blocked');
+        releaseScrape();
+        const scrape = await scrapePromise;
+        assert(scrape.items.length === 1 && scrape.items[0].title === 'Independent scrape result',
+          'the unrelated fan-out must complete before the blocked application save is released');
+        assert(saveOutcome === 'pending', 'completing the unrelated scrape must not implicitly release the application save');
+
+        releaseSaveVerification();
+        const saved = await savePromise;
+        const savedHtml = await fs.promises.readFile(saved.applicationFile, 'utf8');
+        assert(saved.success && saved.saved && savedHtml.includes('Independent application save'),
+          'releasing the save barrier must finish the original application save with its application HTML intact');
+        return { scrapeCompletedWhileSaveBlocked: true, savedApplication: saved.applicationFile };
+      } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

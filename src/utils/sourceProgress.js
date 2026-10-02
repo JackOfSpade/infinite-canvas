@@ -72,6 +72,15 @@ export function createSourceProgressRunGuard(initialRunId = null) {
       }
       activeRunId = null;
     },
+    // An explicit Job Search Resume intentionally continues the same durable
+    // run token after a user stop. Re-open only that exact token; all other
+    // retired generations remain fenced so late events cannot repaint it.
+    resume(runId) {
+      if (!runId) return false;
+      retiredRunIds.delete(runId);
+      activeRunId = runId;
+      return true;
+    },
     active() {
       return activeRunId;
     },

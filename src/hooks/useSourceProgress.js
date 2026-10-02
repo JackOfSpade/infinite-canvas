@@ -25,7 +25,7 @@ import { createSourceProgressRunGuard, mergeSourceProgress } from '../utils/sour
  *                                         tagged with a different nodeId
  *                                         are dropped (multi-hub safety).
  *
- * @returns {object}  { progress, lastActive, reset }
+ * @returns {object}  { progress, lastActive, reset, resume }
  *   progress    — { [sourceId]: { status, count, warning } }
  *   lastActive  — the sourceId most recently emitted with status='searching'
  *   reset       — clears the map (e.g. before a fresh re-run)
@@ -77,5 +77,17 @@ export function useSourceProgress(subscribe, hubId, {
     setLastActive(null);
   }, [tokenAware]);
 
-  return { progress, lastActive, reset };
+  // Stop → Resume intentionally reuses the original job-run id. A regular
+  // reset retires that id, so re-open it only after the caller has verified the
+  // exact saved manifest. This is distinct from a fresh run and must never
+  // accept an arbitrary old token.
+  const resume = useCallback((runId) => {
+    if (tokenAware && !runGuardRef.current.resume(runId)) return false;
+    rejectUntilResetRef.current = false;
+    setProgress({});
+    setLastActive(null);
+    return true;
+  }, [tokenAware]);
+
+  return { progress, lastActive, reset, resume };
 }

@@ -1,3 +1,5 @@
+import { isTerminalSourceStatus } from './sourceProgress.js';
+
 /**
  * Whether a job-source warning must pause the pipeline for a user decision.
  *
@@ -10,6 +12,135 @@ export function isJobSourceWarningGating(warning) {
   return warning?.severity === 'block'
     || warning?.severity === 'paste'
     || warning?.code === 'linkedin-rate-limited';
+}
+
+/**
+ * Reflect a terminal, actionable source-card warning in the live hub while a
+ * multi-source search is still gathering. Source cards consume progress IPC
+ * immediately, whereas the hub normally receives its warning list only in the
+ * eventual `searchJobs` response. Leaving that gap open made the live card say
+ * "blocked" while the hub and diagnostics claimed zero blockers.
+ *
+ * This is deliberately a provisional source-level projection, not final
+ * warning reconciliation: one card has only its current terminal warning,
+ * while the backend can return several query-specific warnings for that source.
+ * The caller uses it only during `searching`; the final backend list replaces
+ * it before the pipeline pauses, scores, or completes.
+ *
+ * `projectedWarnings` holds only entries that this bridge inserted. That
+ * provenance lets a later clear/retry remove the stale live entry without
+ * touching a matching warning supplied by another authority (most importantly
+ * the eventual backend final list).
+ */
+const MAX_WARNING_PROJECTION_DEPTH = 16;
+const MAX_WARNING_PROJECTION_KEYS = 64;
+const MAX_WARNING_PROJECTION_STRING_LENGTH = 4_000;
+
+function warningProjectionSignature(warning) {
+  // Source-progress warnings are JSON-safe IPC payloads. Still reject a
+  // malformed in-memory object instead of letting a cyclic/deep value crash
+  // the live hub, and encode every scalar/key unambiguously so delimiter text
+  // in evidence cannot make two different warnings compare equal.
+  const active = new WeakSet();
+  const serialize = (value, depth = 0) => {
+    if (depth > MAX_WARNING_PROJECTION_DEPTH) return null;
+    if (value === null) return 'null';
+    if (typeof value === 'string') {
+      return value.length <= MAX_WARNING_PROJECTION_STRING_LENGTH ? `string:${JSON.stringify(value)}` : null;
+    }
+    if (typeof value === 'boolean') return `boolean:${value}`;
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? `number:${Object.is(value, -0) ? '-0' : String(value)}` : null;
+    }
+    if (typeof value !== 'object') return null;
+    if (active.has(value)) return null;
+    active.add(value);
+    try {
+      if (Array.isArray(value)) {
+        if (value.length > MAX_WARNING_PROJECTION_KEYS) return null;
+        const items = value.map(item => serialize(item, depth + 1));
+        return items.every(Boolean) ? `array:[${items.join(',')}]` : null;
+      }
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) return null;
+      const keys = Object.keys(value).sort();
+      if (keys.length > MAX_WARNING_PROJECTION_KEYS) return null;
+      const entries = keys.map((key) => {
+        const encoded = serialize(value[key], depth + 1);
+        return encoded ? `${JSON.stringify(key)}=${encoded}` : null;
+      });
+      return entries.every(Boolean) ? `object:{${entries.join(',')}}` : null;
+    } finally {
+      active.delete(value);
+    }
+  };
+  try {
+    return serialize(warning);
+  } catch {
+    return null;
+  }
+}
+
+function isSameWarningProjection(a, b) {
+  const aSignature = warningProjectionSignature(a);
+  const bSignature = warningProjectionSignature(b);
+  return !!aSignature && aSignature === bSignature;
+}
+
+function removeOneWarningProjection(warnings, projection) {
+  const index = warnings.findIndex(warning => isSameWarningProjection(warning, projection));
+  if (index < 0) return warnings;
+  return [...warnings.slice(0, index), ...warnings.slice(index + 1)];
+}
+
+export function reconcileTerminalJobSourceWarningProjection(
+  warnings,
+  sourceProgress,
+  projectedWarnings = new Map(),
+) {
+  const current = Array.isArray(warnings) ? warnings : [];
+  const prior = projectedWarnings instanceof Map ? projectedWarnings : new Map();
+  const sourceIds = new Set([...prior.keys(), ...Object.keys(sourceProgress || {})]);
+  const nextProjectedWarnings = new Map();
+  let next = current;
+
+  for (const sourceId of sourceIds) {
+    const progress = sourceProgress?.[sourceId];
+    const warning = progress?.warning;
+    const liveWarning = isTerminalSourceStatus(progress?.status) && isJobSourceWarningGating(warning)
+      // The progress-map key is the IPC source identity. Do not trust a
+      // malformed nested warning to project itself onto a different card/hub.
+      ? { ...warning, sourceId }
+      : null;
+    const priorWarning = prior.get(sourceId) || null;
+
+    // Same terminal outcome, still represented: retain both the warning and
+    // its provenance without writing on every progress/render tick.
+    if (
+      priorWarning
+      && liveWarning
+      && isSameWarningProjection(priorWarning, liveWarning)
+      && next.some(entry => isSameWarningProjection(entry, priorWarning))
+    ) {
+      nextProjectedWarnings.set(sourceId, priorWarning);
+      continue;
+    }
+
+    // Clear/retry and changed terminal outcomes retract only the bridge's own
+    // entry. Final/backend or unrelated source warnings remain untouched.
+    if (priorWarning) next = removeOneWarningProjection(next, priorWarning);
+    // Do not copy an untrusted/non-JSON-shaped progress payload into durable
+    // hub state. Final backend warnings are preserved in `next` regardless.
+    if (!liveWarning || !warningProjectionSignature(liveWarning)) continue;
+
+    // If another authority has already supplied this exact warning, do not
+    // claim it as provisional: a later progress clear must not remove it.
+    if (next.some(entry => isSameWarningProjection(entry, liveWarning))) continue;
+    next = [...next, liveWarning];
+    nextProjectedWarnings.set(sourceId, liveWarning);
+  }
+
+  return { warnings: next, projectedWarnings: nextProjectedWarnings };
 }
 
 /**
@@ -53,6 +184,13 @@ export function effectiveJobSourceCardRunId(
  * partial-data warning, it merely acknowledges and hides the diagnostic.
  */
 export function jobSourceWarningAction(warning) {
+  // Some provider blocks are actionable only outside the resolver (for
+  // example, a saved crash recovery whose shared browser needs a sign-in).
+  // Preserve that explicit action instead of converting it into a generic
+  // source retry, which can neither authenticate the account nor resume the
+  // durable checkpoint.
+  if (warning?.action === 'open-external') return 'open-external';
+  if (warning?.action === 'login-platform') return 'login-platform';
   return isJobSourceWarningGating(warning) ? 'skip' : 'dismiss';
 }
 
@@ -77,6 +215,16 @@ export function canAttemptJobSourceResolve(warning) {
     'description-recovery-snapshot-stale',
     'description-recovery-snapshot-unavailable',
   ].includes(warning.code);
+}
+
+/**
+ * Whether the hub's "Solve all" loop may drive this warning unattended.
+ * Login and external-navigation actions are deliberately per-card only: they
+ * open a human workflow and do not prove the source has resumed.
+ */
+export function canAutomaticallyResolveJobSourceWarning(warning) {
+  return canAttemptJobSourceResolve(warning)
+    && !['open-external', 'login-platform'].includes(jobSourceWarningAction(warning));
 }
 
 /**

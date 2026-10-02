@@ -324,14 +324,21 @@ Personal Projects`;
       try {
         renderStructuredApplicationResume({ ...resume, skills: [{ ...resume.skills[0], items: ['Go'] }] }, context);
       } catch { rejectedShortSubstringSkill = true; }
-      assert(html.includes('Analytics reporting') && html.includes('Personal Projects') && rejectedListingOnlyProject && rejectedShortSubstringSkill,
-        'project display copy retains its source provenance heading, while neutral editorial headings remain usable and listing-only or substring-only evidence is rejected');
-      return { projectRendered: true, rejectedListingOnlyProject, rejectedShortSubstringSkill };
+      const sparseProjects = [resume.projects[0]];
+      sparseProjects.length = 2;
+      let sparseProjectMessage = '';
+      try {
+        renderStructuredApplicationResume({ ...resume, projects: sparseProjects }, context);
+      } catch (error) { sparseProjectMessage = String(error?.message || error); }
+      assert(html.includes('Analytics reporting') && html.includes('Personal Projects') && rejectedListingOnlyProject && rejectedShortSubstringSkill
+        && sparseProjectMessage.includes('projects[1] must be an object.'),
+      'project display copy retains its source provenance heading, while neutral editorial headings remain usable and listing-only, substring-only, or sparse project input is rejected at validation');
+      return { projectRendered: true, rejectedListingOnlyProject, rejectedShortSubstringSkill, sparseProjectRejected: true };
     },
   },
   {
     // THE DEFECT this covers, rendered by a real generation:
-    //   <dl class="skills"><dt>technologies</dt><dd>React · Typescript ·
+    //   <dl class="skills"><dt>technologies</dt><dd>React · TypeScript ·
     //   Next.js · Django · Nginx · Gunicorn · Docker Compose · MCP ·
     //   connectors · prompt harnessing · model delegation</dd></dl>
     // One lowercase row labelled with a synonym of its own section head, 11
@@ -345,6 +352,9 @@ Personal Projects`;
     run() {
       const skillsCareer = [
         'Ada Lovelace', 'ada@example.test', 'Software Engineer',
+        // The frozen source contains the historical misspelling. The
+        // canonical candidate copy below must still render and remain
+        // grounded, while the old authored spelling is rejected.
         'Built React and Typescript interfaces on a Django service.',
         'Ran Nginx, Gunicorn and Docker Compose for the reporting deployment.',
         'Wired MCP connectors with prompt harnessing and model delegation.',
@@ -358,7 +368,7 @@ Personal Projects`;
       const resume = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and Typescript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and TypeScript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
@@ -369,7 +379,7 @@ Personal Projects`;
       // The shipped block itself: one rejection round names the label, the
       // unsplit row, the row's length and all three concepts, because every
       // repair costs the user the same manual copy/paste round.
-      const shippedItems = ['React', 'Typescript', 'Next.js', 'Django', 'Nginx', 'Gunicorn', 'Docker Compose', 'MCP', 'connectors', 'prompt harnessing', 'model delegation'];
+      const shippedItems = ['React', 'TypeScript', 'Next.js', 'Django', 'Nginx', 'Gunicorn', 'Docker Compose', 'MCP', 'connectors', 'prompt harnessing', 'model delegation'];
       const shipped = rejection([group(0, 'technologies', shippedItems)]);
       assert(shipped.includes('skills[0].group "technologies" must be a neutral category label')
         && shipped.includes(`skills[0].group "technologies" carries all ${shippedItems.length} items of this block under one label`)
@@ -401,7 +411,7 @@ Personal Projects`;
       // Five items, so the split gate stands down and only the rendered row's
       // own length is at issue. The gate measures the string the renderer
       // emits, separators included.
-      const longRow = ['Docker Compose', 'Elasticsearch', 'Typescript', 'Gunicorn', 'PostgreSQL'];
+      const longRow = ['Docker Compose', 'Elasticsearch', 'TypeScript', 'Gunicorn', 'PostgreSQL'];
       const overRow = rejection([group(0, 'infrastructure', longRow)]);
       assert(overRow.includes(`skills[0].items renders a row of ${longRow.join(' · ').length} characters but a row holds at most ${STRUCTURED_RESUME_SKILLS_BUDGET.rowChars}`)
         && !overRow.includes('carries all') && !overRow.includes('item "'),
@@ -429,15 +439,40 @@ Personal Projects`;
       `every concept phrase is reported once in one round while the filterable names beside them pass (got ${concepts})`);
 
       const clean = [
-        group(0, 'languages', ['Typescript', 'Python']),
+        group(0, 'languages', ['TypeScript', 'Python']),
         group(1, 'frameworks', ['React', 'Django']),
         group(2, 'infrastructure', ['Nginx', 'Gunicorn', 'Docker Compose']),
       ];
       const html = renderStructuredApplicationResume(resume(clean), context);
-      assert(html.includes('<dt>Languages</dt><dd>Typescript · Python</dd>')
+      assert(html.includes('<dt>Languages</dt><dd>TypeScript · Python</dd>')
         && html.includes('<dt>Frameworks</dt><dd>React · Django</dd>')
         && html.includes('<dt>Infrastructure</dt><dd>Nginx · Gunicorn · Docker Compose</dd>'),
       `a three-row block inside every budget renders the design system's own shape (got ${html})`);
+
+      // This is a copy-quality rule, not a renderer cosmetic: the resume
+      // draft is accepted before the review/audit stage, so silently changing
+      // it while writing HTML would leave those records describing different
+      // text. Every generated location must instead be rejected together at
+      // the authored-resume boundary.
+      const nonCanonical = resume([
+        group(0, 'languages', ['Typescript', 'Python']),
+        group(1, 'frameworks', ['React', 'Django']),
+        group(2, 'infrastructure', ['Nginx', 'Gunicorn', 'Docker Compose']),
+      ]);
+      nonCanonical.roles[0].bullets[0].text = 'Built React and Typescript interfaces on a Django service.';
+      nonCanonical.projects = [{
+        id: 'typescript-project', name: 'TypeScript',
+        description: 'Built React and Typescript interfaces on a Django service.',
+        metrics: '', evidenceIds: ['career-proof'],
+      }];
+      const nonCanonicalMessage = (() => {
+        try { renderStructuredApplicationResume(nonCanonical, context); return ''; } catch (error) { return String(error?.message || error); }
+      })();
+      assert(nonCanonicalMessage.includes('roles[0].bullets[0].text uses “Typescript”')
+        && nonCanonicalMessage.includes('skills[0].items[0]')
+        && nonCanonicalMessage.includes('projects[0].description')
+        && nonCanonicalMessage.includes('canonical product name “TypeScript”'),
+      `a noncanonical TypeScript spelling is rejected in every rendered location before review/audit (got ${nonCanonicalMessage})`);
       return { gates: 5, cleanRows: clean.length, shippedTerms: shippedItems.length };
     },
   },
@@ -450,7 +485,7 @@ Personal Projects`;
     run() {
       const labelCareer = [
         'Ada Lovelace', 'ada@example.test', 'Software Engineer',
-        'Built React and Typescript interfaces on a Django service.',
+        'Built React and TypeScript interfaces on a Django service.',
         'Ran Nginx and Gunicorn for the reporting deployment.',
         'AI/ML delivery ran MCP for the reporting model.',
       ].join('\n');
@@ -462,7 +497,7 @@ Personal Projects`;
       const resume = (skills) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and Typescript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Built React and TypeScript interfaces on a Django service.', evidenceIds: ['career-proof'] }] }],
         skills,
       });
       const group = (index, label, items) => ({ id: `skills-${index}`, group: label, items, evidenceIds: ['career-proof'] });
@@ -471,7 +506,7 @@ Personal Projects`;
       };
 
       const cased = [
-        group(0, 'languages and frameworks', ['Typescript', 'React']),
+        group(0, 'languages and frameworks', ['TypeScript', 'React']),
         group(1, 'infrastructure & integration', ['Nginx', 'Gunicorn']),
         group(2, 'AI/ML', ['MCP']),
       ];
@@ -494,7 +529,7 @@ Personal Projects`;
       assert(sectionHeadSynonyms.every(label => !NEUTRAL_SKILL_GROUP_LABELS.includes(label)),
         'the neutral vocabulary no longer offers a label that only names the section');
       for (const label of sectionHeadSynonyms) {
-        const message = rejection([group(0, label, ['Typescript', 'React'])]);
+        const message = rejection([group(0, label, ['TypeScript', 'React'])]);
         assert(message.includes(`skills[0].group "${label}" must be a neutral category label`)
           && sectionHeadSynonyms.every(synonym => !message.includes(`, ${synonym},`)),
         `"${label}" is rejected and the vocabulary the rejection prints never offers it back (got ${message})`);
@@ -552,7 +587,7 @@ Personal Projects`;
       // This corpus states no exemplar label, so the escape hatch cannot pass
       // any case below — the neutral vocabulary has to. It carries no skills
       // section either, which is the candidate shape that made the gap acute.
-      const labelCareer = ['Ada Lovelace', 'ada@example.test', 'Software Engineer', 'Shipped Typescript on a Django service with Postgres behind Nginx.'].join('\n');
+      const labelCareer = ['Ada Lovelace', 'ada@example.test', 'Software Engineer', 'Shipped TypeScript on a Django service with Postgres behind Nginx.'].join('\n');
       assert(exemplars.every(label => !labelCareer.toLocaleLowerCase().includes(label.toLocaleLowerCase())),
         'the frozen corpus states no exemplar label, so only the neutral vocabulary can accept one');
       const context = {
@@ -563,8 +598,8 @@ Personal Projects`;
       const resume = (label) => ({
         schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
         identity: { name: 'Ada Lovelace', contact: ['ada@example.test'] },
-        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Shipped Typescript on a Django service with Postgres behind Nginx.', evidenceIds: ['career-proof'] }] }],
-        skills: [{ id: 'skills-1', group: label, items: ['Typescript', 'Postgres'], evidenceIds: ['career-proof'] }],
+        roles: [{ id: 'role-1', title: 'Software Engineer', company: 'Analytical Engines', dates: '2020 – 2024', location: '', bullets: [{ id: 'bullet-1', text: 'Shipped TypeScript on a Django service with Postgres behind Nginx.', evidenceIds: ['career-proof'] }] }],
+        skills: [{ id: 'skills-1', group: label, items: ['TypeScript', 'Postgres'], evidenceIds: ['career-proof'] }],
       });
       const rendered = (label) => {
         try { return renderStructuredApplicationResume(resume(label), context); } catch (error) { return `REJECTED: ${String(error?.message || error)}`; }

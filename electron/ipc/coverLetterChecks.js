@@ -2025,6 +2025,134 @@ export function checkProspectiveContributionTense(paragraphs = [], companyName =
     `${list.length} paragraph(s) frame proposed employer contributions conditionally or prospectively`);
 }
 
+// Employment dates on a résumé normally name months, not days. Treat an
+// explicit end month as over only after the deterministic reference month has
+// passed; on the end month itself the candidate may still be employed. This
+// keeps the gate conservative and avoids letting the host clock change a
+// completed package's verdict.
+const END_DATE_MONTHS = Object.freeze({
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2,
+  apr: 3, april: 3, may: 4, jun: 5, june: 5, jul: 6, july: 6,
+  aug: 7, august: 7, sep: 8, sept: 8, september: 8, oct: 9, october: 9,
+  nov: 10, november: 10, dec: 11, december: 11,
+});
+const ENDED_ROLE_CURRENT_EMPLOYMENT_OBSERVATIONS = 4;
+const CURRENT_ROLE_DATE_MARKER = /\b(?:present|current|ongoing|now)\b/iu;
+// These are deliberately employment-action forms, not a general present-tense
+// lexicon. The gate reads them only after a role/employer frame has already
+// made the action current work, so it catches “I am building” as well as “I
+// build” without turning employer-free capability prose into an employment
+// claim.
+const CURRENT_WORK_VERBS = '(?:build(?:s|ing)?|creat(?:e|es|ing)|deliver(?:s|ing)?|design(?:s|ing)?|develop(?:s|ing)?|implement(?:s|ing)?|lead(?:s|ing)?|maintain(?:s|ing)?|manag(?:e|es|ing)|operat(?:e|es|ing)|run(?:s|ning)?|support(?:s|ing)?|work(?:s|ing)?)';
+const CURRENT_WORK_SUBJECT = `i\\s+(?:(?:am|['’]m)\\s+)?(?:currently\\s+)?${CURRENT_WORK_VERBS}`;
+
+function referenceYearMonth(referenceDate) {
+  if (referenceDate instanceof Date && Number.isFinite(referenceDate.getTime())) {
+    return { year: referenceDate.getUTCFullYear(), month: referenceDate.getUTCMonth() };
+  }
+  // Newly queued Local AI jobs freeze an ISO timestamp in input.json. Do not
+  // accept locale-shaped strings here: their parsing varies by host and would
+  // make an otherwise identical handoff nondeterministic.
+  const match = /^\s*((?:19|20)\d{2})-(0[1-9]|1[0-2])(?:-\d{2})?(?:T.*)?\s*$/u.exec(String(referenceDate || ''));
+  return match ? { year: Number(match[1]), month: Number(match[2]) - 1 } : null;
+}
+
+function explicitEndYearMonth(dates) {
+  // `text()` deliberately folds every dash to `-` for prose comparisons. Date
+  // ranges need to retain an unspaced en/em dash long enough to distinguish
+  // `2023-05–2026-06` from the hyphens inside its ISO month tokens.
+  const range = String(dates ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  // Hyphens within ISO dates are not range separators. The supported bare
+  // hyphen form therefore requires a boundary that distinguishes it from
+  // YYYY-MM, while the usual spaced hyphen and en/em dash forms stay simple.
+  const parts = range.split(/(?:\s+[–—-]\s+|\s+\bto\b\s+|(?<=\d)[–—](?=\p{L}|\d)|(?<=\d)-(?=\p{L}))/iu);
+  if (parts.length < 2) return null;
+  const end = text(parts.at(-1)).split('·')[0].trim();
+  if (!end || CURRENT_ROLE_DATE_MARKER.test(end)) return null;
+  let match = /\b((?:19|20)\d{2})\s*[-/]\s*(0[1-9]|1[0-2])\b/u.exec(end);
+  if (match) return { year: Number(match[1]), month: Number(match[2]) - 1 };
+  match = /\b([a-z]+)\.?\s*,?\s*((?:19|20)\d{2})\b/iu.exec(end);
+  if (match && Object.hasOwn(END_DATE_MONTHS, match[1].toLowerCase())) {
+    return { year: Number(match[2]), month: END_DATE_MONTHS[match[1].toLowerCase()] };
+  }
+  match = /\b(0?[1-9]|1[0-2])\s*[/.]\s*((?:19|20)\d{2})\b/u.exec(end);
+  return match ? { year: Number(match[2]), month: Number(match[1]) - 1 } : null;
+}
+
+function endedBeforeReference(role, reference) {
+  const end = explicitEndYearMonth(role?.dates);
+  return end && (end.year < reference.year || (end.year === reference.year && end.month < reference.month)) ? end : null;
+}
+
+function currentEmploymentFrame(sentence, role) {
+  const company = text(role?.company);
+  if (!company) return '';
+  const employer = escapeRegExp(company);
+  const title = text(role?.title);
+  const roleTitle = title ? escapeRegExp(title) : '';
+  // The title-specific forms capture the common misleading construction
+  // (“As a Software Engineer at Acme, I build ...”) without treating a general
+  // present-tense capability claim that merely recalls prior evidence as work
+  // the candidate is doing now.
+  if (roleTitle) {
+    const asRole = new RegExp(`\\bas\\s+(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu');
+    if (asRole.test(sentence)) return asRole.exec(sentence)?.[0] || company;
+    const isRole = new RegExp(`\\bi\\s+(?:am|['’]m)\\s+(?:currently\\s+)?(?:an?\\s+|the\\s+)?${roleTitle}\\s+(?:at|with)\\s+${employer}\\b`, 'iu');
+    if (isRole.test(sentence)) return isRole.exec(sentence)?.[0] || company;
+  }
+  const currentRole = new RegExp(`\\b(?:my|the)\\s+(?:current|present|ongoing)\\s+(?:role|position|work|employment)\\b[^.!?]{0,80}\\b(?:at|with)\\s+${employer}\\b`, 'iu');
+  if (currentRole.test(sentence)) return currentRole.exec(sentence)?.[0] || company;
+  const employedThere = new RegExp(`\\bi\\s+(?:am|['’]m|remain|continue\\s+to\\s+be)\\s+(?:currently\\s+)?(?:employed|working)\\s+(?:at|with)\\s+${employer}\\b|\\bi\\s+(?:currently\\s+)?(?:work|serve|continue\\s+to\\s+work)\\s+(?:at|with)\\s+${employer}\\b`, 'iu');
+  if (employedThere.test(sentence)) return employedThere.exec(sentence)?.[0] || company;
+  const atEmployer = new RegExp(`\\b(?:at|with)\\s+${employer}\\s*,?\\s+${CURRENT_WORK_SUBJECT}\\b`, 'iu');
+  return atEmployer.test(sentence) ? (atEmployer.exec(sentence)?.[0] || company) : '';
+}
+
+/**
+ * Rejects only explicit present/current-employment framing for a résumé role
+ * whose stated end month is before the frozen handoff month. Present/Current
+ * date ranges, unparseable dates, and employer-free capability claims remain
+ * outside this narrow factual gate.
+ */
+export function checkEndedRoleCurrentEmployment(paragraphs = [], evidence = {}, referenceDate = null) {
+  const reference = referenceYearMonth(referenceDate);
+  if (!reference) return {
+    ...result('ended-role-current-employment', true, 'skipped: no deterministic reference month is available'),
+    endedRoleCount: 0, failureCount: 0, referenceMonth: null,
+  };
+  const endedRoles = (Array.isArray(evidence?.roles) ? evidence.roles : [])
+    .map(role => ({ role, end: endedBeforeReference(role, reference) }))
+    .filter(({ role, end }) => end && text(role?.company));
+  const referenceMonth = `${reference.year}-${String(reference.month + 1).padStart(2, '0')}`;
+  if (!endedRoles.length) return {
+    ...result('ended-role-current-employment', true, 'no résumé role has an explicit end month before the reference month'),
+    endedRoleCount: 0, failureCount: 0, referenceMonth,
+  };
+  const observations = [];
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  for (let paragraphIndex = 0; paragraphIndex < list.length; paragraphIndex++) {
+    for (const sentence of sentences(list[paragraphIndex])) {
+      for (const { role, end } of endedRoles) {
+        const frame = currentEmploymentFrame(text(sentence), role);
+        if (!frame) continue;
+        const roleLabel = [text(role.title), text(role.company)].filter(Boolean).join(' at ');
+        const endLabel = `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][end.month]} ${end.year}`;
+        observations.push(`paragraph ${paragraphIndex + 1} frames the explicitly ended role “${boundedDetailValue(roleLabel)}” (${boundedDetailValue(text(role.dates))}; ended ${endLabel} before the reference month) as current employment (“${boundedDetailValue(frame)}”); describe that role's evidence in past tense or remove the current-work framing`);
+        if (observations.length >= ENDED_ROLE_CURRENT_EMPLOYMENT_OBSERVATIONS) break;
+      }
+      if (observations.length >= ENDED_ROLE_CURRENT_EMPLOYMENT_OBSERVATIONS) break;
+    }
+    if (observations.length >= ENDED_ROLE_CURRENT_EMPLOYMENT_OBSERVATIONS) break;
+  }
+  return {
+    ...observationResult('ended-role-current-employment', observations, ENDED_ROLE_CURRENT_EMPLOYMENT_OBSERVATIONS,
+      'no explicitly ended résumé role is presented as current employment or current work'),
+    endedRoleCount: endedRoles.length,
+    failureCount: observations.length,
+    referenceMonth,
+  };
+}
+
 // “I built X. I built Y too.” appends a second proof without saying why it
 // follows. Both halves are required before a sentence is flagged: an additive
 // opener in front of a non-evidence sentence is ordinary connective prose.
@@ -4344,7 +4472,7 @@ export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = ''
 }
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */
-export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '' } = {}) {
+export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence = {}, jobText = '', researchText = '', companyName = '', referenceDate = null } = {}) {
   const plannedCompanyDetail = text(plan?.companyHook?.detail);
   const priorEmployers = (Array.isArray(evidence?.roles) ? evidence.roles : [])
     .map(role => text(role?.company)).filter(Boolean);
@@ -4406,6 +4534,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     // established order stays stable and both read paragraphs only.
     checkRepeatedTransferCarrier(paragraphs),
     checkDanglingDemonstrative(paragraphs),
+    checkEndedRoleCurrentEmployment(paragraphs, evidence, referenceDate),
   ];
 }
 

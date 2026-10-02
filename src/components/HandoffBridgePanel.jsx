@@ -207,14 +207,12 @@ export function HandoffBridgePanel() {
     || (id === 'open-pairing' && !canPair)
     || (id === 'revoke-all' && !status.enabled)
   );
+  // Copy starter is the deliberate replacement action. Main preserves the
+  // prepare/clipboard/commit transaction; the renderer never adds a second
+  // confirmation, including for an active chat.
   const newChat = useCallback(() => {
-    const referenceNow = now || status.at;
-    const age = status.chat.lastCallAt && referenceNow >= status.chat.lastCallAt
-      ? referenceNow - status.chat.lastCallAt
-      : Infinity;
-    if (status.chat.ordinal && status.chat.state !== 'awaiting-first-call' && age < 120000) setConfirm('new');
-    else void call('handoffBridgeNewChat');
-  }, [call, now, status.at, status.chat.lastCallAt, status.chat.ordinal, status.chat.state]);
+    void call('handoffBridgeNewChat');
+  }, [call]);
 
   const runHealthAction = useCallback(id => {
     if (id === 'setup') {
@@ -268,24 +266,7 @@ export function HandoffBridgePanel() {
     .slice(0, 10);
 
   let dialog = null;
-  if (confirm === 'new') {
-    dialog = (
-      <ConfirmDialog
-        title={BRIDGE_UI_COPY.confirmNewTitle}
-        message={BRIDGE_UI_COPY.confirmNewMessage(
-          chat.ordinal,
-          chat.lastCall || BRIDGE_UI_COPY.recently,
-        )}
-        confirmLabel={BRIDGE_UI_COPY.confirmNew}
-        cancelLabel={BRIDGE_UI_COPY.keepChat(chat.ordinal)}
-        onConfirm={() => {
-          setConfirm(null);
-          void call('handoffBridgeNewChat');
-        }}
-        onCancel={() => setConfirm(null)}
-      />
-    );
-  } else if (confirm === 'revoke') {
+  if (confirm === 'revoke') {
     dialog = (
       <ConfirmDialog
         title={BRIDGE_UI_COPY.confirmRevokeTitle}

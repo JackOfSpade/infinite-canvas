@@ -176,6 +176,7 @@ MODULE MAP (all new; none are pinned by source-text tests) - electron/ipc/handof
 - mcp.js + tools.js: JSON-RPC subset and the frozen tool descriptors/wording constants. Tolerates tools/call with no preceding initialize, answers unknown methods (server/discover) with HTTP 400 + -32601, GET/DELETE with 405, JSON-RPC batch arrays with -32600 (all as observed in RESULTS.md:25,57 and spike server.js). Stateless, plain-JSON replies.
 - oauth.js (pure, injected store) + store.js (the only fs user).
 - engine.js (pure, injected clock and ports): session, chat epoch, lanes, code index, single-flight, verdict cache, tombstones, caps, waiting logic, budgets, telemetry counters.
+- restartContext.js (main-only capability): identifies a guarded UI New/Continue press so it can skip the redundant restart sheet; it carries no renderer data and direct controller callers remain confirmed.
 - preflight.js, framing.js, errors.js (fixed strings), log.js (private logger accepting enumerated codes only), audit.js (metadata ledger), power.js (optional-chained powerMonitor/powerSaveBlocker/setBackgroundThrottling).
 - sources/application.js (Phase 1), sources/push.js (Phase 3). Only sources/application.js imports localAiApplication.js and only for getLocalApplicationHandoff, submitLocalApplicationHandoff and localApplicationStatus; a source-scan test asserts that, and that nothing in the directory imports nonApiAi.js until Phase 3.
 

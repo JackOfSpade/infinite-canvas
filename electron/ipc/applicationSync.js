@@ -33,6 +33,32 @@ const APPLICATION_SYNC_PATH = '/application-sync';
 const MAX_HTML_BYTES = 64 * 1024 * 1024;
 const STATE_FILE = 'application-sync-workspaces.json';
 const APPLICATION_SYNC_TOKEN_RE = /^[a-f0-9]{64}$/i;
+// Keep this narrow validation local instead of importing jobApplication.js:
+// that module already imports this Sync service, so a reciprocal import would
+// make the authorization service depend on a fragile circular module graph.
+// The fields mirror the durable audit written by the Local AI export path.
+const GENERATION_AUDIT_VERSION = 1;
+const GENERATION_AUDIT_SCHEMA = 'infinite-canvas-generation-audit';
+const GENERATION_AUDIT_SHA256_RE = /^[a-f0-9]{64}$/i;
+const GENERATION_AUDIT_FINAL_REQUIRED_HASH_KEYS = [
+  'resultSha256',
+  'resumeContentSha256',
+  'coverLetterContentSha256',
+  'stagedApplicationHtmlSha256',
+  'originalJobListingSha256',
+];
+const GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS = [
+  'applicationHtmlSha256',
+  'originalJobListingSha256',
+];
+// Save-time export permits a missing optional PDF sibling; its audit binding is
+// deliberately null until that document exists. Sync can subsequently create
+// one PDF, so reject malformed receipts but retain a truthful null for the
+// untouched optional sibling.
+const GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS = [
+  'resumePdfSha256',
+  'coverLetterPdfSha256',
+];
 const workspaces = new Map();
 const workspaceSyncQueues = new Map();
 let server = null;
@@ -90,15 +116,18 @@ function normalizeWorkspace(raw) {
   const applicationPath = path.resolve(workspaceDir, 'Application.html');
   const resumePdfPath = path.resolve(workspaceDir, 'Resume.pdf');
   const coverLetterPdfPath = path.resolve(workspaceDir, 'Cover Letter.pdf');
+  const generationAuditPath = path.resolve(workspaceDir, 'Generation Audit.json');
   // Keep persisted data intentionally tiny and reconstruct filenames rather
   // than trusting paths from the state file.
-  if (!isInside(workspaceDir, applicationPath) || !isInside(workspaceDir, resumePdfPath) || !isInside(workspaceDir, coverLetterPdfPath)) return null;
+  if (!isInside(workspaceDir, applicationPath) || !isInside(workspaceDir, resumePdfPath)
+    || !isInside(workspaceDir, coverLetterPdfPath) || !isInside(workspaceDir, generationAuditPath)) return null;
   return {
     token,
     workspaceDir,
     applicationPath,
     resumePdfPath,
     coverLetterPdfPath,
+    generationAuditPath,
     identity: normalizeWorkspaceIdentity(raw?.identity),
   };
 }
@@ -179,45 +208,45 @@ async function readBinaryFileHandleBounded(handle, maxBytes) {
   return Buffer.concat(chunks, offset);
 }
 
-async function readRegisteredWorkspaceHtml(workspace) {
+async function readRegisteredWorkspaceText(workspace, filePath, label, { withMetadata = false } = {}) {
   const noFollow = fs.constants.O_NOFOLLOW || 0;
   let preOpenStat = null;
   let handle;
   if (!noFollow) {
-    preOpenStat = await fs.promises.lstat(workspace.applicationPath);
+    preOpenStat = await fs.promises.lstat(filePath);
     if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
-      throw new Error('Application Sync workspace HTML must be a regular file.');
+      throw new Error(`Application Sync ${label} must be a regular file.`);
     }
   }
   try {
-    handle = await fs.promises.open(workspace.applicationPath, fs.constants.O_RDONLY | noFollow);
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow);
   } catch (error) {
     // A few filesystems expose O_NOFOLLOW but reject the flag itself. Fall
     // back only for an unsupported operation, never for ELOOP (the expected
     // rejection when the path is actually a symbolic link), and bind the
     // opened handle to a pre-open lstat identity below.
     if (!noFollow || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) throw error;
-    preOpenStat = await fs.promises.lstat(workspace.applicationPath);
+    preOpenStat = await fs.promises.lstat(filePath);
     if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
-      throw new Error('Application Sync workspace HTML must be a regular file.');
+      throw new Error(`Application Sync ${label} must be a regular file.`);
     }
-    handle = await fs.promises.open(workspace.applicationPath, fs.constants.O_RDONLY);
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY);
   }
 
   try {
     const openedStat = await handle.stat();
     if (!openedStat.isFile() || openedStat.size > MAX_HTML_BYTES
       || (preOpenStat && !sameFileIdentity(openedStat, preOpenStat))) {
-      throw new Error('Application Sync workspace HTML changed or is not a safe regular file.');
+      throw new Error(`Application Sync ${label} changed or is not a safe regular file.`);
     }
     // Opening a final file with O_NOFOLLOW is not enough if an ancestor was
     // replaced. Re-check the captured directory after the handle is open,
     // then prove the current path still names that exact opened file.
     await captureOrVerifyWorkspaceIdentity(workspace);
-    const currentPathStat = await fs.promises.lstat(workspace.applicationPath);
+    const currentPathStat = await fs.promises.lstat(filePath);
     if (!currentPathStat.isFile() || currentPathStat.isSymbolicLink()
       || !sameFileIdentity(currentPathStat, openedStat)) {
-      throw new Error('Application Sync workspace HTML changed while it was being opened.');
+      throw new Error(`Application Sync ${label} changed while it was being opened.`);
     }
     const html = await readFileHandleBounded(handle, MAX_HTML_BYTES);
     const finalStat = await handle.stat();
@@ -225,12 +254,29 @@ async function readRegisteredWorkspaceHtml(workspace) {
       || finalStat.size !== openedStat.size
       || finalStat.mtimeMs !== openedStat.mtimeMs
       || finalStat.ctimeMs !== openedStat.ctimeMs) {
-      throw new Error('Application Sync workspace HTML changed while it was being read.');
+      throw new Error(`Application Sync ${label} changed while it was being read.`);
     }
-    return html;
+    if (!withMetadata) return html;
+    return {
+      text: html,
+      bytes: finalStat.size,
+      mtimeMs: finalStat.mtimeMs,
+      // The bounded handle above is the file that was identity-checked before
+      // and after reading. This digest therefore describes the verified
+      // readback, rather than a later path-based re-read that could race it.
+      sha256: sha256(Buffer.from(html, 'utf8')).slice(0, 16),
+    };
   } finally {
     await handle.close();
   }
+}
+
+async function readRegisteredWorkspaceHtml(workspace) {
+  return readRegisteredWorkspaceText(workspace, workspace.applicationPath, 'workspace HTML');
+}
+
+async function readRegisteredWorkspaceGenerationAudit(workspace, options) {
+  return readRegisteredWorkspaceText(workspace, workspace.generationAuditPath, 'Generation Audit.json', options);
 }
 
 async function readRegisteredWorkspacePdf(workspace, documentKind) {
@@ -402,6 +448,50 @@ function sendJson(response, status, body, origin) {
 
 function sha256(data) {
   return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+// Generation Audit.json is the durable receipt for a completed Local AI
+// application. Its finalArtifacts section is producer provenance and must
+// never be rewritten by a later user Sync; savedArtifacts, in contrast,
+// explicitly binds the exact files currently beside the receipt. Updating one
+// editable panel therefore changes Application.html plus its derived PDF and
+// must refresh only those two saved-artifact fingerprints.
+function withSyncedGenerationAuditSavedArtifacts(data, { applicationHtml, pdf, documentKind }) {
+  let audit;
+  try {
+    audit = JSON.parse(String(data || ''));
+  } catch {
+    throw new Error('Generation Audit.json cannot be updated because it is not valid JSON.');
+  }
+  const plainObject = value => value != null && typeof value === 'object' && !Array.isArray(value);
+  const validHashMap = (value, requiredKeys, nullableKeys = []) => plainObject(value)
+    && requiredKeys.every(key => typeof value[key] === 'string' && GENERATION_AUDIT_SHA256_RE.test(value[key]))
+    && nullableKeys.every(key => value[key] == null
+      || (typeof value[key] === 'string' && GENERATION_AUDIT_SHA256_RE.test(value[key])));
+  // A present audit belongs to the same atomic bundle as the files Sync is
+  // about to replace. Do not turn a hand-edited or partial JSON object into a
+  // freshly-written but unverifiable receipt: retain producer provenance only
+  // when every producer/durable fingerprint required by the current format is
+  // present and well formed. Absence remains the supported legacy-bundle path.
+  if (!plainObject(audit)
+    || audit.version !== GENERATION_AUDIT_VERSION
+    || audit.schema !== GENERATION_AUDIT_SCHEMA
+    || typeof audit.jobId !== 'string' || !audit.jobId.trim()
+    || !validHashMap(audit.finalArtifacts, GENERATION_AUDIT_FINAL_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS)
+    || !validHashMap(audit.savedArtifacts, GENERATION_AUDIT_SAVED_REQUIRED_HASH_KEYS, GENERATION_AUDIT_OPTIONAL_PDF_HASH_KEYS)) {
+    throw new Error('Generation Audit.json cannot be updated because it is not a supported durable application audit.');
+  }
+  const pdfKey = documentKind === 'cover' ? 'coverLetterPdfSha256'
+    : documentKind === 'resume' ? 'resumePdfSha256' : '';
+  if (!pdfKey) throw new Error('Application Sync received an invalid audit document kind.');
+  return `${JSON.stringify({
+    ...audit,
+    savedArtifacts: {
+      ...audit.savedArtifacts,
+      applicationHtmlSha256: sha256(Buffer.from(applicationHtml, 'utf8')),
+      [pdfKey]: sha256(Buffer.from(pdf)),
+    },
+  }, null, 2)}\n`;
 }
 
 function applicationPanelSha256(html, documentKind) {
@@ -938,6 +1028,18 @@ async function syncWorkspace(payload) {
       } catch (error) {
         throw Object.assign(new Error(`The saved application workspace could not be read: ${error?.message || error}`), { statusCode: 409 });
       }
+      let storedGenerationAudit = null;
+      try {
+        storedGenerationAudit = await readRegisteredWorkspaceGenerationAudit(workspace);
+      } catch (error) {
+        // Audits were added after Sync shipped, so a legacy application bundle
+        // legitimately has no fixed-name receipt. If a receipt is present it
+        // is part of the durable bundle and must be safe to read before Sync
+        // can replace any of its siblings.
+        if (error?.code !== 'ENOENT') {
+          throw Object.assign(new Error(`The saved Generation Audit.json could not be read: ${error?.message || error}`), { statusCode: 409 });
+        }
+      }
       let mergedHtml;
       try {
         mergedHtml = mergeSelectedApplicationPanel(html, storedHtml, documentKind, { expectedToken: token });
@@ -988,6 +1090,13 @@ async function syncWorkspace(payload) {
       // either file restores both prior versions, so Sync cannot leave a new
       // editable document paired with an old employer-facing PDF.
       updateSyncAttempt(attemptId, { phase: 'writing and verifying revision' });
+      const generationAudit = storedGenerationAudit == null
+        ? null
+        : withSyncedGenerationAuditSavedArtifacts(storedGenerationAudit, {
+          applicationHtml: mergedHtml,
+          pdf,
+          documentKind,
+        });
       const manifest = await replaceApplicationBundleAtomically([
         // The transaction rechecks this snapshot after moving the old HTML to
         // its rollback backup. That closes the final gap after the pre-render
@@ -995,14 +1104,41 @@ async function syncWorkspace(payload) {
         // deleted while this older render is promoted.
         { destination: workspace.applicationPath, data: mergedHtml, expectedCurrentData: storedHtml },
         { destination: pdfPath, data: pdf },
+        ...(generationAudit == null ? [] : [{
+          destination: workspace.generationAuditPath,
+          data: generationAudit,
+          // Keep the receipt in the same optimistic-concurrency boundary as
+          // Application.html: an external edit after the bounded read must
+          // roll every promoted sibling back rather than be silently lost.
+          expectedCurrentData: storedGenerationAudit,
+        }]),
       ], {
-        verify: () => inspectApplicationSyncRevision({
-          applicationPath: workspace.applicationPath,
-          pdfPath,
-          html: mergedHtml,
-          pdf,
-          token,
-        }),
+        verify: async () => {
+          const revisionManifest = await inspectApplicationSyncRevision({
+            applicationPath: workspace.applicationPath,
+            pdfPath,
+            html: mergedHtml,
+            pdf,
+            token,
+          });
+          if (generationAudit == null) return revisionManifest;
+          const savedGenerationAudit = await readRegisteredWorkspaceGenerationAudit(workspace, { withMetadata: true });
+          if (!Buffer.from(savedGenerationAudit.text, 'utf8').equals(Buffer.from(generationAudit, 'utf8'))) {
+            throw new Error('Generation Audit.json failed readback verification.');
+          }
+          return [...revisionManifest, {
+            name: 'Generation Audit.json',
+            path: workspace.generationAuditPath,
+            kind: 'generation-audit',
+            exists: true,
+            readable: true,
+            bytes: savedGenerationAudit.bytes,
+            mtimeMs: savedGenerationAudit.mtimeMs,
+            sha256: savedGenerationAudit.sha256,
+            matchesSource: true,
+            integrityVerified: true,
+          }];
+        },
       });
       updateSyncAttempt(attemptId, {
         status: 'completed', phase: 'completed', finishedAt: Date.now(), manifest,
@@ -1144,6 +1280,9 @@ export async function __assertApplicationSyncWorkspaceSnapshotForTests(workspace
 }
 export function __applicationPanelSha256ForTests(html, documentKind) {
   return applicationPanelSha256(html, documentKind);
+}
+export function __withSyncedGenerationAuditSavedArtifactsForTests(data, options) {
+  return withSyncedGenerationAuditSavedArtifacts(data, options);
 }
 export async function __reconcileApplicationSyncWorkspaceForTests(payload) {
   return reconcileWorkspacePdfs(payload);

@@ -5,7 +5,7 @@ import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugRepor
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../../src/utils/nonApiAiNavigation.js';
-import { STALE_MANUAL_AI_RESUME_MS, isLiveManualAiRecoveryBoardOwner, isStaleOrdinaryManualAiResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../test-dependencies.js';
+import { MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION, STALE_MANUAL_AI_RESUME_MS, createManualAiPreSearchRecovery, isLiveManualAiRecoveryBoardOwner, isStaleOrdinaryManualAiResume, manualAiPreSearchRecoveryForResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../test-dependencies.js';
 
 // A handful of representative marketplace tasks used below to prove routing
 // and dispatch are task-agnostic now that every task shares the one manual
@@ -127,8 +127,9 @@ export default [
         && dialogSource.includes('result.nodeCancelled && cancelledNodeId')
         && dialogSource.includes('detail: { nodeId: cancelledNodeId, runId: cancelledRunId }')
         && jobSearchSource.includes("document.addEventListener('non-api-ai-node-cancelled', onManualAiNodeCancelled)")
-        && jobSearchSource.includes('resetHandler();'),
-      'cancelling a node-owned manual AI request notifies its Job Search hub with exact run ownership before using the in-card cancellation path');
+        && jobSearchSource.includes('stopHandler();')
+        && jobSearchSource.includes('resetHandler(e, { preserveRecovery: true })'),
+      'cancelling a node-owned manual AI request notifies its Job Search hub with exact run ownership before using the in-card saved-progress Stop path');
       assert(preloadSource.includes("revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath })")
         && dialogSource.includes('activeRequest.attachments?.length > 0')
         && dialogSource.includes('Show in Finder'),
@@ -446,12 +447,18 @@ export default [
         && jobSearchSource.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
         && jobSearchSource.includes('User resumed stale manual AI run'),
       'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, auto-resumes when recent, and requires an exact user-authorized run id when stale');
-      assert(jobSearchSource.includes("retirementReason: 'discarded-stale-manual-ai-recovery'")
-        && jobSearchSource.includes('marker: resume,')
-        && jobSearchSource.includes('User discarded stale manual AI run')
-        && jobSearchSource.includes('its age could not be verified.')
-        && jobSearchSource.includes('start fresh discards only that saved handoff.'),
-      'discarding an aged manual-AI recovery retires only its exact durable marker, while its explicit Resume control preserves the same run identity');
+      const staleRecoveryBannerStart = jobSearchSource.indexOf('const pausedManualAiRecovery = staleManualAiRecovery?.pausedByUser === true;');
+      const staleRecoveryBannerEnd = jobSearchSource.indexOf('\n\n  const banner = (', staleRecoveryBannerStart);
+      const staleRecoveryBanner = jobSearchSource.slice(staleRecoveryBannerStart, staleRecoveryBannerEnd);
+      assert(staleRecoveryBannerStart >= 0 && staleRecoveryBannerEnd > staleRecoveryBannerStart
+        && !jobSearchSource.includes("retirementReason: 'discarded-stale-manual-ai-recovery'")
+        && !jobSearchSource.includes('handleDiscardStaleManualAiRecovery')
+        && staleRecoveryBanner.includes('const pausedManualAiRecovery = staleManualAiRecovery?.pausedByUser === true;')
+        && staleRecoveryBanner.includes('This job search was stopped before source scraping began.')
+        && staleRecoveryBanner.includes('Clear career data is the only way to remove it.')
+        && staleRecoveryBanner.includes('onClick={handleResumeStaleManualAiRecovery}')
+        && !staleRecoveryBanner.includes('Start fresh'),
+      'an aged or user-paused manual-AI recovery retains its exact marker: its banner offers explicit Resume and identifies Clear career data as the only removal action');
       const sliceSource = (start, end) => {
         const from = jobSearchSource.indexOf(start);
         const to = jobSearchSource.indexOf(end, from);
@@ -504,10 +511,11 @@ export default [
       );
       assert(staleAdmission.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;')
         && jobSearchSource.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;')
-        && genericRerun.includes('Choose Resume or Start fresh for the saved older manual-AI recovery')
+        && genericRerun.includes('Choose Resume for the saved manual-AI recovery, or use Clear career data to deliberately remove it before another search.')
+        && !genericRerun.includes('Start fresh')
         && pipelineAdmission.includes('staleRecoveryBlockedAtLaneStart')
         && pipelineAdmission.includes('staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume'),
-      'a pending stale recovery locks normal controls and is rechecked at the shared-lane turn, while the exact user-authorized run id remains admissible');
+      'a pending stale recovery locks normal controls and is rechecked at the shared-lane turn, while the exact user-authorized Resume remains admissible and Clear career data is the sole removal path');
       const scoringContinuation = sliceSource('const resumeScoring = useCallback', 'resumeScoringRef.current = resumeScoring;');
       const interruptedResume = sliceSource('const handleResumeRun = useCallback', 'resumeInterruptedRunRef.current = handleResumeRun;');
       const savedScrapeResume = sliceSource('const handleResumeSavedScrape = useCallback', 'resumeSavedScrapeRef.current = handleResumeSavedScrape;');
@@ -519,11 +527,11 @@ export default [
         && reanalysis.includes('staleRecoveryBlockedAtLaneStart'),
       'every standalone continuation rechecks stale admission both before and after its queue turn, so a marker that arrives while scoring, interrupted recovery, saved-scrape recovery, or re-analysis waits cannot mint manual AI');
       assert(jobSearchSource.includes('manualAiStaleRecoveryActionRunIdRef.current')
-        && jobSearchSource.includes('requireCancellationAck: true')
-        && jobSearchSource.includes("cancellationReason: 'discarded-stale-manual-ai-recovery'")
         && jobSearchSource.includes('className="nodrag px-2 py-0.5')
-        && jobSearchSource.includes('disabled={baseControlsLocked || staleManualAiRecoveryActionBusy'),
-      'Resume and Start fresh are mutually excluded while their exact recovery action is active; discard obtains a cancellation acknowledgement before retiring the marker');
+        && jobSearchSource.includes('disabled={baseControlsLocked || staleManualAiRecoveryActionBusy || !canvasFilePath}')
+        && jobSearchSource.includes('onClick={handleResumeStaleManualAiRecovery}')
+        && !jobSearchSource.includes("cancellationReason: 'discarded-stale-manual-ai-recovery'"),
+      'an explicit stale-recovery Resume remains single-action and exact-id-bound; it never exposes a competing discard path that could erase the saved marker');
       assert(mainSource.includes('async function flushNonApiAiPersistenceForLifecycle(win, actionType)')
         && mainSource.includes("if (!await flushNonApiAiPersistenceForLifecycle(win, 'close')) return;")
         && mainSource.includes("return flushNonApiAiPersistenceForLifecycle(win, 'quit');")
@@ -556,6 +564,82 @@ export default [
     },
   },
   {
+    name: 'non-API AI: pre-search recovery freezes the original window and exact ownership',
+    run: () => {
+      const originalWindow = {
+        startTimestamp: 1_763_596_800_000,
+        anchorTimestamp: 1_763_596_800_000,
+        completionTimestamp: null,
+        capped: true,
+        capReason: 'no-completion',
+        providerLookbackDays: 21,
+      };
+      const fingerprint = 'a'.repeat(64);
+      const descriptor = createManualAiPreSearchRecovery({
+        manualAiRunId: 'manual-run-1',
+        nodeId: 'job-search-hub-1',
+        searchWindow: originalWindow,
+        profileFingerprint: fingerprint,
+        startedAt: 1_765_420_123_456,
+      });
+      assert(descriptor?.version === MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION
+        && descriptor.manualAiRunId === 'manual-run-1'
+        && descriptor.nodeId === 'job-search-hub-1'
+        && descriptor.searchWindow.startTimestamp === originalWindow.startTimestamp
+        && descriptor.searchWindow.anchorTimestamp === originalWindow.startTimestamp
+        && descriptor.searchWindow.completionTimestamp === null
+        && descriptor.searchWindow.capped === true
+        && descriptor.searchWindow.capReason === 'no-completion'
+        && descriptor.searchWindow.providerLookbackDays === 21
+        && descriptor.profileFingerprint === fingerprint
+        && descriptor.startedAt === 1_765_420_123_456
+        && descriptor.searchWindow !== originalWindow,
+      'a pre-search recovery writes a versioned copy of the original exact boundary, cap state, profile identity, and workflow start');
+      originalWindow.providerLookbackDays = 1;
+      assert(descriptor.searchWindow.providerLookbackDays === 21,
+        'the persisted descriptor owns a copy of the frozen provider boundary rather than a mutable caller object');
+
+      const resume = { runId: 'manual-run-1', preSearchRecovery: descriptor };
+      const recovered = manualAiPreSearchRecoveryForResume(resume, {
+        runId: 'manual-run-1',
+        nodeId: 'job-search-hub-1',
+      });
+      assert(recovered?.manualAiRunId === 'manual-run-1'
+        && recovered.nodeId === 'job-search-hub-1'
+        && recovered.searchWindow.startTimestamp === 1_763_596_800_000
+        && recovered.startedAt === 1_765_420_123_456,
+      'Resume admits only the exact marker/run/hub tuple and returns its immutable original boundary');
+
+      const invalidLookback = createManualAiPreSearchRecovery({
+        ...descriptor,
+        searchWindow: { ...descriptor.searchWindow, providerLookbackDays: 368 },
+      });
+      const invalidFingerprint = createManualAiPreSearchRecovery({
+        ...descriptor,
+        profileFingerprint: 'not-a-sha256',
+      });
+      const contradictoryAnchor = createManualAiPreSearchRecovery({
+        ...descriptor,
+        searchWindow: { ...descriptor.searchWindow, anchorTimestamp: descriptor.searchWindow.startTimestamp + 1 },
+      });
+      assert(invalidLookback === null
+        && invalidFingerprint === null
+        && contradictoryAnchor === null
+        && manualAiPreSearchRecoveryForResume(resume, { runId: 'other-run', nodeId: 'job-search-hub-1' }) === null
+        && manualAiPreSearchRecoveryForResume(resume, { runId: 'manual-run-1', nodeId: 'other-hub' }) === null
+        && manualAiPreSearchRecoveryForResume({
+          ...resume,
+          preSearchRecovery: { ...descriptor, version: MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION + 1 },
+        }, { runId: 'manual-run-1', nodeId: 'job-search-hub-1' }) === null
+        && manualAiPreSearchRecoveryForResume({
+          ...resume,
+          preSearchRecovery: { ...descriptor, startedAt: 0 },
+        }, { runId: 'manual-run-1', nodeId: 'job-search-hub-1' }) === null,
+      'invalid provider horizons, fingerprints, timestamps, versions, and ownership mismatches fail closed instead of becoming recovery authority');
+      return { descriptorVersion: descriptor.version, frozenLookbackDays: descriptor.searchWindow.providerLookbackDays };
+    },
+  },
+  {
     name: 'non-API AI: every Job Search recovery path owns one shared lane and workflow id',
     run: () => {
       const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
@@ -566,7 +650,7 @@ export default [
       };
       const usaJobs = between('const triggerUSAJobsBackgroundSearch = useCallback', 'const handleJobsSettingsChange = useCallback');
       const paused = between('const resumeScoring = useCallback', 'useEffect(() => {\n    resumeScoringRef.current = resumeScoring;');
-      const crashResume = between('const handleResumeRun = useCallback', 'const handleDiscardResume = useCallback');
+      const crashResume = between('const handleResumeRun = useCallback', 'resumeInterruptedRunRef.current = handleResumeRun;');
       const savedScrape = between('const handleResumeSavedScrape = useCallback', 'const autoResumedManualAiRunRef = useRef(null);');
 
       assert(usaJobs.includes("lane: 'job-search'")

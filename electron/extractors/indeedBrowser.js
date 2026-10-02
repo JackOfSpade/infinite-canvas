@@ -14,7 +14,7 @@ import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
-import { normalizeJobCollectionLimits, resolvePageCeiling, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
+import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
@@ -648,7 +648,34 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
  * @param {string} [profileDir] — override for the Puppeteer userDataDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null) {
+/** Exclusive 0-based page end for an Indeed query, exported for resume tests. */
+export function indeedQueryPageEnd(startPage, pageBudget) {
+  // `pageBudget` is the absolute lifetime ceiling for this generated query,
+  // not a fresh allowance on every crash resume. Returning the greater value
+  // makes an already-exhausted checkpoint a zero-page no-op without ever
+  // moving the finite Auto boundary outward.
+  return Math.max(
+    Math.max(0, Math.floor(Number(startPage) || 0)),
+    Math.max(0, Math.floor(Number(pageBudget) || 0)),
+  );
+}
+
+/** Resolve original per-query budgets without allowing a resume suffix to widen Auto. */
+export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePageBudgets = null, isResume = false) {
+  const count = Math.max(0, Math.floor(Number(queryCount) || 0));
+  const defaults = resolveBrowserPageBudgets(collectionLimits, count);
+  const validResumeBudgets = Array.isArray(resumePageBudgets)
+    && resumePageBudgets.length === count
+    // Auto distributes its finite aggregate allowance across every generated
+    // query. More queries than that allowance correctly leave a zero-page
+    // suffix, which must remain a no-op on Continue rather than fall back to a
+    // fresh one-page-per-query budget.
+    && resumePageBudgets.every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1_000);
+  if (validResumeBudgets) return resumePageBudgets.slice();
+  return isResume ? Array(count).fill(1) : defaults;
+}
+
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
     return {
@@ -662,6 +689,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       gathered: 0,
     };
   }
+  // Resolve this before every retryable early return. A busy profile can be
+  // retried interactively; its Continue state must retain an explicit Pages
+  // override or Auto's original per-query allocation rather than silently
+  // minting the legacy one-page-per-query fallback.
+  const queryList = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
+  const limits = normalizeJobCollectionLimits(collectionLimits);
+  const pageBudgets = resolveIndeedPageBudgets(queryList.length, limits, resumePageBudgets, isResume);
   const reservation = getSharedProfileReservationInfo();
   if (reservation) {
     return {
@@ -672,13 +706,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: `Indeed could not start because the shared browser profile is reserved for ${reservation.reason}.`,
         actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
         suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
-        resumeState: { remainingQueries: Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean), startPage },
+        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
       },
       gathered: 0,
     };
   }
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
-  const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
   // Board-ready target location → Indeed's `&l=` filter. Empty → omitted
   // (nationwide). Without this a location-free query searched the whole US.
@@ -688,12 +721,14 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
   // Haysi VA, Honaker VA and Williamson WV — all 3 of the run's Indeed results
   // were US, because `l=Canada` on the US site is just an unmatched place name.
   const host         = indeedHostForLocation(location);
-  const limits       = normalizeJobCollectionLimits(collectionLimits);
-  const resultCap    = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
-  // resolvePageCeiling ALWAYS returns a finite number (the JOB_COLLECTION_PAGE_CEILING
-  // backstop when the hub's page setting is "All") — the page-walk loops below key
-  // off this directly (`p < maxPages`), so it must never be null.
-  const maxPages     = resolvePageCeiling(limits);
+  const resultCap    = resolveJobsPerPlatform(limits);
+  // Auto's aggregate platform budget is allocated deterministically among the
+  // query list. An explicit Pages value deliberately remains per-query.
+  // Interactive Continue can resume only a suffix of the original query set.
+  // Carry that suffix's original allocations so it cannot re-divide Auto's 40
+  // pages across fewer queries and mint extra depth. A legacy resume without
+  // this structural metadata is deliberately conservative: one page/query,
+  // never a new Auto allocation.
   const unlimitedPages = isUnlimitedPages(limits);
 
   let executablePath;
@@ -731,7 +766,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: error?.message || 'Indeed could not reserve the shared browser profile.',
         actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
         suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
-        resumeState: { remainingQueries: queryList, startPage },
+        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
       },
       gathered: 0,
     };
@@ -758,7 +793,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           evidence: `Indeed's Chrome could not start: ${String(launchError?.message || launchError).slice(0, 400)}`,
           actionTitle: 'Retries the Indeed scrape — this failure was a browser that could not start, not your Indeed login',
           suggestion: 'Close any open login or verification window, then click Continue to resume Indeed.',
-          resumeState: { remainingQueries: queryList, startPage },
+        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
         },
         gathered: 0,
       };
@@ -823,7 +858,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             : 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.',
           resumeState: {
             mode: shouldHandoffIndeedChallengeToNative(preflight.reason) ? 'native-challenge' : 'retry-later',
-            challengeUrl: page.url(), remainingQueries: queryList, startPage,
+            challengeUrl: page.url(), remainingQueries: queryList, startPage, pageBudgets,
           },
         },
         gathered: 0,
@@ -863,7 +898,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           actionTitle: 'Opens a real Chrome window to sign in to Indeed, then resumes this search automatically',
           evidence: `Indeed session check landed at ${landedUrl}. Cookies observed: ${allCookieNames}. PPID — the session proof — was absent.`,
           suggestion: 'Click "Log in" on this card to sign in to Indeed in a real Chrome window — the search resumes automatically afterward.',
-          resumeState: { mode: 'native-login', remainingQueries: queryList, startPage },
+        resumeState: { mode: 'native-login', remainingQueries: queryList, startPage, pageBudgets },
         },
         gathered: 0,
         sessionDiagnostics,
@@ -872,7 +907,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // Say "All" explicitly (with its backstop) rather than just printing the
     // resolved ceiling number — otherwise a user who chose "All" sees a plain
     // "up to 1000 pages" log line that reads like a deliberate 1000-page setting.
-    logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${describeJobCollectionLimits(limits).pages} pages`);
+    logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × ${describeJobCollectionLimits(limits).pages} pages`);
     // The preflight passed on the ACCOUNT page. Remembered so a block on the
     // first /jobs page can be reported as endpoint-scoped rather than as a
     // session problem (see stopForIndeedChallenge).
@@ -881,6 +916,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const allJobs = [];
     const seenKeys = new Set();
     const providerSeenKeys = new Set();
+    let pagesWalked = 0;
+    let autoPageBudgetReached = false;
+    let explicitPageBudgetReached = false;
+    let jobBudgetReached = false;
     let totalChallenges = 0;
     let loginWallHit = false;
     let challengedQi = -1;
@@ -930,7 +969,14 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     const workList = queryList.map((q, qi) => ({
       q, qi,
       startPage: qi === 0 ? startPage : 0,
-    }));
+      // `maxPages` is an exclusive absolute page index. A resume consumes only
+      // pages that were still inside this query's original allocation; it must
+      // not turn Auto's finite cap into a fresh allowance after every crash.
+      maxPages: indeedQueryPageEnd(qi === 0 ? startPage : 0, pageBudgets[qi]),
+    // An Auto allocation can legitimately assign zero pages to a query beyond
+    // its finite aggregate budget. Drop exhausted entries before the outer
+    // loop so they cannot spend an inter-query pacing delay on a no-op.
+    })).filter(entry => entry.startPage < entry.maxPages);
 
     // Data-driven per-page stop, one instance PER QUERY (indexed by qi, not per
     // workList entry): a deferred CF retry or an opportunistic next-page advance
@@ -963,7 +1009,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      const { q, qi } = entry;
+      const { q, qi, maxPages } = entry;
 
       const overlayBase = {
         srcName:  'Indeed',
@@ -974,7 +1020,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
       for (let p = entry.startPage; p < maxPages; p++) {
         if (signal?.aborted) break outer;
-        if (allJobs.length >= resultCap) break outer;
+        if (allJobs.length >= resultCap) { jobBudgetReached = true; break outer; }
 
         const start = p * 10;
         const url   = `https://${host}/jobs?q=${encodeURIComponent(q)}${locParam}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
@@ -1071,6 +1117,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         ).catch(() => null);
 
         logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${pageJobs.length} platform-returned job(s) from ${rawPageJobs.length} candidate(s) (${htmlKB}KB${hasNextPage === false ? ', last page' : ''})`);
+        pagesWalked++;
         onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}`);
 
         if (rawPageJobs.length === 0) break;
@@ -1135,7 +1182,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             status: `Collected ${allJobs.length} jobs…`,
             progressText: `${i + 1}/${pageJobs.length}`,
           });
-          if (allJobs.length >= resultCap) break;
+          if (allJobs.length >= resultCap) { jobBudgetReached = true; break; }
         }
         await updateOverlay(page, {
           ...overlayBase,
@@ -1174,6 +1221,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
 
         if (rawPageJobs.length < 10 || hasNextPage === false) break;
+
+        if (p + 1 >= maxPages) {
+          if (isUnlimitedPages(limits)) autoPageBudgetReached = true;
+          else explicitPageBudgetReached = true;
+          break;
+        }
 
         if (p < maxPages - 1) {
           const delay = PAGE_DELAY_MS[0] + Math.round(Math.random() * (PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
@@ -1331,6 +1384,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           challengeUrl: manualChallenge.challengeUrl,
           remainingQueries: queryList.slice(manualChallenge.qi),
           startPage: manualChallenge.p,
+          pageBudgets: pageBudgets.slice(manualChallenge.qi),
         },
       };
     } else if (loginWallHit) {
@@ -1345,6 +1399,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           mode: 'native-login',
           remainingQueries: queryList.slice(challengedQi),
           startPage: challengedPage,
+          pageBudgets: pageBudgets.slice(challengedQi),
         },
       };
     } else if (totalChallenges > 0 && items.length === 0) {
@@ -1361,6 +1416,20 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       warning,
       gathered: inWindow.length,
       providerGathered: providerSeenKeys.size,
+      pagesFetched: pagesWalked,
+      stopReasons: [
+        ...(autoPageBudgetReached ? ['auto-page-budget'] : []),
+        ...(jobBudgetReached ? [limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform'] : []),
+        ...(explicitPageBudgetReached ? ['pages-per-platform'] : []),
+      ],
+      truncated: autoPageBudgetReached || explicitPageBudgetReached || jobBudgetReached,
+      cap: jobBudgetReached
+        ? { type: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform', limit: resultCap }
+        : autoPageBudgetReached
+          ? { type: 'auto-pages-per-platform', limit: pageBudgets.reduce((sum, value) => sum + value, 0) }
+          : explicitPageBudgetReached
+            ? { type: 'pages-per-platform', limit: limits.pagesPerPlatform }
+          : null,
       relevanceDropped: 0,
       preCapRelevanceDropped: 0,
       relevanceRejected: [],

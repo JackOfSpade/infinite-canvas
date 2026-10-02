@@ -15,7 +15,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { hubCardFilter } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason } from './jobboard/mergeJobs';
+import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
@@ -39,15 +39,7 @@ import {
   subscribeJobWorkflowDeletionLifecycle,
 } from '../utils/nodeDeletionLifecycle';
 
-const ACTIVE_SEARCH_STATES = new Set([
-  'queued',
-  'parsing',
-  'interpreting-preferences',
-  'querying',
-  'searching',
-  'evaluating-preferences',
-  'scoring',
-]);
+const ACTIVE_SEARCH_STATES = ACTIVE_JOB_SEARCH_STATES;
 const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set([
   'resume-saved-scrape',
   'append-scored-jobs',
@@ -742,6 +734,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const autoRetriedBoardCancellationRef = useRef(null);
   const attemptedSupersededCleanupRunIdsRef = useRef(new Set());
   const foreignRecoveryWaitSigRef = useRef(null);
+  const visibleSnapshotRefreshLogKeyRef = useRef(null);
   // The compensation stage begins only after global taxonomy validation. Its
   // progress uses the same main-process event as a Job Search node, but the
   // node id below keeps concurrent boards/searches completely isolated.
@@ -1019,7 +1012,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const onRecoveryLedgerChanged = (event) => {
       const { hubId, canvasFilePath: changedCanvasFilePath } = event?.detail || {};
       if (!hubId || changedCanvasFilePath !== canvasFilePath) return;
-      // A Start fresh can arrive while a previous peek is still in flight.
+      // A Clear career data action can arrive while a previous peek is still in flight.
       // Invalidate that async generation before removing its cached affordance,
       // otherwise its stale completion can put the old token straight back.
       interruptedRecoveryProbeGenerationRef.current += 1;
@@ -1298,12 +1291,46 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setNodes((nodes) => computeJobTreeView(nodes, id, hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold })));
   }, [id, setNodes, data.sourceFilter, data.scoreThreshold]);
 
-  // Detect connection/data drift vs. the last Combine. A deleted connection (or a
-  // re-run, or a newly added module) makes the cached board stale → hide results +
-  // prompt re-combine. Restoring the exact connections+data (e.g. re-adding the
-  // same edge with unchanged jobs) clears staleness → results reappear, no
-  // re-combine or LLM call needed. Old boards (no stored signature) adopt the
-  // current connections as their baseline instead of falsely going stale.
+  // Use one guarded path for every place a changing connected Search can
+  // supersede a prior Combine. This is deliberately imperative too: Combine
+  // admission/pre-commit fences read the live canvas, not render-time inputs.
+  const keepCompletedSnapshotDuringActiveSearch = useCallback(({
+    boardData = {},
+    completedModules: liveCompletedModules = [],
+    connectedModules: liveConnectedModules = [],
+  } = {}) => {
+    if (!shouldKeepCompletedBoardSnapshotVisible({
+      boardHubState: boardData.hubState,
+      boardStale: !!boardData.stale,
+      boardLocked: !!boardData.locked,
+      combineSignature: boardData.combineSignature,
+      completedModules: liveCompletedModules,
+      connectedModules: liveConnectedModules,
+    })) {
+      visibleSnapshotRefreshLogKeyRef.current = null;
+      return false;
+    }
+    const activeSearchIds = liveConnectedModules
+      .filter(module => ACTIVE_SEARCH_STATES.has(module.hubState))
+      .map(module => module.id)
+      .sort()
+      .join(',');
+    const refreshLogKey = `${boardData.combineSignature}|${activeSearchIds}`;
+    if (visibleSnapshotRefreshLogKeyRef.current !== refreshLogKey) {
+      visibleSnapshotRefreshLogKeyRef.current = refreshLogKey;
+      EventLogger.log(`[JobBoard] previous completed results remain visible while connected Search updates id=${id} sources=${activeSearchIds}`);
+    }
+    return true;
+  }, [id]);
+
+  // Detect connection/data drift vs. the last Combine. Topology changes and
+  // terminal output changes make the cached board stale → hide results + prompt
+  // re-combine. A connected Search that is still actively re-running keeps the
+  // prior cascade visible until it reaches a terminal changed input. Restoring
+  // the exact connections+data (e.g. re-adding the same edge with unchanged
+  // jobs) clears staleness → results reappear, no re-combine or LLM call needed.
+  // Old boards (no stored signature) adopt the current connections as their
+  // baseline instead of falsely going stale.
   useEffect(() => {
     if (hubState !== 'done' || data.locked) return; // locked = frozen snapshot
     // A released flat-board build persisted direct cards with no taxonomy.
@@ -1325,6 +1352,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // instead of falsely going stale.
     if (data.combineSignature == null || isLegacyCombineSignature(data.combineSignature)) {
       updateGlobal(id, { combineSignature: liveSignature, stale: false, staleReason: null });
+      return;
+    }
+    // A connected Search leaves the terminal signature as soon as it starts.
+    // Keep the last completed cascade usable during that transient phase; a
+    // topology edit, existing stale result, or terminal result change still
+    // falls through to the normal stale/hide path below.
+    if (keepCompletedSnapshotDuringActiveSearch({
+      boardData: data,
+      completedModules,
+      connectedModules,
+    })) {
       return;
     }
     const nextStale = liveSignature !== data.combineSignature;
@@ -1354,7 +1392,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       showBoardChildren();
       EventLogger.log(`[JobBoard] results restored after stale state cleared id=${id}`);
     }
-  }, [hubState, data, data.locked, liveSignature, data.combineSignature, data.stale, data.staleReason, completedModules, connectedModules, id, getNodes, updateGlobal, hideBoardChildren, showBoardChildren]);
+  }, [hubState, data, data.locked, liveSignature, data.combineSignature, data.stale, data.staleReason, completedModules, connectedModules, id, getNodes, updateGlobal, hideBoardChildren, showBoardChildren, keepCompletedSnapshotDuringActiveSearch]);
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
   const clearBoardChildren = useCallback(() => {
@@ -2644,8 +2682,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         || (expectedCombineSignature && expectedCombineSignature !== sigAtCombine)
       ) {
         const reason = 'Connected Job Search results changed before the interrupted Combine resumed';
-        hideBoardChildren();
-        updateGlobal(id, { stale: true, staleReason: reason });
+        const preserveCompletedSnapshot = keepCompletedSnapshotDuringActiveSearch({
+          boardData: getNode(id)?.data || {},
+          completedModules: completedAtCombine,
+          connectedModules: inputsAtCombine.all,
+        });
+        if (!preserveCompletedSnapshot) {
+          hideBoardChildren();
+          updateGlobal(id, { stale: true, staleReason: reason });
+        }
         autoResumedManualAiRunRef.current = null;
         await completeManualAiRun(manualAiRunId);
         EventLogger.log(`[JobBoard] recovered combine superseded at admission id=${id}`);
@@ -2877,8 +2922,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         || !combineInputsMatchExpected(liveInputsBeforeCommit, exactSourceRunsAtCombine)
       ) {
         const reason = 'Connected Job Search results changed while Combine was running';
-        hideBoardChildren();
-        updateGlobal(id, { stale: true, staleReason: reason });
+        const preserveCompletedSnapshot = keepCompletedSnapshotDuringActiveSearch({
+          boardData: getNode(id)?.data || {},
+          completedModules: liveInputsBeforeCommit,
+          connectedModules: liveStateBeforeCommit.all,
+        });
+        if (!preserveCompletedSnapshot) {
+          hideBoardChildren();
+          updateGlobal(id, { stale: true, staleReason: reason });
+        }
         // A manual taxonomy/compensation handoff belongs to the immutable input
         // signature captured above. Once that signature changes, this response
         // can never be resumed safely. Retire its exact marker now so it cannot
@@ -3033,7 +3085,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue]);
+  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch]);
 
   const handleSearchSelected = useCallback(async (request = null) => {
     if (isJobWorkflowDeletionPending(id)) return { status: 'cancelled' };

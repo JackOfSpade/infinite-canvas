@@ -231,6 +231,13 @@ Use any local coding agent with filesystem and shell access. The routine is prov
    equips me to contribute`. Prefer a direct conditional bridge that names the target
    responsibility, in a transfer form that differs from the neighbouring
    paragraphs' transfer forms.
+   When a résumé role has an explicit end month before `input.json.createdAt`'s
+   month, never frame that named employer or title as current employment or
+   current work. For example, write `As a Software Engineer at Acme, I built
+   ...`, not `I build ...`; describe the evidence in past
+   tense. A date range marked `Present` or `Current` remains a current role,
+   and an employer-free present-tense capability claim is not an employment
+   claim.
    Treat phrases such as `most of my work` and `throughout my career` as
    factual breadth claims that require source support. Across paragraph
    boundaries a demonstrative must find its referent in the immediately

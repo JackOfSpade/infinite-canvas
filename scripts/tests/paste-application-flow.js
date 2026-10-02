@@ -4508,7 +4508,7 @@ export default [
           resultSha256: crypto.createHash('sha256').update('some other result').digest('hex'),
           revisionRound: 1,
           documentSha256: { resume: 'a'.repeat(64), coverLetter: 'b'.repeat(64) },
-          resume: { pageCount: 1, targetPageCount: 1 }, coverLetter: { pageCount: 1, targetPageCount: 1 },
+          resume: { pageCount: 2, targetPageCount: 1 }, coverLetter: { pageCount: 1, targetPageCount: 1 },
           message: 'A stale measured advisory for bytes this job no longer carries.',
         }), 'utf8');
         let importError = '';

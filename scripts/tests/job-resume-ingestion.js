@@ -1,8 +1,9 @@
-import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
+import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCheckpointForTests, __discardJobAnalysisSnapshotForTests, __discardOwnedJobRunForTests, __formatJobAnalysisPromptForTests, __getJobAnalysisRetirementStateForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __removeDescriptionRecoveryCheckpointForTests, __runWithIpcRequestContextForTests, __saveDescriptionRecoverySnapshotIfCurrentForTests, __saveJobAnalysisSnapshotForTests, assessDescriptionRecoverySnapshotOwnership, assert, canRecoverGatheredRunDirectly, collectDeletedJobAnalysisDiscards, collectDeletedJobRunDiscards, createDescriptionRecoveryMutex, filterJobsByDescriptionEvidence, fs, getJobAnalysisPaths, ipcMain, isLiveDescriptionRecoveryRun, isSafeJobAnalysisCleanupNoop, listDescriptionRecoveryCheckpointsSync, path, readRunState, setStage, startRun } from '../test-dependencies.js';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport } from '../../electron/ipc/jobs.js';
+import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, markSourceStatus, recordSourcePage } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
@@ -256,7 +257,7 @@ export default [
     },
   },
   {
-    name: 'gathered job-run recovery bypasses scrape prerequisites only for a complete matching manifest',
+    name: 'gathered or explicitly saved-partial job-run recovery bypasses scrape prerequisites without a provider retry',
     run: async () => {
       const gathered = {
         stage: 'gathered',
@@ -265,22 +266,28 @@ export default [
       };
       assert(canRecoverGatheredRunDirectly(gathered, ['data engineer']),
         'a gathered run with every source done and matching queries can score staged jobs without another scrape');
-      assert(!canRecoverGatheredRunDirectly({ ...gathered, sources: { ...gathered.sources, linkedin: { status: 'blocked' } } }, ['data engineer'])
+      const finishedPartial = {
+        ...gathered,
+        collectionDisposition: 'user-finished-partial',
+        sources: { ...gathered.sources, linkedin: { status: 'blocked' } },
+      };
+      assert(canRecoverGatheredRunDirectly(finishedPartial, ['data engineer'])
+        && !canRecoverGatheredRunDirectly({ ...gathered, sources: { ...gathered.sources, linkedin: { status: 'blocked' } } }, ['data engineer'])
         && !canRecoverGatheredRunDirectly({ ...gathered, stage: 'searching' }, ['data engineer'])
         && !canRecoverGatheredRunDirectly(gathered, ['other role']),
-      'blocked, incomplete, or mismatched-query manifests retain the ordinary scrape-resume path');
+      'only an explicit gathered partial-finish marker may bypass the ordinary blocked/incomplete provider-resume path; query identity remains required');
 
       const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(source.includes('const cache = resumeGatheredOnly ? {} : await preflight')
-        && source.includes('resumeGatheredOnly\n        ? [{ manualResults: [], indeedResult: null }, []]')
-        && source.includes('if (!resumeGatheredOnly && diceKept.length > 0)')
-        && source.includes('if (!resumeGatheredOnly && linkedinKept.length > 0)'),
+      assert(source.includes('const cache = skipProviderCollection ? {} : await preflight')
+        && source.includes('skipProviderCollection\n        ? [{ manualResults: [], indeedResult: null }, []]')
+        && source.includes('if (!skipProviderCollection && diceKept.length > 0)')
+        && source.includes('if (!skipProviderCollection && linkedinKept.length > 0)'),
       'direct gathered recovery skips session preflight, browser/HTTP tasks, and post-gather network enrichment while the later evidence gate remains intact');
       const stagingStart = source.indexOf('const runStartedAt = initialRunStartedAt;');
       const stagingEnd = source.indexOf('const stageOnPage =', stagingStart);
       const staging = source.slice(stagingStart, stagingEnd);
       assert(staging.includes('if (resumeScope) {')
-        && staging.includes('if (!resumeGatheredOnly) {\n        const stageAdvanced = await setJobRunStage')
+        && staging.includes('if (!skipProviderCollection) {\n        const stageAdvanced = await setJobRunStage')
         && staging.includes('if (hasExactResumeToken && stageAdvanced !== true)')
         && staging.includes('} else {\n      const startedRun = await startJobRun'),
       'gathered-only recovery remains inside the resume branch, preserving its original manifest token and staged rows instead of starting/truncating a fresh run');
@@ -299,8 +306,8 @@ export default [
       assert(source.includes("['block', 'throttle'].includes(r?.warning?.severity)")
         && source.includes('const retryablePartialProviderFailure = sourceId === \'remoteok\'')
         && source.includes('entry?.fanoutStopped === true')
-        && source.includes("status === 'error' || retryablePartialProviderFailure ? 'blocked' : 'done'"),
-      'a throttled RemoteOK optional tag fanout preserves its base rows but remains retryable in the gathered manifest instead of being misclassified as a clean completion');
+        && source.includes("status === 'error' || retryablePartialProviderFailure ? 'blocked' : status"),
+      'the terminal finalizer preserves a policy/config info skip as skipped in the manifest, while a throttled RemoteOK optional tag fanout remains retryable/blocked');
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);
       const finalization = source.slice(finalizationStart, gatheredStage);
@@ -323,10 +330,166 @@ export default [
       assert(!resumeHandler.includes('Select at least one job platform before resuming')
         && renderer.includes('resumeOffer?.nodeId === id')
         && renderer.includes('(info?.nodeId === id || !info?.nodeId)')
-        && renderer.includes('const legacyUnknownOwner = !resumeOffer?.nodeId;')
+        && renderer.includes('const unknownOwnerResumeRunId = resumeOffer?.found === true && !resumeOffer?.nodeId')
+        && renderer.includes('Clear career data is the sole explicit action')
         && renderer.includes('discardUnknownOwnerJobRun'),
-      'only the owning hub resumes or discards a modern recovery offer; a node-less legacy manifest gets an explicit Start fresh-only recovery path while current platform toggles never block a valid resume');
+      'only the owning hub resumes a modern recovery; a node-less legacy manifest can be retired only through Clear career data while current platform toggles never block a valid resume');
       return { direct: true };
+    },
+  },
+  {
+    name: 'Finish with saved listings durably forces direct local recovery while source states remain unfinished',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join('/tmp', 'ic-finish-saved-listings-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'finish-saved-hub';
+      const runId = 'finish-saved-run';
+      const startedAt = 1_770_000_000_000;
+      const stoppedAt = startedAt + 1_000;
+      const queries = ['data engineer'];
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt,
+          nodeId,
+          queries,
+          sourceIds: ['dice', 'usajobs', 'glassdoor', 'remoteok'],
+        });
+        await recordSourcePage(canvasPath, {
+          expectedRunId: runId,
+          nodeId,
+          sourceId: 'dice',
+          query: queries[0],
+          page: 1,
+          jobs: [{ id: 'saved-dice-job', title: 'Data Engineer', source: 'dice' }],
+          now: startedAt + 100,
+        });
+        await markSourceStatus(canvasPath, 'dice', 'done', startedAt + 200, {
+          expectedRunId: runId,
+          nodeId,
+        });
+        // This is the durable seam used by the production finalizer after a
+        // country/config policy produces its info-level renderer `skipped` status.
+        await markSourceStatus(canvasPath, 'usajobs', 'skipped', startedAt + 300, {
+          expectedRunId: runId,
+          nodeId,
+        });
+        await markSourceStatus(canvasPath, 'glassdoor', 'blocked', startedAt + 400, {
+          expectedRunId: runId,
+          nodeId,
+        });
+
+        const first = await finishRunWithSavedListings(canvasPath, {
+          expectedRunId: runId,
+          nodeId,
+          now: stoppedAt,
+        });
+        const marked = await readRunState(canvasPath, stoppedAt + 1, { nodeId });
+        const second = await finishRunWithSavedListings(canvasPath, {
+          expectedRunId: runId,
+          nodeId,
+          now: stoppedAt + 500,
+        });
+        const attemptedDowngrade = await setStage(canvasPath, 'searching', stoppedAt + 600, {
+          expectedRunId: runId,
+          nodeId,
+        });
+        const afterDowngrade = await readRunState(canvasPath, stoppedAt + 700, { nodeId });
+        registerJobsHandlers();
+        const peekJobRun = ipcMain.__getInvokeHandler('peek-job-run');
+        const peek = await peekJobRun({
+          sender: {
+            id: 98_221,
+            isDestroyed: () => false,
+            once: () => {},
+            on: () => {},
+            removeListener: () => {},
+            send: () => {},
+          },
+        }, { canvasFilePath: canvasPath, nodeId });
+
+        assert(first?.ok === true && first.marked === true
+          && second?.ok === true && second.marked === false
+          && marked?.stagedJobs?.length === 1
+          && marked?.manifest?.stage === 'gathered'
+          && marked?.manifest?.collectionDisposition === 'user-finished-partial'
+          && marked?.manifest?.collectionCompletedAt === stoppedAt
+          && marked?.manifest?.sources?.dice?.status === 'done'
+          && marked?.manifest?.sources?.usajobs?.status === 'skipped'
+          && marked?.manifest?.sources?.glassdoor?.status === 'blocked'
+          && marked?.manifest?.sources?.remoteok?.status === 'pending',
+        `Finish must atomically retain saved rows and truthful source states, got ${JSON.stringify({ first, second, manifest: marked?.manifest })}`);
+        assert(isRunCollectionFinishedWithSavedListings(marked.manifest)
+          && canRecoverGatheredRunDirectly(marked.manifest, queries)
+          && !canRecoverGatheredRunDirectly(marked.manifest, ['other role']),
+        'a partial-finish marker must take the no-provider direct-recovery branch despite blocked/pending sources, while still binding the original queries');
+        assert(attemptedDowngrade === true
+          && afterDowngrade?.manifest?.stage === 'gathered'
+          && isRunCollectionFinishedWithSavedListings(afterDowngrade.manifest)
+          && afterDowngrade.manifest.collectionCompletedAt === stoppedAt,
+        'a later generic resume-stage write cannot erase the durable partial-finish marker and re-open provider collection after a crash');
+        assert(peek?.collectionDisposition === 'user-finished-partial'
+          && peek?.doneSources === 2
+          && peek?.sourceSummary?.some(source => source.id === 'usajobs' && source.status === 'skipped')
+          && JSON.stringify(peek?.unfinishedSourceIds) === JSON.stringify(['glassdoor', 'remoteok']),
+        `recovery peek must preserve partial-finish provenance and count done + skipped sources as terminal, got ${JSON.stringify(peek)}`);
+        return { savedRows: marked.stagedJobs.length, directRecovery: true, sourceStatesPreserved: true, terminalSources: peek.doneSources };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'config-skipped source persists skipped in the run manifest and recovery peek',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join('/tmp', 'ic-config-skipped-source-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'config-skipped-source-hub';
+      const sender = {
+        id: 98_222,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+        send: () => {},
+      };
+      const priorApiKey = process.env.USAJOBS_API_KEY;
+      const priorEmail = process.env.USAJOBS_EMAIL;
+      try {
+        // This makes the production USAJobs fetcher take its deterministic
+        // config-missing/info path without performing any network request.
+        delete process.env.USAJOBS_API_KEY;
+        delete process.env.USAJOBS_EMAIL;
+        registerJobsHandlers();
+        const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
+        const peekJobRun = ipcMain.__getInvokeHandler('peek-job-run');
+        const result = await searchJobs({ sender }, {
+          nodeId,
+          canvasFilePath: canvasPath,
+          queries: ['data engineer'],
+          enabledSourceIds: ['usajobs'],
+          // USAJobs is country-applicable here, so this reaches config-missing
+          // finalization rather than the earlier all-country-skipped rejection.
+          preferredLocation: 'New York, NY',
+        });
+        const state = await readRunState(canvasPath, Date.now(), { nodeId });
+        const peek = await peekJobRun({ sender }, { canvasFilePath: canvasPath, nodeId });
+        assert(result?.success === true
+          && result?.scrapeWarnings?.some(warning => warning.sourceId === 'usajobs'
+            && warning.code === 'config-missing' && warning.severity === 'info')
+          && state?.manifest?.sources?.usajobs?.status === 'skipped'
+          && peek?.sourceSummary?.some(source => source.id === 'usajobs' && source.status === 'skipped')
+          && peek?.doneSources === 1
+          && peek?.unfinishedSourceIds?.length === 0,
+        `an info/config skipped source must remain skipped across finalization and recovery peek, got ${JSON.stringify({ result, manifest: state?.manifest, peek })}`);
+        return { durableSkipped: true, peekSkipped: true };
+      } finally {
+        if (priorApiKey == null) delete process.env.USAJOBS_API_KEY;
+        else process.env.USAJOBS_API_KEY = priorApiKey;
+        if (priorEmail == null) delete process.env.USAJOBS_EMAIL;
+        else process.env.USAJOBS_EMAIL = priorEmail;
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -2018,6 +2181,53 @@ export default [
         return { hubsHoldingTelemetry: 3, attributableHubs: 2 };
       } finally {
         __resetJobsTelemetryForTests();
+      }
+    },
+  },
+  {
+    name: 'oversized description-recovery checkpoints retain bounded ownership metadata and remain loadable',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-oversized-description-checkpoint-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'oversized-checkpoint-hub';
+      const runId = 'oversized-checkpoint-run';
+      try {
+        const snapshot = {
+          version: 2,
+          canvasFilePath: canvas,
+          sourceHubId: hubId,
+          nodeId: hubId,
+          runId,
+          createdAt: '2026-10-02T00:00:00.000Z',
+          gatheredJobCount: 1,
+          jobs: [{ title: 'Recovery row', description: 'x'.repeat(600 * 1024) }],
+          descriptionRecoveryJobs: [{ title: 'Recovery row' }],
+        };
+        const saved = await __createDescriptionRecoveryCheckpointForTests(snapshot);
+        const listing = listDescriptionRecoveryCheckpointsSync(canvas);
+        const row = listing.checkpoints.find(checkpoint => checkpoint.runId === runId);
+        const loaded = await __loadDescriptionRecoveryCheckpointForTests(canvas, hubId, runId);
+        assert(saved.saved === true && row?.state === 'metadata-only' && row.actionable === true
+          && row.sourceHubId === hubId && row.nodeId === hubId
+          && row.checkpointBytes > 512 * 1024
+          && listing.ignored.oversized === 0
+          && loaded.snapshot.jobs[0].description.length === 600 * 1024,
+        'a large new checkpoint is discovered from its first-property reportMetadata envelope without parsing its body, then the exact user-authorized load still restores the full payload');
+
+        const legacyRunId = 'oversized-legacy-checkpoint-run';
+        const legacyPath = getJobDescriptionRecoveryCheckpointPath(canvas, legacyRunId, path.join(dir, 'unsaved-analysis'));
+        fs.writeFileSync(legacyPath, JSON.stringify({
+          canvasFilePath: canvas, sourceHubId: hubId, nodeId: hubId, runId: legacyRunId,
+          createdAt: '2026-10-01T00:00:00.000Z', gatheredJobCount: 1,
+          descriptionRecoveryCount: 0, payload: 'x'.repeat(600 * 1024),
+        }), 'utf8');
+        const legacy = listDescriptionRecoveryCheckpointsSync(canvas).checkpoints.find(checkpoint => checkpoint.runId === legacyRunId);
+        assert(legacy?.state === 'legacy-prefix' && legacy.actionable === true
+          && legacy.checkpointBytes > 512 * 1024,
+        'a pre-envelope oversized checkpoint is safely attributed by bounded root-header fields instead of being silently abandoned');
+        return { oversizedBytes: row.checkpointBytes, legacyBytes: legacy.checkpointBytes };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
       }
     },
   },

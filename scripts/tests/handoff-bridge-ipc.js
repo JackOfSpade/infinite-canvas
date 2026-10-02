@@ -3,6 +3,7 @@ import { IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE } from '../../electron/i
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffBridgeTray } from '../../electron/ipc/handoffBridge/tray.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
+import { clearBridgeChatCopyDiagnostic, getBridgeChatCopyDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const JOB = '550e8400-e29b-41d4-a716-446655440000';
 const EXTRA_JOB = '660e8400-e29b-41d4-a716-446655440000';
@@ -301,17 +302,25 @@ export default [
         `${channel} must abandon a late preparation without writing the clipboard or committing the chat`);
     }
   } },
-  { name: 'handoff bridge: ipc: New chat passes only an opaque guarded sender for deferred restart confirmation', async run() {
-    let received = null;
-    const h = setup({ controller: {
-      prepareChat: async value => { received = value; return { commitToken: 't', starter: 'synthetic', chatOrdinal: 1 }; },
-      commitChat: async () => ({ success: true }),
-    }, clipboard: { writeText() {}, readText: () => '', clear() {} } });
-    assert((await invoke(h, IPC_CHANNELS.NEW_CHAT)).success
-      && received?.kind === 'new' && received.restartContext?.sender === h.sender
-      && Object.isFrozen(received.restartContext)
-      && !JSON.stringify(received).includes(PATH),
-    'New chat provides the controller only a guarded sender context, never renderer path data');
+  { name: 'handoff bridge: ipc: New and Continue pass only a main-owned opaque restart capability', async run() {
+    const received = [];
+    let nativeAsks = 0;
+    clearBridgeChatCopyDiagnostic();
+    try {
+      const h = setup({ controller: {
+        snapshot: () => ({ enabled: true, hold: 'restart', config: { telemetryInBugReports: true } }),
+        prepareChat: async value => { received.push(value); return { commitToken: 't', starter: 'synthetic', chatOrdinal: 1 }; },
+        commitChat: async () => ({ success: true }),
+      }, dialogs: { ask: async () => { nativeAsks += 1; return { ok: true }; } }, clipboard: { writeText() {}, readText: () => '', clear() {} } });
+      for (const channel of [IPC_CHANNELS.NEW_CHAT, IPC_CHANNELS.CONTINUE_CHAT]) assert((await invoke(h, channel)).success, `${channel} succeeds`);
+      const trace = getBridgeChatCopyDiagnostic();
+      assert(received.map(value => value.kind).join() === 'new,continue'
+        && received.every(value => value.restartContext && Object.isFrozen(value.restartContext)
+          && Object.keys(value.restartContext).length === 0 && !JSON.stringify(value).includes(PATH))
+        && nativeAsks === 0
+        && trace.length === 2 && trace.every(value => value.outcome === 'copied' && value.restartPath === 'ui-ack'),
+      'UI chat presses provide only a main-owned opaque capability, skip native restart sheets, and retain a bounded UI-ack receipt');
+    } finally { clearBridgeChatCopyDiagnostic(); }
   } },
   { name: 'handoff bridge: ipc: starter clipboard clear is 120 seconds, conditional, and never erases a replacement', async run() {
     const matchingClock = fakeClock(); let matchingClipboard = ''; let matchingClears = 0;

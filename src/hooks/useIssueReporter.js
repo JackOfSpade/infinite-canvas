@@ -286,6 +286,27 @@ export function useIssueReporter({
           localApplication,
         }] : [];
       });
+      // A Job Search run manifest proves durable recovery exists, but only the
+      // mounted renderer knows whether its asynchronous peek completed and
+      // whether it is offering an enabled Resume/Finish control. Keep this
+      // separate from nodeComponentStates because recovery-focused filter codes
+      // intentionally omit that heavyweight general-purpose section.
+      const liveNodeStateById = new Map((nodeComponentStates || [])
+        .filter(state => typeof state?.id === 'string')
+        .map(state => [state.id, state]));
+      const jobRecoveryOfferStates = (allNodesDeep || [])
+        .filter(node => node?.type === 'jobhub' && typeof node?.id === 'string')
+        .map(node => {
+          const liveState = liveNodeStateById.get(node.id);
+          return {
+            id: node.id,
+            mounted: !!liveState,
+            hubState: typeof safeReportField(safeReportField(node, 'data'), 'hubState') === 'string'
+              ? safeReportField(safeReportField(node, 'data'), 'hubState')
+              : 'empty',
+            recoveryOffer: liveState?.jobRecoveryOffer || null,
+          };
+        });
 
       // Build the full payload, then drop sections excluded by the filter code.
       const fullPayload = {
@@ -314,6 +335,7 @@ export function useIssueReporter({
         mediaState,
         imageState,
         issueReporterDraft,
+        jobRecoveryOfferStates,
         frontEndState: {
           activeTool,
           placementMode,

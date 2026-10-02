@@ -124,6 +124,19 @@ const MAX_PASTE_REJECTION_TRACE_ROWS = 200;
 // one's normal ceiling.
 const MAX_PASTE_REJECTION_TRACE_BYTES = 512_000;
 const PASTE_APPLICATION_STAGES = ['evidence-plan', 'resume', 'cover-letter', 'review'];
+// Keep the durable-audit projection on the same deliberately narrow protocol
+// vocabulary as the terminal receipt and bug-report rollup. A trace is
+// app-authored in normal operation, but it remains a file on disk while a job
+// is pending; never let a hand-edited reason, stage, or check detail become
+// durable bundle content.
+const PASTE_REJECTION_TRACE_REASONS = new Set([
+  'STALE_HANDOFF_ECHO',
+  'DOMAIN_VALIDATION_FAILED',
+  'VALIDATION_FAILED',
+  'SCHEMA_INVALID',
+]);
+const PASTE_REJECTION_TRACE_CHECK_ID_RE = /^[a-z][a-z0-9-]{0,39}$/u;
+const PASTE_REJECTION_TRACE_FINGERPRINT_RE = /^[0-9a-f]{8}$/u;
 const PASTE_STABLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
 // The paste contract must state the exact pattern and ceilings this file
 // enforces, so both are exported and interpolated rather than transcribed. A
@@ -708,7 +721,7 @@ function pasteHandoffCode() {
 }
 
 // A live handoff rotated its code the moment a measured PDF re-render found
-// the résumé underfilled, mid-review, with baseHashes unchanged: the chat
+// the résumé exceeded its page target, mid-review, with baseHashes unchanged: the chat
 // answering it kept echoing the envelope from its own earlier turn, and four
 // otherwise-correct pastes in a row were rejected with no repair the user
 // could make. A chat can keep doing this for several rounds, and a restart of
@@ -1453,6 +1466,9 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   'dangling-paragraph-transition': 'prose-unit',
   'detached-relevance-claim': 'prose-unit',
   'direct-welcome-closing': 'prose-unit',
+  // Reads a rendered paragraph's employer/title framing against the rendered
+  // résumé's explicit dates. Rewording that paragraph is the only repair.
+  'ended-role-current-employment': 'prose-unit',
   'entailed-premise': 'prose-unit',
   'experience-infinitive-grammar': 'prose-unit',
   // Reads the letter's figures against the frozen résumé bullet the argument
@@ -2820,12 +2836,12 @@ function pasteRenderedResumeMainHtml(resume, state, input) {
 // A check added to the battery reaches the totality test without a second
 // edit, which is what keeps PASTE_CHECK_PROSE_UNITS total as the pipeline
 // grows.
-function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName }) {
+function pasteCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, referenceDate = null }) {
   return [
     checkRoleThesis(plan),
     checkMappingNarrativeStructure(plan),
     checkEvidenceGrounding(plan, evidence),
-    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName }),
+    ...evaluateCoverLetterChecks({ plan, paragraphs, evidence, jobText, researchText, companyName, referenceDate }),
   ];
 }
 
@@ -3171,6 +3187,7 @@ function pasteCoverLetterCompletionTwinErrors(response, state, input) {
       jobText: jobTextForCoverLetter(input.job || {}),
       researchText: '',
       companyName: input.job?.company || '',
+      referenceDate: input.createdAt,
     });
     const gradableChecks = coverLetterArgument
       ? checks
@@ -3719,7 +3736,55 @@ async function getPasteApplicationState(jobId, canvasFilePath) {
   // careerData and jobListing stay in `state` exactly as the files hold them:
   // the authoring stages grade a response's quotes against the raw corpus, and
   // `frozen` carries the graded text for the callers that need it.
-  return { root, dir, manifest, input, frozen, state: { ...manifest.paste, careerData, jobListing } };
+  const migratedManifest = await retireLegacyUnderfillOnlyPasteReview({ root, dir, manifest, input });
+  return {
+    root, dir, manifest: migratedManifest, input, frozen,
+    state: { ...migratedManifest.paste, careerData, jobListing },
+  };
+}
+
+// Builds before the no-minimum-fill policy could persist a paste job in
+// `review` solely to ask the writer to lengthen a one-page cover letter. That
+// is not a content or page-limit repair. Retire only the exact, app-authored
+// shape: any other finding/target (and any still-failing measured page
+// feedback) remains a normal review round.
+function isLegacyUnderfillOnlyPasteReview(manifest) {
+  const paste = manifest?.paste;
+  const findings = Array.isArray(paste?.findings) ? paste.findings : [];
+  const documents = Array.isArray(paste?.requiredChangeDocuments) ? paste.requiredChangeDocuments : [];
+  const targets = Array.isArray(paste?.requiredChangeTargets) ? paste.requiredChangeTargets : [];
+  return manifest?.transport === 'paste'
+    && ['queued', 'completed'].includes(manifest.status)
+    && paste?.stage === 'review'
+    && findings.length > 0
+    && findings.every(finding => /^host-cover-pathological-underfill(?:-|$)/u.test(String(finding?.id || '')))
+    && documents.length === 1 && documents[0] === 'coverLetter'
+    && targets.every(target => target === 'coverLetter:rendered');
+}
+
+async function retireLegacyUnderfillOnlyPasteReview({ root, dir, manifest, input }) {
+  if (!isLegacyUnderfillOnlyPasteReview(manifest)) return manifest;
+  const feedback = await readLocalFitFeedback(root, dir);
+  // A malformed legacy state must never let an actual overflow slip through.
+  // The fixed one-page cover target in this predicate also rejects a corrupt
+  // legacy record that claimed a two-page cover-letter target.
+  if (feedback?.jobId === input.jobId && measuredFeedbackHasUnmetPageTarget(
+    feedback,
+    targetPageCountForJob(input.job?.title),
+  )) return manifest;
+  const { requiredChangeDocuments: _documents, requiredChangeTargets: _targets, ...completedPaste } = manifest.paste;
+  const migrated = {
+    ...manifest,
+    status: 'completed',
+    paste: {
+      ...completedPaste,
+      stage: 'completed',
+      handoffCode: null,
+      findings: [],
+    },
+  };
+  await atomicJson(path.join(dir, 'manifest.json'), migrated);
+  return migrated;
 }
 
 // A process can stop after the measured advisory and its append-only log event
@@ -4222,7 +4287,7 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
     // Hand-wiping priorHandoffCodes to [] on completion instead (this
     // branch's own prior version) was the exact gap that produced a live,
     // unrecoverable deadlock: a review passed, a measured PDF re-render found
-    // the résumé underfilled ten seconds later and reopened review with a
+    // the résumé exceeded its page target ten seconds later and reopened review with a
     // freshly minted code, and the chat kept answering with the code from the
     // round that had JUST been accepted — a code this branch discarded
     // instead of remembering, so every otherwise-correct paste was rejected
@@ -4715,6 +4780,10 @@ function assertFrozenJobState({ jobId, manifest, input, careerData, jobListing }
     careerData: frozenCareerData,
     jobListing: frozenJobListing,
     evidencePlan,
+    // The cover-letter stage receives this same input timestamp. Project it
+    // through the shared completed-result options so its final gate reads the
+    // same deterministic reference month as its drafting twin.
+    referenceDate: input?.createdAt || null,
     // The raw field, which is what validateLocalApplicationResult resolves,
     // and the resolved number the import reports back in fit-feedback. The
     // gate above has already refused every value that would make them differ
@@ -4749,6 +4818,11 @@ function completedResultValidationOptions({ manifest, frozen }) {
     jobListing: frozen.jobListing,
     qualityChecklistVersion: frozen.qualityChecklistVersion,
     generationAuditVersion: frozen.generationAuditVersion,
+    // The job timestamp is frozen before any response is written. It is the
+    // deterministic reference month for the ended-role employment check; a
+    // delayed retry must not change a factual tense verdict with wall-clock
+    // time.
+    referenceDate: frozen.referenceDate,
     // The audit is graded against the plan the paste stages actually accepted.
     // A legacy filesystem job has no plan, and its own published contract
     // (local_ai/LOCAL_AI_APPLICATION_ROUTINE.md) bounds the audit instead.
@@ -4790,7 +4864,7 @@ export const APPLICATION_QUALITY_CRITERIA = Object.freeze([
   { id: 'resume-copy-editing', document: 'resume', requirement: 'Grammar, parallel structure, modifier attachment, compounds, and reference clarity are correct.' },
   { id: 'resume-structure', document: 'resume', requirement: 'Markup uses exactly one bare design-system main and valid peer section and role structures.' },
   { id: 'resume-ats-safety', document: 'resume', requirement: 'The document contains no unsafe, hidden, decorative, or non-parseable content.' },
-  { id: 'cover-source-grounding', document: 'coverLetter', requirement: 'Every candidate claim is supported and does not broaden scope, causality, chronology, or attribution.' },
+  { id: 'cover-source-grounding', document: 'coverLetter', requirement: 'Every candidate claim is supported and does not broaden scope, causality, chronology, or attribution; an explicitly ended résumé role is never framed as current employment or current work.' },
   { id: 'cover-single-argument', document: 'coverLetter', requirement: 'One specific controlling argument organizes the entire letter.' },
   { id: 'cover-minimum-evidence', document: 'coverLetter', requirement: 'Only minimum-sufficient evidence is used; each additional proof has an explicit supporting role.' },
   { id: 'cover-priority-alignment', document: 'coverLetter', requirement: 'The argument connects a source-supported transferable capability to an actual emphasized responsibility in the posting. The role thesis and target-facing opening use the general capability the posting supports; a prior project’s features, triggers, and workflow appear only in past-tense evidence with an explicit bridge, never as target requirements.' },
@@ -4876,6 +4950,76 @@ function safeJson(value, fallback = null) {
   try { return JSON.parse(JSON.stringify(value)); } catch { return fallback; }
 }
 
+// The card id is not document content; it is the narrow, opaque ownership
+// handle bug-report scoping already uses for API-originated applications.
+// Local-AI used to receive it from JobCardNode but then silently discard it,
+// which made an otherwise completed import appear uncorrelated. Keep only the
+// conservative identifier grammar that our node ids use. It is never rendered
+// directly (reports hash it), and an invalid value simply remains unrecorded.
+function localAiApplicationNodeId(value) {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,239}$/.test(id) ? id : '';
+}
+
+// Local-AI deliberately does not mine achievements, but it can reuse the
+// ledger the originating hub already supplied. The report needs that fact and
+// its bounded counts, not ledger prose, claims, evidence, or identifiers.
+function localAiAchievementTelemetry(achievements) {
+  const source = achievements && Array.isArray(achievements.ledger) ? 'reused' : 'unavailable';
+  if (source !== 'reused') return { source };
+  const ledger = achievements.ledger;
+  const stats = achievements.stats && typeof achievements.stats === 'object' ? achievements.stats : null;
+  const bounded = (value, max = 10_000) => Number.isInteger(value) && value >= 0 && value <= max ? value : null;
+  const safeStats = stats ? {
+    mined: bounded(stats.mined),
+    droppedByRefute: bounded(stats.droppedByRefute),
+    demotedByCheck: bounded(stats.demotedByCheck),
+    evidenceMisses: bounded(stats.evidenceMisses),
+    claimFigureLeaks: bounded(stats.claimFigureLeaks),
+    dateMisses: bounded(stats.dateMisses),
+    directionMisses: bounded(stats.directionMisses),
+  } : null;
+  return {
+    source,
+    kept: Math.min(ledger.length, 10_000),
+    ...(safeStats ? { stats: safeStats } : {}),
+  };
+}
+
+// A successful save removes the private job directory, which formerly took
+// this metadata-only rejection evidence with it. Project one strict whitelist
+// into both the terminal receipt and the saved generation audit. Never copy
+// corrections, handoff codes, prompts, responses, validation text, job ids,
+// or any free-form field.
+function projectLocalAiPasteRejectionTrace(rows, jobId) {
+  if (!Array.isArray(rows)) return [];
+  const bounded = (value, max) => Number.isInteger(value) && value >= 0 && value <= max ? value : null;
+  return rows.slice(-MAX_PASTE_REJECTION_TRACE_ROWS).map((row) => {
+    const atMs = typeof row?.at === 'string' ? Date.parse(row.at) : NaN;
+    if (!row || typeof row !== 'object' || row.jobId !== jobId
+      || !Number.isFinite(atMs) || !PASTE_APPLICATION_STAGES.includes(row.stage)) return null;
+    const checkIds = [...new Set((Array.isArray(row.checkIds) ? row.checkIds : [])
+      .filter(id => typeof id === 'string' && PASTE_REJECTION_TRACE_CHECK_ID_RE.test(id)))].sort().slice(0, 16);
+    const checkFingerprints = {};
+    for (const id of checkIds) {
+      if (typeof row.checkFingerprints?.[id] === 'string' && PASTE_REJECTION_TRACE_FINGERPRINT_RE.test(row.checkFingerprints[id])) {
+        checkFingerprints[id] = row.checkFingerprints[id];
+      }
+    }
+    return {
+      at: new Date(atMs).toISOString(),
+      stage: row.stage,
+      reason: PASTE_REJECTION_TRACE_REASONS.has(row.reason) ? row.reason : 'unknown',
+      revision: bounded(row.revision, 1_000_000),
+      errorCount: bounded(row.errorCount, 10_000),
+      uncodedErrors: bounded(row.uncodedErrors, 10_000),
+      rejectionStreak: bounded(row.rejectionStreak, 10_000),
+      checkIds,
+      checkFingerprints,
+    };
+  }).filter(Boolean);
+}
+
 function contentHash(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
 }
@@ -4933,6 +5077,7 @@ async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
 
 async function writeLocalAiTerminalReceipt({
   canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount, outputDir,
+  pasteRejectionTrace = [],
 }) {
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   // The private job folder is deleted right after this receipt is written, so
@@ -4947,7 +5092,7 @@ async function writeLocalAiTerminalReceipt({
     throw new Error('Local AI terminal receipt requires a saved output directory inside the canvas folder.');
   }
   const receipt = {
-    version: 1,
+    version: 2,
     jobId,
     // Receipts share the canvas directory, but jobs belong to one exact saved
     // canvas file. Bind terminal evidence to that canonical file so sibling
@@ -4969,6 +5114,12 @@ async function writeLocalAiTerminalReceipt({
       pageCount: Number.isFinite(coverLetterFit?.pageCount) ? coverLetterFit.pageCount : null,
       targetPageCount: 1,
     },
+    // This is a durable diagnostic projection, deliberately separate from
+    // generated output and limited to the metadata-only row whitelist.
+    pasteRejectionTrace: {
+      version: 1,
+      rows: projectLocalAiPasteRejectionTrace(pasteRejectionTrace, jobId),
+    },
     message: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
   };
   await atomicJson(path.join(receiptsRoot, `${jobId}.json`), receipt);
@@ -4982,7 +5133,7 @@ async function readLocalAiTerminalReceipt(canvasRoot, canvasFilePath, jobId) {
     let receipt;
     try { receipt = JSON.parse(raw); }
     catch { return null; }
-    return receipt?.version === 1 && receipt?.jobId === jobId && receipt?.status === 'imported'
+    return (receipt?.version === 1 || receipt?.version === 2) && receipt?.jobId === jobId && receipt?.status === 'imported'
       && typeof receipt?.canvasFilePath === 'string' && path.isAbsolute(receipt.canvasFilePath)
       && path.resolve(receipt.canvasFilePath) === path.resolve(canvasFilePath)
       && typeof receipt?.resultSha256 === 'string' && /^[a-f0-9]{64}$/i.test(receipt.resultSha256)
@@ -5573,6 +5724,35 @@ function localAiCoverLetterTelemetry(coverLetter = {}) {
     signatureTitle: String(coverLetter.signatureTitle || ''),
     contact: Array.isArray(coverLetter.contact) ? [...coverLetter.contact] : [],
     paragraphs: Array.isArray(coverLetter.paragraphs) ? [...coverLetter.paragraphs] : [],
+  };
+}
+
+// The host validator's detailed observation deliberately stays inside the
+// correction path: it can contain document prose, employer names, and role
+// dates. The bug-report telemetry needs only the fixed check identity and
+// aggregate outcome, so project that one check into a content-free receipt.
+function localAiChronologyTelemetry(result) {
+  const check = Array.isArray(result?.hostValidation?.coverLetter)
+    ? result.hostValidation.coverLetter.find(item => item?.id === 'ended-role-current-employment')
+    : null;
+  if (!check) return null;
+  const referenceMonth = /^\d{4}-(?:0[1-9]|1[0-2])$/u.test(String(check.referenceMonth || ''))
+    ? check.referenceMonth
+    : null;
+  const count = (value, fallback = 0) => Number.isInteger(value) && value >= 0
+    ? Math.min(value, 999)
+    : fallback;
+  const passed = check.passed === true;
+  return {
+    checkId: 'ended-role-current-employment',
+    status: passed ? 'pass' : 'issue',
+    referenceMonth,
+    endedRoleCount: count(check.endedRoleCount),
+    failureCount: count(check.failureCount, passed ? 0 : 1),
+    // This function is called only after validateLocalApplicationResult
+    // accepted this final artifact. Keep that fact explicit instead of
+    // asking a report reader to infer it from an all-pass AI review.
+    finalArtifactPassedHostCheck: passed,
   };
 }
 
@@ -7137,7 +7317,44 @@ export function sanitizeQualityReview(raw, sourceContext, expectedChecklistVersi
   if (sourceContext?.required) {
     qualityReview.sourceGrounding = sanitizeSourceGrounding(raw.sourceGrounding, sourceContext);
   }
+  assertQualityReviewObjectiveCounts(qualityReview, sourceContext);
   return qualityReview;
+}
+
+// A review is permitted to use prose, but it must not certify a count from a
+// superseded draft.  Source grounding already binds the final units exactly;
+// this small gate makes an explicit numeric claim in a review note agree with
+// those same accepted units before the note is made durable.
+function assertQualityReviewObjectiveCounts(qualityReview, sourceContext) {
+  const bulletCount = Array.isArray(sourceContext?.resumeEvidence?.bulletTexts)
+    ? sourceContext.resumeEvidence.bulletTexts.length
+    : Array.isArray(sourceContext?.resumeEvidence?.roles)
+      ? sourceContext.resumeEvidence.roles.reduce((total, role) => total + (Array.isArray(role?.bullets) ? role.bullets.length : 0), 0)
+      : null;
+  if (bulletCount == null) return;
+  const numbers = Object.freeze({ one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20 });
+  const check = (text, label) => {
+    const count = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
+    const explicitTotals = [
+      new RegExp(`\\ball\\s+${count}\\s+(?:(?:résumé|resume)\\s+)?bullets?\\b`, 'ig'),
+      new RegExp(`\\b(?:résumé|resume)(?:['’]s)?\\s+(?:has|contains)\\s+${count}\\s+bullets?\\b`, 'ig'),
+      new RegExp(`\\b(?:the\\s+)?(?:résumé|resume)(?:['’]s)\\s+${count}\\s+bullets?\\b`, 'ig'),
+      new RegExp(`\\b${count}\\s+(?:(?:résumé|resume)\\s+)?bullets?\\s+total\\b`, 'ig'),
+      // A count followed by a quality-state predicate is an asserted final
+      // total.  Do not treat edit history such as “two bullets are
+      // consolidated” as one: it describes an operation, not the final count.
+      new RegExp(`\\b${count}\\s+(?:(?:résumé|resume)\\s+)?bullets?\\s+(?:are|stay|remain)\\s+(?:concise|focused|scannable|readable|single-purpose)\\b`, 'ig'),
+    ];
+    for (const pattern of explicitTotals) for (const match of String(text || '').matchAll(pattern)) {
+      const claimedText = match[1] || match[2];
+      const claimed = /^\d+$/.test(claimedText) ? Number(claimedText) : numbers[claimedText.toLowerCase()];
+      if (claimed !== bulletCount) {
+        throw new Error(`Local AI qualityReview ${label} claims ${claimed} résumé bullets, but the accepted final résumé has ${bulletCount}. Regenerate the review from the final artifact rather than a superseded draft.`);
+      }
+    }
+  };
+  for (const criterion of qualityReview.criteria || []) check(criterion?.evidence, `criterion “${criterion?.id || 'unknown'}”`);
+  check(qualityReview.resume?.rationale, 'resume rationale');
 }
 
 // Feedback, telemetry, and the bounded manifest ring need revision decisions,
@@ -7314,6 +7531,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     jobText,
     researchText: '',
     companyName: job?.company || '',
+    referenceDate: options.referenceDate,
   });
   // The cover-letter checks, the dash-punctuation assert and the quality
   // review all read artifacts that are already built above, so none of them
@@ -7721,6 +7939,10 @@ function projectGenerationAuditFit(value, { resume = false } = {}) {
     fontsLoaded: source.fontsLoaded === true ? true : source.fontsLoaded === false ? false : null,
     contentUtilization: finiteMetric(source.contentUtilization),
     layout: projectGenerationAuditLayout(source.layout, source.contentUtilization),
+    ...(!resume ? {
+      bodyWordCount: finiteMetric(source.bodyWordCount),
+      bodyParagraphCount: finiteMetric(source.bodyParagraphCount),
+    } : {}),
     ...(resume ? {
       attempts: (Array.isArray(source.attempts) ? source.attempts : [])
         .slice(0, 4).map(projectGenerationAuditFitAttempt).filter(Boolean),
@@ -7770,6 +7992,7 @@ export function buildLocalGenerationAuditArtifact({
   resumeFit = null,
   coverLetterFit = null,
   importedManifest = null,
+  pasteRejectionTrace = [],
   generationAuditRequired = false,
   createdAt = new Date().toISOString(),
 } = {}) {
@@ -7782,6 +8005,7 @@ export function buildLocalGenerationAuditArtifact({
     && importedManifest.handoffEventCount >= handoffHistory.length
     ? importedManifest.handoffEventCount
     : handoffHistory.length;
+  const rejectionTrace = projectLocalAiPasteRejectionTrace(pasteRejectionTrace, jobId);
   const documentHashes = localAiDocumentHashes(result);
   const artifact = {
     version: LOCAL_AI_GENERATION_AUDIT_VERSION,
@@ -7849,6 +8073,10 @@ export function buildLocalGenerationAuditArtifact({
       retainedEventCount: handoffHistory.length,
       historyTruncated: handoffEventCount > handoffHistory.length,
       events: handoffHistory,
+      // Rejections do not participate in Generation Log's monotonic sequence.
+      // This redacted chronology survives private-job cleanup without retaining
+      // any rejected copy, prompt, correction, or validation-detail text.
+      pasteRejectionTrace: { version: 1, rows: rejectionTrace },
     },
   };
   return `${JSON.stringify(artifact, null, 2)}\n`;
@@ -7924,11 +8152,32 @@ function safeMeasuredLayout(layout) {
 // An invalid result has no measurements of its own. Preserve the last app
 // measurement inside an explicit snapshot so a validation rejection cannot
 // erase the hard-layout invariant for the next submitted bytes.
+function measuredFeedbackHasUnmetPageTarget(feedback, fallbackResumeTarget = 1) {
+  if (!['revision-required', 'revision-exhausted'].includes(feedback?.status)) return false;
+  const positivePageTarget = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
+  const resumeTarget = positivePageTarget(
+    feedback?.resume?.targetPageCount,
+    positivePageTarget(feedback?.targetPageCount, fallbackResumeTarget),
+  );
+  // Cover letters have one invariant target. Unlike a résumé target, this is
+  // not job-configurable, so a malformed persisted value such as 2 must not
+  // turn a two-page letter into an accepted legacy measurement.
+  const coverLetterTarget = 1;
+  const resumePageCount = finiteMetric(feedback?.resume?.pageCount);
+  const coverLetterPageCount = finiteMetric(feedback?.coverLetter?.pageCount);
+  return resumePageCount == null || coverLetterPageCount == null
+    || resumePageCount > resumeTarget || coverLetterPageCount > coverLetterTarget;
+}
+
 function measuredFeedbackSnapshot(feedback) {
   const source = ['revision-required', 'revision-exhausted'].includes(feedback?.status)
     ? feedback
     : feedback?.priorMeasured;
   if (!source || !['revision-required', 'revision-exhausted'].includes(source.status)) return null;
+  // Historical records may name a former low-utilization advisory. It was
+  // never a page-limit failure, so it must not make an otherwise valid package
+  // look like it still requires a material rewrite.
+  if (!measuredFeedbackHasUnmetPageTarget(source)) return null;
   const documentSha256 = safeMeasuredDocumentHashes(source.documentSha256);
   if (!documentSha256) return null;
   return {
@@ -8202,12 +8451,25 @@ async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetP
   };
 }
 
+function coverLetterBodyShape(letter) {
+  const paragraphs = (Array.isArray(letter?.paragraphs) ? letter.paragraphs : [])
+    .map(paragraph => typeof paragraph === 'string' ? paragraph : paragraph?.text)
+    .map(paragraph => String(paragraph || '').trim())
+    .filter(Boolean);
+  return {
+    paragraphCount: paragraphs.length,
+    wordCount: paragraphs.join(' ').match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu)?.length || 0,
+  };
+}
+
 async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
   try {
     const rendered = await renderPdf(buildCoverLetterDocument({ letter, variantAttrs, docId }), { signal });
     const fontsLoaded = rendered.fontsLoaded !== false;
     const pageCount = Number.isFinite(rendered.pageCount) ? rendered.pageCount : null;
     const missingFontFaces = Array.isArray(rendered.missingFontFaces) ? rendered.missingFontFaces : [];
+    const bodyShape = coverLetterBodyShape(letter);
+    const layout = rendered.layout || null;
     return {
       bytes: fontsLoaded ? rendered.bytes : null,
       pageCount,
@@ -8218,17 +8480,19 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
         : `The cover-letter render window reported unresolved font face(s): ${missingFontFaces.join(', ') || 'face detail unreported'}.`,
       centered: false,
       // The letter prints onto the same `main.page` surface as the résumé, so
-      // the renderer's probe reports the letter's OWN type area and the shared
-      // ratio helper applies unchanged. Utilization is reported for the letter,
-      // never enforced: a short letter is a supported top-aligned outcome.
-      layout: rendered.layout || null,
-      contentUtilization: resumeTypeAreaUtilization(rendered.layout || null),
+      // the renderer's probe reports the letter's own type area and the shared
+      // ratio helper applies unchanged. Utilization and body shape are durable
+      // diagnostics only: a one-page letter is never lengthened to fill space.
+      layout,
+      contentUtilization: resumeTypeAreaUtilization(layout),
+      bodyWordCount: bodyShape.wordCount,
+      bodyParagraphCount: bodyShape.paragraphCount,
     };
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
     const renderError = error?.message || String(error);
     logger.warn(`[LocalAI] Cover-letter PDF render failed: ${renderError}`);
-    return { bytes: null, pageCount: null, fontsLoaded: null, missingFontFaces: [], renderError, centered: false, layout: null, contentUtilization: null };
+    return { bytes: null, pageCount: null, fontsLoaded: null, missingFontFaces: [], renderError, centered: false, layout: null, contentUtilization: null, bodyWordCount: null, bodyParagraphCount: null };
   }
 }
 
@@ -8341,6 +8605,11 @@ export function localAiHandoffEvent({ type, resultRaw, revisionRound = null, res
       targetPageCount: Number.isFinite(coverLetterFit.targetPageCount) ? coverLetterFit.targetPageCount : null,
       fontsLoaded: coverLetterFit.fontsLoaded === false ? false : coverLetterFit.fontsLoaded === true ? true : null,
       contentUtilization: Number.isFinite(coverLetterFit.contentUtilization) ? coverLetterFit.contentUtilization : null,
+      // These are app-measured aggregate layout facts, not letter prose. Keep
+      // them beside a failed handoff so a later successful audit can explain
+      // why the prior render was reopened without retaining candidate content.
+      bodyWordCount: Number.isFinite(coverLetterFit.bodyWordCount) ? coverLetterFit.bodyWordCount : null,
+      bodyParagraphCount: Number.isFinite(coverLetterFit.bodyParagraphCount) ? coverLetterFit.bodyParagraphCount : null,
       error: coverLetterFit.renderError ? cleanText(coverLetterFit.renderError, 280) : null,
       layout: coverLetterFit.layout ? {
         contentHeightPx: Number.isFinite(coverLetterFit.layout.contentHeightPx) ? coverLetterFit.layout.contentHeightPx : null,
@@ -8642,6 +8911,7 @@ export async function queueLocalApplicationJob(args = {}, signal = null) {
     const input = {
       version: LOCAL_AI_APPLICATION_VERSION, jobId: id, createdAt: new Date().toISOString(),
       canvasFilePath: canvas.canonicalCanvasFilePath, canvasRoot: canvas.canvasRoot, job,
+      nodeId: localAiApplicationNodeId(args.nodeId),
       additionalNotes: normalizeApplicationAdditionalNotes(args.additionalNotes),
       reasoning: cleanText(args.reasoning, 8_000), matchScore: Number.isFinite(args.matchScore) ? args.matchScore : null,
       achievements: safeJson(args.achievements), mineAllowed: Boolean(args.mineAllowed),
@@ -9103,7 +9373,7 @@ export async function localApplicationStatus(jobId, canvasFilePath, options = {}
       };
     }
   }
-  const manifest = await loadFrozenManifest(dir);
+  let manifest = await loadFrozenManifest(dir);
   // The listing companion is read here as well as at import because
   // completedResultValidationOptions grades the frozen evidence plan against
   // both sources, and a poll that read only one of them could not ask the
@@ -9140,6 +9410,7 @@ export async function localApplicationStatus(jobId, canvasFilePath, options = {}
     if (ended) return ended;
     throw error;
   }
+  manifest = await retireLegacyUnderfillOnlyPasteReview({ root, dir, manifest, input });
   if (manifest.transport === 'paste' && manifest.paste && manifest.paste.stage !== 'completed') {
     return {
       id: jobId, status: manifest.status, mode: 'paste', folder: dir,
@@ -9194,7 +9465,7 @@ export async function localApplicationStatus(jobId, canvasFilePath, options = {}
       // both allow-lists: an 'invalid' record is not a measurement or proof of
       // a completed app-side import.
       const measuredFeedback = matchingFeedback
-        && ['revision-required', 'revision-exhausted'].includes(feedback.status);
+        && measuredFeedbackHasUnmetPageTarget(feedback, targetPageCountForJob(input.job?.title));
       const appRetryFeedback = matchingFeedback && feedback?.status === 'render-retry-required'
         && feedback?.measured === false;
       if (!measuredFeedback && !appRetryFeedback) assertLocalAiQualityReviewConsistency(raw, feedback);
@@ -9447,7 +9718,7 @@ async function importLocalApplicationJobUnlocked(request) {
 
 async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderId, signal, expectedResultSha256 = '' }, postRenderFailure) {
   const { root, dir, ...canvas } = await assertRealJobDirectory(jobId, canvasFilePath);
-  const [manifest, inputRaw, careerDataRaw, jobListingRaw] = await Promise.all([
+  let [manifest, inputRaw, careerDataRaw, jobListingRaw] = await Promise.all([
     loadFrozenManifest(dir),
     readFrozenJobFile({ subject: FROZEN_JOB_RECORD, label: 'input record', root, candidate: path.join(dir, 'input.json'), maxBytes: MAX_LOCAL_AI_INPUT_BYTES }),
     readFrozenJobFile({ subject: FROZEN_CAREER_DATA, label: 'career corpus', root, candidate: path.join(dir, 'context', 'career-data.txt'), maxBytes: MAX_LOCAL_AI_CONTEXT_BYTES }),
@@ -9476,6 +9747,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // submit surface, not reached at all.
   const frozen = await gradingFrozenJobRecord(
     () => assertFrozenJobState({ jobId, manifest, input, careerData: careerDataRaw, jobListing: jobListingRaw }));
+  manifest = await retireLegacyUnderfillOnlyPasteReview({ root, dir, manifest, input });
   const { expectedChecklistVersion, generationAuditVersion: expectedAuditVersion } = frozen;
   // The same options the final submit and the status poll project, off the
   // same graded values, so all three grade these bytes identically.
@@ -9546,11 +9818,15 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     && ['revision-required', 'revision-exhausted'].includes(priorFeedback?.status);
   // A renderer can retry an IPC request after a slow render, and a local coding agent
   // can leave the card mounted while it is reading the app's feedback. Once a
-  // particular result has already produced trusted measured feedback, never
-  // render it again: doing so would inflate revision rounds and overwrite the
-  // original observation with an identical one. A changed result has a new
-  // hash and intentionally continues below for a fresh measurement.
-  if (measuredPriorFeedback) {
+  // particular result has already produced a failed hard page measurement,
+  // never render it again: doing so would inflate revision rounds and overwrite
+  // the original observation with an identical one. Legacy feedback can carry
+  // a low-utilization advisory; it is diagnostic only and must fall through to
+  // normal acceptance when both page limits already pass.
+  if (measuredPriorFeedback && measuredFeedbackHasUnmetPageTarget(
+    priorFeedback,
+    targetPageCountForJob(input.job?.title),
+  )) {
     const targetPageCount = Number.isFinite(priorFeedback.targetPageCount) && priorFeedback.targetPageCount > 0
       ? priorFeedback.targetPageCount
       : (Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
@@ -9564,8 +9840,12 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     const coverLetterTargetMet = coverLetterPageCount != null && coverLetterPageCount <= 1;
     const fitIssues = [
       ...(resumePageCount != null && resumePageCount > targetPageCount ? [`résumé is ${resumePageCount} pages (target: ${targetPageCount})`] : []),
-      ...(!coverLetterTargetMet && coverLetterPageCount != null ? [`cover letter is ${coverLetterPageCount} pages (target: 1)`] : []),
+      ...(coverLetterPageCount != null && coverLetterPageCount > 1 ? [`cover letter is ${coverLetterPageCount} pages (target: 1)`] : []),
     ];
+    if (targetMet && coverLetterTargetMet) {
+      // Do not resurrect a historical underfill-only revision. The current
+      // result continues through rendering and normal editorial validation.
+    } else {
     const fitMessage = priorFeedback.status === 'revision-exhausted'
       ? `${fitIssues.join('; ') || 'A measured layout criterion remains unsatisfied'}. This legacy diminishing-returns result is resumable: make a material correction, rerun the complete checklist, and continue without a fixed revision limit.`
       : String(priorFeedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
@@ -9577,14 +9857,17 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
       localJob: { id: jobId, status: 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
+    }
   }
-  // measuredPriorFeedback always returns above, so this always runs the assert.
+  // A prior feedback record returns above only for an unmet hard page limit;
+  // legacy underfill-only records deliberately continue into normal validation.
   // Recorded like the validate above: its throw rejects the same completed
   // package, and an unrecorded rejection here cannot be reopened as a handoff.
   const documentSha256 = await gradeOrRecordRejection(() => assertLocalAiQualityReviewConsistency(raw, priorFeedback));
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
   const docId = crypto.randomUUID();
   const ledger = Array.isArray(input?.achievements?.ledger) ? input.achievements.ledger : null;
+  const achievementTelemetry = localAiAchievementTelemetry(input?.achievements);
   const targetPageCount = Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
     ? input.targetPageCount
     : targetPageCountForJob(input.job?.title);
@@ -9661,9 +9944,11 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     }));
     recordApplicationTelemetry({
       source: 'local-ai', status: 'render-retry-required', phase: 'layout verification unavailable', attemptId: `local-${jobId}`,
+      nodeId: input.nodeId || undefined,
       jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
       resumeHtmlLen: result.resumeMainHtml.length,
       resumeRoleBlockSample: resumeRoleBlockSample(result.resumeMainHtml),
+      achievements: achievementTelemetry,
       coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
       render: {
         targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
@@ -9672,7 +9957,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         coverLetterPageCount: coverLetterFit.pageCount, coverLetterFontsLoaded: coverLetterFit.fontsLoaded,
         coverLetterPdfError: coverLetterFit.renderError,
       },
-      localAi: { jobId, verificationIssues: boundedVerificationIssues, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
+      localAi: { jobId, verificationIssues: boundedVerificationIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
       id: jobId, status: 'render-retry-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
@@ -9690,7 +9975,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const fitIssues = [
     ...(resumeFit.fontsLoaded !== false && resumeFit.pageCount != null && !pageTargetMet
       ? [`résumé is ${resumeFit.pageCount} pages (target: ${targetPageCount})`] : []),
-    ...(coverLetterFit.fontsLoaded !== false && coverLetterFit.pageCount != null && !coverLetterTargetMet
+    ...(coverLetterFit.fontsLoaded !== false && coverLetterFit.pageCount != null && coverLetterFit.pageCount > 1
       ? [`cover letter is ${coverLetterFit.pageCount} pages (target: 1)`] : []),
   ];
   if (fitIssues.length) {
@@ -9713,7 +9998,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       targetPageCount,
       resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null },
       coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null },
-      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${expectedChecklistVersion} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. Cut generic, redundant, weakly related, or low-evidence content first. ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} ${COVER_LETTER_RELEVANCE_LINK_RULE} ${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE} ${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} ${COVER_LETTER_PRIOR_WORK_CONTEXT_RULE} ${COVER_LETTER_BOUNDARY_REFERENCE_RULE} For a cover letter that already fits, improve it when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed. Both documents' reported type-area utilization is informational only: neither has a minimum utilization, neither is ever lengthened to fill its page, and a shorter page carrying only evidence that earns its place is the supported outcome. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
+      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${expectedChecklistVersion} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. Cut generic, redundant, weakly related, or low-evidence content first. ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} ${COVER_LETTER_RELEVANCE_LINK_RULE} ${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE} ${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} ${COVER_LETTER_PRIOR_WORK_CONTEXT_RULE} ${COVER_LETTER_BOUNDARY_REFERENCE_RULE} For a cover letter that already fits, improve it only when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed or to occupy more page space. Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
       message: fitMessage,
     };
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), feedback);
@@ -9731,7 +10016,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     if (manifest.transport === 'paste' && handoffManifest?.paste) {
       const measuredFindings = [
         ...(!pageTargetMet ? [{ id: `host-resume-fit-${revisionRound}`, document: 'resume', targetId: 'document', issue: `Measured ${resumeFit.pageCount} pages; target is ${targetPageCount}.`, fix: 'Edit the résumé to satisfy the measured page target while retaining supported evidence.' }] : []),
-        ...(!coverLetterTargetMet ? [{ id: `host-cover-fit-${revisionRound}`, document: 'coverLetter', targetId: 'document', issue: `Measured ${coverLetterFit.pageCount} pages; target is 1.`, fix: 'Edit the cover letter to fit one measured page while preserving its argument.' }] : []),
+        ...(coverLetterFit.pageCount > 1 ? [{ id: `host-cover-fit-${revisionRound}`, document: 'coverLetter', targetId: 'document', issue: `Measured ${coverLetterFit.pageCount} pages; target is 1.`, fix: 'Edit the cover letter to fit one measured page while preserving its argument.' }] : []),
       ];
       const paste = {
         ...handoffManifest.paste,
@@ -9771,9 +10056,11 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     }
     recordApplicationTelemetry({
       source: 'local-ai', status: 'revision-required', phase: 'fit revision requested', attemptId: `local-${jobId}`,
+      nodeId: input.nodeId || undefined,
       jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
       resumeHtmlLen: result.resumeMainHtml.length,
       resumeRoleBlockSample: resumeRoleBlockSample(result.resumeMainHtml),
+      achievements: achievementTelemetry,
       coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
       render: {
         targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
@@ -9784,7 +10071,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         coverLetterPageCount: coverLetterFit.pageCount, coverLetterPdfProduced: false,
         coverLetterFontsLoaded: coverLetterFit.fontsLoaded, coverLetterPdfError: coverLetterFit.renderError,
       },
-      localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: true, revisionRound, fitIssues, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
+      localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: true, revisionRound, fitIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
       id: jobId, status: 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
@@ -9837,6 +10124,12 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     coverLetterFit: coverLetterHandoffFit, qualityReview: result.qualityReview,
     detail: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
   }));
+  // Read the metadata-only trace before staging the audit. The same projector
+  // is used later by the terminal receipt, so successful cleanup cannot make
+  // the saved bundle's account of rejected paste rounds diverge from it.
+  const pasteRejectionTrace = manifest.transport === 'paste'
+    ? await readPasteRejectionTrace(root, dir)
+    : [];
   const generationAuditArtifact = buildLocalGenerationAuditArtifact({
     jobId,
     input,
@@ -9850,6 +10143,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     resumeFit: resumeHandoffFit,
     coverLetterFit: coverLetterHandoffFit,
     importedManifest,
+    pasteRejectionTrace,
     generationAuditRequired: expectedAuditVersion != null,
   });
   postRenderFailure.phase = 'staging imported application workspace';
@@ -9868,6 +10162,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   postRenderFailure.phase = 'recording imported application telemetry';
   recordApplicationTelemetry({
     source: 'local-ai', status: 'completed', phase: 'imported', attemptId: `local-${jobId}`,
+    nodeId: input.nodeId || undefined,
     jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
     coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
     render: {
@@ -9888,7 +10183,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     // verification or needs a revision is exactly when a reader needs to see it.
     resumeHtmlLen: result.resumeMainHtml.length,
     resumeRoleBlockSample: resumeRoleBlockSample(result.resumeMainHtml),
-    localAi: { jobId, targetMet, coverLetterTargetMet, qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: importedManifest.handoffHistory },
+    achievements: achievementTelemetry,
+    localAi: { jobId, targetMet, coverLetterTargetMet, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: importedManifest.handoffHistory },
   });
   // Persist the imported settling state before exposing the one-shot save
   // capability. If this atomic write fails, the post-render wrapper can park
@@ -9927,6 +10223,10 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     // below still read.
     onSuccessfulSave: async ({ dir: savedOutputDir } = {}) => {
       await assertLocalAiResultHashCurrent(root, dir, resultSha256);
+      // Read before the normal successful-save cleanup deletes this private
+      // job directory. The receipt writer whitelists the metadata again, so a
+      // corrupt or hand-edited trace cannot carry document text forward.
+      const pasteRejectionTrace = await readPasteRejectionTrace(root, dir);
       await writeLocalAiTerminalReceipt({
         canvasRoot: canvas.canvasRoot,
         canvasFilePath: canvas.canonicalCanvasFilePath,
@@ -9935,6 +10235,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         resumeFit,
         coverLetterFit, targetPageCount,
         outputDir: savedOutputDir,
+        pasteRejectionTrace,
       });
       // LOCAL_AI_JOB_PHASES's own header: written beside the receipt above,
       // not in place of it — the receipt is the strong, hash-bound proof of a

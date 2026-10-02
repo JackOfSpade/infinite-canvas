@@ -139,7 +139,7 @@ export default [
     assert(BRIDGE_SETUP_COPY.firstChat.includes('appears as a chip') && BRIDGE_SETUP_COPY.firstChat.includes('Paste and send the starter') && BRIDGE_SETUP_COPY.firstChat.includes('leave the chat alone'), 'first-chat guidance must retain chip, starter, and queue-draining instructions');
     assert(!BRIDGE_SETUP_COPY.requirements.includes('dedicated ChatGPT Project'), 'a dedicated ChatGPT Project is optional guidance, not a technical setup prerequisite');
     const wordCount = value => String(value).trim().split(/\s+/).filter(Boolean).length;
-    const confirmationMessages = [BRIDGE_UI_COPY.confirmNewMessage(2, '1 min ago'), BRIDGE_UI_COPY.confirmRevokeMessage];
+    const confirmationMessages = [BRIDGE_UI_COPY.confirmRevokeMessage];
     assert(confirmationMessages.every(value => wordCount(value) <= 24), 'renderer critical-warning confirmations must stay within the compact copy budget');
     const setupParagraphs = [BRIDGE_SETUP_COPY.overview, BRIDGE_SETUP_COPY.requirements, BRIDGE_SETUP_COPY.tunnelLead, BRIDGE_SETUP_COPY.tunnelCommands, BRIDGE_SETUP_COPY.zoneChecklist, BRIDGE_SETUP_COPY.commandPreview, BRIDGE_SETUP_COPY.pairingLead, ...BRIDGE_SETUP_COPY.pluginSteps, BRIDGE_SETUP_COPY.earlyBlock, BRIDGE_SETUP_COPY.reconnect, BRIDGE_SETUP_COPY.firstChat];
     assert(setupParagraphs.every(value => wordCount(value) <= 50), 'setup instructions must stay within the scannable paragraph budget');

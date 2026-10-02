@@ -170,8 +170,8 @@ export function pageTextMeasurementExpression() {
     // typical line at whatever density and paper it actually rendered at —
     // measured, not derived from type tokens, and robust to the handful of
     // outsized lines (the display-size name, section headings) that would
-    // drag a mean upward. It is what converts a px shortfall into "about N
-    // more lines" for the underfill finding; no other consumer reads it.
+    // drag a mean upward. It remains a reported layout diagnostic; no
+    // acceptance or revision decision consumes it.
     '    var sorted = lineHeights.slice().sort(function (a, b) { return a - b; });',
     '    var middle = Math.floor(sorted.length / 2);',
     '    var lineHeightPx = sorted.length === 0 ? null',

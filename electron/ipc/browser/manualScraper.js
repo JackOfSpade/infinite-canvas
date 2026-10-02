@@ -28,7 +28,7 @@ import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
-import { JOB_COLLECTION_PAGE_CEILING } from '../../../src/utils/jobCollectionLimits.js';
+import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
@@ -529,6 +529,23 @@ export function resolveManualSourceStopReason({
   if (hitPageTurnStalled) return 'page-turn-stalled';
   if (hitEmptyPage) return 'empty-page';
   return 'completed';
+}
+
+// The manual scraper returns one aggregate result per source, while its tasks
+// are one per generated query.  Preserve the *sum* of Auto's allocated query
+// budgets as the source cap, not a misleading single-query 10-page value.
+// Explicit Pages intentionally remains a per-query setting and is reported as
+// that configured value.  This is a pure seam because a headed browser test is
+// neither necessary nor reliable for verifying receipt metadata.
+export function manualPageCapForTasks(sourceTasks, collectionLimits) {
+  const limits = normalizeJobCollectionLimits(collectionLimits);
+  if (limits.pagesPerPlatform != null) {
+    return { type: 'pages-per-platform', limit: limits.pagesPerPlatform };
+  }
+  const taskCount = Array.isArray(sourceTasks) ? sourceTasks.length : 0;
+  const allocated = resolveBrowserPageBudgets(limits, taskCount)
+    .reduce((sum, pages) => sum + pages, 0);
+  return allocated > 0 ? { type: 'auto-pages-per-platform', limit: allocated } : null;
 }
 
 /**
@@ -5552,7 +5569,7 @@ export async function preloadResolvedJobList(page, sourceId, extractorJS, signal
     qLabel: 'Recovery', qText: 'Loading the full result list',
   };
   await preloadContent(page, sourceId, extractorJS, overlayBase, signal, {
-    maxPages: JOB_COLLECTION_PAGE_CEILING,
+    maxPages: resolvePageCeiling(null),
     // Scroll until the provider count plateaus. The recovery pool intentionally
     // omits age/history rows whose physical positions may be anywhere in the
     // larger list, so its own size cannot be used as the reveal target.
@@ -6391,9 +6408,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Keep the aggregate job limit at source scope so several role queries
       // cannot each consume a separate allowance.
       const collectionLimits = sourceTasks[0]?.options?.collectionLimits || { jobsPerPlatform: null, pagesPerPlatform: null };
-      const jobsPerPlatform = Number.isFinite(collectionLimits.jobsPerPlatform)
-        ? collectionLimits.jobsPerPlatform
-        : Infinity;
+      const jobsPerPlatform = resolveJobsPerPlatform(collectionLimits);
       let sourceSiteChangedWarning = null;
       let sourcePagesWalked        = 0;
       let sourceSkipped            = false; // set true when challenge times out — skips remaining queries for this source
@@ -6524,6 +6539,25 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         }
 
         const task = sourceTasks[qi];
+
+        // Auto allocates one finite browser-page pool across all generated
+        // queries. A zero allocation is an intentional no-op, not permission
+        // to navigate its first page (or spend the normal inter-query pace)
+        // before the pagination loop notices `pageNum > maxPages`.
+        const taskPageBudget = task.options?.maxPages ?? resolvePageCeiling(null);
+        if (taskPageBudget <= 0) {
+          hitPageCap = true;
+          logger.info(`[BrowserScraper] ${srcName} q${qi + 1}/${sourceTasks.length} has no remaining allocated browser pages — skipping without navigation`);
+          recordManualScraperTelemetry({
+            phase: 'query-skipped-page-budget',
+            sourceId,
+            srcName,
+            queryIndex: qi + 1,
+            queryTotal: sourceTasks.length,
+            pageBudget: taskPageBudget,
+          }, { updateActive: false });
+          continue;
+        }
 
         const overlayBase = {
           srcLabel: `Source ${displayIndex} of ${displayTotal}`,
@@ -6794,7 +6828,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             // always-finite ceiling (resolvePageCeiling), but fall back to the
             // same backstop if a task was ever built without it so this never
             // silently reinstates the retired 10-page default.
-            maxPages: task.options?.maxPages ?? JOB_COLLECTION_PAGE_CEILING,
+            maxPages: task.options?.maxPages ?? resolvePageCeiling(null),
             jobsPerPlatform,
             existingJobs: allJobs.length,
           });
@@ -6842,7 +6876,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // onPageScraped signal below, an empty extraction, or a failed
           // next-page action, so this ceiling is purely the backstop against a
           // stale pager looping forever.
-          const maxPages = task.options?.maxPages ?? JOB_COLLECTION_PAGE_CEILING;
+          const maxPages = task.options?.maxPages ?? resolvePageCeiling(null);
           if (pageNum > maxPages) {
             logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit browser pages/query (${maxPages}) — stopping pagination`);
             hitPageCap = true;
@@ -7894,7 +7928,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // A ZipRecruiter empty page below its verified advertised total is not
         // a clean end-of-results. Keep the partial result usable while making
         // the coverage qualification durable through jobs.js and the receipt.
-        truncated: hitProviderTotalShortfall,
+        // Reaching the allocated page budget is a deliberately bounded,
+        // non-exhaustive walk just like a verified provider-total shortfall.
+        // Keep it durable so a later receipt/report cannot call the collected
+        // subset lossless merely because the manual scraper returned rows.
+        truncated: hitProviderTotalShortfall || hitPageCap,
+        ...(hitPageCap ? { cap: manualPageCapForTasks(sourceTasks, collectionLimits) } : {}),
         relevanceDropped: 0,
         preCapRelevanceDropped: 0,
         relevanceRejected: [],

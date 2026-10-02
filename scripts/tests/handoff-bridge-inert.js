@@ -25,6 +25,7 @@ import {
   startHandoffBridge,
   stopHandoffBridge,
 } from '../../electron/ipc/handoffBridge/index.js';
+import { createUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
 
 const TMP = '/tmp/bridge-test';
 const SAFE_PATHS = Object.freeze({
@@ -222,7 +223,7 @@ async function disposeCompositionGraph(graph) {
 
 export default [
   {
-    name: 'handoff bridge: inert: deferred restart dialog stays on the requesting canvas in a multi-window app',
+    name: 'handoff bridge: inert: UI New skips the restart sheet while direct controller calls retain it',
     async run() {
       const first = liveCanvas(901); const second = liveCanvas(902); const asks = [];
       const { graph } = createCompositionGraph({
@@ -232,30 +233,31 @@ export default [
       try {
         assert((await graph.controller.enable({ confirmed: true, restartConfirmed: false, startContext: COMPOSITION_START_CONTEXT })).success,
           'the composed bridge must reach its restart-held repeat-enable state');
-        await graph.controller.prepareChat({ kind: 'new', restartContext: Object.freeze({ sender: second.webContents }) });
-        assert(asks.length === 1 && asks[0].kind === 'restart' && asks[0].parent === second.webContents,
-          'the restart sheet must parent to the exact requesting canvas, never the first canvas');
+        await graph.controller.prepareChat({ kind: 'new', restartContext: createUiRestartContext() });
+        assert(asks.length === 0,
+          'a main-owned UI New capability makes the starter press the affirmative restart action');
       } finally { await disposeCompositionGraph(graph); }
     },
   },
   {
-    name: 'handoff bridge: inert: a closed restart-sheet canvas cannot acknowledge New or Continue',
+    name: 'handoff bridge: inert: a direct restart call retains its native sheet on the fallback canvas',
     async run() {
       for (const kind of ['new', 'continue']) {
-        const first = liveCanvas(910); const second = liveCanvas(911); const sheet = deferred(); let windows = [first, second]; let asks = 0;
+        const first = liveCanvas(910); const second = liveCanvas(911); const sheet = deferred(); let windows = [first, second]; let asks = 0; let parent = null;
         const { graph } = createCompositionGraph({
           canvasWindows: () => windows,
-          dialogs: { ask: async (_parent, askedKind) => { asks += 1; assert(askedKind === 'restart', 'only the deferred restart sheet may be requested'); return sheet.promise; } },
+          dialogs: { ask: async (candidate, askedKind) => { asks += 1; parent = candidate; assert(askedKind === 'restart', 'only the deferred restart sheet may be requested'); return sheet.promise; } },
         });
         try {
           assert((await graph.controller.enable({ confirmed: true, restartConfirmed: false, startContext: COMPOSITION_START_CONTEXT })).success,
-            'the graph must begin restart-held');
-          const pending = graph.controller.prepareChat({ kind, restartContext: Object.freeze({ sender: second.webContents }) });
-          await Promise.resolve(); await Promise.resolve();
-          windows = [first]; sheet.resolve({ ok: true });
-          const result = await pending;
-          assert(asks === 1 && result?.copied === false && graph.controller.snapshot().hold === 'restart',
-            `${kind} keeps the restart hold when its accepted sheet loses the originating canvas`);
+          'the graph must begin restart-held');
+          const pending = graph.controller.prepareChat({ kind, restartContext: null });
+          for (let turn = 0; turn < 12 && asks === 0; turn += 1) await Promise.resolve();
+          assert(asks === 1 && parent === first.webContents, `${kind} uses the first live canvas for a direct controller restart sheet`);
+          sheet.resolve({ ok: true });
+          await pending;
+          assert(graph.controller.snapshot().hold === null,
+            `${kind} clears the restart hold only after the native direct-call sheet is accepted`);
         } finally { await disposeCompositionGraph(graph); }
       }
     },

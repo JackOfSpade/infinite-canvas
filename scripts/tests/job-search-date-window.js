@@ -36,6 +36,17 @@ export default [
       const legacyDone = jobSearchNextAnchor({
         hubState: 'done', jobRunId: `${nodeId}-${legacyRunStartedAt}`,
       }, nodeId);
+      const partialFinished = jobSearchNextAnchor({
+        hubState: 'done',
+        jobRunId: `${nodeId}-${legacyRunStartedAt}`,
+        partialCollectionRunId: `${nodeId}-${legacyRunStartedAt}`,
+      }, nodeId);
+      const partialWithPriorFullHistory = jobSearchNextAnchor({
+        hubState: 'done',
+        jobRunId: `${nodeId}-${legacyRunStartedAt}`,
+        partialCollectionRunId: `${nodeId}-${legacyRunStartedAt}`,
+        lastCompletedRunAt: completedAt,
+      }, nodeId);
       const savedWindowAt = localDate(2026, 10, 1, 7).getTime();
       const savedWindow = jobSearchHistoricalAnchor({
         hubState: 'empty', searchWindow: { completionTimestamp: savedWindowAt, anchorTimestamp: localDate(2026, 9, 1).getTime() },
@@ -52,6 +63,9 @@ export default [
       'retained no-gap history wins even if an obsolete full-lookback mode remains on disk');
       assert(legacyDone.timestamp === legacyRunStartedAt && legacyDone.source === 'legacy-run-start',
         'a completed legacy run id provides a safe anchor that Clear career files can materialize before removing the id');
+      assert(partialFinished.timestamp === null && partialFinished.source === 'initial-lookback'
+        && partialWithPriorFullHistory.timestamp === completedAt && partialWithPriorFullHistory.source === 'last-completed',
+      'a saved-listings partial finish never converts its run-id timestamp into full-scan history, while earlier genuine history remains available');
       assert(savedWindow.timestamp === savedWindowAt && savedWindow.source === 'saved-window-completion',
         'a Reset followed by Clear can retain a prior window completion without treating its capped start as history');
       return { historyWins: true, legacyRunMaterializes: true, initialLookback: true };

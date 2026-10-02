@@ -31,7 +31,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
+import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -1345,7 +1345,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
-  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1384,7 +1384,7 @@ async function forgetActiveRuntime(current, status) {
 
 async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
-  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic(); }
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1452,7 +1452,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1504,7 +1504,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       // in-memory failed-start receipt before any later FULL report is built.
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
         clearFailedStartDiagnostic();
-        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
       }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
@@ -1590,7 +1590,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);

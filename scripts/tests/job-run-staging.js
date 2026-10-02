@@ -14,12 +14,184 @@ import { screenJobRolesByTitle } from '../test-dependencies.js';
 import { interpretJobPreferences } from '../test-dependencies.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
-import { authoritativeFreshJobSearchWindow, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, legacyJobSearchWindow, mergeRoleScreenedJobs, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
+import { authoritativeFreshJobSearchWindow, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
 import { collectionCompletedAtForManifest, markSourceStatus, sanitizeJobSearchWindow, setStage } from '../../electron/ipc/jobRunStaging.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
 
 export default [
+  {
+    name: 'manual-AI pre-search recovery: preserves its original window and rejects an altered checkpoint',
+    run: async () => {
+      const startedAt = new Date(2026, 8, 1, 15, 30, 0, 0);
+      const frozen = freshJobSearchWindow(null, startedAt, 21);
+      const laterDispatch = new Date(2026, 8, 8, 0, 0, 0, 0);
+      const recovery = {
+        version: 1,
+        manualAiRunId: 'manual-ai-pre-search-run',
+        nodeId: 'manual-ai-pre-search-hub',
+        startedAt: startedAt.getTime(),
+        searchWindow: frozen,
+      };
+
+      // The request may carry a stale relative provider horizon, but it must
+      // retain the same immutable date boundary. Dispatching a week later
+      // must broaden the provider request rather than moving the client-side
+      // cutoff forward from the original run.
+      const resumed = manualAiPreSearchRecoveryWindow(recovery, {
+        ...frozen,
+        providerLookbackDays: 1,
+      }, laterDispatch);
+      assert(resumed?.startTimestamp === frozen.startTimestamp
+        && resumed?.anchorTimestamp === frozen.anchorTimestamp
+        && resumed?.completionTimestamp === frozen.completionTimestamp
+        && resumed?.providerLookbackDays === 29
+        && resumed.providerLookbackDays > frozen.providerLookbackDays,
+      `a manual-AI pre-search resume must preserve its original cutoff and widen only its provider horizon, got ${JSON.stringify(resumed)}`);
+
+      const alteredRequestedWindow = {
+        ...frozen,
+        startTimestamp: frozen.startTimestamp + 86_400_000,
+        anchorTimestamp: frozen.anchorTimestamp + 86_400_000,
+      };
+      const invalidDescriptor = { ...recovery, nodeId: '' };
+      assert(manualAiPreSearchRecoveryWindow(recovery, alteredRequestedWindow, laterDispatch) === null
+        && manualAiPreSearchRecoveryWindow(invalidDescriptor, frozen, laterDispatch) === null
+        && manualAiPreSearchRecoveryWindow({ ...recovery, version: 2 }, frozen, laterDispatch) === null,
+      'manual-AI pre-search recovery must reject a mismatched window or invalid descriptor instead of silently creating a fresh scan');
+    },
+  },
+  {
+    name: 'crash resume: auth preflight clears only transient unfinished source cards and preserves Retry token',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const card = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const resumeStart = search.indexOf('const handleResumeRun = useCallback');
+      const resumeEnd = search.indexOf('resumeInterruptedRunRef.current = handleResumeRun;', resumeStart);
+      const resume = search.slice(resumeStart, resumeEnd);
+      const catchStart = resume.indexOf('} catch (error) {');
+      const catchBlock = resume.slice(catchStart);
+
+      assert(resumeStart >= 0 && resumeEnd > resumeStart
+        && resume.includes('let resumedUnfinishedSourceIds = [];')
+        && resume.includes("source.status !== 'done' && source.status !== 'skipped'")
+        && resume.includes('resumedSourceSummary.flatMap(source => (')
+        && resume.includes("source.status === 'done' || source.status === 'skipped'")
+        && resume.includes('if (!resumingFinishedSavedListings && resumedUnfinishedSourceIds.length > 0)')
+        && !resume.includes("? source.status\n            : 'searching'"),
+      'crash resume restores only durable terminal card progress, clears stale unfinished-card warnings before re-dispatch, and never persists synthetic searching state');
+      assert(catchBlock.includes('if (error?.isLoginGate && resumedUnfinishedSourceIds.length > 0)')
+        && catchBlock.includes("new CustomEvent('job-source-progress-reset'")
+        && catchBlock.includes('sourceIds: resumedUnfinishedSourceIds')
+        && catchBlock.includes('clearPersistedProgress: true')
+        && catchBlock.includes('preserveRunGeneration: true')
+        && !catchBlock.includes('discardJobRun')
+        && !catchBlock.includes('clearJobRun'),
+      'a rejected auth preflight clears only the active resume-card display while retaining the manifest/checkpoint required by Retry');
+      assert(card.includes('const sourceIds = event.detail?.sourceIds;')
+        && card.includes('!sourceIds.includes(data.sourceId)')
+        && card.includes('event.detail?.preserveRunGeneration !== true')
+        && card.includes('event.detail?.clearPersistedProgress === true')
+        && card.includes('updateNodeData(id, { persistedProgress: null });'),
+      'source-card reset is source-scoped, clears stale persisted display state, and does not retire the exact resume generation');
+      return { authFailureCardsIdle: true, manifestRetainedForRetry: true };
+    },
+  },
+  {
+    name: 'crash resume: one logged-out provider blocks only itself while staged and eligible sources continue',
+    run: () => {
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const card = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+      const paused = fs.readFileSync(path.resolve('src/nodes/jobsearch/JobSearchSourcesReadyState.jsx'), 'utf8');
+      const preflightStart = jobs.indexOf('const browserJobPlatforms = activeSourceIds');
+      const preflightEnd = jobs.indexOf('// Notify frontend that sources are starting.', preflightStart);
+      const preflight = jobs.slice(preflightStart, preflightEnd);
+      const sourceResultsStart = jobs.indexOf('const sourceResults = {};', preflightEnd);
+      const sourceResultsEnd = jobs.indexOf('for (const policy of sourceCountryPolicies)', sourceResultsStart);
+      const sourceResults = jobs.slice(sourceResultsStart, sourceResultsEnd);
+
+      assert(preflightStart >= 0 && preflightEnd > preflightStart
+        && preflight.includes('!skipProviderCollection && resumeScope !== null ? notLoggedIn : []')
+        && preflight.includes('notLoggedIn.length > 0 && loginBlockedSourceIds.size === 0')
+        && preflight.includes('const candidateTasks = buildJobTasks(')
+        && preflight.includes('const runnableSourceScope = new Set(')
+        && preflight.includes('const tasks = candidateTasks.filter(task => runnableSourceScope.has(task.sourceId));')
+        && preflight.includes('const authPreflightSourceIds = jobSourceAuthPreflightScope(browserJobPlatforms, resumeScope);')
+        && preflight.includes('for (const t of candidateTasks)')
+        && preflight.includes('sourceFirstUrl[t.sourceId] = t.url'),
+      'a crash-resume must exclude only logged-out provider tasks while retaining a safe provider URL for that source card; fresh runs retain the hard login gate');
+      const browserSources = ['indeed', 'glassdoor', 'ziprecruiter'];
+      const unfinishedResumeScope = new Set(['indeed']);
+      assert(JSON.stringify(jobSourceAuthPreflightScope(browserSources, null)) === JSON.stringify(browserSources)
+        && JSON.stringify(jobSourceAuthPreflightScope(browserSources, unfinishedResumeScope)) === JSON.stringify(['indeed']),
+      'fresh runs preflight every selected browser source, while a resume ignores a done-but-now-logged-out Glassdoor and preflights only unfinished Indeed');
+      assert(sourceResults.includes('for (const sourceId of loginBlockedSourceIds)')
+        && sourceResults.includes("code: 'login-required'")
+        && sourceResults.includes("severity: 'block'")
+        && sourceResults.includes("action: 'login-platform'")
+        && sourceResults.includes('markSourceStatus') === false,
+      'each skipped resume provider must surface a privacy-safe, provider-specific gating warning; its normal terminal loop owns the durable blocked manifest status');
+      const loginWarning = { code: 'login-required', severity: 'block', action: 'login-platform' };
+      assert(jobSourceWarningAction(loginWarning) === 'login-platform'
+        && !canAutomaticallyResolveJobSourceWarning(loginWarning)
+        && card.includes("if (warningAction === 'login-platform')")
+        && card.includes('window.electronAPI.openLoginWindow({ platformId })')
+        && search.includes('canAutomaticallyResolveJobSourceWarning(w)'),
+      'a login-required card uses the verified shared-profile login flow and is excluded from Solve all because login does not resume a provider by itself');
+      assert(search.includes('onRetryRemaining={resumeRunActionable && !activeBoardRecoveryOwnerKey')
+        && search.includes('|| searchResult?.hasUnfinishedSources === true')
+        && paused.includes('Retry remaining sources')
+        && paused.includes('Completed and staged work stays intact.')
+        && jobs.includes("phase: pausedSourceIds.length > 0 ? 'sources-blocked' : 'completed'")
+        && jobs.includes('pendingSources: pausedSourceIds')
+        && jobs.includes('hasUnfinishedSources: finalGatingSourceIds.size > 0'),
+      'the paused hub must offer an exact retry after sign-in, preserve the partial coverage anchor for every remaining gate (not only login), and report blocked sources instead of a false completed gather');
+      return { partialRecovery: true, loginWarningDurable: true, retryRemainingSources: true };
+    },
+  },
+  {
+    name: 'job pause retains the exact staging checkpoint while destructive cancellation clears it',
+    run: () => {
+      const userStopped = Object.assign(new Error('Node deleted'), { cancelCause: 'user-stopped' });
+      const sourceCardRemoved = Object.assign(new Error('Node deleted'), { cancelCause: 'job-source-card-removed' });
+      const userReset = Object.assign(new Error('Node deleted'), { cancelCause: 'user-reset' });
+      const nodeDeleted = Object.assign(new Error('Node deleted'), { cancelCause: 'node-deleted' });
+      const unrelatedFailure = new Error('network unavailable');
+      assert(shouldDiscardJobRunAfterAbort(userStopped) === false
+        && shouldDiscardJobRunAfterAbort(sourceCardRemoved) === false
+        && shouldDiscardJobRunAfterAbort(userReset) === true
+        && shouldDiscardJobRunAfterAbort(nodeDeleted) === true
+        && shouldDiscardJobRunAfterAbort(unrelatedFailure) === false,
+      'Stop or removal of an active source card keeps its exact staged run; Reset/delete retain their token-scoped cleanup policy');
+
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const abortStart = jobs.indexOf('const throwIfSearchAborted = async () => {');
+      const abortEnd = jobs.indexOf('// ── Browser sources', abortStart);
+      const abortPolicy = jobs.slice(abortStart, abortEnd);
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const resetStart = search.indexOf('const resetHandler = useCallback');
+      const stopStart = search.indexOf('const stopHandler = useCallback', resetStart);
+      const reset = search.slice(resetStart, stopStart);
+      const preserveStart = reset.indexOf('if (preserveRecovery) {', reset.indexOf('const resetData ='));
+      const preserveEnd = reset.indexOf('// The renderer generation was already fenced', preserveStart);
+      const savedStop = reset.slice(preserveStart, preserveEnd);
+      const stop = search.slice(stopStart, search.indexOf('// Non-API scoring is controlled', stopStart));
+      assert(abortStart >= 0 && abortEnd > abortStart
+        && abortPolicy.includes('shouldDiscardJobRunAfterAbort(reason)')
+        && abortPolicy.includes("CANCEL_CAUSE_LABELS[reason?.cancelCause]")
+        && jobs.includes("'job-source-card-removed'")
+        && jobs.includes('CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
+        && preserveStart >= 0 && preserveEnd > preserveStart
+        && savedStop.includes('cancelNodeTaskAndWait(')
+        && savedStop.includes('setResumeOffer(stoppedOffer)')
+        && !savedStop.includes('discardJobRun')
+        && stop.includes('resetHandler(e, { preserveRecovery: true })'),
+      'the visible Stop waits for the backend acknowledgement, retains the verified offer, and routes its checkpoint-preserving abort through the non-discarding backend policy');
+      return { stoppedCheckpointRetained: true, destructiveCancelsDiscard: true };
+    },
+  },
   {
     name: 'job search date window: backend derives fresh boundaries and staging preserves the exact resume window',
     run: async () => {
@@ -2110,7 +2282,7 @@ export default [
         && done.includes("jobsLabel(filteredPreferenceCount, 'job')} filtered"),
       'an all-filtered terminal state must explain that Job Preferences filtered the results, not imply a zero-result scrape');
       const resumeStart = search.indexOf('const handleResumeRun = useCallback');
-      const resumeEnd = search.indexOf('const handleDiscardResume', resumeStart);
+      const resumeEnd = search.indexOf('resumeInterruptedRunRef.current = handleResumeRun;', resumeStart);
       const resume = search.slice(resumeStart, resumeEnd);
       assert(resume.includes("typeof offer.jobPreferences === 'string' ? offer.jobPreferences : ''")
         && resume.includes('offer.jobPreferencePlan ?? offer.preferencePlan ?? null')
@@ -2487,7 +2659,10 @@ export default [
         && normalProcessing.slice(primaryLiveEnd).includes('{scoringStatus && <p')
         && normalProcessing.slice(primaryLiveEnd).includes('{resumeSummary && (')
         && !normalProcessing.slice(primaryLiveEnd).includes('role="status"')
-        && processing.includes('aria-label="Cancel and reset job search"')
+        && processing.includes('aria-label="Stop job search and keep saved progress for Resume when available"')
+        && processing.includes('onStop,')
+        && processing.includes('onClick={onStop}')
+        && !processing.includes('Cancel and reset job search')
         && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
       'processing controls must be keyboard-operable and communicate the compact phase/source through one atomic live region without making detail, counts, scoring, or résumé text live');
       // NAMING LOCK (inverted for Phase B): the merged box's visible name is
@@ -2658,8 +2833,8 @@ export default [
       const searchRerunButton = button(search, 'handleRerun(); }}');
       assert(!searchRerunButton.includes('disabled'),
       'JobSearchNode.jsx Re-run Search button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
-      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && (\n                    <button'),
-      'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked (not settingsFrozen) via conditional rendering, not a disabled prop');
+      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    <button'),
+      'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked and the absence of an incomplete checkpoint (not settingsFrozen) via conditional rendering, not a disabled prop');
       const searchClearButton = button(search, 'handleClearCareerFiles(e)');
       assert(!searchClearButton.includes('disabled'),
       'JobSearchNode.jsx Clear career data button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
@@ -2726,10 +2901,27 @@ export default [
           && bState?.stagedJobs?.[0]?.job?.title === 'B'
           && cState?.stagedJobs?.[0]?.job?.title === 'C'
           && staleWrite === false
-          && replacement?.runId === 'hub-a-rerun' && afterRerun?.stagedJobs?.length === 0
+          && replacement?.conflict === true
+          && replacement?.ownerNodeId === 'hub-a'
+          && replacement?.ownerRunId === 'hub-a-run'
+          && afterRerun?.manifest?.runId === 'hub-a-run'
+          && afterRerun?.stagedJobs?.[0]?.job?.title === 'A'
           && bAfterAReplaced?.manifest?.runId === 'hub-b-run' && bAfterAReplaced.stagedJobs?.[0]?.job?.title === 'B',
-        'each hub must have isolated jobs + manifest files, while an old token cannot write into a same-hub rerun');
-        return { simultaneous: 3, sameHubRerunFenced: true };
+        'each hub must have isolated jobs + manifest files, while a same-hub fresh start cannot overwrite its staged recovery ledger');
+
+        const deliberatelyCleared = await clearRun(canvasPath, {
+          expectedRunId: 'hub-a-run',
+          expectedNodeId: 'hub-a',
+        });
+        const afterExplicitClear = await startRun(canvasPath, {
+          runId: 'hub-a-rerun', startedAt: 9, nodeId: 'hub-a', sourceIds: ['indeed'],
+        });
+        const afterExplicitRerun = await readRunState(canvasPath, 10, { nodeId: 'hub-a' });
+        assert(deliberatelyCleared === true
+          && afterExplicitClear?.runId === 'hub-a-rerun'
+          && afterExplicitRerun?.stagedJobs?.length === 0,
+        'only an explicit token- and owner-bound discard may clear a same-hub checkpoint before a fresh start');
+        return { simultaneous: 3, sameHubRerunFenced: true, explicitDiscardRequired: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -2751,13 +2943,13 @@ export default [
         const rows = await readStagedJobs(canvasPath);
         assert(attempted?.conflict === true && attempted.ownerUnknown === true && attempted.ownerNodeId === null
           && state?.manifest?.runId === 'legacy-run' && rows.length === 1,
-        'a tokened hub cannot overwrite a parseable legacy manifest whose owner is unknown; its staged rows remain available for an explicit legacy Start fresh action');
+        'a tokened hub cannot overwrite a parseable legacy manifest whose owner is unknown; its staged rows remain available for the explicit Clear career data action');
         const deliberateLegacyClear = await clearRun(canvasPath, {
           expectedRunId: 'legacy-run', expectedOwnerUnknown: true,
         });
         const next = await startRun(canvasPath, { runId: 'new-hub-run', startedAt: 5, nodeId: 'new-hub', sourceIds: ['google'] });
         assert(deliberateLegacyClear === true && next?.runId === 'new-hub-run',
-          'the explicit owner-unknown discard is token-bound and clears only a manifest that still has no hub owner, restoring a safe Start fresh path');
+          'the explicit owner-unknown discard is token-bound and clears only a manifest that still has no hub owner, restoring the explicit Clear career data path');
         return { runId: state.manifest.runId, rows: rows.length, legacyCleared: deliberateLegacyClear };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
@@ -4003,6 +4195,27 @@ export default [
         assert(pageCap.sources.dice.cap?.type === 'pages-per-platform' && pageCap.sources.dice.cap.limit === 2
           && !JSON.stringify(pageCap).includes('MUST NOT PERSIST'),
         `safe page caps must survive receipt sanitization without details, got ${JSON.stringify(pageCap)}`);
+        const autoPageCap = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          sources: { ziprecruiter: { cap: { type: 'auto-pages-per-platform', limit: 40, detail: 'MUST NOT PERSIST' } } },
+        });
+        assert(autoPageCap.sources.ziprecruiter.cap?.type === 'auto-pages-per-platform'
+          && autoPageCap.sources.ziprecruiter.cap.limit === 40
+          && !JSON.stringify(autoPageCap).includes('MUST NOT PERSIST'),
+        `Auto browser-page caps must survive durable receipt sanitization without details, got ${JSON.stringify(autoPageCap)}`);
+        const manualAggregate = { jobs: [], stopReasons: new Set(['page-cap']), truncated: true };
+        assert(mergeJobSourceCollectionCap(manualAggregate, { type: 'auto-pages-per-platform', limit: 40 })
+          && manualAggregate.cap?.limit === 40
+          && manualAggregate.caps?.[0]?.type === 'auto-pages-per-platform',
+        `manual browser aggregation must retain its Auto cap before receipt serialization, got ${JSON.stringify(manualAggregate)}`);
+        const manualReceipt = sanitizeLastRunReceipt({
+          runId: 'receipt-run',
+          sources: { ziprecruiter: manualAggregate },
+        });
+        assert(manualReceipt.sources.ziprecruiter.truncated === true
+          && manualReceipt.sources.ziprecruiter.cap?.type === 'auto-pages-per-platform'
+          && manualReceipt.sources.ziprecruiter.caps?.some(cap => cap.type === 'auto-pages-per-platform' && cap.limit === 40),
+        `manual Auto cap provenance must survive aggregation into a durable receipt, got ${JSON.stringify(manualReceipt.sources.ziprecruiter)}`);
         const linkedInCap = sanitizeLastRunReceipt({
           runId: 'receipt-run',
           sources: { linkedin: { cap: { type: 'source-internal', limit: 150 }, stopReason: 'result-ceiling' } },
@@ -4075,7 +4288,7 @@ export default [
         && fanOut.includes('const pagesFetched = results.reduce(')
         && fanOut.includes('r?.providerTotal != null')
         && fanOut.includes('Number(r.providerTotal) >= 0')
-        && fanOut.includes("['jobs-per-platform', 'pages-per-platform'].includes(value?.type)")
+        && fanOut.includes("'auto-jobs-per-platform'")
         && fanOut.includes('Number(value.limit) > 0')
         && fanOut.includes(".map(reason => (typeof reason === 'string' ? reason : reason?.stopReason))")
         && fanOut.includes("warning: { code: 'query-error', severity: 'warn' }")
@@ -4105,9 +4318,9 @@ export default [
         // (LinkedIn's 150) survives serialization and can be reported with its
         // number instead of a bare `result-ceiling` stop reason. It is still
         // refused as user-configured-cap proof by configuredSourceCap.
-        && bySource.includes("['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(data.cap.type)")
+        && bySource.includes("'auto-jobs-per-platform'")
         && bySource.includes('Number(data.cap.limit) > 0')
-        && bySource.includes("data.stopReasons.add('jobs-per-platform')")
+        && bySource.includes("data.stopReasons.add(autoJobs ? 'auto-jobs-per-platform' : 'jobs-per-platform')")
         && bySource.includes('if (Array.isArray(data.caps))')
         && bySource.includes('bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };'),
       'by-source serialization must retain finite API caps and matching outer-cap stop evidence');
@@ -4405,8 +4618,9 @@ export default [
 
       const receiptCheckAt = completion.indexOf("if (completionCanvasFilePath && (result?.ok !== true || result?.cleared !== true)) {");
       const failedReceiptAt = completion.indexOf('recordFinalizationState(true);', receiptCheckAt);
-      const successfulReceiptAt = completion.indexOf('} else recordFinalizationState(false);', failedReceiptAt);
+      const successfulReceiptAt = completion.indexOf('recordFinalizationState(false);', failedReceiptAt);
       assert(receiptCheckAt >= 0 && failedReceiptAt > receiptCheckAt && successfulReceiptAt > failedReceiptAt
+        && completion.slice(failedReceiptAt, successfulReceiptAt).includes('} else {')
         && (completion.match(/recordFinalizationState\(false\)/g) || []).length === 1,
       'a saved canvas may enter the completion-anchor commit branch only after an ok receipt with confirmed sidecar cleanup');
 

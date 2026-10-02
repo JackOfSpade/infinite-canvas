@@ -351,16 +351,26 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   useEffect(() => {
     const onReset = (event) => {
       if (event.detail?.hubId !== data.hubId) return;
+      const sourceIds = event.detail?.sourceIds;
+      if (Array.isArray(sourceIds) && !sourceIds.includes(data.sourceId)) return;
       rejectProgressUntilResetRef.current = false;
       appliedRollbackReceiptNonceRef.current = null;
-      progressRunGuardRef.current.retireActive();
+      // A rejected resume auth preflight has not sent provider work. It clears
+      // the card's synthetic active display but intentionally keeps the same
+      // manifest run id admissible for the user's Retry after signing in.
+      if (event.detail?.preserveRunGeneration !== true) {
+        progressRunGuardRef.current.retireActive();
+      }
       updateNodeData(id, { _boardRollbackProgressRestore: null });
+      if (event.detail?.clearPersistedProgress === true) {
+        updateNodeData(id, { persistedProgress: null });
+      }
       setProgress(null);
       setDismissed(false);
     };
     document.addEventListener('job-source-progress-reset', onReset);
     return () => document.removeEventListener('job-source-progress-reset', onReset);
-  }, [data.hubId, id, setProgress, updateNodeData]);
+  }, [data.hubId, data.sourceId, id, setProgress, updateNodeData]);
 
   // An exact Job Board child rollback replaces this node's persisted graph
   // payload, but React keeps the component mounted when its id is unchanged.
@@ -560,6 +570,50 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         externalOpenInFlightRef.current = false;
       }
       finishSolveRequest('opened-external');
+      return;
+    }
+    // A login gate must use the app's shared-profile login IPC. Opening the
+    // provider URL externally would use the system browser's unrelated cookie
+    // jar, leave this source blocked, and falsely suggest that a retry ran.
+    // Keep the warning in place even when the login window reports success;
+    // only the explicit "Retry remaining sources" recovery can prove that the
+    // resumed scraper can now use the authenticated profile.
+    if (warningAction === 'login-platform') {
+      if (resolving || externalOpenInFlightRef.current) { finishSolveRequest('busy'); return; }
+      const platformId = progress?.warning?.platformId || data.sourceId;
+      if (!platformId || !window.electronAPI?.openLoginWindow) {
+        addToast({
+          title: 'Login unavailable',
+          description: 'Open Settings → Job Platform Logins, then retry the remaining saved sources.',
+          type: 'error',
+          dedupeKey: `job-source-login-unavailable:${id}`,
+        });
+        finishSolveRequest('login-unavailable');
+        return;
+      }
+      externalOpenInFlightRef.current = true;
+      try {
+        const result = await window.electronAPI.openLoginWindow({ platformId });
+        addToast({
+          title: result?.connected ? 'Login verified' : 'Login not verified',
+          description: result?.reason || (result?.connected
+            ? 'Retry the remaining saved sources to continue recovery.'
+            : 'Complete sign-in in the login window, then retry the remaining saved sources.'),
+          type: result?.connected ? 'success' : 'error',
+          dedupeKey: `job-source-login:${id}`,
+        });
+        finishSolveRequest(result?.connected ? 'login-verified' : 'login-unverified');
+      } catch (error) {
+        addToast({
+          title: 'Login failed',
+          description: error?.message || String(error),
+          type: 'error',
+          dedupeKey: `job-source-login:${id}`,
+        });
+        finishSolveRequest('login-failed');
+      } finally {
+        externalOpenInFlightRef.current = false;
+      }
       return;
     }
     // Do not let a source-card action race the owning hub's current search or
@@ -1508,7 +1562,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={warningAction === 'open-external' ? (resolving || hubLocked) : resolverActionDisabled}
+              disabled={['open-external', 'login-platform'].includes(warningAction) ? (resolving || hubLocked) : resolverActionDisabled}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'

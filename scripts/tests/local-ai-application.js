@@ -3,6 +3,7 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
 import { subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC } from '../../electron/ipc/jobApplication.js';
+import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 
@@ -177,6 +178,68 @@ async function atomicReplaceJson(file, value) {
 const LOCAL_AI_TEST_JOB_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 export default [
+  {
+    name: 'Paste handoff recovery: legacy underfill-only review state is retired without reopening a one-page letter',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.test\nEngineer\nBuilt supported systems with concrete delivery outcomes.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const resultRaw = '{"completed":"underfill-fixture"}\n';
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 1,
+          resultSha256: sha256(resultRaw), targetPageCount: 1,
+          resume: { pageCount: 1, targetPageCount: 1, layout: { contentHeightPx: 720, typeAreaHeightPx: 800 } },
+          coverLetter: {
+            pageCount: 1, targetPageCount: 1, layout: { contentHeightPx: 320, typeAreaHeightPx: 800 },
+            pathologicalUnderfill: {
+              id: 'host-cover-pathological-underfill', utilization: 0.4, bodyWordCount: 220, paragraphCount: 3,
+            },
+          },
+        }), 'utf8');
+        await fs.promises.writeFile(manifestPath, JSON.stringify({
+          ...manifest,
+          status: 'queued',
+          paste: {
+            ...manifest.paste,
+            stage: 'review', revision: 1, handoffCode: 'legacy-underfill-review', logCount: 1,
+            findings: [{
+              id: 'host-cover-pathological-underfill-1', document: 'coverLetter', targetId: 'document',
+              issue: 'Measured 40% type-area utilization.', fix: 'Add more cover-letter content.',
+            }],
+            requiredChangeDocuments: ['coverLetter'],
+            requiredChangeTargets: ['coverLetter:rendered'],
+          },
+        }), 'utf8');
+
+        _resetPasteCorrectionsForTests();
+        const statusBeforeHandoff = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const recoveredManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        assert(statusBeforeHandoff.status === 'queued'
+          && reopened.completed === true && reopened.handoff == null
+          && recoveredManifest.status === 'completed'
+          && recoveredManifest.paste?.stage === 'completed'
+          && recoveredManifest.paste?.handoffCode == null
+          && recoveredManifest.paste?.requiredChangeDocuments == null
+          && recoveredManifest.paste?.requiredChangeTargets == null
+          && Array.isArray(recoveredManifest.paste?.findings)
+          && recoveredManifest.paste.findings.length === 0,
+        `legacy underfill-only review state must retire instead of forcing an obsolete rewrite, got ${JSON.stringify({ handoff: reopened.handoff, manifest: recoveredManifest })}`);
+        return { status: statusBeforeHandoff.status, completed: reopened.completed, stage: recoveredManifest.paste.stage };
+      } finally {
+        _resetPasteCorrectionsForTests();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'Local AI handoff wait: terminal evidence beats a late deadline without result.json metadata',
     run: async () => {
@@ -450,11 +513,11 @@ export default [
         && localSource.includes('primaryEvidence.relationToThesis')
         && localSource.includes('COVER_LETTER_SECONDARY_NARRATIVE_ROLES.includes(narrativeRole)')
         && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
-        && localSource.includes("contentUtilization: resumeTypeAreaUtilization(rendered.layout || null)")
-        && localSource.includes("Both documents' reported type-area utilization is informational only")
-        && localSource.includes('neither has a minimum utilization')
+        && localSource.includes('contentUtilization: resumeTypeAreaUtilization(layout)')
+        && localSource.includes('Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria')
+        && localSource.includes('do not rewrite it merely because the résumé overflowed or to occupy more page space')
         && localSource.includes('missingArtifacts.length === 0'),
-      'Local AI measures both final documents, keeps revisions argument-led and fact-bounded, states that neither document has a minimum utilization, records every handoff event without a queue/history cap, keeps unresolved work revision-required, and never saves when layout verification is unavailable');
+      'Local AI measures both final documents, treats utilization and cover-letter body shape as diagnostics rather than acceptance gates, records every handoff event without a queue/history cap, keeps unresolved page-limit work revision-required, and never saves when layout verification is unavailable');
       assert(APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('selected position is referenced proximally')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('target scope is stated as this role or the work itself')
         && APPLICATION_QUALITY_CRITERIA.find(({ id }) => id === 'cover-reference-clarity')?.requirement.includes('source document—not the target position—as the reporting subject')
@@ -612,6 +675,7 @@ export default [
         const queued = await queueLocalApplicationJob({
           job: { title: 'Developer', company: 'Acme', snippet: 'Build reliable systems.' },
           careerData: 'Built reliable systems with measurable outcomes.', additionalNotes: 'Prefer a concise letter.',
+          nodeId: 'board-source-42-job-7',
           canvasFilePath: project.canvasFilePath,
         });
         assert(queued.status === 'queued' && /^[a-f0-9-]{36}$/i.test(queued.id), 'queue creates a UUID-backed Local AI job');
@@ -625,6 +689,7 @@ export default [
         const parsedInput = JSON.parse(input);
         const parsedManifest = JSON.parse(manifest);
         assert(parsedManifest.status === 'queued' && parsedInput.jobId === queued.id
+          && parsedInput.nodeId === 'board-source-42-job-7'
           && parsedInput.qualityChecklist?.version === APPLICATION_QUALITY_CHECKLIST_VERSION
           && JSON.stringify(parsedInput.qualityChecklist.criteria) === JSON.stringify(APPLICATION_QUALITY_CRITERIA)
           && parsedInput.generationAudit?.version === LOCAL_AI_GENERATION_AUDIT_VERSION
@@ -1860,7 +1925,10 @@ export default [
             layout: { contentHeightPx: 925.641, typeAreaHeightPx: 1000 },
           }],
         },
-        coverLetterFit: { targetPageCount: 1, pageCount: 1, fontsLoaded: true, contentUtilization: 0.48 },
+        coverLetterFit: {
+          targetPageCount: 1, pageCount: 1, fontsLoaded: true, contentUtilization: 0.4,
+          bodyWordCount: 220, bodyParagraphCount: 3,
+        },
       });
       assert(handoffEvent.resume?.compactApplied === true
         && handoffEvent.resume?.fontsLoaded === true
@@ -1869,8 +1937,11 @@ export default [
         && handoffEvent.resume?.attempts?.[0]?.layout?.utilization === 1.08
         && handoffEvent.resume?.attempts?.[1]?.contentUtilization === 0.925641
         && handoffEvent.resume?.attempts?.[1]?.layout?.utilization === 0.925641
-        && handoffEvent.coverLetter?.contentUtilization === 0.48,
-      'handoff events retain verification and utilization fields consumed by the audit for both documents and every résumé attempt');
+        && handoffEvent.coverLetter?.contentUtilization === 0.4
+        && handoffEvent.coverLetter?.bodyWordCount === 220
+        && handoffEvent.coverLetter?.bodyParagraphCount === 3
+        && !Object.hasOwn(handoffEvent.coverLetter || {}, 'pathologicalUnderfill'),
+      'handoff events retain verification, aggregate cover-letter shape, and utilization fields consumed by the audit for both documents and every résumé attempt');
       const artifactText = buildLocalGenerationAuditArtifact({
         jobId: LOCAL_AI_TEST_JOB_ID,
         input: {
@@ -1926,6 +1997,34 @@ export default [
             },
           }],
         },
+        // Two rejected cover-letter submissions followed by the imported
+        // accepted result above. Poisoned fields prove the audit gets only the
+        // strict metadata whitelist shared with the terminal receipt.
+        pasteRejectionTrace: [
+          {
+            at: '2026-09-05T12:03:00.000Z', jobId: LOCAL_AI_TEST_JOB_ID,
+            stage: 'cover-letter', reason: 'VALIDATION_FAILED', revision: 2,
+            errorCount: 2, uncodedErrors: 0, rejectionStreak: 1,
+            checkIds: ['repeated-phrase', 'target-claim-scope'],
+            checkFingerprints: { 'repeated-phrase': 'e85d50c9', 'target-claim-scope': '206b89df' },
+            response: 'REJECTED_LETTER_TEXT_SENTINEL', detail: 'REJECTED_VALIDATION_DETAIL_SENTINEL',
+            handoffCode: 'REJECTED_HANDOFF_CODE_SENTINEL', path: '/private/tmp/REJECTED_PATH_SENTINEL',
+          },
+          {
+            at: '2026-09-05T12:04:00.000Z', jobId: LOCAL_AI_TEST_JOB_ID,
+            stage: 'cover-letter', reason: 'VALIDATION_FAILED', revision: 2,
+            errorCount: 1, uncodedErrors: 0, rejectionStreak: 1,
+            checkIds: ['repeated-phrase'], checkFingerprints: { 'repeated-phrase': 'b3706d7d' },
+            prompt: 'REJECTED_PROMPT_SENTINEL', validationErrors: ['REJECTED_ERROR_SENTINEL'],
+          },
+          // A malformed sidecar row must not add arbitrary text or protocol
+          // values to the audit.
+          {
+            at: '2026-09-05T12:04:30.000Z', jobId: LOCAL_AI_TEST_JOB_ID,
+            stage: 'not-a-stage', reason: 'REJECTED_REASON_SENTINEL',
+            detail: 'REJECTED_MALFORMED_ROW_SENTINEL',
+          },
+        ],
         generationAuditRequired: true,
         createdAt: '2026-09-05T12:06:00.000Z',
       });
@@ -1951,11 +2050,19 @@ export default [
         && artifact.handoff.events[0]?.resume?.attempts[0]?.layout?.utilization === 1.08
         && artifact.handoff.events[0]?.resume?.attempts[1]?.contentUtilization === 0.925641
         && artifact.handoff.events[0]?.resume?.attempts[1]?.layout?.utilization === 0.925641
-        && artifact.handoff.events[0]?.coverLetter?.contentUtilization === 0.48
+        && artifact.handoff.events[0]?.coverLetter?.contentUtilization === 0.4
+        && artifact.handoff.events[0]?.coverLetter?.bodyWordCount === 220
+        && artifact.handoff.events[0]?.coverLetter?.bodyParagraphCount === 3
+        && !Object.hasOwn(artifact.handoff.events[0]?.coverLetter || {}, 'pathologicalUnderfill')
         && artifact.handoff.eventCount === 40
         && artifact.handoff.retainedEventCount === 1
-        && artifact.handoff.historyTruncated === true,
-      'the audit preserves app-owned fit attempts and makes bounded handoff-history truncation explicit');
+        && artifact.handoff.historyTruncated === true
+        && artifact.handoff.pasteRejectionTrace.version === 1
+        && artifact.handoff.pasteRejectionTrace.rows.length === 2
+        && artifact.handoff.pasteRejectionTrace.rows[0].checkIds.join(',') === 'repeated-phrase,target-claim-scope'
+        && artifact.handoff.pasteRejectionTrace.rows[1].checkFingerprints['repeated-phrase'] === 'b3706d7d'
+        && !Object.hasOwn(artifact.handoff.pasteRejectionTrace.rows[0], 'jobId'),
+      'the audit preserves fit history plus two redacted rejected cover-letter rounds before the accepted import');
       assert(artifact.finalArtifacts.resultSha256 === sha256(resultRaw)
         && artifact.finalArtifacts.resumePdfSha256 === sha256(resumePdf)
         && artifact.finalArtifacts.coverLetterPdfSha256 === sha256(coverPdf)
@@ -1976,6 +2083,14 @@ export default [
         && !artifactText.includes('SECRET_HOST_CHECK_PATH_SENTINEL')
         && !artifactText.includes('SECRET_EVENT_RENDER_PATH_SENTINEL')
         && !artifactText.includes('SECRET_EVENT_INTERNAL_PATH_SENTINEL')
+        && !artifactText.includes('REJECTED_LETTER_TEXT_SENTINEL')
+        && !artifactText.includes('REJECTED_VALIDATION_DETAIL_SENTINEL')
+        && !artifactText.includes('REJECTED_HANDOFF_CODE_SENTINEL')
+        && !artifactText.includes('REJECTED_PATH_SENTINEL')
+        && !artifactText.includes('REJECTED_PROMPT_SENTINEL')
+        && !artifactText.includes('REJECTED_ERROR_SENTINEL')
+        && !artifactText.includes('REJECTED_REASON_SENTINEL')
+        && !artifactText.includes('REJECTED_MALFORMED_ROW_SENTINEL')
         && !artifactText.includes('privateReasoning')
         && !artifactText.includes('toolTranscript'),
       'the durable projection omits credentials, undeclared raw/result/manifest fields, private reasoning, transcripts, corpora, notes, job URLs, and live filesystem paths');
@@ -2026,8 +2141,9 @@ export default [
         assert(legacyInspection[0]?.integrityVerified
           && legacyInspection[0].generationAuditRequirednessValid
           && legacyInspection[0].generationAuditStructureValid
-          && JSON.parse(legacyArtifact).writerAudit === null,
-        'a true legacy job emits a valid app-owned durable audit with explicit required=false and writerAudit=null');
+          && JSON.parse(legacyArtifact).writerAudit === null
+          && JSON.parse(legacyArtifact).handoff.pasteRejectionTrace.rows.length === 0,
+        'a true legacy job emits a valid app-owned durable audit with explicit required=false, writerAudit=null, and no rejection chronology');
 
         const requiredError = await inspectApplicationExport([{
           path: requiredPath,
@@ -2273,7 +2389,35 @@ export default [
         assert(ready.status === 'completed' && ready.resultSha256 === sha256(resultText),
           'a completed Local AI status supplies the exact result hash so the renderer can wait for a stable final write');
         await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 16,
+          resultSha256: sha256(resultText), documentSha256,
+          resume: { targetPageCount: 1, pageCount: 1 },
+          coverLetter: {
+            targetPageCount: 1, pageCount: 1,
+            pathologicalUnderfill: {
+              id: 'host-cover-pathological-underfill', utilization: 0.4, bodyWordCount: 220, paragraphCount: 3,
+            },
+          },
+          message: 'Legacy low-utilization advisory.',
+        })}\n`, 'utf8');
+        const legacyUnderfillReady = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(legacyUnderfillReady.status === 'completed' && legacyUnderfillReady.resultSha256 === sha256(resultText),
+          'a hash-matching legacy underfill-only record does not hold a valid one-page letter in revision-required status');
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
           version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 17,
+          resultSha256: sha256(resultText), documentSha256,
+          resume: { targetPageCount: 1, pageCount: 1 },
+          // A cover letter is never allowed a configurable two-page target.
+          // This guards a malformed legacy record from bypassing the hard
+          // one-page limit merely by raising its persisted target value.
+          coverLetter: { targetPageCount: 2, pageCount: 2 },
+          message: 'cover letter is 2 pages (target: 2).',
+        })}\n`, 'utf8');
+        const malformedCoverTarget = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(malformedCoverTarget.status === 'revision-required' && /2 page/.test(malformedCoverTarget.message),
+          'a malformed legacy two-page cover-letter target cannot override the invariant one-page limit');
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 18,
           resultSha256: sha256(resultText), documentSha256,
           resume: { targetPageCount: 1, pageCount: 2 }, coverLetter: { targetPageCount: 1, pageCount: 1 },
           message: 'résumé is 2 pages (target: 1). Re-run the Local AI routine.',
@@ -2325,7 +2469,7 @@ export default [
         await fs.promises.writeFile(path.join(queued.folder, 'result.json'), `${JSON.stringify(changedResult, null, 2)}\n`, 'utf8');
         const revised = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(revised.status === 'completed', 'a materially changed résumé and unchanged diminishing-returns cover letter clear stale feedback and return to import-ready state');
-        return { held: revisionRequired.status, legacyResumed: legacyExhausted.status, revised: revised.status };
+        return { legacyUnderfill: legacyUnderfillReady.status, malformedCoverTarget: malformedCoverTarget.status, held: revisionRequired.status, legacyResumed: legacyExhausted.status, revised: revised.status };
       } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -2754,6 +2898,67 @@ export default [
         return { retryReproducesFailure: feedback.retryReproducesFailure, errorCode: failedSave.errorCode };
       } finally {
         fs.promises.open = originalOpen;
+        __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Local AI import: legacy underfill-only feedback permits a valid one-page cover letter to import',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const careerData = 'Built supported systems. I built supported systems for the teams that depend on them. The engineering was in matching the constraints those teams set rather than my own preferences. I would apply that delivery work to the reliable system delivery this role requires.';
+        const queued = await queueLocalApplicationJob({
+          job: { title: 'Developer', company: 'Acme', snippet: 'Reliable system delivery is required for this role.' },
+          careerData,
+          canvasFilePath: project.canvasFilePath,
+        });
+        const resultValue = {
+          version: LOCAL_AI_APPLICATION_VERSION,
+          jobId: queued.id,
+          status: 'completed',
+          outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml: '<main class="page"><section class="section"><article class="role"><span class="title">Developer</span><span class="company">Acme</span><ul class="highlights"><li>Built supported systems.</li></ul></article></section></main>',
+          coverLetter: normalizedCoverLetter(),
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built supported systems.', 'Developer at Acme'),
+          generationAudit: generationAuditFor(),
+          qualityReview: groundedQualityReview(sourceGroundingFor()),
+        };
+        const result = await atomicReplaceJson(path.join(queued.folder, 'result.json'), resultValue);
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => ({
+          bytes: Buffer.from(fixturePdfBytes), pageCount: 1, fontsLoaded: true, missingFontFaces: [],
+          layout: { contentHeightPx: 320, typeAreaHeightPx: 800 },
+        }));
+        await atomicReplaceJson(path.join(queued.folder, 'fit-feedback.json'), {
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 1,
+          resultSha256: result.sha256,
+          documentSha256: {
+            resume: sha256(resultValue.resumeMainHtml),
+            coverLetter: sha256(JSON.stringify(resultValue.coverLetter)),
+          },
+          resume: { targetPageCount: 1, pageCount: 1 },
+          coverLetter: {
+            targetPageCount: 1, pageCount: 1,
+            pathologicalUnderfill: {
+              id: 'host-cover-pathological-underfill', utilization: 0.4, bodyWordCount: 220, paragraphCount: 3,
+            },
+          },
+        });
+        const beforeImport = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const imported = await importLocalApplicationJob({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, senderId: 1881, expectedResultSha256: result.sha256,
+        });
+        assert(beforeImport.status === 'completed'
+          && imported.status === 'imported'
+          && imported.coverLetterFit.targetMet === true
+          && fs.existsSync(imported.coverLetterPdfPath),
+        `a legacy underfill-only measurement must permit import instead of a rewrite, got ${JSON.stringify({ beforeImport, imported })}`);
+        return { beforeImport: beforeImport.status, imported: imported.status };
+      } finally {
         __setLocalAiRenderPdfForTests(null);
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
@@ -5068,8 +5273,18 @@ Personal Projects`;
       const telemetryCalls = [...localSource.matchAll(/recordApplicationTelemetry\(\{/g)];
       assert(telemetryCalls.length === 3 && produced.length === 3,
         `every Local AI telemetry record must carry the role-block summary, got ${produced.length} of ${telemetryCalls.length}`);
+      const terminalTelemetry = localSource.split('recordApplicationTelemetry({').slice(1);
+      assert(terminalTelemetry.length === 3
+        && terminalTelemetry.every(record => record.includes('nodeId: input.nodeId || undefined'))
+        && terminalTelemetry.every(record => record.includes('achievements: achievementTelemetry')),
+      'every Local AI terminal path must preserve its originating card correlation and the bounded achievement-ledger summary');
       assert(localSource.includes('resumeHtmlLen: result.resumeMainHtml.length'),
         'the report\u2019s "Résumé markup: N chars" line needs its producer too');
+      const chronologyProduced = [...localSource.matchAll(/chronology: localAiChronologyTelemetry\(result\)/g)];
+      assert(chronologyProduced.length === telemetryCalls.length
+        && localSource.includes("checkId: 'ended-role-current-employment'")
+        && localSource.includes('finalArtifactPassedHostCheck: passed'),
+      'every terminal Local AI telemetry record must project the content-free ended-role chronology verdict for the bug report');
 
       // The consumer reads exactly the shape the producer emits.
       for (const field of ['found', 'roleCount', 'truncated']) {
@@ -5305,6 +5520,77 @@ Personal Projects`;
     },
   },
   {
+    name: 'Local AI cover letter: explicitly ended roles cannot be presented as current employment',
+    run: () => {
+      const referenceDate = '2026-10-01T12:00:00.000Z';
+      const endedRole = {
+        title: 'Software Engineer', company: 'Thomson School District', dates: '2023-05 – 2026-06',
+      };
+      const incident = 'As a Software Engineer at Thomson School District, I build reliable district systems.';
+      const rejected = checkEndedRoleCurrentEmployment([incident], { roles: [endedRole] }, referenceDate);
+      assert(!rejected.passed
+        && rejected.id === 'ended-role-current-employment'
+        && rejected.detail.includes('Software Engineer at Thomson School District')
+        && rejected.detail.includes('2023-05 - 2026-06')
+        && rejected.detail.includes('past tense'),
+      `the exact ended-role/current-work incident must be rejected with a stable actionable observation, got ${JSON.stringify(rejected)}`);
+
+      const pastTense = checkEndedRoleCurrentEmployment(
+        ['As a Software Engineer at Thomson School District, I built reliable district systems.'],
+        { roles: [endedRole] }, referenceDate,
+      );
+      const presentRole = checkEndedRoleCurrentEmployment(
+        [incident],
+        { roles: [{ ...endedRole, dates: '2023-05 – Present' }] }, referenceDate,
+      );
+      const employerFreeCapability = checkEndedRoleCurrentEmployment(
+        ['I build reliable systems by applying the delivery practices I developed in prior roles.'],
+        { roles: [endedRole] }, referenceDate,
+      );
+      assert(pastTense.passed && presentRole.passed && employerFreeCapability.passed,
+        'past evidence, a Present role, and employer-free present-tense capability claims must remain outside the ended-role current-employment gate');
+
+      const noSpaceIsoRange = { title: 'Software Engineer', company: 'Acme', dates: '2023-05–2026-06' };
+      const progressiveCurrentWork = checkEndedRoleCurrentEmployment(
+        ['As a Software Engineer at Acme, I am building reliable systems.'],
+        { roles: [noSpaceIsoRange] }, referenceDate,
+      );
+      const declaredCurrentRole = checkEndedRoleCurrentEmployment(
+        ['In my current role as a Software Engineer at Acme, I build reliable systems.'],
+        { roles: [noSpaceIsoRange] }, referenceDate,
+      );
+      const creatingCurrentWork = checkEndedRoleCurrentEmployment(
+        ['As a Software Engineer at Acme, I am creating reliable systems.'],
+        { roles: [noSpaceIsoRange] }, referenceDate,
+      );
+      const managingCurrentWork = checkEndedRoleCurrentEmployment(
+        ['As a Software Engineer at Acme, I am managing reliable systems.'],
+        { roles: [noSpaceIsoRange] }, referenceDate,
+      );
+      assert(!progressiveCurrentWork.passed && !declaredCurrentRole.passed
+        && !creatingCurrentWork.passed && !managingCurrentWork.passed,
+      'a no-space ISO range must still reject progressive current work, including creating/managing, and an explicit current-role declaration at its ended employer');
+
+      const resumeMainHtml = '<main class="page"><article class="role"><div class="role-header meta-row">'
+        + '<p class="role-title-line"><span class="title">Software Engineer</span><span class="company">Thomson School District</span></p>'
+        + '<p class="role-dates">2023-05 – 2026-06</p></div><ul class="highlights"><li>Built reliable district systems.</li></ul></article></main>';
+      let validationError = '';
+      try {
+        validateLocalApplicationResult({
+          version: LOCAL_AI_APPLICATION_VERSION, jobId: LOCAL_AI_TEST_JOB_ID, status: 'completed', outputBundleRoot: 'Applied Jobs',
+          resumeMainHtml,
+          coverLetter: { ...normalizedCoverLetter(), paragraphs: [incident] },
+          coverLetterArgument: coverLetterArgumentForResumeEvidence('Built reliable district systems.', 'Software Engineer at Thomson School District'),
+          qualityReview: draftedQualityReview(),
+        }, LOCAL_AI_TEST_JOB_ID, process.cwd(), {}, { careerData: null, referenceDate });
+      } catch (error) { validationError = String(error?.message || error); }
+      assert(validationError.includes('Local AI cover letter failed required checks')
+        && validationError.includes('ended-role-current-employment'),
+      `the completion gate must turn this check into a cover-letter revision instruction, got ${JSON.stringify(validationError)}`);
+      return { rejected: true, exceptions: 3 };
+    },
+  },
+  {
     name: 'Local AI cover letter: employer introductions are accepted in every frame the contract describes',
     async run() {
       const employers = ['Thomson School District'];
@@ -5488,7 +5774,37 @@ Personal Projects`;
       const unrequired = sanitizeQualityReview(draftedQualityReview(), { ...context, required: false }, APPLICATION_QUALITY_CHECKLIST_VERSION);
       assert(!unrequired.sourceGrounding,
         'a context that states grounding is not required still skips that arm, which is why the state has to be stated');
-      return { gradedVersion: graded.checklistVersion };
+      const thirteenEvidence = extractResumeEvidence(`<main class="page"><section class="section"><article class="role"><span class="title">Engineer</span><span class="company">Acme</span><ul class="highlights">${Array.from({ length: 13 }, (_, index) => `<li>Built supported system ${index + 1}.</li>`).join('')}</ul></article></section></main>`);
+      const staleCount = draftedQualityReview();
+      staleCount.criteria.find(item => item.id === 'resume-concision').evidence = 'Fifteen bullets stay concise and single-purpose, with no repeated source accomplishment and no bullet exceeding the 180-character rendering limit.';
+      const staleNumber = failure(() => sanitizeQualityReview(staleCount, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const matchingCount = draftedQualityReview();
+      matchingCount.criteria.find(item => item.id === 'resume-concision').evidence = '13 résumé bullets total stay concise, focused, and easy to scan for a technical reviewer.';
+      const acceptedCount = sanitizeQualityReview(matchingCount, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      const historyPhrase = draftedQualityReview();
+      historyPhrase.criteria.find(item => item.id === 'resume-concision').evidence = 'Two bullets were consolidated while preserving concrete systems, outcomes, and readable scanning order.';
+      const historyAccepted = sanitizeQualityReview(historyPhrase, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      const presentHistoryPhrase = draftedQualityReview();
+      presentHistoryPhrase.criteria.find(item => item.id === 'resume-concision').evidence = 'Two bullets are consolidated while preserving concrete systems, outcomes, and readable scanning order.';
+      const presentHistoryAccepted = sanitizeQualityReview(presentHistoryPhrase, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      const areConcise = draftedQualityReview();
+      areConcise.criteria.find(item => item.id === 'resume-concision').evidence = 'Fifteen bullets are concise, focused, and easy to scan for a technical reviewer.';
+      const areConciseFailure = failure(() => sanitizeQualityReview(areConcise, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const laterContradiction = draftedQualityReview();
+      laterContradiction.criteria.find(item => item.id === 'resume-concision').evidence = 'All 13 bullets are concise; the résumé contains fifteen bullets after the final edit.';
+      const laterFailure = failure(() => sanitizeQualityReview(laterContradiction, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const asciiPossessive = draftedQualityReview();
+      asciiPossessive.criteria.find(item => item.id === 'resume-concision').evidence = "The resume's 15 bullets remain concise, focused, and easy to scan for a technical reviewer.";
+      const asciiFailure = failure(() => sanitizeQualityReview(asciiPossessive, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const plainTotal = draftedQualityReview();
+      plainTotal.criteria.find(item => item.id === 'resume-concision').evidence = 'Fifteen bullets total stay concise, focused, and easy to scan for a technical reviewer.';
+      const plainTotalFailure = failure(() => sanitizeQualityReview(plainTotal, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION));
+      const matchingPlainTotal = draftedQualityReview();
+      matchingPlainTotal.criteria.find(item => item.id === 'resume-concision').evidence = '13 bullets total stay concise, focused, and easy to scan for a technical reviewer.';
+      const matchingPlainTotalAccepted = sanitizeQualityReview(matchingPlainTotal, { ...context, required: false, resumeEvidence: thirteenEvidence }, APPLICATION_QUALITY_CHECKLIST_VERSION);
+      assert(/claims 15 résumé bullets.*has 13/u.test(String(staleNumber?.message || '')) && acceptedCount.criteria.length === APPLICATION_QUALITY_CRITERIA.length && historyAccepted.criteria.length === APPLICATION_QUALITY_CRITERIA.length && presentHistoryAccepted.criteria.length === APPLICATION_QUALITY_CRITERIA.length && /claims 15 résumé bullets.*has 13/u.test(String(areConciseFailure?.message || '')) && /claims 15 résumé bullets.*has 13/u.test(String(laterFailure?.message || '')) && /claims 15 résumé bullets.*has 13/u.test(String(asciiFailure?.message || '')) && /claims 15 résumé bullets.*has 13/u.test(String(plainTotalFailure?.message || '')) && matchingPlainTotalAccepted.criteria.length === APPLICATION_QUALITY_CRITERIA.length,
+        `a stale spelled bullet count must be rejected while a matching numeric count passes, got ${staleNumber?.message || 'acceptance'}`);
+      return { gradedVersion: graded.checklistVersion, objectiveCount: thirteenEvidence.bulletTexts.length };
     },
   },
   {

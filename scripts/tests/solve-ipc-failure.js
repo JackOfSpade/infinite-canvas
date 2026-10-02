@@ -1,8 +1,100 @@
-import { assert, canAttemptJobSourceResolve, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, isTerminalSourceStatus } from '../test-dependencies.js';
+import { assert, canAttemptJobSourceResolve, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, isTerminalSourceStatus, reconcileTerminalJobSourceWarningProjection } from '../test-dependencies.js';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage } from '../../src/utils/solveIpcFailure.js';
 import fs from 'node:fs';
 
 export default [
+  {
+    name: 'terminal source-card blocks immediately project to the active Job Search hub without changing final warning authority',
+    run: () => {
+      const existing = [{ sourceId: 'ziprecruiter', code: 'provider-total-shortfall', severity: 'warn' }];
+      const sourceProgress = {
+        indeed: { status: 'error', warning: { sourceId: 'wrong-source', code: 'scrape-failed', severity: 'block' } },
+        glassdoor: { status: 'error', warning: { code: 'login-required', severity: 'block' } },
+        linkedin: { status: 'searching', warning: { code: 'linkedin-rate-limited', severity: 'warn' } },
+        google: { status: 'done', warning: { code: 'description-listing-unavailable', severity: 'block' } },
+      };
+      const first = reconcileTerminalJobSourceWarningProjection(existing, sourceProgress);
+      const projected = first.warnings;
+      assert(projected !== existing
+        && projected.some(w => w.sourceId === 'indeed' && w.code === 'scrape-failed')
+        && projected.some(w => w.sourceId === 'glassdoor' && w.code === 'login-required')
+        && projected.some(w => w.sourceId === 'google' && w.code === 'description-listing-unavailable')
+        && projected.some(w => w.sourceId === 'ziprecruiter' && w.code === 'provider-total-shortfall')
+        && !projected.some(w => w.sourceId === 'linkedin'),
+      'terminal block warnings project by their progress-map source identity; nonterminal gates and unrelated warnings do not');
+      const repeated = reconcileTerminalJobSourceWarningProjection(
+        projected,
+        sourceProgress,
+        first.projectedWarnings,
+      );
+      assert(repeated.warnings === projected,
+        'an unchanged terminal projection is referentially stable and cannot churn hub writes');
+
+      const changed = reconcileTerminalJobSourceWarningProjection(projected, {
+        indeed: { status: 'error', warning: { code: 'cloudflare-hard-block', severity: 'block' } },
+        glassdoor: sourceProgress.glassdoor,
+        google: sourceProgress.google,
+      }, first.projectedWarnings);
+      const changedIndeed = changed.warnings;
+      assert(changedIndeed.filter(w => w.sourceId === 'indeed').length === 1
+        && changedIndeed.some(w => w.sourceId === 'indeed' && w.code === 'cloudflare-hard-block')
+        && changedIndeed.some(w => w.sourceId === 'glassdoor' && w.code === 'login-required'),
+      'a newer terminal card outcome replaces only its own provisional gate and preserves sibling source gates');
+
+      const cleared = reconcileTerminalJobSourceWarningProjection(changedIndeed, {
+        indeed: { status: 'searching', warning: null },
+        glassdoor: { status: 'done', warning: null },
+        google: { status: 'done', warning: { code: 'description-listing-unavailable', severity: 'block' } },
+      }, changed.projectedWarnings);
+      assert(!cleared.warnings.some(w => w.sourceId === 'indeed')
+        && !cleared.warnings.some(w => w.sourceId === 'glassdoor')
+        && cleared.warnings.some(w => w.sourceId === 'google')
+        && cleared.warnings.some(w => w.sourceId === 'ziprecruiter'),
+      'a source retry or clean terminal event retracts only that source’s provisional gate');
+
+      const evidenceChanged = reconcileTerminalJobSourceWarningProjection(cleared.warnings, {
+        google: { status: 'done', warning: { code: 'description-listing-unavailable', severity: 'block', action: 'login-platform', evidence: 'new proof' } },
+      }, cleared.projectedWarnings);
+      assert(evidenceChanged.warnings.filter(w => w.sourceId === 'google').length === 1
+        && evidenceChanged.warnings.some(w => w.sourceId === 'google' && w.evidence === 'new proof' && w.action === 'login-platform'),
+      'changed action or evidence replaces the bridge-owned warning instead of being treated as an unchanged code/severity');
+
+      const delimiterFirst = reconcileTerminalJobSourceWarningProjection([], {
+        indeed: { status: 'error', warning: { code: 'x|detail:string:y', severity: 'block' } },
+      });
+      const delimiterChanged = reconcileTerminalJobSourceWarningProjection(delimiterFirst.warnings, {
+        indeed: { status: 'error', warning: { code: 'x', detail: 'y', severity: 'block' } },
+      }, delimiterFirst.projectedWarnings);
+      assert(delimiterChanged.warnings.length === 1
+        && delimiterChanged.warnings[0].code === 'x',
+      'delimiter-bearing warning values cannot collide with a different projected warning signature');
+
+      const cyclicWarning = { code: 'cyclic', severity: 'block' };
+      cyclicWarning.self = cyclicWarning;
+      const cyclic = reconcileTerminalJobSourceWarningProjection([], {
+        indeed: { status: 'error', warning: cyclicWarning },
+      });
+      assert(cyclic.warnings.length === 0 && cyclic.projectedWarnings.size === 0,
+        'malformed cyclic progress warnings are ignored instead of crashing or entering hub state');
+
+      const finalWarning = { sourceId: 'indeed', code: 'scrape-failed', severity: 'block', evidence: 'backend final' };
+      const finalPreserved = reconcileTerminalJobSourceWarningProjection([finalWarning], {
+        indeed: { status: 'searching', warning: null },
+      }, new Map());
+      assert(finalPreserved.warnings[0] === finalWarning,
+        'a matching-but-unowned final warning is never removed by a later live clear');
+
+      const renderer = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      assert(renderer.includes('reconcileTerminalJobSourceWarningProjection(')
+        && renderer.includes("if (hubStateRef.current !== 'searching' || !terminalSourceWarningProjectionOpenRef.current) return;")
+        && renderer.includes('terminalSourceWarningProjectionRef.current = projection.projectedWarnings;')
+        && renderer.includes('terminalSourceWarningProjectionOpenRef.current = false;')
+        && renderer.includes('terminalSourceWarningProjectionRef.current.clear();')
+        && renderer.includes("the backend's final warning reconciliation remains the\n  // authority for sources-ready, scoring, and completion."),
+      'the renderer applies the projection only while gathering, leaving sources-ready/scoring/completion to final backend reconciliation');
+      return { projectedSources: 3, noOpStable: true, staleGatesRetracted: true, finalAuthorityPreserved: true };
+    },
+  },
   {
     name: 'Solve IPC failures use concise, actionable browser guidance',
     run: () => {

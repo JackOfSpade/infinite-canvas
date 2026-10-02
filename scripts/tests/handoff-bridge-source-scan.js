@@ -33,7 +33,7 @@ const allBridgeSiblings = [
   './constants.js', './contracts.js', './respond.js', './wire.js', './http.js', './listener.js', './tools.js', './mcp.js',
   './oauth.js', './oauthPages.js', './clientAuth.js', './cimd.js', './egressProbe.js', './oauthStore.js', './store.js',
   './laneStore.js', './engine.js', './lanes.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
-  './telemetry.js', './controller.js', './pairing.js', './ui.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
+  './telemetry.js', './restartContext.js', './controller.js', './pairing.js', './ui.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
 ];
 const sibling = (...imports) => [...imports, ...allBridgeSiblings];
 
@@ -67,6 +67,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'audit.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../logger.js'] },
   'log.js': { allow: ['../logger.js'] },
   'telemetry.js': { allow: [] },
+  'restartContext.js': { allow: [] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
   'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js'] },
   'controller.js': { allow: sibling('node:crypto') },
@@ -344,7 +345,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 48, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 49, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {

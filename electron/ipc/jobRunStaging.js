@@ -17,10 +17,11 @@
  *       version, runId, startedAt, lastUpdated,
  *       stage: 'searching' | 'gathered',
  *       collectionCompletedAt?: number,
+ *       collectionDisposition?: 'user-finished-partial',
  *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
  *                 jobPreferencePlan, canonicalLocation, searchWindow,
  *                 maxAgeDays, nodeId },
- *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
+ *       sources: { [sourceId]: { status: 'pending'|'done'|'skipped'|'blocked',
  *                                queries: { [query]: { lastPage } },
  *                                collectionScopeCaveats?: [{ sourceId, code }] } }
  *     }
@@ -32,7 +33,7 @@
  * (complete-job-run), so any manifest on disk means an unfinished run.
  *
  * On the next launch, an incomplete + recent manifest is what the renderer
- * detects to offer "Resume or start fresh?".
+ * detects to offer Resume, Finish with saved listings, or Clear career data.
  *
  * Atomicity: the manifest is written tmp→rename (never half-written). The staging
  * file is append-only — a torn final line after a hard crash is just one
@@ -48,6 +49,15 @@ import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearch
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } from './aiSchemas.js';
 
 const MANIFEST_VERSION = 2;
+// An explicit user choice to stop collection and carry the durable ledger into
+// preference/scoring.  This is intentionally distinct from `stage: 'gathered'`:
+// the latter normally means every provider completed, while this marker means
+// some provider work was deliberately left unfinished and must never be
+// silently restarted after a scoring/restart interruption.
+export const JOB_RUN_COLLECTION_DISPOSITION = Object.freeze({
+  USER_FINISHED_PARTIAL: 'user-finished-partial',
+});
+const JOB_RUN_COLLECTION_DISPOSITIONS = new Set(Object.values(JOB_RUN_COLLECTION_DISPOSITION));
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
@@ -268,7 +278,7 @@ function sanitizeReceiptSourceCap(cap) {
   // still safe aggregate-only provenance and the report explicitly refuses it
   // as configured-cap proof; dropping it here left a durable `result-ceiling`
   // stop with no number after restart.
-  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(cap.type)) return null;
+  if (!['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal'].includes(cap.type)) return null;
   // A cap is completion evidence, not a display hint. Do not coerce truthy
   // values or fractions into a different integer cap (for example, 0.5 → 0),
   // since that could make a malformed receipt look like a user-configured
@@ -614,13 +624,19 @@ async function readManifestFromFiles(files) {
     const inputs = manifest.inputs && typeof manifest.inputs === 'object' && !Array.isArray(manifest.inputs)
       ? manifest.inputs
       : {};
-    const { collectionCompletedAt: rawCollectionCompletedAt, ...otherManifest } = manifest;
+    const {
+      collectionCompletedAt: rawCollectionCompletedAt,
+      collectionDisposition: rawCollectionDisposition,
+      ...otherManifest
+    } = manifest;
     const collectionCompletedAt = manifestTimestamp(rawCollectionCompletedAt);
+    const collectionDisposition = normalizeJobRunCollectionDisposition(rawCollectionDisposition);
     const { searchWindow: rawSearchWindow, ...otherInputs } = inputs;
     const searchWindow = sanitizeJobSearchWindow(rawSearchWindow);
     return {
       ...otherManifest,
       ...(collectionCompletedAt != null ? { collectionCompletedAt } : {}),
+      ...(collectionDisposition ? { collectionDisposition } : {}),
       inputs: {
         ...otherInputs,
         jobPreferences: sanitizeJobPreferences(inputs.jobPreferences),
@@ -805,6 +821,24 @@ function manifestTimestamp(value) {
     : null;
 }
 
+/** Keep the durable collection outcome to a fixed, non-provider-controlled enum. */
+export function normalizeJobRunCollectionDisposition(value) {
+  return typeof value === 'string' && JOB_RUN_COLLECTION_DISPOSITIONS.has(value)
+    ? value
+    : null;
+}
+
+/**
+ * True only when this exact ledger was deliberately ended with its saved rows.
+ * Callers still validate run ownership, query identity, and profile identity;
+ * this predicate answers only whether provider collection must remain stopped.
+ */
+export function isRunCollectionFinishedWithSavedListings(manifest) {
+  return manifest?.stage === 'gathered'
+    && normalizeJobRunCollectionDisposition(manifest?.collectionDisposition)
+      === JOB_RUN_COLLECTION_DISPOSITION.USER_FINISHED_PARTIAL;
+}
+
 /**
  * Return the immutable instant at which this run first reached its gathered
  * checkpoint. Older manifests stored only `lastUpdated`; that value is a safe
@@ -890,11 +924,13 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     // independently while same-hub reruns retain the established fencing.
     const existing = await readManifestFromFiles(files);
     const existingNodeId = normalizeNodeId(existing?.inputs?.nodeId);
-    if (existing && ownerNodeId && existingNodeId !== ownerNodeId) {
-      // A legacy manifest without node ownership is still a real unfinished
-      // recovery record. Treat its owner as unknown rather than overwriting it
-      // from a different modern hub and losing its staged pages. An explicit
-      // Reset/Discard remains the deliberate escape hatch for that legacy run.
+    if (existing && ownerNodeId) {
+      // A manifest on disk is an unfinished recovery record, including one
+      // owned by THIS hub. Never let a new start truncate a same-hub staging
+      // ledger behind the user's back; Resume (or Finish with saved listings)
+      // owns that token, while Clear career data is the explicit destructive
+      // escape hatch. A legacy manifest without ownership is likewise real
+      // recovery data rather than permission to overwrite it.
       return {
         conflict: true,
         ownerNodeId: existingNodeId,
@@ -1013,7 +1049,7 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
   });
 }
 
-/** Set a source's terminal status ('done' | 'blocked') for the expected run. */
+/** Set a source's terminal status ('done' | 'skipped' | 'blocked') for the expected run. */
 export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
   expectedRunId = null,
   nodeId = null,
@@ -1050,6 +1086,14 @@ export async function setStage(canvasFilePath, stage, now, {
   return withManifestLock(files.manifest, async () => {
     const manifest = await readManifestFromFiles(files);
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
+    // A deliberate partial finish is an irreversible collection decision for
+    // this run.  Never let a later/general resume caller quietly demote the
+    // manifest back to `searching`: a crash after that demotion would make the
+    // durable marker fail its gathered-stage predicate and re-open provider
+    // collection. Returning success keeps this a safe no-op for old callers.
+    if (stage === 'searching' && isRunCollectionFinishedWithSavedListings(manifest)) {
+      return true;
+    }
     // The first gathered boundary is immutable for this run. A gathered-only
     // recovery may happen on a later calendar date; moving this timestamp to
     // the resume time would let the next scan skip postings created between
@@ -1065,6 +1109,96 @@ export async function setStage(canvasFilePath, stage, now, {
     manifest.lastUpdated = now ?? manifest.lastUpdated;
     try { await atomicWriteJson(files.manifest, manifest); return true; }
     catch (e) { logger.warn(`[JobRunStaging] setStage failed: ${e?.message || e}`); }
+  });
+}
+
+/**
+ * Durably record the user's explicit choice to stop provider collection and
+ * continue only with the rows already staged.  This is deliberately a single
+ * manifest-lock transaction: writing the marker before renderer-side role
+ * screening/scoring means a crash during either step cannot turn the next
+ * Resume into another provider scrape.
+ *
+ * Existing source statuses are left untouched. `pending`/`blocked` remains a
+ * truthful record of work that was not completed, while the fixed disposition
+ * tells exact recovery to process the saved ledger without dispatching it.
+ */
+export async function finishRunWithSavedListings(canvasFilePath, {
+  expectedRunId = null,
+  nodeId = null,
+  now = null,
+} = {}) {
+  const expectedRunToken = typeof expectedRunId === 'string' && expectedRunId.trim()
+    ? expectedRunId.trim()
+    : null;
+  const expectedNodeId = normalizeNodeId(nodeId);
+  // This is a recovery action, never a best-effort generic manifest edit. A
+  // delayed banner click without both ownership coordinates must fail closed.
+  if (!expectedRunToken || !expectedNodeId) {
+    return { ok: false, marked: false, missingOwnership: true, reason: 'missing-ownership' };
+  }
+  const stoppedAt = manifestTimestamp(now);
+  if (stoppedAt == null) {
+    return { ok: false, marked: false, invalidTimestamp: true, reason: 'invalid-stop-time' };
+  }
+  const located = await locateRun(canvasFilePath, nodeId);
+  const { files } = located;
+  if (!files) return { ok: false, marked: false, absent: true, reason: 'missing-canvas' };
+  return withManifestLock(files.manifest, async () => {
+    const manifest = await readManifestFromFiles(files);
+    if (!manifest) return { ok: false, marked: false, absent: true, reason: 'run-absent' };
+    if (
+      manifest.runId !== expectedRunToken
+      || normalizeNodeId(manifest.inputs?.nodeId) !== expectedNodeId
+    ) {
+      return { ok: false, marked: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+    }
+    // The action is idempotent.  Preserve the first explicit collection
+    // boundary so retries cannot move the next-run coverage anchor forward.
+    const alreadyFinished = isRunCollectionFinishedWithSavedListings(manifest);
+    const sourceEntries = Object.entries(manifest.sources || {});
+    const sourceIsTerminal = source => source?.status === 'done' || source?.status === 'skipped';
+    const alreadyFullyGathered = manifest.stage === 'gathered'
+      && sourceEntries.length > 0
+      && sourceEntries.every(([, source]) => sourceIsTerminal(source));
+    // An already clean gathered checkpoint already has the normal no-network
+    // recovery path. Do not relabel it as a deliberately partial collection.
+    if (alreadyFullyGathered && !alreadyFinished) {
+      return {
+        ok: true,
+        marked: false,
+        alreadyGathered: true,
+        runId: manifest.runId || null,
+        collectionDisposition: null,
+        collectionCompletedAt: collectionCompletedAtForManifest(manifest),
+        unfinishedSourceIds: [],
+      };
+    }
+    const existingBoundary = collectionCompletedAtForManifest(manifest);
+    manifest.stage = 'gathered';
+    manifest.collectionDisposition = JOB_RUN_COLLECTION_DISPOSITION.USER_FINISHED_PARTIAL;
+    if (manifestTimestamp(manifest.collectionCompletedAt) == null) {
+      manifest.collectionCompletedAt = existingBoundary ?? stoppedAt;
+    }
+    manifest.lastUpdated = stoppedAt;
+    try {
+      await atomicWriteJson(files.manifest, manifest);
+      const unfinishedSourceIds = sourceEntries
+        .filter(([, source]) => !sourceIsTerminal(source))
+        .map(([sourceId]) => sourceId)
+        .slice(0, 32);
+      return {
+        ok: true,
+        marked: !alreadyFinished,
+        runId: manifest.runId || null,
+        collectionDisposition: manifest.collectionDisposition,
+        collectionCompletedAt: manifest.collectionCompletedAt,
+        unfinishedSourceIds,
+      };
+    } catch (error) {
+      logger.warn(`[JobRunStaging] finishRunWithSavedListings failed: ${error?.message || error}`);
+      return { ok: false, marked: false, reason: 'write-failed' };
+    }
   });
 }
 
@@ -1142,7 +1276,7 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
  * @param {object} [opts]
  * @param {(path:string)=>Promise<void>} [opts.trashItem] - When provided (e.g.
  *   electron `shell.trashItem`), move the sidecars to the OS Trash instead of
- *   hard-deleting, so an accidental "Start fresh" is recoverable. A clean finish
+ *   hard-deleting, so an explicit Clear career data action is recoverable. A clean finish
  *   passes nothing and hard-deletes — there's nothing to recover, and trashing a
  *   sidecar on every successful run would steadily clutter the Trash. The
  *   function is INJECTED, not imported, so this module stays electron-free and
@@ -1198,7 +1332,7 @@ async function clearRunFiles(files, trashItem = null) {
         await trashItem(p);
       } catch (err) {
         // trashItem can fail on volumes without a Trash (network / exFAT). Fall
-        // back to a hard delete so "Start fresh" still clears the run rather
+        // back to a hard delete so Clear career data still clears the run rather
         // than leaving a stale resumable manifest behind.
         logger.warn(`[JobRunStaging] trashItem failed for ${p} (${err?.message || err}); hard-deleting instead`);
         try { await fs.promises.unlink(p); } catch { /* verified below */ }

@@ -202,7 +202,7 @@ export const SKILLS_BLOCK_BUDGET_RULE = `at most ${MAX_DESIGN_SKILL_GROUPS} grou
 // recruiter can filter on and never concepts, and prose is all that rule ever
 // was: the shipped defect rendered "connectors", "prompt harnessing" and
 // "model delegation" beside React and Django. A named product, language,
-// platform or acronym shows its name in its own spelling. React, Typescript,
+// platform or acronym shows its name in its own spelling. React, TypeScript,
 // Next.js, Django, Nginx, Gunicorn, Docker Compose, MCP, gRPC and iOS all
 // carry an uppercase letter or a digit; a lowercase common noun or a concept
 // phrase carries neither, which makes the distinction decidable here.
@@ -211,7 +211,51 @@ export const SKILLS_BLOCK_BUDGET_RULE = `at most ${MAX_DESIGN_SKILL_GROUPS} grou
 // with them. That class is commodity tooling, which SKILL.md:687 already bans
 // from this block, so nothing the design system wanted kept is refused here.
 const FILTERABLE_SKILL_ITEM_RE = /[\p{Lu}\p{Lt}\p{N}]/u;
-export const SKILL_ITEM_FILTERABLE_RULE = 'each item is a named product, language, platform or acronym a recruiter can filter on, and a name shows in its spelling: every item carries at least one uppercase letter or digit. A lowercase common noun, and any phrase naming a concept or an activity rather than a product, belongs in a bullet where it is evidence';
+export const SKILL_ITEM_FILTERABLE_RULE = 'each item is a named product, language, platform or acronym a recruiter can filter on, and a name shows in its spelling: every item carries at least one uppercase letter or digit. Use the canonical spelling “TypeScript”, never “Typescript”. A lowercase common noun, and any phrase naming a concept or an activity rather than a product, belongs in a bullet where it is evidence';
+const TYPESCRIPT_TOKEN_RE = /\btypescript\b/giu;
+const TYPESCRIPT_SPELLING_RULE = 'canonical-typescript-spelling';
+
+function hasNonCanonicalTypeScript(value) {
+  return [...String(value || '').matchAll(TYPESCRIPT_TOKEN_RE)]
+    .some(match => match[0] !== 'TypeScript');
+}
+
+/* A browser renderer does not repair prose, so an apparently harmless
+ * misspelling in structured copy reaches both the HTML and the PDF.  Reject
+ * it at the structured-resume boundary, which is exercised before a résumé
+ * draft is persisted and again for every review replacement.  That keeps the
+ * accepted review, its audit, and the recruiter-facing render on identical
+ * text; a late display-only rewrite would not. */
+function collectNonCanonicalTypeScriptOffenses(roles, projects, skills, offenses) {
+  for (const [roleIndex, role] of roles.entries()) {
+    for (const [bulletIndex, bullet] of role.bullets.entries()) {
+      if (hasNonCanonicalTypeScript(bullet.text)) {
+        offend(offenses, TYPESCRIPT_SPELLING_RULE, `roles[${roleIndex}].bullets[${bulletIndex}].text`,
+          `roles[${roleIndex}].bullets[${bulletIndex}].text uses “Typescript”; write the canonical product name “TypeScript”.`);
+      }
+    }
+  }
+  for (const [groupIndex, group] of skills.entries()) {
+    for (const [itemIndex, item] of group.items.entries()) {
+      if (hasNonCanonicalTypeScript(item)) {
+        offend(offenses, TYPESCRIPT_SPELLING_RULE, `skills[${groupIndex}].items[${itemIndex}]`,
+          `skills[${groupIndex}].items[${itemIndex}] uses “Typescript”; write the canonical product name “TypeScript”.`);
+      }
+    }
+  }
+  for (const [projectIndex, project] of projects.entries()) {
+    for (const [field, value] of Object.entries({
+      name: project.name,
+      description: project.description,
+      metrics: project.metrics,
+    })) {
+      if (hasNonCanonicalTypeScript(value)) {
+        offend(offenses, TYPESCRIPT_SPELLING_RULE, `projects[${projectIndex}].${field}`,
+          `projects[${projectIndex}].${field} uses “Typescript”; write the canonical product name “TypeScript”.`);
+      }
+    }
+  }
+}
 // The `<dt>` casing rule lives in its own import-free module and is
 // re-exported here, where the résumé contract's consumers read it: the second
 // renderer that writes into this same `<dl class="skills">` is resumeHtml.js,
@@ -575,7 +619,9 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
   // manual handoff round per role.
   const bulletOffenses = offenses;
   const evidenceAccepted = [];
-  normalized.bullets = role.bullets.map((rawBullet, bulletIndex) => {
+  // As with roles and skills, a sparse array must be rejected at the boundary
+  // rather than carried as a hole into later prose and spelling checks.
+  normalized.bullets = Array.from(role.bullets, (rawBullet, bulletIndex) => {
     const bullet = record(rawBullet, `roles[${index}].bullets[${bulletIndex}]`);
     const offensesBefore = bulletOffenses.length;
     const normalizedBullet = {
@@ -851,15 +897,30 @@ function careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById) {
   return evidenceIds.flatMap(evidenceId => careerEvidenceQuotesById?.get(evidenceId) || []);
 }
 
-function occursInQuotedCareerEvidence(value, quotes) {
+function quotedEvidenceHasTerm(value, quotes, flags) {
   const literal = String(value || '').trim();
   if (!literal) return false;
   // Do not let a short skill (Go) match inside a longer token (Google). The
   // same Unicode-aware boundaries retain literal symbolic names such as C++,
   // C#, .NET, and Node.js.
   const escaped = literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  const exactTerm = new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'iu');
+  const exactTerm = new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, flags);
   return quotes.some(quote => exactTerm.test(String(quote)));
+}
+
+function occursInQuotedCareerEvidence(value, quotes) {
+  return quotedEvidenceHasTerm(value, quotes, 'iu');
+}
+
+/* The source corpus from the reported package has the one known legacy
+ * spelling, `Typescript`; its canonical recruiter-facing rendering is
+ * `TypeScript`. Preserve that explicit source-to-display equivalence before
+ * applying the established skill-grounding comparator. No other new
+ * equivalence is introduced, so existing grounding behaviour stays intact. */
+function occursInQuotedSkillEvidence(value, quotes) {
+  if (String(value || '').trim() === 'TypeScript'
+    && quotedEvidenceHasTerm('Typescript', quotes, 'u')) return true;
+  return occursInQuotedCareerEvidence(value, quotes);
 }
 
 const PROJECT_OCCURRENCE_RULE = 'project-field-occurs-in-cited-career-evidence';
@@ -894,7 +955,11 @@ function normalizeProjects(value, allowedEvidenceIds, careerEvidenceIds, careerE
   if (!Array.isArray(value) || value.length > MAX_PROJECTS) fail(`projects must be an array with at most ${MAX_PROJECTS} projects.`);
   const projectOffenses = offenses;
   const evidenceAccepted = [];
-  const projects = value.map((raw, index) => {
+  // `map` skips a hole, then the grounding pass below dereferences the
+  // unvalidated hole as though it were a project. Consume every declared
+  // index so malformed in-memory drafts fail at the same boundary as roles,
+  // bullets, and skills.
+  const projects = Array.from(value, (raw, index) => {
     const project = record(raw, `projects[${index}]`);
     const offensesBefore = projectOffenses.length;
     const normalized = {
@@ -972,7 +1037,7 @@ function normalizeSkills(value, allowedEvidenceIds, careerEvidenceIds, careerEvi
     // against; restating that as an item defect would hide the real repair.
     if (skillOffenses.length === offensesBefore) {
       for (const item of items) {
-        if (!(careerQuotes.length ? occursInQuotedCareerEvidence(item, careerQuotes) : occursInCareerData(item, careerData))) {
+        if (!(careerQuotes.length ? occursInQuotedSkillEvidence(item, careerQuotes) : occursInCareerData(item, careerData))) {
           offend(skillOffenses, SKILL_ITEM_RULE, `skills[${index}] item "${item}"`,
             `skills[${index}] item "${item}" must occur in its cited career-data evidence.`);
         }
@@ -1079,7 +1144,10 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   // grounding rule that fires in three roles — or in a role and again in a
   // skill group — one correction round instead of three manual handoffs.
   const offenses = [];
-  const roles = draft.roles.map((role, index) => normalizeRole(
+  // Array.from, not map: map skips a sparse-array hole, leaving an undefined
+  // role for later collection-level checks to dereference. Treat the hole as
+  // an invalid record at its own index, just as normalizeSkills already does.
+  const roles = Array.from(draft.roles, (role, index) => normalizeRole(
     role, index, sourceById, allowedEvidenceIds, careerEvidenceIds, careerData,
     careerEvidenceQuotesById, careerDataRoleRegions, offenses,
   ));
@@ -1087,6 +1155,7 @@ export function validateStructuredResumeDraft(raw, { sourceRoles, evidenceIds, e
   for (const role of normalizedSourceRoles) if (!roleIds.has(role.id)) fail(`roles is missing trusted source role "${role.id}".`);
   const projects = normalizeProjects(draft.projects, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, listingEvidenceQuotesById, offenses);
   const skills = normalizeSkills(draft.skills, allowedEvidenceIds, careerEvidenceIds, careerEvidenceQuotesById, careerData, offenses);
+  collectNonCanonicalTypeScriptOffenses(roles, projects, skills, offenses);
   failOffenses(offenses);
   return {
     schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,

@@ -10,19 +10,53 @@ export function JobSearchProcessingState({
   resumeSummary,
   activeSourceId,
   activeSourceDetail,
-  onReset,
+  resumeCheckpoint,
+  onStop,
   chromeLaunchInfo,
   queuedRun,
 }) {
-  const primaryStatus = hubState === 'searching' && activeSourceId
+  const finishingWithSavedListings = resumeCheckpoint?.mode === 'finish-with-saved-listings';
+  const primaryStatus = finishingWithSavedListings
+    ? 'Finishing with saved listings…'
+    : hubState === 'searching' && activeSourceId
     ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...`
     : statusLabel;
   const queuedStatus = hubState === 'queued'
     ? `${queuedRun?.label || 'Job search'} · Position ${queuedRun?.position || 1}`
     : null;
   const collectedStatus = hubState === 'searching' && totalSourceJobs > 0
-    ? `${totalSourceJobs} listing${totalSourceJobs === 1 ? '' : 's'} collected so far (before de-duplication)`
+    ? `${totalSourceJobs} listing${totalSourceJobs === 1 ? '' : 's'} currently reported by sources (before de-duplication)`
     : null;
+  const checkpointSourceSummary = Array.isArray(resumeCheckpoint?.sourceSummary)
+    ? resumeCheckpoint.sourceSummary
+    : [];
+  const remainingSources = checkpointSourceSummary
+    .filter(source => source?.status !== 'done' && source?.status !== 'skipped')
+    .map(source => JOB_SOURCE_BY_ID[source?.id]?.name || source?.id)
+    .filter(Boolean);
+  const checkpointStart = Number(resumeCheckpoint?.searchWindow?.startTimestamp);
+  const checkpointDate = Number.isFinite(checkpointStart) && checkpointStart > 0
+    ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(checkpointStart))
+    : null;
+  const checkpointContext = resumeCheckpoint ? (
+    <div className="mt-1 text-center text-[10px] leading-snug text-amber-200/75">
+      <p className="font-medium text-amber-200/90">
+        {finishingWithSavedListings ? 'Finishing with saved checkpoint' : 'Resuming saved checkpoint'}
+        {' — '}{resumeCheckpoint.gatheredCount || 0} listing{resumeCheckpoint.gatheredCount === 1 ? '' : 's'} retained.
+      </p>
+      {!finishingWithSavedListings && (remainingSources.length > 0 || checkpointDate) && (
+        <p className="mt-0.5 text-amber-100/55">
+          {remainingSources.length > 0
+            ? `Continuing ${remainingSources.join(', ')}`
+            : 'Continuing the saved run'}
+          {checkpointDate ? ` · original window starts ${checkpointDate}` : ''}.
+        </p>
+      )}
+      {finishingWithSavedListings && (
+        <p className="mt-0.5 text-amber-100/55">No further sources will be scraped; the next step uses only these retained listings.</p>
+      )}
+    </div>
+  ) : null;
   const scoringStatus = hubState === 'scoring' && scoringProgress?.total > 0
     ? <>
         {scoringProgress.scored} / {scoringProgress.total} scored
@@ -50,14 +84,14 @@ export function JobSearchProcessingState({
   if (chromeLaunchInfo) {
     return (
       <div className="group flex flex-col py-4 px-3 relative gap-2.5">
-        {onReset && (
+        {onStop && (
           <button
             type="button"
-            onClick={onReset}
+            onClick={onStop}
             onPointerDown={(e) => e.stopPropagation()}
-            className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
-            aria-label="Cancel and reset job search"
-            title="Cancel/Reset Task"
+            className="absolute top-2 right-2 p-1 text-white/30 hover:text-amber-300 opacity-0 group-hover:opacity-100 transition-all rounded"
+            aria-label="Stop job search and keep saved progress for Resume when available"
+            title="Stop — keep saved progress for Resume when available"
           >
             <XCircle size={14} />
           </button>
@@ -66,6 +100,7 @@ export function JobSearchProcessingState({
           <Terminal size={13} />
           <span className="text-[11px] font-semibold">Open Chrome for Indeed</span>
         </div>
+        {checkpointContext}
         <p className="text-white/50 text-[10px] leading-snug">
           Paste this in Terminal. A separate Chrome window will open — <strong className="text-white/70">log into Indeed</strong> and we'll connect automatically. Your login is saved for next time.
         </p>
@@ -94,14 +129,14 @@ export function JobSearchProcessingState({
 
   return (
     <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
-      {onReset && (
+      {onStop && (
         <button
           type="button"
-          onClick={onReset}
+          onClick={onStop}
           onPointerDown={(e) => e.stopPropagation()}
-          className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
-          aria-label="Cancel and reset job search"
-          title="Cancel/Reset Task"
+          className="absolute top-2 right-2 p-1 text-white/30 hover:text-amber-300 opacity-0 group-hover:opacity-100 transition-all rounded"
+          aria-label="Stop job search and keep saved progress for Resume when available"
+          title="Stop — keep saved progress for Resume when available"
         >
           <XCircle size={14} />
         </button>
@@ -115,6 +150,7 @@ export function JobSearchProcessingState({
         <p className="text-white/60 text-xs font-medium" role="status" aria-live="polite" aria-atomic="true">
           {primaryStatus}
         </p>
+        {checkpointContext}
         {queuedStatus && <p className="text-blue-400/60 text-[10px] mt-1">{queuedStatus}</p>}
         {/* Browser description walks can take minutes without increasing the
             collection count, so expose the current step visually without

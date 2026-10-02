@@ -5,6 +5,7 @@ import nodePath from 'node:path';
 import { assert } from './testHelpers.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffBridgeController } from '../../electron/ipc/handoffBridge/controller.js';
+import { createUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { deriveBridgeHealth } from '../../src/utils/handoffBridgeView.js';
 import { createOAuthServer } from '../../electron/ipc/handoffBridge/oauth.js';
@@ -1023,15 +1024,19 @@ export default [
     assert(await h.controller.confirmRestart() && restartConfirms === 1 && h.controller.snapshot().hold === null,
       'the first chat-side restart confirmation is still required and releases the hold only when accepted');
   } },
-  { name: 'handoff bridge: controls: deferred restart keeps the requesting main-only canvas context', async run() {
-    let seen = null;
-    const h = controllerHarness({ ui: { confirmRestart: async (_details, context) => { seen = context; return { response: 1 }; } } });
-    const first = { id: 91, __isCanvasRenderer: true }; const second = { id: 92, __isCanvasRenderer: true };
-    const context = Object.freeze({ sender: second });
+  { name: 'handoff bridge: controls: only a main-owned UI capability bypasses restart confirmation', async run() {
+    let confirms = 0;
+    const h = controllerHarness({ ui: { confirmRestart: async () => { confirms += 1; return { response: 1 }; } } });
+    const forged = Object.freeze({});
     assert((await h.controller.enable({ confirmed: true, restartConfirmed: false })).success
-      && (await h.controller.prepareChat({ kind: 'new', restartContext: context })).copied === false
-      && seen === context && seen.sender === second && seen.sender !== first,
-    'the controller forwards the exact opaque requester to the restart confirmation instead of selecting another canvas');
+      && (await h.controller.prepareChat({ kind: 'new', restartContext: forged })).copied === false
+      && confirms === 1,
+    'a forged renderer-shaped object cannot bypass the native restart confirmation');
+    await h.controller.disable();
+    assert((await h.controller.enable({ confirmed: true, restartConfirmed: false })).success
+      && (await h.controller.prepareChat({ kind: 'new', restartContext: createUiRestartContext() })).copied === false
+      && confirms === 1 && h.controller.snapshot().hold === null,
+    'a capability minted by the guarded main UI adapter bypasses only the routine restart sheet');
   } },
   { name: 'handoff bridge: controls: 2,000 authenticated calls cannot reset the human idle deadline', async run() {
     const h = controllerHarness(); await h.controller.enable();

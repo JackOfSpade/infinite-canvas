@@ -22,7 +22,7 @@ import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIde
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
-import { normalizeJobCollectionLimits, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
+import { normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -30,6 +30,10 @@ import { normalizeJobCollectionLimits, resolvePageCeiling } from '../../src/util
 // these are single-shot fetches with no "time to stable" to learn from, so
 // they're not actively learned yet — this indirection removes the scattered
 // magic literals and leaves a single hook to switch on learning later.
+// This is a hard ceiling, not a retry window: an unresponsive request still
+// has one bounded attempt, and provider blocks retain their no-retry behavior.
+const DICE_SEARCH_REQUEST_TIMEOUT_SEED_MS = 25_000;
+
 const API_TIMEOUT_SEEDS = {
   'linkedin-api':   10000,
   'usajobs-api':    10000,
@@ -38,6 +42,11 @@ const API_TIMEOUT_SEEDS = {
   'reverb-api':     12000,
   'pricecharting-api': 10000,
   'aptdeco-api':    10000,
+  // Dice search pages can carry 1,000 rows and arrive while up to four paced
+  // fan-out queries are in flight. The old 10s ceiling aborted otherwise
+  // healthy siblings immediately after a successful key warm. Detail-page
+  // enrichment keeps its shorter, independent budget below.
+  'dice-search-api': DICE_SEARCH_REQUEST_TIMEOUT_SEED_MS,
   'dice-api':       10000,
 };
 
@@ -3017,7 +3026,7 @@ function dedupeIndeedJobs(jobs) {
   return collapseDescriptionlessIndeedDuplicates(out);
 }
 
-function collectIndeedJobsFromObject(root) {
+function collectIndeedJobsFromObject(root, { loggedPlaceholderKeys = null } = {}) {
   const jobs = [];
   const seenObjects = new WeakSet();
   const stack = [root];
@@ -3043,7 +3052,15 @@ function collectIndeedJobsFromObject(root) {
       if (isPlaceholderIndeedJobKey(normalized.jobkey)) {
         if (!rejectedPlaceholderKeys.has(normalized.jobkey)) {
           rejectedPlaceholderKeys.add(normalized.jobkey);
-          logger.debug(`[Indeed/extract] Rejected placeholder-shaped jobkey "${normalized.jobkey}" title="${normalized.title}" — template/companion block, not a real listing`);
+          // A provider can expose the same template record through both
+          // __NEXT_DATA__ and Mosaic. Keep each path's rejection accounting,
+          // but emit its diagnostic once for this extracted response so a
+          // repeated phantom cannot consume the log ring during pagination.
+          const diagnosticKey = normalized.jobkey.toLowerCase();
+          if (!loggedPlaceholderKeys || !loggedPlaceholderKeys.has(diagnosticKey)) {
+            loggedPlaceholderKeys?.add(diagnosticKey);
+            logger.debug(`[Indeed/extract] Rejected placeholder-shaped jobkey "${normalized.jobkey}" title="${normalized.title}" — template/companion block, not a real listing`);
+          }
         }
       } else {
         jobs.push(normalized);
@@ -3064,7 +3081,7 @@ function collectIndeedJobsFromObject(root) {
   return result;
 }
 
-function extractNextDataJobs(html) {
+function extractNextDataJobs(html, options = {}) {
   const match = String(html || '').match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
   const data = parseJsonSafely(match?.[1]);
   if (!data) return [];
@@ -3079,11 +3096,11 @@ function extractNextDataJobs(html) {
     const value = getNested(data, path);
     if (Array.isArray(value)) direct.push(...value);
   }
-  const jobs = direct.length > 0 ? collectIndeedJobsFromObject(direct) : [];
-  return jobs.length > 0 ? jobs : collectIndeedJobsFromObject(data);
+  const jobs = direct.length > 0 ? collectIndeedJobsFromObject(direct, options) : [];
+  return jobs.length > 0 ? jobs : collectIndeedJobsFromObject(data, options);
 }
 
-function extractMosaicJobs(html) {
+function extractMosaicJobs(html, options = {}) {
   const text = String(html || '');
   const marker = 'mosaic-provider-jobcards';
   const markerIndex = text.indexOf(marker);
@@ -3101,12 +3118,12 @@ function extractMosaicJobs(html) {
   ];
   for (const p of knownPaths) {
     const val = getNested(data, p);
-    if (Array.isArray(val) && val.length > 0) return collectIndeedJobsFromObject(val);
+    if (Array.isArray(val) && val.length > 0) return collectIndeedJobsFromObject(val, options);
   }
-  return collectIndeedJobsFromObject(data);
+  return collectIndeedJobsFromObject(data, options);
 }
 
-function extractDomJobs(html) {
+function extractDomJobs(html, { loggedPlaceholderKeys = null } = {}) {
   let document;
   try {
     document = new JSDOM(String(html || '')).window.document;
@@ -3116,11 +3133,26 @@ function extractDomJobs(html) {
 
   const cards = document.querySelectorAll('.job_seen_beacon, [data-testid="job-card-container"], [data-jk]');
   const jobs = [];
+  // The selector deliberately supports both container and anchor variants.
+  // On current Indeed markup a `.job_seen_beacon[data-jk]` contains an
+  // `a[data-jk]`, so both selector branches resolve to this same enclosing
+  // card. Process that DOM identity once: accepted rows already collapse later,
+  // but placeholder rejection logging happens before that dedupe and otherwise
+  // emits the identical diagnostic twice for one provider card.
+  const processedCards = new Set();
   cards.forEach(node => {
     try {
-      const card = node.matches?.('a[data-jk]')
-        ? (node.closest('.job_seen_beacon, [data-testid="job-card-container"], li, article') || node)
-        : node;
+      const isJobCardContainer = node.matches?.('.job_seen_beacon, [data-testid="job-card-container"]');
+      // `[data-jk]` also appears on nested non-anchor elements. Prefer the
+      // known provider card containers before the generic list/article
+      // fallback, so every selector hit for one listing has one identity.
+      const card = isJobCardContainer
+        ? node
+        : (node.closest?.('.job_seen_beacon, [data-testid="job-card-container"]')
+          || node.closest?.('li, article')
+          || node);
+      if (processedCards.has(card)) return;
+      processedCards.add(card);
       // Skip Indeed recommendation panels ("Similar to jobs you explored", "Jobs for
       // you", …) that render alongside the real results. They're off-search cards —
       // sponsored, frequently the wrong location/role (one leaked into a Denver search
@@ -3145,7 +3177,15 @@ function extractDomJobs(html) {
       // payloads. Keep key-less cards (they may be real), but never let a
       // positively identified placeholder through this independent path.
       if (key && isPlaceholderIndeedJobKey(key)) {
-        logger.debug(`[Indeed/extract] Rejected placeholder-shaped DOM jobkey "${key}" title="${title}" — template/companion card, not a real listing`);
+        // Multiple DOM nodes can represent one provider row, and the same
+        // placeholder can also be present in JSON/Mosaic. Rejection itself is
+        // intentionally repeated per path/card; only the bounded diagnostic is
+        // de-duplicated for this response.
+        const diagnosticKey = key.toLowerCase();
+        if (!loggedPlaceholderKeys || !loggedPlaceholderKeys.has(diagnosticKey)) {
+          loggedPlaceholderKeys?.add(diagnosticKey);
+          logger.debug(`[Indeed/extract] Rejected placeholder-shaped DOM jobkey "${key}" title="${title}" — template/companion card, not a real listing`);
+        }
         return;
       }
       jobs.push({
@@ -3201,11 +3241,16 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
     tagged.rejectedPlaceholderCount = jobs?.rejectedPlaceholderCount || 0;
     return tagged;
   };
-  const nextDataRaw = tagExtractPath(extractNextDataJobs(html), 'nextData');
+  // This response can expose one placeholder through several independent
+  // representations. Share only the logging set — each extractor still
+  // performs its own rejection/count so data behaviour cannot change.
+  const loggedPlaceholderKeys = new Set();
+  const placeholderDiagnosticOptions = { loggedPlaceholderKeys };
+  const nextDataRaw = tagExtractPath(extractNextDataJobs(html, placeholderDiagnosticOptions), 'nextData');
   const mosaicRaw = tagExtractPath(windowMosaicResults
-    ? collectIndeedJobsFromObject(windowMosaicResults)
-    : extractMosaicJobs(html), 'mosaic');
-  const dom      = extractDomJobs(html);
+    ? collectIndeedJobsFromObject(windowMosaicResults, placeholderDiagnosticOptions)
+    : extractMosaicJobs(html, placeholderDiagnosticOptions), 'mosaic');
+  const dom      = extractDomJobs(html, placeholderDiagnosticOptions);
   const nextData = anchorDescriptionlessIndeedJsonJobs(nextDataRaw, dom);
   const mosaic = anchorDescriptionlessIndeedJsonJobs(mosaicRaw, dom);
   // nextData/mosaic each carry a .rejectedPlaceholderCount from the JSON-walk
@@ -3324,14 +3369,22 @@ function mapDiceListing(job) {
  * { ok, status, json, warning } shape without patching global fetch.
  */
 async function fetchDicePage(url, signal, requestPage = null) {
-  const request = requestPage || ((pageUrl) => safeApiFetch(pageUrl, {
-    headers: {
-      'User-Agent': getRandomUA(),
-      'x-api-key': getDiceApiKey(),
-      'Accept': 'application/json',
-    },
-    signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-  }, 'dice'));
+  // Build a fresh signal for every attempt: reusing a timed-out signal would
+  // make a later 500/key-refresh retry fail synchronously. The test seam sees
+  // only this transport context, never a credential.
+  const request = (pageUrl, apiKey = getDiceApiKey()) => {
+    const timeoutMs = apiTimeout('dice-search-api');
+    const requestSignal = createTimeoutSignal(signal, timeoutMs);
+    if (requestPage) return requestPage(pageUrl, { signal: requestSignal, timeoutMs });
+    return safeApiFetch(pageUrl, {
+      headers: {
+        'User-Agent': getRandomUA(),
+        'x-api-key': apiKey,
+        'Accept': 'application/json',
+      },
+      signal: requestSignal,
+    }, 'dice');
+  };
 
   let r;
   for (let attempt = 0; attempt <= DICE_MAX_RETRIES; attempt++) {
@@ -3339,11 +3392,16 @@ async function fetchDicePage(url, signal, requestPage = null) {
     if (attempt > 0) {
       const delay = DICE_RETRY_DELAYS_MS[attempt - 1] ?? 4000;
       logger.info(`[Dice API] Retry ${attempt}/${DICE_MAX_RETRIES} in ${delay}ms (last status: ${r?.status ?? '?'})`);
-      await new Promise(res => setTimeout(res, delay));
+      await sleepUnlessAborted(delay, signal);
       if (signal?.aborted) throw new Error('Aborted');
     }
     r = await request(url);
     if (r.ok) return r;
+    // A provider-declared block (including Dice/Cloudflare's HTTP 503) is
+    // terminal. Retrying it — or scanning/refreshing a key — only extends the
+    // block window; the 500 recovery below is for unclassified transient
+    // server failures.
+    if (r?.warning?.severity === 'block') return r;
     // When the key is confirmed stable, 500s are transient server errors —
     // retrying with the same key won't help. Break immediately and let the
     // stable-backoff handler below wait 3s, saving 7s of pointless retry delay.
@@ -3357,7 +3415,8 @@ async function fetchDicePage(url, signal, requestPage = null) {
   let retryKey;
   if (_diceKeyIsStable) {
     logger.info('[Dice API] Key stable — skipping bundle scan, using 3s backoff for transient 500');
-    await new Promise(res => setTimeout(res, 3000));
+    await sleepUnlessAborted(3000, signal);
+    if (signal?.aborted) throw new Error('Aborted');
     retryKey = getDiceApiKey();
   } else {
     const oldKey = getDiceApiKey();
@@ -3374,15 +3433,7 @@ async function fetchDicePage(url, signal, requestPage = null) {
   if (!retryKey) return r;
 
   logger.info('[Dice API] Retrying with refreshed key');
-  const retryRequest = requestPage || ((pageUrl) => safeApiFetch(pageUrl, {
-    headers: {
-      'User-Agent': getRandomUA(),
-      'x-api-key': retryKey,
-      'Accept': 'application/json',
-    },
-    signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-  }, 'dice'));
-  const refreshed = await retryRequest(url);
+  const refreshed = await request(url, retryKey);
   return refreshed.ok ? refreshed : r;
 }
 
@@ -3400,7 +3451,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   // smaller page; otherwise keep the wide over-pull and filter client-side.
   const bucket = dicePostedBucket(maxAgeDays);
   const limits = normalizeJobCollectionLimits(collectionLimits);
-  const rowBudget = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
+  const rowBudget = resolveJobsPerPlatform(limits);
   const pageCeiling = resolvePageCeiling(limits);
   const defaultPageSize = bucket ? 400 : 1000;
   // With a finite allowance, do not ask the provider for a 400/1000-row page
@@ -3457,7 +3508,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   for (let page = 1; page <= pageCeiling; page++) {
     if (signal?.aborted) throw new Error('Aborted');
     if (page > 1 && interPageDelayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, interPageDelayMs));
+      await sleepUnlessAborted(interPageDelayMs, signal);
       if (signal?.aborted) throw new Error('Aborted');
     }
     const params = new URLSearchParams(baseParams);
@@ -3532,7 +3583,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     if (items.length >= rowBudget) {
       truncated = true;
       stoppedByJobsLimit = true;
-      stopReasons.push({ page, stopReason: 'jobs-per-platform' });
+      stopReasons.push({ page, stopReason: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform' });
       break;
     }
     if (page === pageCeiling) {
@@ -3567,7 +3618,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     stopReasons,
     pagesFetched,
     cap: stoppedByJobsLimit
-      ? { type: 'jobs-per-platform', limit: rowBudget }
+      ? { type: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform', limit: rowBudget }
       : stoppedByExplicitPageLimit
         ? { type: 'pages-per-platform', limit: limits.pagesPerPlatform }
         : null,

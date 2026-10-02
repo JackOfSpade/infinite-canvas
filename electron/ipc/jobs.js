@@ -44,7 +44,7 @@ import {
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRunWithResult, completeRunWithReceipt, computeResumeStartPage, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume, historyPathForCanvas } from './jobsHistory.js';
 import { filterJobsByPostedSince, parsePostedDate } from './jobDateFilter.js';
 import {
@@ -69,7 +69,7 @@ import {
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
 import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
-import { normalizeJobCollectionLimits, isUnlimitedPages, resolvePageCeiling, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
+import { normalizeJobCollectionLimits, isUnlimitedPages, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { getEnabledJobSourceIds, getRunnableJobSourceIds } from '../../src/utils/jobPlatformSelection.js';
 import { makeJobPageStop } from './jobPageStop.js';
 import { buildExactTargetRoleQueryBundle, flattenJobSearchQueries } from '../../src/utils/jobSearchQueries.js';
@@ -192,6 +192,32 @@ export function authoritativeFreshJobSearchWindow(
   // horizon is derived data and is recomputed at the actual dispatch time.
   return effectiveJobSearchWindow(requested, null, null, clock);
 }
+
+/**
+ * Validate a pre-provider manual-AI recovery checkpoint.
+ *
+ * A normal fresh request may only carry today's (or yesterday's) resolved
+ * boundary, but a manual handoff can have paused after the renderer froze its
+ * original search scope and before any staging manifest existed. Its resume is
+ * neither a fresh scan nor a page-resume: retain the checkpoint's exact
+ * boundary and broaden only the relative provider horizon at dispatch time.
+ */
+export function manualAiPreSearchRecoveryWindow(recovery, requestedSearchWindow, now = new Date()) {
+  if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) return null;
+  if (recovery.version !== 1) return null;
+  if (typeof recovery.manualAiRunId !== 'string' || !recovery.manualAiRunId.trim()) return null;
+  if (typeof recovery.nodeId !== 'string' || !recovery.nodeId.trim()) return null;
+  if (
+    typeof recovery.startedAt !== 'number'
+    || !Number.isSafeInteger(recovery.startedAt)
+    || recovery.startedAt <= 0
+    || !Number.isFinite(new Date(recovery.startedAt).getTime())
+  ) return null;
+  const frozen = serializableJobSearchWindow(recovery.searchWindow);
+  const requested = serializableJobSearchWindow(requestedSearchWindow);
+  if (!frozen || !requested || !sameFreshJobSearchBoundary(frozen, requested)) return null;
+  return effectiveJobSearchWindow(frozen, null, null, now);
+}
 const MAX_SOURCE_RUN_HISTORY_PER_SOURCE = 3;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
@@ -223,6 +249,7 @@ const UNSAVED_ANALYSIS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_DIRECTORY_ENTRIES = 256;
 const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_CANDIDATES = 48;
 const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_BYTES = 512 * 1024;
+const MAX_DESCRIPTION_RECOVERY_CHECKPOINT_METADATA_BYTES = 16 * 1024;
 const SCORING_HEARTBEAT_MS = 30 * 1000;
 // Grounded salary research is shared across equivalent jobs during this process.
 // It is intentionally an in-memory cache: live market evidence must not be
@@ -1348,7 +1375,12 @@ async function saveDescriptionRecoveryCheckpoint(snapshot, { create = false } = 
       }
     }
     await fs.promises.mkdir(path.dirname(checkpointPath), { recursive: true });
-    await writeJobAnalysisFileAtomically(checkpointPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+    // Reuse the snapshot writer's first-property `reportMetadata` envelope.
+    // The payload is still the exact recovery snapshot, but a bounded reader
+    // can now establish safe ownership/count metadata without parsing its job
+    // bodies when a normal checkpoint grows past 512 KiB.
+    const content = serializeJobAnalysisSnapshot(snapshot);
+    await writeJobAnalysisFileAtomically(checkpointPath, content, { mode: 0o600 });
     return { saved: true, checkpointPath };
   });
 }
@@ -1406,9 +1438,13 @@ function descriptionRecoveryCheckpointMeta(snapshot, updatedAt = null) {
     const text = typeof value === 'string' ? value.trim() : '';
     return /^[A-Za-z0-9_.:-]{1,180}$/.test(text) ? text : null;
   };
+  const nonnegativeInteger = (value) => {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+  };
   const recoveryJobs = Array.isArray(snapshot?.descriptionRecoveryJobs)
     ? snapshot.descriptionRecoveryJobs
-    : (Array.isArray(snapshot?.jobs) ? snapshot.jobs : []);
+    : (Array.isArray(snapshot?.jobs) ? snapshot.jobs : null);
   return {
     version: snapshot?.version ?? null,
     createdAt: snapshot?.createdAt ?? null,
@@ -1416,11 +1452,256 @@ function descriptionRecoveryCheckpointMeta(snapshot, updatedAt = null) {
     sourceHubId: safeIdentifier(snapshot?.sourceHubId),
     nodeId: safeIdentifier(snapshot?.nodeId),
     runId: safeIdentifier(snapshot?.runId),
-    gatheredJobCount: Number(snapshot?.gatheredJobCount) || 0,
-    sourceGatheredCount: Number(snapshot?.sourceGatheredCount) || 0,
-    scoreReadyCount: Array.isArray(snapshot?.jobs) ? snapshot.jobs.length : 0,
-    descriptionRecoveryCount: recoveryJobs.length,
+    gatheredJobCount: nonnegativeInteger(snapshot?.gatheredJobCount),
+    sourceGatheredCount: nonnegativeInteger(snapshot?.sourceGatheredCount),
+    scoreReadyCount: Array.isArray(snapshot?.jobs) ? snapshot.jobs.length : nonnegativeInteger(snapshot?.scoreReadyCount),
+    descriptionRecoveryCount: recoveryJobs ? recoveryJobs.length : nonnegativeInteger(snapshot?.descriptionRecoveryCount),
   };
+}
+
+function reportMetadataPrefixObject(text) {
+  if (typeof text !== 'string') return null;
+  let index = 0;
+  const skip = () => { while (index < text.length && /[ \t\r\n]/.test(text[index])) index += 1; };
+  const stringEnd = (start) => {
+    if (text[start] !== '"') return -1;
+    for (let cursor = start + 1; cursor < text.length; cursor += 1) {
+      if (text[cursor] === '\\') { cursor += 1; continue; }
+      if (text[cursor] === '"') return cursor;
+    }
+    return -1;
+  };
+  const objectEnd = (start) => {
+    if (text[start] !== '{') return -1;
+    let depth = 0;
+    let quoted = false;
+    for (let cursor = start; cursor < text.length; cursor += 1) {
+      const char = text[cursor];
+      if (quoted) {
+        if (char === '\\') { cursor += 1; continue; }
+        if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}' && --depth === 0) return cursor + 1;
+    }
+    return -1;
+  };
+  skip();
+  if (text[index++] !== '{') return null;
+  skip();
+  const keyStart = index;
+  const keyEnd = stringEnd(keyStart);
+  if (keyEnd < 0) return null;
+  let key;
+  try { key = JSON.parse(text.slice(keyStart, keyEnd + 1)); } catch { return null; }
+  if (key !== 'reportMetadata') return null;
+  index = keyEnd + 1;
+  skip();
+  if (text[index++] !== ':') return null;
+  skip();
+  const valueStart = index;
+  const valueEnd = objectEnd(valueStart);
+  if (valueEnd < 0) return null;
+  try { return JSON.parse(text.slice(valueStart, valueEnd)); } catch { return null; }
+}
+
+// Read only consecutive scalar properties at the root of a JSON object. This
+// is deliberately not a search: a legacy checkpoint can put an arbitrarily
+// large jobs/payload object after its small header, but a lookalike field
+// nested in that payload must never establish checkpoint ownership.
+function rootScalarPrefixObject(text) {
+  if (typeof text !== 'string') return null;
+  let index = 0;
+  const result = Object.create(null);
+  const skip = () => { while (index < text.length && /[ \t\r\n]/.test(text[index])) index += 1; };
+  const stringEnd = (start) => {
+    if (text[start] !== '"') return -1;
+    for (let cursor = start + 1; cursor < text.length; cursor += 1) {
+      if (text[cursor] === '\\') { cursor += 1; continue; }
+      if (text[cursor] === '"') return cursor;
+    }
+    return -1;
+  };
+  const parseString = () => {
+    const end = stringEnd(index);
+    if (end < 0) return { ok: false };
+    try {
+      const value = JSON.parse(text.slice(index, end + 1));
+      index = end + 1;
+      return { ok: true, value };
+    } catch {
+      return { ok: false };
+    }
+  };
+  const scalar = () => {
+    if (text[index] === '"') return parseString();
+    const rest = text.slice(index);
+    const literal = /^(true|false|null)(?=[\s,}])/.exec(rest);
+    if (literal) {
+      index += literal[1].length;
+      return { ok: true, value: literal[1] === 'null' ? null : literal[1] === 'true' };
+    }
+    const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?=[\s,}])/.exec(rest);
+    if (!number) return { ok: false };
+    index += number[0].length;
+    return { ok: true, value: Number(number[0]) };
+  };
+  skip();
+  if (text[index++] !== '{') return null;
+  while (index < text.length) {
+    skip();
+    if (text[index] === '}') return result;
+    const key = parseString();
+    if (!key.ok || typeof key.value !== 'string' || Object.prototype.hasOwnProperty.call(result, key.value)) return null;
+    skip();
+    if (text[index++] !== ':') return null;
+    skip();
+    // Once a root collection begins, subsequent bytes can be both huge and
+    // attacker-controlled. Return only the root header parsed so far.
+    if (text[index] === '{' || text[index] === '[') return result;
+    // A large legacy payload is commonly a root string. Its closing quote can
+    // be beyond this bounded prefix; its *key* is root-scoped, but its body is
+    // neither read nor trusted, so retain the preceding header only.
+    if (text[index] === '"' && stringEnd(index) < 0) return result;
+    const value = scalar();
+    if (!value.ok) return null;
+    result[key.value] = value.value;
+    skip();
+    if (text[index] === '}') return result;
+    if (text[index++] !== ',') return null;
+  }
+  return null;
+}
+
+function checkpointMetadataOwnsCanvas(metadata, canvasFilePath, { allowMissing = false } = {}) {
+  const hasCanvas = Object.prototype.hasOwnProperty.call(metadata, 'canvasFilePath');
+  if (!hasCanvas) return allowMissing;
+  if (typeof canvasFilePath !== 'string' || !canvasFilePath.trim()) return metadata.canvasFilePath == null;
+  if (typeof metadata.canvasFilePath !== 'string' || !metadata.canvasFilePath.trim()) return false;
+  try {
+    return path.resolve(metadata.canvasFilePath) === path.resolve(canvasFilePath);
+  } catch {
+    return false;
+  }
+}
+
+function boundedOversizedCheckpointMetadata(metadata, canvasFilePath, checkpointPath, checkpointBytes, { legacy = false } = {}) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const safeId = value => normalizeJobAnalysisIdentifier(value);
+  const sourceHubId = safeId(metadata.sourceHubId);
+  const nodeId = safeId(metadata.nodeId);
+  const runId = safeId(metadata.runId);
+  const createdAt = typeof metadata.createdAt === 'string' && Number.isFinite(Date.parse(metadata.createdAt))
+    ? metadata.createdAt
+    : null;
+  const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const gatheredJobCount = integer(metadata.gatheredJobCount);
+  const scoreReadyCount = integer(metadata.candidatePoolJobCount);
+  const descriptionRecoveryCount = integer(metadata.descriptionRecoveryJobCount);
+  if (!sourceHubId || sourceHubId !== nodeId || !runId || !createdAt
+    || !checkpointMetadataOwnsCanvas(metadata, canvasFilePath, { allowMissing: legacy })
+    || (!legacy && (gatheredJobCount == null || descriptionRecoveryCount == null))
+    || (!legacy && (metadata.schemaVersion !== JOB_ANALYSIS_REPORT_METADATA_VERSION || scoreReadyCount == null || gatheredJobCount > scoreReadyCount))
+    || descriptionRecoveryCheckpointPath(canvasFilePath, runId) !== checkpointPath) return null;
+  return {
+    version: metadata.schemaVersion ?? null,
+    createdAt,
+    updatedAt: createdAt,
+    sourceHubId,
+    nodeId,
+    runId,
+    gatheredJobCount,
+    // A legacy root header may encounter an earlier object (for example a
+    // resume summary) before any count fields. Those fields are intentionally
+    // unknown rather than inferred as zero; the user-authorized exact load
+    // remains the point that validates the complete payload.
+    sourceGatheredCount: legacy ? null : 0,
+    scoreReadyCount: scoreReadyCount,
+    descriptionRecoveryCount,
+    state: legacy ? 'legacy-prefix' : 'metadata-only',
+    actionable: true,
+    checkpointBytes,
+  };
+}
+
+function legacyOversizedCheckpointMetadata(text, canvasFilePath, checkpointPath, checkpointBytes) {
+  // Legacy checkpoint writers predate the envelope. Their root-level scalar
+  // header is still enough to bind a path to its opaque run token, but the
+  // result remains visibly legacy because no payload-wide count audit occurred.
+  const prefix = typeof text === 'string' ? text.slice(0, MAX_DESCRIPTION_RECOVERY_CHECKPOINT_METADATA_BYTES) : '';
+  const header = rootScalarPrefixObject(prefix);
+  if (!header) return null;
+  const string = name => typeof header[name] === 'string' ? header[name] : null;
+  const count = name => Number.isSafeInteger(header[name]) && header[name] >= 0 ? header[name] : null;
+  return boundedOversizedCheckpointMetadata({
+    schemaVersion: null,
+    ...(Object.prototype.hasOwnProperty.call(header, 'canvasFilePath') ? { canvasFilePath: header.canvasFilePath } : {}),
+    sourceHubId: string('sourceHubId'),
+    nodeId: string('nodeId'),
+    runId: string('runId'),
+    createdAt: string('createdAt'),
+    gatheredJobCount: count('gatheredJobCount'),
+    candidatePoolJobCount: count('candidatePoolJobCount'),
+    descriptionRecoveryJobCount: count('descriptionRecoveryJobCount') ?? count('descriptionRecoveryCount'),
+  }, canvasFilePath, checkpointPath, checkpointBytes, { legacy: true });
+}
+
+async function oversizedCheckpointMetadata(filePath, canvasFilePath, checkpointBytes) {
+  const read = await readRegularCheckpointPrefix(filePath, MAX_DESCRIPTION_RECOVERY_CHECKPOINT_METADATA_BYTES);
+  if (read.errorCode) return null;
+  const envelope = boundedOversizedCheckpointMetadata(reportMetadataPrefixObject(read.text), canvasFilePath, filePath, checkpointBytes);
+  return envelope || legacyOversizedCheckpointMetadata(read.text, canvasFilePath, filePath, checkpointBytes);
+}
+
+function oversizedCheckpointMetadataSync(filePath, canvasFilePath, checkpointBytes) {
+  const read = readRegularCheckpointPrefixSync(filePath, MAX_DESCRIPTION_RECOVERY_CHECKPOINT_METADATA_BYTES);
+  if (read.errorCode) return null;
+  const envelope = boundedOversizedCheckpointMetadata(reportMetadataPrefixObject(read.text), canvasFilePath, filePath, checkpointBytes);
+  return envelope || legacyOversizedCheckpointMetadata(read.text, canvasFilePath, filePath, checkpointBytes);
+}
+
+async function readRegularCheckpointPrefix(filePath, maxBytes) {
+  const noFollow = fs.constants?.O_NOFOLLOW;
+  const nonBlocking = fs.constants?.O_NONBLOCK;
+  if (!Number.isInteger(noFollow) || !Number.isInteger(nonBlocking)) return { errorCode: 'UNSAFE_FILE' };
+  let file;
+  try {
+    file = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+    const stat = await file.stat();
+    if (!stat.isFile()) return { errorCode: 'UNSAFE_FILE' };
+    const size = Math.max(0, Number(stat.size) || 0);
+    const byteLength = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(byteLength);
+    const { bytesRead } = byteLength > 0 ? await file.read(buffer, 0, byteLength, 0) : { bytesRead: 0 };
+    return { text: buffer.subarray(0, bytesRead).toString('utf8'), size };
+  } catch (error) {
+    return { errorCode: error?.code === 'ENOENT' ? 'MISSING' : 'UNSAFE_FILE' };
+  } finally {
+    if (file) await file.close().catch(() => {});
+  }
+}
+
+function readRegularCheckpointPrefixSync(filePath, maxBytes) {
+  const noFollow = fs.constants?.O_NOFOLLOW;
+  const nonBlocking = fs.constants?.O_NONBLOCK;
+  if (!Number.isInteger(noFollow) || !Number.isInteger(nonBlocking)) return { errorCode: 'UNSAFE_FILE' };
+  let fd;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return { errorCode: 'UNSAFE_FILE' };
+    const size = Math.max(0, Number(stat.size) || 0);
+    const byteLength = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(byteLength);
+    const bytesRead = byteLength > 0 ? fs.readSync(fd, buffer, 0, byteLength, 0) : 0;
+    return { text: buffer.subarray(0, bytesRead).toString('utf8'), size };
+  } catch (error) {
+    return { errorCode: error?.code === 'ENOENT' ? 'MISSING' : 'UNSAFE_FILE' };
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch { /* descriptor already unusable */ }
+    }
+  }
 }
 
 async function listDescriptionRecoveryCheckpoints(canvasFilePath) {
@@ -1430,10 +1711,14 @@ async function listDescriptionRecoveryCheckpoints(canvasFilePath) {
   try {
     handle = await fs.promises.opendir(paths.dir, { bufferSize: 16 });
   } catch (error) {
-    if (error?.code === 'ENOENT') return [];
+    if (error?.code === 'ENOENT') return {
+      checkpoints: [],
+      ignored: { malformed: 0, ownershipMismatch: 0, pathMismatch: 0, metadataInvalid: 0, oversized: 0, unsafe: 0 },
+    };
     throw error;
   }
-  const results = [];
+  const checkpoints = [];
+  const ignored = { malformed: 0, ownershipMismatch: 0, pathMismatch: 0, metadataInvalid: 0, oversized: 0, unsafe: 0 };
   let candidates = 0;
   try {
     for (let scanned = 0; scanned < MAX_DESCRIPTION_RECOVERY_CHECKPOINT_DIRECTORY_ENTRIES; scanned++) {
@@ -1446,27 +1731,40 @@ async function listDescriptionRecoveryCheckpoints(canvasFilePath) {
       try {
         const filePath = path.join(paths.dir, name);
         const read = await readBoundedRegularCheckpoint(filePath);
-        if (read.errorCode) continue;
-        const snapshot = JSON.parse(read.text);
-        const expectedPath = descriptionRecoveryCheckpointPath(canvasFilePath, snapshot?.runId);
-        if (expectedPath !== filePath
-          || !hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) continue;
-        const metadata = descriptionRecoveryCheckpointMeta(snapshot, read.updatedAt);
-        if (metadata.sourceHubId && metadata.nodeId && metadata.runId) results.push(metadata);
+      if (read.errorCode === 'TOO_LARGE') {
+        const metadata = await oversizedCheckpointMetadata(filePath, canvasFilePath, read.size);
+        if (metadata) checkpoints.push(metadata);
+        else ignored.oversized += 1;
+        continue;
+      }
+      if (read.errorCode) {
+        if (read.errorCode !== 'MISSING') ignored.unsafe += 1;
+        continue;
+      }
+      const snapshot = JSON.parse(read.text);
+      const expectedPath = descriptionRecoveryCheckpointPath(canvasFilePath, snapshot?.runId);
+      if (expectedPath !== filePath
+          || !hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) {
+        ignored.ownershipMismatch += 1;
+        continue;
+      }
+      const metadata = descriptionRecoveryCheckpointMeta(snapshot, read.updatedAt);
+        if (metadata.sourceHubId && metadata.nodeId && metadata.runId) checkpoints.push({ ...metadata, state: 'parseable', actionable: true });
+        else ignored.metadataInvalid += 1;
       } catch {
-        // The listing is best-effort recovery metadata. A malformed sidecar
-        // must not make a normal analysis-snapshot read fail.
+        ignored.malformed += 1;
       }
     }
   } finally {
     try { await handle.close(); } catch { /* iterator/descriptor already closed */ }
   }
-  return results.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  checkpoints.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return { checkpoints, ignored };
 }
 
 // Report assembly is intentionally synchronous. This mirrors the async IPC
 // listing above but exposes metadata only, never checkpoint job content/paths.
-async function readBoundedRegularCheckpoint(filePath) {
+async function readBoundedRegularCheckpoint(filePath, maxBytes = MAX_DESCRIPTION_RECOVERY_CHECKPOINT_BYTES) {
   const noFollow = fs.constants?.O_NOFOLLOW;
   const nonBlocking = fs.constants?.O_NONBLOCK;
   if (!Number.isInteger(noFollow) || !Number.isInteger(nonBlocking)) {
@@ -1478,7 +1776,7 @@ async function readBoundedRegularCheckpoint(filePath) {
     const stat = await file.stat();
     if (!stat.isFile()) return { errorCode: 'UNSAFE_FILE' };
     const size = Math.max(0, Number(stat.size) || 0);
-    if (size > MAX_DESCRIPTION_RECOVERY_CHECKPOINT_BYTES) return { errorCode: 'TOO_LARGE' };
+    if (size > maxBytes) return { errorCode: 'TOO_LARGE', size };
     const buffer = Buffer.alloc(size);
     const { bytesRead } = size > 0 ? await file.read(buffer, 0, size, 0) : { bytesRead: 0 };
     return {
@@ -1494,7 +1792,7 @@ async function readBoundedRegularCheckpoint(filePath) {
   }
 }
 
-function readBoundedRegularCheckpointSync(filePath) {
+function readBoundedRegularCheckpointSync(filePath, maxBytes = MAX_DESCRIPTION_RECOVERY_CHECKPOINT_BYTES) {
   const noFollow = fs.constants?.O_NOFOLLOW;
   const nonBlocking = fs.constants?.O_NONBLOCK;
   // macOS and supported Linux builds expose both flags. Failing closed is
@@ -1509,8 +1807,8 @@ function readBoundedRegularCheckpointSync(filePath) {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return { errorCode: 'UNSAFE_FILE' };
     const size = Math.max(0, Number(stat.size) || 0);
-    if (size > MAX_DESCRIPTION_RECOVERY_CHECKPOINT_BYTES) {
-      return { errorCode: 'TOO_LARGE' };
+    if (size > maxBytes) {
+      return { errorCode: 'TOO_LARGE', size };
     }
     const buffer = Buffer.alloc(size);
     const bytesRead = size > 0 ? fs.readSync(fd, buffer, 0, size, 0) : 0;
@@ -1564,7 +1862,9 @@ export function listDescriptionRecoveryCheckpointsSync(canvasFilePath) {
       const filePath = path.join(paths.dir, name);
       const read = readBoundedRegularCheckpointSync(filePath);
       if (read.errorCode === 'TOO_LARGE') {
-        ignored.oversized++;
+        const metadata = oversizedCheckpointMetadataSync(filePath, canvasFilePath, read.size);
+        if (metadata) checkpoints.push(metadata);
+        else ignored.oversized++;
         continue;
       }
       if (read.errorCode) {
@@ -1590,7 +1890,7 @@ export function listDescriptionRecoveryCheckpointsSync(canvasFilePath) {
         if (!metadata.sourceHubId || !metadata.nodeId || !metadata.runId) {
           ignored.metadataInvalid++;
         } else {
-          checkpoints.push(metadata);
+          checkpoints.push({ ...metadata, state: 'parseable', actionable: true });
         }
       }
       } catch {
@@ -1682,7 +1982,7 @@ export async function __loadDescriptionRecoveryCheckpointForTests(canvasFilePath
 }
 
 export async function __listDescriptionRecoveryCheckpointsForTests(canvasFilePath) {
-  return listDescriptionRecoveryCheckpoints(canvasFilePath);
+  return (await listDescriptionRecoveryCheckpoints(canvasFilePath)).checkpoints;
 }
 
 async function discardOwnedJobRun(canvasFilePath, nodeId, runId, { trashItem = null } = {}) {
@@ -1725,7 +2025,7 @@ export async function __discardOwnedJobRunForTests(canvasFilePath, nodeId, runId
 
 // Legacy manifests written before hub ownership existed cannot be safely
 // attributed to whichever current hub happens to see their banner. Give the
-// user an explicit Start fresh path, but bind it atomically to both the run
+// user an explicit Clear career data path, but bind it atomically to both the run
 // token and the manifest still having no owner; it cannot clear a modern hub.
 async function discardUnknownOwnerJobRun(canvasFilePath, runId, { trashItem = null } = {}) {
   if (!canvasFilePath || !runId) return { ok: true, cleared: false, reason: 'missing-run-token' };
@@ -1972,7 +2272,10 @@ export function canRecoverGatheredRunDirectly(manifest, queries) {
     && JSON.stringify(manifest.inputs.queries) === JSON.stringify(Array.isArray(queries) ? queries : [])
     && !!sources
     && Object.keys(sources).length > 0
-    && Object.values(sources).every(source => source?.status === 'done');
+    && (
+      isRunCollectionFinishedWithSavedListings(manifest)
+      || Object.values(sources).every(source => source?.status === 'done' || source?.status === 'skipped')
+    );
 }
 
 /**
@@ -2047,13 +2350,13 @@ export function validateExactResumeRun(prior, resumeRunId, profileFingerprint = 
   if (!persistedFingerprint || !requestedFingerprint) {
     return {
       resumeProfileMissing: true,
-      error: 'This saved recovery is missing profile-safe resume metadata. Start fresh to search with the current career profile.',
+      error: 'This saved recovery is missing profile-safe resume metadata. It was kept; use Clear career data before deliberately starting with the current career profile.',
     };
   }
   if (persistedFingerprint !== requestedFingerprint) {
     return {
       resumeProfileMismatch: true,
-      error: 'The career profile changed after this search was staged. Start fresh so saved jobs are not resumed under a different profile.',
+      error: 'The career profile changed after this search was staged. The checkpoint was kept; use Clear career data before deliberately starting with a different profile.',
     };
   }
   return null;
@@ -2761,6 +3064,8 @@ function clearLinkedInCeiling() {
 // string is a load-bearing IPC/control-flow contract; these labels are what the
 // bug report shows instead, so a user's Reset never reads as a deleted node.
 const CANCEL_CAUSE_LABELS = {
+  'user-stopped': 'Stopped by user — saved checkpoint retained for Resume',
+  'job-source-card-removed': 'Source card removed — saved checkpoint retained for Resume',
   'user-reset': 'Cancelled by user — clicked Reset on this hub',
   'career-files-cleared': 'Cancelled by user — cleared the career files on this hub',
   'reanalysis-cancelled': 'Cancelled by user — stopped saved-result re-analysis',
@@ -2769,6 +3074,23 @@ const CANCEL_CAUSE_LABELS = {
   'node-deleted': 'Cancelled — this node was deleted from the canvas',
   'manual-ai-cancelled': 'Cancelled by user — dismissed the manual AI copy/paste prompt',
 };
+
+// These are intentional pauses, not ownership-ending resets.  Their staging
+// sidecar stays intact so a later Resume continues the exact original run.
+const CHECKPOINT_PRESERVING_ABORT_CAUSES = new Set([
+  'user-stopped',
+  'job-source-card-removed',
+]);
+
+// Every node-scoped cancellation uses the same sentinel error message for the
+// IPC/control-flow contract.  The explicit cause is therefore what separates
+// a destructive abandon (clear/reset/delete) from a deliberate pause.  Stop
+// and removal of an active source card keep the exact manifest and staging
+// ledger so Resume continues the original run rather than manufacturing a scan.
+export function shouldDiscardJobRunAfterAbort(reason) {
+  return reason?.message === 'Node deleted'
+    && !CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause);
+}
 
 /**
  * Start a job run's browser-diagnostic generation only after it owns the
@@ -4949,6 +5271,29 @@ const ALL_SOURCE_IDS = [
 ];
 const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
 const ACTIVE_SOURCE_ID_SET = new Set(ACTIVE_SOURCE_IDS);
+const JOB_SOURCE_DISPLAY_NAMES = Object.freeze({
+  google: 'Google Jobs',
+  indeed: 'Indeed',
+  linkedin: 'LinkedIn',
+  remoteok: 'RemoteOK',
+  weworkremotely: 'We Work Remotely',
+  ziprecruiter: 'ZipRecruiter',
+  glassdoor: 'Glassdoor',
+  dice: 'Dice',
+  usajobs: 'USAJobs',
+});
+
+/**
+ * Fresh collection requires every selected browser source to be authenticated.
+ * A crash-resume reuses already-settled providers, so only manifest-unfinished
+ * sources can legitimately become an auth block for that continuation.
+ */
+export function jobSourceAuthPreflightScope(browserSourceIds, resumeScope = null) {
+  const sources = Array.isArray(browserSourceIds) ? browserSourceIds : [];
+  return resumeScope instanceof Set
+    ? sources.filter(sourceId => resumeScope.has(sourceId))
+    : sources;
+}
 
 // A Solve window has to use the same list extractor and description-evidence
 // path as its ordinary browser scrape.  Omitting a browser source here makes
@@ -5063,11 +5408,33 @@ function getEffectiveSourceWarning(warning, jobCount) {
   return warning;
 }
 
+const RECEIPT_COLLECTION_CAP_TYPES = new Set([
+  'per-platform', 'jobs-per-platform', 'pages-per-platform',
+  'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal',
+]);
+
+// Merge only the compact, receipt-safe cap envelope. Both manual browser
+// results and HTTP fan-out results pass through this before telemetry/staging;
+// keeping the seam shared prevents one path from dropping Auto cap provenance.
+export function mergeJobSourceCollectionCap(sourceResult, candidate) {
+  if (!sourceResult || typeof sourceResult !== 'object'
+      || !candidate || typeof candidate !== 'object'
+      || !RECEIPT_COLLECTION_CAP_TYPES.has(candidate.type)
+      || !Number.isSafeInteger(candidate.limit) || candidate.limit <= 0) return false;
+  const cap = { type: candidate.type, limit: candidate.limit };
+  if (!sourceResult.cap) sourceResult.cap = cap;
+  if (!Array.isArray(sourceResult.caps)) sourceResult.caps = [];
+  if (!sourceResult.caps.some(existing => existing?.type === cap.type && existing?.limit === cap.limit)) {
+    sourceResult.caps.push(cap);
+  }
+  return true;
+}
+
 // Per-query pagination stop callback, one fresh instance per task (see
-// buildJobTasks below). The hub's page count is now "All" by default
-// (pagesPerPlatform: null), so the walk is no longer bounded by a user-typed
-// ceiling in the common case — resolvePageCeiling's JOB_COLLECTION_PAGE_CEILING
-// is a backstop against a runaway pager, not the intended stop condition. The
+// buildJobTasks below). The hub's blank page count is the finite Auto policy
+// (pagesPerPlatform: null on disk), so every generated query has a deterministic
+// browser-page allocation and the platform never receives an accidental
+// 1000×query walk. The data-driven stops below can end even earlier. The
 // real stop condition is the DATA, decided by makeJobPageStop
 // (electron/ipc/jobPageStop.js) per page: empty-page (terminal/lossless — no
 // results exist past an empty offset), age-window (two consecutive pages
@@ -5080,9 +5447,8 @@ function getEffectiveSourceWarning(warning, jobCount) {
 // the window and that a naive "first out-of-window row ends the source" cutoff
 // would prune real jobs under relevance sort (a reshuffled page reads as
 // out-of-window even though later pages are not). That reasoning no longer
-// holds now that "All" removes the ceiling as a practical stop: walking a
-// truly unbounded pager to a 1000-page backstop on every query is not
-// affordable, so a data-driven stop is required. The age-window rule here
+// holds when an explicit deep override raises the ceiling: walking every page
+// blindly is not affordable, so a data-driven stop is required. The age-window rule here
 // avoids the exact failure mode the old naive cutoff had — it fires only when
 // a page carries enough dated evidence to be conclusive AND is entirely
 // out-of-window, TWICE in a row (a single relevance reshuffle does not produce
@@ -5267,6 +5633,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
   // the manual trio runs ZipRecruiter → Glassdoor → Google (Indeed runs first, but
   // it's a separate launcher handled in the search-jobs browser driver, not here).
   const pageCeiling = resolvePageCeiling(limits);
+  const pageBudgets = resolveBrowserPageBudgets(limits, queries.length);
   const unlimitedPages = isUnlimitedPages(limits);
   const extractors = {
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, paginates: true,
@@ -5330,6 +5697,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     // source (Google) runs as a one-shot scrape.
     let idx = 0;
     for (const q of querySubset) {
+      const queryPageBudget = pageBudgets[idx] ?? pageCeiling;
       const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, startPage - 1), extractorJS: extractor, query: q };
       // Glassdoor's location filter needs a numeric locId (its locKeyword text is
       // ignored). The scraper resolves it in-browser (CF-gated) just before nav and
@@ -5372,7 +5740,11 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           // Without it a slow page load made the extractor re-read the previous
           // page, whose rows all dedup away — reported as a board-side clamp.
           urlPaginated,
-          maxPages: pageCeiling,
+          // manualScraper compares its 1-based absolute page number with this
+          // end bound. The per-query budget is a lifetime ceiling, including
+          // any pages staged before a crash; a resume can use only its
+          // unconsumed portion and never extends Auto beyond 40/source.
+          maxPages: queryPageBudget,
           unlimitedPages,
           maxAgeDays: days,
           collectionLimits: limits,
@@ -5386,7 +5758,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
         // Google has one result view, but its scroll/preload loop treats the
         // configured page count as its maximum reveal iterations — resolved,
         // not the raw (possibly null/"All") pagesPerPlatform.
-        base.options = { ...config, maxPages: pageCeiling, unlimitedPages, maxAgeDays: days, collectionLimits: limits, onPageScraped };
+        base.options = { ...config, maxPages: queryPageBudget, unlimitedPages, maxAgeDays: days, collectionLimits: limits, onPageScraped };
       }
       tasks.push(base);
     }
@@ -5632,7 +6004,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   // HTTP wrapper can carry it into sourceResults/bySource diagnostics.
   const caps = [...new Map(results.map(result => result?.cap)
     .filter(value => (
-      ['jobs-per-platform', 'pages-per-platform'].includes(value?.type)
+      ['jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform'].includes(value?.type)
       && value.limit != null
       && value.limit !== ''
       && Number.isFinite(Number(value.limit))
@@ -5672,9 +6044,9 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   const limits = normalizeJobCollectionLimits(collectionLimits);
-  // Per-query row ceiling for the USAJobs pager. null ("All") means unbounded —
-  // the provider's own reported total is then the stop condition.
-  const usajobsRowBudget = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
+  // Per-query row ceiling for the USAJobs pager. A persisted blank resolves to
+  // Auto's finite platform budget; explicit values remain explicit.
+  const usajobsRowBudget = resolveJobsPerPlatform(limits);
   const location = String(preferredLocation || '').trim();
   const queryTotal = getQueryProgressTotal(queries);
   // Whole-feed remote boards cannot receive a location parameter. Exclude the
@@ -5701,7 +6073,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
     // Bound it by the user's per-platform allowance so an explicit limit is
     // honoured at FETCH time — every gathered row is LLM-scored (JOB_SCORE_CAP is
     // Infinity), so fetching past the allowance and slicing later would pay for
-    // rows the user already excluded. "All" (null) stays unbounded by design.
+    // rows the user already excluded. Auto is bounded before provider walking.
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location, usajobsRowBudget), s, Infinity, 0, 'USAJobs API') },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, wholeFeedGeoTerms) },
     { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, wholeFeedGeoTerms) },
@@ -5780,9 +6152,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
       const sourceCaps = Array.isArray(result) ? [] : (Array.isArray(result?.caps) ? result.caps : []);
       const pagesFetched = Array.isArray(result) ? 0 : Math.max(0, Number(result?.pagesFetched) || 0);
-      const jobs = limits.jobsPerPlatform == null
-        ? rawJobs
-        : rawJobs.slice(0, limits.jobsPerPlatform);
+      const jobs = rawJobs.slice(0, resolveJobsPerPlatform(limits));
       // Exactly what the per-platform cap removed. The report previously
       // derived this as `gathered - jobs.length`, which also swallowed
       // cross-query dedup — so a multi-query source with overlapping results
@@ -8151,9 +8521,10 @@ Return a JSON object with four arrays of search query strings:
     });
   });
 
-  handleSafe('get-job-description-recovery-checkpoints', async (_event, { canvasFilePath } = {}) => ({
-    checkpoints: await listDescriptionRecoveryCheckpoints(canvasFilePath),
-  }));
+  handleSafe('get-job-description-recovery-checkpoints', async (_event, { canvasFilePath } = {}) => {
+    const listing = await listDescriptionRecoveryCheckpoints(canvasFilePath);
+    return { checkpoints: listing.checkpoints, ignored: listing.ignored };
+  });
 
   handleSafe('save-job-analysis-snapshot', async (event, { jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext, saveDescriptionRecoveryCheckpoint: requestRecoveryCheckpoint = false, descriptionRecoveryCheckpoint = false } = {}) => {
     const { snapshot } = buildJobAnalysisSnapshot({ jobs, descriptionRecoveryJobs, descriptionRecoveryState, profile, careerData, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, snapshotContext });
@@ -8195,7 +8566,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, profileFingerprint = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, targetRole = '', jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, profileFingerprint = null, manualAiPreSearchRecovery = null, runOrigin, profileInputMode }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -8214,22 +8585,38 @@ Return a JSON object with four arrays of search query strings:
       const error = 'No search queries were produced for this run. Set a target role, or re-run query generation, then search again.';
       return { success: false, noQueries: true, error };
     }
-    // Avoid repainting global diagnostics for an obviously foreign unfinished
-    // run. `startRun` below remains the authoritative, locked check; this is
-    // only a read-only fast path that preserves the current owner's telemetry
-    // while the user is directed to that owner's recovery controls.
+    // Avoid repainting global diagnostics for any unfinished run. `startRun`
+    // below remains the authoritative, locked check; this is only a read-only
+    // fast path. A same-hub checkpoint is just as protected as a foreign one:
+    // a fresh scan would otherwise truncate its staged ledger and make Resume
+    // indistinguishable from a restart.
+    const recoveredPreSearchWindow = runOrigin === 'manual-ai-resume'
+      ? manualAiPreSearchRecoveryWindow(manualAiPreSearchRecovery, requestedSearchWindow)
+      : null;
+    if (runOrigin === 'manual-ai-resume' && !recoveredPreSearchWindow) {
+      return {
+        success: false,
+        manualAiRecoveryInvalid: true,
+        error: 'This saved job-search recovery could not verify its original search window. It was kept; use Clear career data before choosing a new window.',
+      };
+    }
     if (!resume && canvasFilePath) {
       const existing = await readRunState(canvasFilePath, Date.now(), { nodeId });
-      if (existing?.incomplete && existing.manifest?.inputs?.nodeId !== nodeId) {
+      if (existing?.incomplete) {
         const ownerNodeId = existing.manifest?.inputs?.nodeId || null;
         const ownerLabel = ownerNodeId
           ? `Job Search hub ${ownerNodeId}`
           : 'an older Job Search run with an unknown owner';
-        const error = `${ownerLabel} has unfinished recovery data. Resume or Start fresh that run from its recovery banner before starting a fresh search here.`;
+        const sameHub = ownerNodeId === nodeId;
+        const error = sameHub
+          ? 'This Job Search has an unfinished saved checkpoint. Resume it or finish with its saved listings; use Clear career data only if you intentionally want to remove it.'
+          : `${ownerLabel} has unfinished recovery data. Resume it from its owning card before starting another search here.`;
         logger.warn(`[Jobs][${nodeId}] ${error}`);
         return {
           success: false,
           stagingConflict: true,
+          ...(recoveredPreSearchWindow ? { manualAiRecoveryConflict: true } : {}),
+          sameHub,
           ownerNodeId,
           ownerUnknown: !ownerNodeId,
           error,
@@ -8241,12 +8628,13 @@ Return a JSON object with four arrays of search query strings:
     // run whose preparation crossed midnight without accepting an arbitrary
     // widened window. stale maxAgeDays remains legacy-resume compatibility.
     const normalizedInitialLookbackDays = normalizeJobSearchInitialLookbackDays(initialLookbackDays);
-    let activeSearchWindow = authoritativeFreshJobSearchWindow(
+    let activeSearchWindow = recoveredPreSearchWindow || authoritativeFreshJobSearchWindow(
       lastCompletedRunAt,
       normalizedInitialLookbackDays,
       requestedSearchWindow,
     );
     const appliedInitialLookbackDays = !resume
+      && !recoveredPreSearchWindow
       && activeSearchWindow.completionTimestamp == null
       ? normalizedInitialLookbackDays
       : null;
@@ -8255,7 +8643,7 @@ Return a JSON object with four arrays of search query strings:
     let activeJobPreferencePlan = normalizeJobPreferencePlan(jobPreferencePlan || jobPreferencesInterpretation);
     const normalizedRunOrigin = resume
       ? 'crash-resume'
-      : (['initial', 'rerun-button', 'job-board-scan'].includes(runOrigin) ? runOrigin : 'unknown');
+      : (['initial', 'rerun-button', 'job-board-scan', 'manual-ai-resume'].includes(runOrigin) ? runOrigin : 'unknown');
     const normalizedProfileInputMode = ['fresh-files', 'stored-profile'].includes(profileInputMode)
       ? profileInputMode
       : 'unknown';
@@ -8376,6 +8764,12 @@ Return a JSON object with four arrays of search query strings:
     // This is deliberately narrower than general resume: any incomplete or
     // blocked source stays on the ordinary re-scrape recovery path below.
     let resumeGatheredOnly = false;
+    // An explicit Finish action has the same downstream local processing as a
+    // clean gathered recovery, but it preserves the truthful unfinished source
+    // states and never advances full-coverage history.
+    let skipProviderCollection = false;
+    let collectionDisposition = null;
+    let intentionallyUnfinishedSourceIds = [];
     // A gathered-only recovery must report the original provider-settled
     // boundary, not the later time at which staged rows are resumed/scored.
     // Otherwise a midnight-crossing resume could advance the next scan past
@@ -8384,6 +8778,7 @@ Return a JSON object with four arrays of search query strings:
     const hasExactResumeToken = resume === true
       && typeof resumeRunId === 'string'
       && resumeRunId.length > 0;
+    const finishSavedRecoveryRequested = finishWithStaged === true;
     // Re-read the durable manifest at every ownership boundary. `setStage` and
     // the page writers already compare their expected token, but their boolean
     // result alone cannot protect a provider call that happens after another
@@ -8419,6 +8814,11 @@ Return a JSON object with four arrays of search query strings:
       Object.assign(error, failure, { exactResumeOwnershipFailure: true });
       throw error;
     };
+    if (finishSavedRecoveryRequested && !hasExactResumeToken) {
+      const error = 'Finishing with saved listings requires the exact saved Job Search checkpoint. Reload the Job Search card and try again.';
+      retirePipeline('preflight-rejected', error);
+      return { success: false, finishWithStagedInvalid: true, error };
+    }
     if (resume) {
       const prior = await preflight('read prior run state', () => readRunState(canvasFilePath, Date.now(), { nodeId }));
       // A token-bearing recovery must never degrade into a fresh search if its
@@ -8449,7 +8849,7 @@ Return a JSON object with four arrays of search query strings:
         if (Object.hasOwn(priorInputs, 'jobPreferencePlan')) activeJobPreferencePlan = normalizeJobPreferencePlan(priorInputs.jobPreferencePlan);
         const priorRunId = prior.manifest?.runId || null;
         if (!priorInputs.nodeId || priorInputs.nodeId !== nodeId) {
-          const error = 'This unfinished search belongs to a different Job Search card. Open that card to recover it, or start a fresh search here.';
+          const error = 'This unfinished search belongs to a different Job Search card. Recover it from its owning card, or use Clear career data there before intentionally starting a new search.';
           retirePipeline('preflight-rejected', error);
           return { success: false, resumeNodeMismatch: true, error };
         }
@@ -8458,13 +8858,13 @@ Return a JSON object with four arrays of search query strings:
         const currentLocation = normalizeLocationInput(location).boardReady;
         if (!hasRecordedLocation || priorLocation !== currentLocation) {
           const error = hasRecordedLocation
-            ? `This unfinished search targeted "${priorLocation || 'no location'}", but the hub now targets "${currentLocation || 'no location'}". Start fresh so staged jobs and queries cannot cross locations.`
-            : 'This unfinished search predates location-safe resume metadata. Start fresh so staged jobs cannot be mixed into the current location.';
+            ? `This unfinished search targeted "${priorLocation || 'no location'}", but the hub now targets "${currentLocation || 'no location'}". Its checkpoint was kept; use Clear career data before deliberately starting a new location search.`
+            : 'This unfinished search predates location-safe resume metadata. Its checkpoint was kept; use Clear career data before deliberately starting a new location search.';
           retirePipeline('preflight-rejected', error);
           return { success: false, resumeLocationMismatch: true, error };
         }
         if (JSON.stringify(priorInputs.queries || []) !== JSON.stringify(queries)) {
-          const error = 'This unfinished search used different queries. Start fresh so staged jobs cannot be mixed with a changed search.';
+          const error = 'This unfinished search used different queries. Its checkpoint was kept; use Clear career data before deliberately starting with changed queries.';
           retirePipeline('preflight-rejected', error);
           return { success: false, resumeQueryMismatch: true, error };
         }
@@ -8477,33 +8877,91 @@ Return a JSON object with four arrays of search query strings:
         const priorSources = prior.manifest.sources || {};
         resumedCollectionScopeCaveats = collectionScopeCaveatsFromCompletedManifestSources(priorSources);
         resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
-        if (resumeSourceIds.length === 0) {
-          const error = 'None of this unfinished search’s original job platforms are available in this app version. Start fresh to use the current platform selection.';
+        recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        if (finishSavedRecoveryRequested && recoveredStaged.length === 0) {
+          const error = 'There are no saved listings to finish. Resume the remaining sources instead.';
+          retirePipeline('preflight-rejected', error);
+          return { success: false, noSavedListings: true, error };
+        }
+        // Finish is allowed to score a durable ledger even when every original
+        // provider has since been removed from this app version. It dispatches
+        // no providers and retains the exact staged rows; ordinary Resume still
+        // needs at least one supported source to continue collection.
+        if (resumeSourceIds.length === 0 && !finishSavedRecoveryRequested) {
+          const error = 'None of this unfinished search’s original job platforms are available in this app version. The checkpoint was kept; use Clear career data before deliberately using the current platform selection.';
           retirePipeline('preflight-rejected', error);
           return { success: false, noResumablePlatforms: true, error };
         }
         activeSourceIds = resumeSourceIds;
-        recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
         activeRunId = priorRunId;
         jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), runId: activeRunId, ts: Date.now() };
         priorRunStartedAt = prior.manifest.startedAt ?? null;
-        resumeGatheredOnly = canRecoverGatheredRunDirectly(prior.manifest, queries);
-        if (resumeGatheredOnly) {
+        const alreadyFinishedWithSavedListings = isRunCollectionFinishedWithSavedListings(prior.manifest);
+        if (finishSavedRecoveryRequested) {
+          // Persist the voluntary early-finish decision BEFORE any role screen,
+          // preference evaluation, or renderer-side scoring. A crash after this
+          // point therefore resumes the same saved listings without re-opening
+          // a provider, and leaves pending/blocked source status truthful.
+          const finishReceipt = await preflight('mark saved-listing finish', () => (
+            finishRunWithSavedListings(canvasFilePath, {
+              expectedRunId: activeRunId,
+              nodeId,
+              now: Date.now(),
+            })
+          ));
+          if (finishReceipt?.ok !== true) {
+            const error = finishReceipt?.tokenMismatch
+              ? 'This saved checkpoint changed before it could be finished. Reload the Job Search card and try again.'
+              : 'Could not safely mark this saved checkpoint as finished. No provider was contacted.';
+            retirePipeline('preflight-rejected', error);
+            return {
+              success: false,
+              ...(finishReceipt?.tokenMismatch ? { resumeRunMismatch: true } : {}),
+              finishWithStagedFailed: true,
+              error,
+            };
+          }
+          collectionDisposition = finishReceipt.collectionDisposition || null;
+          resumedCollectionCompletedAt = finishReceipt.collectionCompletedAt ?? null;
+          intentionallyUnfinishedSourceIds = Array.isArray(finishReceipt.unfinishedSourceIds)
+            ? finishReceipt.unfinishedSourceIds
+            : [];
+        } else if (alreadyFinishedWithSavedListings) {
+          collectionDisposition = prior.manifest.collectionDisposition;
+          resumedCollectionCompletedAt = collectionCompletedAtForManifest(prior.manifest);
+          intentionallyUnfinishedSourceIds = Object.entries(priorSources)
+            .filter(([, source]) => source?.status !== 'done' && source?.status !== 'skipped')
+            .map(([sourceId]) => sourceId);
+        }
+        // Keep this narrowly tied to a naturally clean gathered checkpoint.
+        // Forced partial finish uses the same local/no-network branch below,
+        // but still appends its score-safe final rows to the durable ledger.
+        resumeGatheredOnly = !finishSavedRecoveryRequested
+          && canRecoverGatheredRunDirectly(prior.manifest, queries);
+        skipProviderCollection = finishSavedRecoveryRequested || resumeGatheredOnly;
+        if (resumeGatheredOnly && resumedCollectionCompletedAt == null) {
           resumedCollectionCompletedAt = collectionCompletedAtForManifest(prior.manifest);
         }
         resumeScope = new Set();
         resumeStartPages = {};
-        for (const sid of activeSourceIds) {
-          if (priorSources[sid]?.status === 'done') continue; // complete — reuse its staged jobs
-          resumeScope.add(sid);
-          // Resume from the LEAST-progressed query's next page (min lastPage + 1),
-          // but ONLY when every query recorded a page — buildJobTasks applies one
-          // start page to EVERY query of the source, so fast-forwarding while some
-          // query never flushed would silently skip that query's early pages.
-          // Unrecorded queries ⇒ restart at 1; the cross-source dedup absorbs overlap.
-          resumeStartPages[sid] = computeResumeStartPage(priorSources[sid], queries.length);
+        if (!skipProviderCollection) {
+          for (const sid of activeSourceIds) {
+            if (priorSources[sid]?.status === 'done' || priorSources[sid]?.status === 'skipped') continue; // complete — reuse its staged jobs
+            resumeScope.add(sid);
+            // Resume from the LEAST-progressed query's next page (min lastPage + 1),
+            // but ONLY when every query recorded a page — buildJobTasks applies one
+            // start page to EVERY query of the source, so fast-forwarding while some
+            // query never flushed would silently skip that query's early pages.
+            // Unrecorded queries ⇒ restart at 1; the cross-source dedup absorbs overlap.
+            resumeStartPages[sid] = computeResumeStartPage(priorSources[sid], queries.length);
+          }
         }
-        logger.info(`[Jobs][${nodeId}] Resume: ${resumeGatheredOnly ? 'recover gathered jobs without network' : `re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}`}; recovered ${recoveredStaged.length} staged job(s)`);
+        const recoveryPlan = finishSavedRecoveryRequested
+          ? 'finish with saved listings without network'
+          : resumeGatheredOnly
+            ? 'recover gathered jobs without network'
+            : `re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}`;
+        logger.info(`[Jobs][${nodeId}] Resume: ${recoveryPlan}; recovered ${recoveredStaged.length} staged job(s)`);
       } else {
         logger.info(`[Jobs][${nodeId}] Resume requested but no incomplete prior run — running a fresh search.`);
       }
@@ -8516,14 +8974,19 @@ Return a JSON object with four arrays of search query strings:
       ACTIVE_SOURCE_IDS,
       normalizedCollectionLimits,
     );
-    if (activeSourceIds.length === 0) {
+    if (activeSourceIds.length === 0 && !(skipProviderCollection && recoveredStaged.length > 0)) {
       const error = 'Select at least one enabled job platform before running the search.';
       retirePipeline('preflight-rejected', error);
       return { success: false, noPlatformsSelected: true, error };
     }
     const sourceCountryPolicies = summarizeJobSourceCountryPolicies(activeSourceIds, location);
     const sourceCountryPolicyById = Object.fromEntries(sourceCountryPolicies.map(policy => [policy.sourceId, policy]));
-    const countryApplicableSourceIds = new Set(sourceCountryPolicies.filter(policy => policy.include).map(policy => policy.sourceId));
+    // A saved-ledger-only continuation does not contact providers, so present
+    // country/app-version policy must not discard rows that were validly
+    // collected under this run's original, already-verified location.
+    const countryApplicableSourceIds = skipProviderCollection
+      ? new Set(activeSourceIds)
+      : new Set(sourceCountryPolicies.filter(policy => policy.include).map(policy => policy.sourceId));
     // A non-empty selection is not necessarily a runnable search. For example,
     // Dice is a valid enabled platform but this integration is intentionally
     // excluded from Canada-scoped hubs. Letting an all-inapplicable selection
@@ -8532,7 +8995,7 @@ Return a JSON object with four arrays of search query strings:
     // and last-good snapshot even though no query was attempted. Reject before
     // login checks, run staging, or snapshot work, while still giving every
     // selected source a visible skipped card with the exact policy reason.
-    if (countryApplicableSourceIds.size === 0) {
+    if (!skipProviderCollection && countryApplicableSourceIds.size === 0) {
       for (const policy of sourceCountryPolicies) {
         const warning = {
           code: 'country-source-skipped',
@@ -8564,25 +9027,42 @@ Return a JSON object with four arrays of search query strings:
     const browserJobPlatforms = activeSourceIds
       .filter(sourceId => ['indeed', 'glassdoor', 'ziprecruiter'].includes(sourceId))
       .filter(sourceId => countryApplicableSourceIds.has(sourceId));
+    // Completed sources are recovered from the ledger and are never contacted
+    // by this resume. Their current login state must not manufacture a new
+    // block or prevent another unfinished provider from continuing.
+    const authPreflightSourceIds = jobSourceAuthPreflightScope(browserJobPlatforms, resumeScope);
     // A gathered-only recovery has no browser/API work left. In particular, do
     // not turn a stale startup verifier result into an auth gate for data that
     // is already durably staged and about to be scored locally/manual-AI.
-    if (!resumeGatheredOnly) {
+    if (!skipProviderCollection) {
       await preflight('await pending startup session verification', () => (
-        waitForPendingPlatformVerification(browserJobPlatforms)
+        waitForPendingPlatformVerification(authPreflightSourceIds)
       ));
     }
-    const cache = resumeGatheredOnly ? {} : await preflight('read session status cache', () => readStatusCache());
+    const cache = skipProviderCollection ? {} : await preflight('read session status cache', () => readStatusCache());
     // LinkedIn's public listing feed is still guest-accessible, but description
     // enrichment can use a positively verified profile session. Pass this as a
     // preference rather than an assumption: the extractor falls back to the
     // guest SEO representation if the cached session no longer renders a JD.
     const preferLinkedInAuthenticated = cache.linkedin?.connected === true;
-    const notLoggedIn = browserJobPlatforms.filter(sourceId => !cache[sourceId]?.connected);
-    if (!resumeGatheredOnly && notLoggedIn.length > 0) {
+    const notLoggedIn = authPreflightSourceIds.filter(sourceId => !cache[sourceId]?.connected);
+    // A fresh search intentionally remains all-or-nothing at this boundary: it
+    // has no durable work yet, and beginning a new collection while one of its
+    // required authenticated providers is unavailable would make its coverage
+    // ambiguous. A crash-resume is different. It already owns a checkpoint and
+    // may have thousands of staged rows plus other unfinished sources that can
+    // safely continue. Treat each missing login as that source's durable block,
+    // rather than rejecting the whole recovery before it can reuse any work.
+    const loginBlockedSourceIds = new Set(
+      !skipProviderCollection && resumeScope !== null ? notLoggedIn : [],
+    );
+    if (!skipProviderCollection && notLoggedIn.length > 0 && loginBlockedSourceIds.size === 0) {
       const error = `Not logged in to: ${notLoggedIn.join(', ')}. ${indeedPreflightObservationNote(notLoggedIn)}Open Settings → Job Platforms to connect.`;
       retirePipeline('preflight-rejected', error);
       return { success: false, notLoggedIn, error };
+    }
+    if (loginBlockedSourceIds.size > 0) {
+      logger.info(`[Jobs][${nodeId}] Resume continuing without logged-out source(s): ${[...loginBlockedSourceIds].join(', ')}`);
     }
     const limitsDescription = describeJobCollectionLimits(normalizedCollectionLimits);
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${activeSourceIds.length} selected source(s) (origin=${normalizedRunOrigin}, careerInput=${normalizedProfileInputMode}, windowStart=${new Date(activeSearchWindow.startTimestamp).toISOString()}, providerLookback=${ageDays}d, jobs/platform=${limitsDescription.jobs}, browser pages/query=${limitsDescription.pages}, location=${location || 'none'})`);
@@ -8606,19 +9086,29 @@ Return a JSON object with four arrays of search query strings:
       maxAgeDays: ageDays,
       collectionLimits: normalizedCollectionLimits,
       location: location || '',
+      ...(collectionDisposition ? { collectionDisposition } : {}),
     };
 
     // Country applicability is enforced before any source request. On resume,
     // intersect it with the unfinished-source scope so an older staged run cannot
     // reintroduce a now-inapplicable source (for example Dice on a Canada hub).
     const requestedSourceScope = resumeScope || new Set(activeSourceIds);
-    const runnableSourceScope = new Set(
+    const requestedRunnableSourceScope = new Set(
       [...requestedSourceScope].filter(sourceId => countryApplicableSourceIds.has(sourceId)),
     );
-    const tasks = buildJobTasks(queries, ageDays, {
-      onlySources: runnableSourceScope,
+    // This is the actual dispatch scope. Keep the broader requested scope
+    // above solely to retain a first URL for each login-blocked source card.
+    const runnableSourceScope = new Set(
+      [...requestedRunnableSourceScope].filter(sourceId => !loginBlockedSourceIds.has(sourceId)),
+    );
+    // Keep the blocked source's first provider URL even though it receives no
+    // task. Its card can then offer a privacy-safe "Open sign-in page" action
+    // without guessing an account URL or retaining any session detail.
+    const candidateTasks = buildJobTasks(queries, ageDays, {
+      onlySources: requestedRunnableSourceScope,
       ...(resumeStartPages ? { startPageBySource: resumeStartPages } : {}),
     }, location, normalizedCollectionLimits, countryScope);
+    const tasks = candidateTasks.filter(task => runnableSourceScope.has(task.sourceId));
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -8628,10 +9118,12 @@ Return a JSON object with four arrays of search query strings:
     const sourceFirstUrl = {};
     const sourceBlockedUrls = {}; // sourceId → [url, ...] in task order
     const taskUrlById = {};       // task id → its scrape URL (for sequential solve)
+    for (const t of candidateTasks) {
+      if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
+    }
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
-      if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
       taskUrlById[t.id] = t.url;
     }
 
@@ -8652,8 +9144,39 @@ Return a JSON object with four arrays of search query strings:
 
     const allJobs = [];
     const sourceResults = {};
+    for (const sourceId of loginBlockedSourceIds) {
+      const sourceName = JOB_SOURCE_DISPLAY_NAMES[sourceId] || sourceId;
+      const warning = {
+        code: 'login-required',
+        severity: 'block',
+        // Do not expose cache values, cookies, account identifiers, or the
+        // verifier's raw failure. The actionable fact is enough for recovery.
+        evidence: `${sourceName} is not connected in Job Platform Logins.`,
+        suggestion: `Log in to ${sourceName} in Settings → Job Platform Logins, then retry the remaining saved sources. Other staged and eligible-source results were kept.`,
+        action: 'login-platform',
+        platformId: sourceId,
+        actionLabel: 'Log in',
+        actionTitle: `Open ${sourceName}'s verified Job Platform Login window. After it confirms sign-in, retry this saved search.`,
+      };
+      // Match every other resumable source-results entry: recovered staged
+      // rows may be appended below, then flow through the normal page/stop
+      // merge without a special login-only shape.
+      sourceResults[sourceId] = {
+        jobs: [], errors: 0, warnings: [warning], pagesWalked: 0, stopReasons: new Set(),
+      };
+      emitProgress({
+        nodeId,
+        sourceId,
+        status: 'error',
+        count: 0,
+        completed: 0,
+        total: getQueryProgressTotal(queries),
+        url: sourceFirstUrl[sourceId] || null,
+        warning,
+      });
+    }
     for (const policy of sourceCountryPolicies) {
-      if (policy.include) continue;
+      if (policy.include || skipProviderCollection) continue;
       sourceResults[policy.sourceId] = {
         jobs: [],
         errors: 0,
@@ -8676,7 +9199,7 @@ Return a JSON object with four arrays of search query strings:
     // worth recovering. First-seen order is preserved (Map insertion semantics).
     const recoveredByKey = new Map();
     for (const j of recoveredStaged) {
-      if (!countryApplicableSourceIds.has(j.source)) continue;
+      if (!skipProviderCollection && !countryApplicableSourceIds.has(j.source)) continue;
       // Google now replaces its brittle internal card route with the chosen
       // Apply-on URL after enrichment.  That public URL is intentionally free
       // to change between provider mirrors; sourceJobKey retains Google’s
@@ -8705,7 +9228,7 @@ Return a JSON object with four arrays of search query strings:
       // Keep the recovered manifest/staging and its original run token intact.
       // A gathered-only recovery has no page work to record; changing its stage
       // or starting a fresh run here would truncate the very rows it must score.
-      if (!resumeGatheredOnly) {
+      if (!skipProviderCollection) {
         const stageAdvanced = await setJobRunStage(canvasFilePath, 'searching', runStartedAt, { expectedRunId: activeRunId, nodeId });
         // Do not ignore a failed compare-and-set. If the manifest vanished or
         // was replaced between the renderer peek and this checkpoint, a
@@ -8751,7 +9274,7 @@ Return a JSON object with four arrays of search query strings:
         const ownerLabel = startedRun.ownerNodeId
           ? `Job Search hub ${startedRun.ownerNodeId}`
           : 'an older Job Search run with an unknown owner';
-        const error = `${ownerLabel} has unfinished recovery data. Resume or Start fresh that run from its recovery banner before starting a fresh search here.`;
+        const error = `${ownerLabel} has unfinished recovery data. Resume it or finish with its saved listings; use Clear career data only if you intentionally want to remove it.`;
         // `startRun` rejected this request under the manifest lock. Restore the
         // previous process-global owner rather than publishing B's short-lived
         // preparing token over A's valid Solve/recovery diagnostics.
@@ -8817,11 +9340,12 @@ Return a JSON object with four arrays of search query strings:
       const reason = combinedSignal.reason instanceof Error
         ? combinedSignal.reason
         : Object.assign(new Error('Search aborted'), { name: 'AbortError' });
-      // cancelNodeTask (Reset or hub deletion) uses the explicit "Node deleted"
-      // reason. That is an intentional abandonment, not a crash: remove only
-      // this run's recovery sidecars. A destroyed renderer/window keeps them so
-      // crash recovery can still do its job on the next launch.
-      if (reason.message === 'Node deleted' && activeRunId) {
+      // Reset or hub deletion uses the explicit "Node deleted" sentinel. Those
+      // are intentional abandonment and remove only this run's sidecars. A
+      // user-stopped run is different: it deliberately retains its checkpoint
+      // for Resume, while a destroyed renderer/window also keeps crash
+      // recovery available on the next launch.
+      if (shouldDiscardJobRunAfterAbort(reason) && activeRunId) {
         const abortCleanup = await clearRunWithResult(canvasFilePath, {
           trashItem: (p) => shell.trashItem(p),
           expectedRunId: activeRunId,
@@ -8884,9 +9408,7 @@ Return a JSON object with four arrays of search query strings:
         await syncIndeedSessionStatusFromScrape(r?.sessionDiagnostics, r?.warning);
         const rawJobs = Array.isArray(r?.items) ? r.items : [];
         const gathered = r?.gathered ?? rawJobs.length;
-        const jobs = normalizedCollectionLimits.jobsPerPlatform == null
-          ? rawJobs
-          : rawJobs.slice(0, normalizedCollectionLimits.jobsPerPlatform);
+        const jobs = rawJobs.slice(0, resolveJobsPerPlatform(normalizedCollectionLimits));
         indeedResult = {
           sourceId: 'indeed', jobs, warning: r?.warning || null, gathered,
           providerGathered: r?.providerGathered,
@@ -8894,6 +9416,10 @@ Return a JSON object with four arrays of search query strings:
           preCapRelevanceDropped: r?.preCapRelevanceDropped,
           relevanceRejected: r?.relevanceRejected,
           enrichment: r?.enrichment || null,
+          pagesFetched: r?.pagesFetched,
+          stopReasons: r?.stopReasons,
+          truncated: r?.truncated === true,
+          cap: r?.cap || null,
         };
       } catch (error) {
         indeedResult = { sourceId: 'indeed', jobs: [], error: error?.message || String(error) };
@@ -9069,7 +9595,7 @@ Return a JSON object with four arrays of search query strings:
       // This branch deliberately does no browser work and does not acquire the
       // profile lock merely to reset diagnostics: a gathered recovery must
       // remain independent of an unrelated hub's browser lifetime.
-      [browserOut, httpResults] = resumeGatheredOnly
+      [browserOut, httpResults] = skipProviderCollection
         ? [{ manualResults: [], indeedResult: null }, []]
         : await Promise.all([
           withFreshManualScraperTelemetry(runBrowserSourcesInOrder, combinedSignal),
@@ -9118,6 +9644,12 @@ Return a JSON object with four arrays of search query strings:
       if (result.warning) {
         sourceResults[sourceId].warnings.push(result.warning);
       }
+      // Manual browser walkers report one aggregate source result after their
+      // per-query tasks finish. Preserve the same whitelisted cap envelope as
+      // API sources before the result is reduced into telemetry/receipt data;
+      // otherwise an Auto page-budget stop became a bare `page-cap` and looked
+      // like an unqualified, possibly exhaustive walk after restart.
+      mergeJobSourceCollectionCap(sourceResults[sourceId], result.cap);
       // A detail-enrichment block does not stop the walk, so it never reaches
       // stopReason. Carry it separately (merged across a source's query
       // variants) or the run reports `completed` while most of its rows were
@@ -9289,13 +9821,25 @@ Return a JSON object with four arrays of search query strings:
       if (Array.isArray(res.sourceCaps) && res.sourceCaps.length > 0) {
         if (!Array.isArray(sourceResults[res.sourceId].caps)) sourceResults[res.sourceId].caps = [];
         for (const cap of res.sourceCaps) {
-          if (!['jobs-per-platform', 'pages-per-platform'].includes(cap?.type)
+          if (!['jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform'].includes(cap?.type)
               || !Number.isSafeInteger(cap.limit) || cap.limit <= 0
               || sourceResults[res.sourceId].caps.some(existing => existing.type === cap.type && existing.limit === cap.limit)) continue;
           sourceResults[res.sourceId].caps.push({ type: cap.type, limit: cap.limit });
         }
       }
       if (res.enrichment) sourceResults[res.sourceId].enrichment = res.enrichment;
+      if (res.pagesFetched != null) {
+        sourceResults[res.sourceId].pagesWalked = Math.max(
+          Number(sourceResults[res.sourceId].pagesWalked) || 0,
+          Math.max(0, Number(res.pagesFetched) || 0),
+        );
+      }
+      if (Array.isArray(res.stopReasons) && res.stopReasons.length > 0) {
+        if (!(sourceResults[res.sourceId].stopReasons instanceof Set)) {
+          sourceResults[res.sourceId].stopReasons = new Set(sourceResults[res.sourceId].stopReasons || []);
+        }
+        for (const stopReason of res.stopReasons) sourceResults[res.sourceId].stopReasons.add(stopReason);
+      }
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
         sourceResults[res.sourceId].relevanceRejected = res.relevanceRejected;
       }
@@ -9353,8 +9897,12 @@ Return a JSON object with four arrays of search query strings:
     //   - 'error'   → fetched but every attempt failed (errors > 0 OR every
     //                 attempt produced a block warning and no jobs)
     //   - 'idle'    → reserved for "never got a progress event" (renderer fallback)
-    for (const sourceId of activeSourceIds) {
-      const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
+    // A voluntary saved-listing finish leaves pending/blocked sources truthful
+    // in the manifest. Do not synthesize "done" events/statuses merely because
+    // no provider work was scheduled in this local-only continuation.
+    if (collectionDisposition !== 'user-finished-partial') {
+      for (const sourceId of activeSourceIds) {
+        const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
       const progressTotal = sourceTaskIds[sourceId]?.length || getQueryProgressTotal(queries);
       const effectiveWarnings = (data.warnings || []).map(w => getEffectiveSourceWarning(w, data.jobs.length));
       // Block > info > throttle > nothing. Block wins for visual urgency;
@@ -9401,17 +9949,18 @@ Return a JSON object with four arrays of search query strings:
       });
       // Record terminal status in the run manifest so resume knows which sources
       // completed vs. need re-running. 'skipped' counts as done (it ran its course).
-      markSourceStatus(
-        canvasFilePath,
-        sourceId,
-        status === 'error' || retryablePartialProviderFailure ? 'blocked' : 'done',
-        Date.now(),
-        {
-          expectedRunId: activeRunId,
-          nodeId,
-          collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
-        },
-      );
+        markSourceStatus(
+          canvasFilePath,
+          sourceId,
+          status === 'error' || retryablePartialProviderFailure ? 'blocked' : status,
+          Date.now(),
+          {
+            expectedRunId: activeRunId,
+            nodeId,
+            collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
+          },
+        );
+      }
     }
 
     // Flat per-source warning list returned with the response so the Job Search Module
@@ -9426,6 +9975,18 @@ Return a JSON object with four arrays of search query strings:
           sourceId,
           url: sourceFirstUrl[sourceId] || null,
           ...effectiveWarning,
+        });
+      }
+    }
+    if (collectionDisposition === 'user-finished-partial') {
+      for (const sourceId of intentionallyUnfinishedSourceIds) {
+        scrapeWarnings.push({
+          sourceId,
+          url: null,
+          code: 'collection-finished-with-saved-listings',
+          severity: 'info',
+          evidence: 'Provider collection was deliberately stopped; this source was not resumed.',
+          suggestion: 'Run a later full Job Search to collect the remaining source coverage.',
         });
       }
     }
@@ -9583,7 +10144,7 @@ Return a JSON object with four arrays of search query strings:
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
     // only fetch detail pages for jobs that will actually be scored/shown.
     const diceKept = kept.filter(j => j.source === 'dice');
-    if (!resumeGatheredOnly && diceKept.length > 0) {
+    if (!skipProviderCollection && diceKept.length > 0) {
       jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-dice', ts: Date.now(), active: true, pendingSources: ['dice'] };
       const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -9595,7 +10156,7 @@ Return a JSON object with four arrays of search query strings:
     // One tab is opened on the already-running browser, navigated through each
     // job URL sequentially, then closed. Stops early on a login wall.
     const linkedinKept = kept.filter(j => j.source === 'linkedin');
-    if (!resumeGatheredOnly && linkedinKept.length > 0) {
+    if (!skipProviderCollection && linkedinKept.length > 0) {
       jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-linkedin', ts: Date.now(), active: true, pendingSources: ['linkedin'] };
       // Re-enter 'searching' before browser enrichment so the source card stays
       // visible and its dismiss timer is cancelled. Without this, the card gets
@@ -9978,14 +10539,14 @@ Return a JSON object with four arrays of search query strings:
       // left behind. Persist it; the report labels it distinctly from the
       // user-configured caps and it is still rejected as configured-cap PROOF.
       if (data.cap && typeof data.cap === 'object'
-          && ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(data.cap.type)
+          && ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal'].includes(data.cap.type)
           && data.cap.limit != null && data.cap.limit !== ''
           && Number.isFinite(Number(data.cap.limit)) && Number(data.cap.limit) > 0) {
         bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };
       }
       if (Array.isArray(data.caps)) {
         const caps = data.caps
-          .filter(cap => ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'source-internal'].includes(cap?.type)
+          .filter(cap => ['per-platform', 'jobs-per-platform', 'pages-per-platform', 'auto-jobs-per-platform', 'auto-pages-per-platform', 'source-internal'].includes(cap?.type)
             && Number.isSafeInteger(cap.limit) && cap.limit > 0)
           .filter((cap, index, values) => values.findIndex(other => other.type === cap.type && other.limit === cap.limit) === index)
           .slice(0, 3)
@@ -10007,7 +10568,10 @@ Return a JSON object with four arrays of search query strings:
           // Browser sources cannot know how many additional matches exist without
           // issuing more pages. Preserve the actual enforced aggregate cap so the
           // report never calls this a clean/exhausted search.
-          bySource[sid].cap = { type: 'per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
+          bySource[sid].cap = {
+            type: normalizedCollectionLimits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'per-platform',
+            limit: resolveJobsPerPlatform(normalizedCollectionLimits),
+          };
         }
       }
       // Pre-limit match count for API sources — surface an explicit user-set
@@ -10039,10 +10603,12 @@ Return a JSON object with four arrays of search query strings:
           if (!(data.stopReasons instanceof Set)) {
             data.stopReasons = new Set(data.stopReasons || []);
           }
-          data.stopReasons.add('jobs-per-platform');
-          bySource[sid].cap = normalizedCollectionLimits.jobsPerPlatform == null
-            ? null
-            : { type: 'jobs-per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
+          const autoJobs = normalizedCollectionLimits.jobsPerPlatform == null;
+          data.stopReasons.add(autoJobs ? 'auto-jobs-per-platform' : 'jobs-per-platform');
+          bySource[sid].cap = {
+            type: autoJobs ? 'auto-jobs-per-platform' : 'jobs-per-platform',
+            limit: resolveJobsPerPlatform(normalizedCollectionLimits),
+          };
           if (bySource[sid].cap) {
             const caps = Array.isArray(bySource[sid].caps) ? bySource[sid].caps : [];
             if (!caps.some(cap => cap.type === bySource[sid].cap.type && cap.limit === bySource[sid].cap.limit)) {
@@ -10304,7 +10870,9 @@ Return a JSON object with four arrays of search query strings:
     // as gathered after it has cleared its token-scoped sidecars.
     await throwIfSearchAborted();
     const gatheredStageUpdatedAt = Date.now();
-    const collectionCompletedAt = resumeGatheredOnly
+    const collectionCompletedAt = collectionDisposition === 'user-finished-partial'
+      ? (resumedCollectionCompletedAt ?? gatheredStageUpdatedAt)
+      : resumeGatheredOnly
       ? (resumedCollectionCompletedAt ?? gatheredStageUpdatedAt)
       : gatheredStageUpdatedAt;
     // The next successful scan uses this run's original start as its
@@ -10337,12 +10905,16 @@ Return a JSON object with four arrays of search query strings:
       }
     }
     const completedAt = Date.now();
+    const pausedSourceIds = [...finalGatingSourceIds];
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
-      phase: 'completed',
+      // A source-level gate is a settled partial gather, not a completed
+      // pipeline. Keep the report honest while the renderer waits at
+      // sources-ready for a Login/Solve/Skip decision.
+      phase: pausedSourceIds.length > 0 ? 'sources-blocked' : 'completed',
       ts: completedAt,
       active: false,
-      pendingSources: [],
+      pendingSources: pausedSourceIds,
       durationMs: Math.max(0, completedAt - (Number(jobsTelemetry.pipeline?.startedAt) || runStartedAt)),
     };
 
@@ -10370,17 +10942,29 @@ Return a JSON object with four arrays of search query strings:
       searchWindow: activeSearchWindow,
       collectionStartedAt,
       collectionCompletedAt,
+      collectionDisposition,
+      // A paused source gate is a partial collection even when it was caused
+      // by a captcha/verification wall rather than the resume auth preflight.
+      // The renderer may subsequently let the person score the listings now;
+      // that explicit partial choice must never advance the next scan's
+      // full-coverage watermark past the source that was not proven complete.
+      // `finalGatingSourceIds` is assembled after every post-search recovery
+      // pass (including description enrichment), making it the authoritative
+      // set rather than the narrower loginBlockedSourceIds preflight subset.
+      hasUnfinishedSources: finalGatingSourceIds.size > 0,
+      intentionallyUnfinishedSourceIds,
     };
   });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
   // peek-job-run (on hub load) detects a recent, incomplete run and surfaces a
-  // "Resume / Start fresh" banner. RESUME re-invokes search-jobs with { resume:true }
-  // (see that handler): it re-scrapes ONLY the unfinished sources from their last
-  // completed page and reuses the staged jobs from finished sources — there is NO
-  // separate "score the staged jobs without re-scraping" path anymore.
+  // Resume banner. RESUME re-invokes search-jobs with { resume:true } (see that
+  // handler): it re-scrapes ONLY the unfinished sources from their last completed
+  // page and reuses the staged jobs from finished sources. Finish with saved
+  // listings records an intentional partial collection before it continues only
+  // with the staged rows; Clear career data is the sole destructive path.
   // complete-job-run (clean finish, incl. a successful resume-on-crash) and
-  // discard-job-run ("start fresh") both move the sidecars to the OS Trash, so
+  // discard-job-run (Clear career data) both move the sidecars to the OS Trash, so
   // the cleanup is always recoverable.
 
   handleSafe('peek-job-run', async (event, { canvasFilePath, nodeId = null } = {}) => {
@@ -10398,8 +10982,16 @@ Return a JSON object with four arrays of search query strings:
       ageMs: state.ageMs,
       gatheredCount: state.stagedJobs.length,
       totalSources: sourceSummary.length,
-      doneSources: sourceSummary.filter(s => s.status === 'done').length,
+      // A policy-skipped source has reached a terminal collection outcome just
+      // like a source that returned listings.  Count both so the saved-run
+      // banner accurately distinguishes work that remains from work that was
+      // intentionally not dispatched.
+      doneSources: sourceSummary.filter(s => s.status === 'done' || s.status === 'skipped').length,
       sourceSummary,
+      collectionDisposition: state.manifest.collectionDisposition || null,
+      unfinishedSourceIds: sourceSummary
+        .filter(source => source.status !== 'done' && source.status !== 'skipped')
+        .map(source => source.id),
       nodeId: state.manifest.inputs?.nodeId || null,
       queries: state.manifest.inputs?.queries || [],
       targetRole: state.manifest.inputs?.targetRole || null,
@@ -10461,7 +11053,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   handleSafe('discard-job-run', async (event, { canvasFilePath, nodeId = null, runId = null } = {}) => {
-    // "Start fresh" → recoverable: route the sidecars to the OS Trash instead of
+    // Clear career data → recoverable: route the sidecars to the OS Trash instead of
     // unlinking them. clearRun falls back to a hard delete if the volume has no
     // Trash, so the run is always cleared either way. Just like clean
     // completion, this MUST be run-token scoped: an old recovery banner's
@@ -12870,11 +13462,22 @@ Return a JSON object with four arrays of search query strings:
       recordResumeAttempt(sourceId, attemptMode, 'blocked', 'no remaining queries in resume state');
       return { resolved: false, items: [] };
     }
+    // Only the extractor-authored fixed-width numeric vector is accepted.
+    // Omit malformed/legacy metadata so the extractor takes its conservative
+    // one-page-per-query resume path rather than reallocating Auto depth.
+    const resumePageBudgets = Array.isArray(effectiveResumeState.pageBudgets)
+      && effectiveResumeState.pageBudgets.length === remainingQueries.length
+      && effectiveResumeState.pageBudgets.every(value => Number.isSafeInteger(value) && value > 0 && value <= 1_000)
+      ? effectiveResumeState.pageBudgets.slice()
+      : null;
     const location = String(preferredLocation || '').trim();
     logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1} (location=${location || 'none'})`);
     // Same shared-profile lock — a "Continue" click could land while a full
     // search is still scraping; serialize this Indeed browser against them.
-    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, ageDays, null, null, startPage, null, location, normalizedCollectionLimits), signal, 'job Indeed resume scrape');
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(
+      remainingQueries, signal, ageDays, null, null, startPage, null, location,
+      normalizedCollectionLimits, resumePageBudgets, true,
+    ), signal, 'job Indeed resume scrape');
     // Observation of the session this resumed scrape actually ran with (see
     // BUG 3/4), plus BUG 5's cache truth check — a warning proving the
     // session is dead must downgrade the cached "connected" status.

@@ -8,6 +8,7 @@
 import { assert } from './testHelpers.js';
 import {
   JOB_COLLECTION_LIMITS_MAX,
+  JOB_COLLECTION_AUTO_LIMITS,
   JOB_COLLECTION_PAGE_CEILING,
   MIN_DATED_EVIDENCE,
   STOP_STREAK,
@@ -19,10 +20,14 @@ import {
   getEnabledJobSourceIds,
   getRunnableJobSourceIds,
   isUnlimitedPages,
+  isAutoJobCollection,
   makeJobPageStop,
+  manualPageCapForTasks,
   normalizeJobCollectionLimits,
   normalizeEnabledJobSourceIds,
   resolvePageCeiling,
+  resolveJobsPerPlatform,
+  resolveBrowserPageBudgets,
 } from '../test-dependencies.js';
 
 const FIXED_NOW = new Date('2026-08-13T12:00:00Z');
@@ -93,23 +98,44 @@ export default [
     },
   },
   {
-    name: 'jobPlatformSafety: finite-only modes block exactly the All setting that would make a future collector non-terminating',
+    name: 'jobPlatformSafety: Auto resolves to finite collection limits',
     run: () => {
       const jobsAll = { jobsPerPlatform: null, pagesPerPlatform: 4 };
       const pagesAll = { jobsPerPlatform: 40, pagesPerPlatform: null };
       const bothAll = { jobsPerPlatform: null, pagesPerPlatform: null };
-      assert(getJobCollectionSafetyForMode('finite-jobs', jobsAll).code === 'unlimited-jobs', 'jobs-only mode blocks Jobs=All');
+      assert(getJobCollectionSafetyForMode('finite-jobs', jobsAll).enabled, 'jobs-only mode accepts finite Auto jobs');
       assert(getJobCollectionSafetyForMode('finite-jobs', pagesAll).enabled, 'jobs-only mode permits Pages=All');
-      assert(getJobCollectionSafetyForMode('finite-pages', pagesAll).code === 'unlimited-pages', 'pages-only mode blocks Pages=All');
+      assert(getJobCollectionSafetyForMode('finite-pages', pagesAll).enabled, 'pages-only mode accepts finite Auto pages');
       assert(getJobCollectionSafetyForMode('finite-pages', jobsAll).enabled, 'pages-only mode permits Jobs=All');
       const both = getJobCollectionSafetyForMode('finite-both', bothAll);
-      assert(both.code === 'unlimited-jobs-and-pages' && both.reason.includes('both are set to All'), 'both-only mode produces an actionable both-All warning');
-      assert(getJobCollectionSafetyForMode('finite-both', jobsAll).code === 'unlimited-jobs', 'both-only mode blocks Jobs=All alone');
-      assert(getJobCollectionSafetyForMode('finite-both', pagesAll).code === 'unlimited-pages', 'both-only mode blocks Pages=All alone');
+      assert(both.enabled, 'both-only mode accepts the finite Auto policy');
+      assert(getJobCollectionSafetyForMode('finite-both', jobsAll).enabled, 'both-only mode accepts Auto jobs');
+      assert(getJobCollectionSafetyForMode('finite-both', pagesAll).enabled, 'both-only mode accepts Auto pages');
       assert(getJobCollectionSafetyForMode('finite-both', { jobsPerPlatform: 40, pagesPerPlatform: 4 }).enabled, 'finite limits enable a finite-only collector');
       const unknown = getJobPlatformSafety('future-unreviewed-board', bothAll);
-      assert(unknown.enabled === false && unknown.code === 'unreviewed-unlimited-collector', 'unknown unlimited collectors are conservatively disabled with a UI warning');
+      assert(unknown.enabled === false && unknown.code === 'unreviewed-auto-collector', 'unknown Auto collectors are conservatively disabled with a UI warning');
+      for (const partialAuto of [jobsAll, pagesAll]) {
+        const partialUnknown = getJobPlatformSafety('future-unreviewed-board', partialAuto);
+        assert(partialUnknown.enabled === false && partialUnknown.code === 'unreviewed-auto-collector',
+          `an unknown collector stays disabled when either dimension uses Auto: ${JSON.stringify(partialAuto)}`);
+      }
       return { modes: 3 };
+    },
+  },
+  {
+    name: 'manual browser page caps preserve Auto aggregate allocation in the durable source cap',
+    run: () => {
+      const fourTasks = Array.from({ length: 4 }, () => ({ options: {} }));
+      const auto = manualPageCapForTasks(fourTasks, { jobsPerPlatform: null, pagesPerPlatform: null });
+      assert(auto?.type === 'auto-pages-per-platform' && auto.limit === JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform,
+        'four generated browser queries report Auto’s aggregate 40-page source budget, not the per-query 10-page allocation');
+      const single = manualPageCapForTasks([{ options: {} }], {});
+      assert(single?.limit === JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery,
+        'a one-query Auto run reports its actually allocated ten-page budget');
+      const explicit = manualPageCapForTasks(fourTasks, { pagesPerPlatform: 7 });
+      assert(explicit?.type === 'pages-per-platform' && explicit.limit === 7,
+        'an explicit page depth remains a per-query configured cap');
+      return { auto: auto.limit, explicit: explicit.limit };
     },
   },
   {
@@ -146,7 +172,7 @@ export default [
     },
   },
   {
-    name: 'isUnlimitedPages / resolvePageCeiling: the seam every walker must use instead of `|| 10`',
+    name: 'Auto resolvers: legacy blank values are finite and browser budgets are shared',
     run: () => {
       assert(isUnlimitedPages({ pagesPerPlatform: '' }) === true, 'blank pagesPerPlatform reads as unlimited');
       assert(isUnlimitedPages({ pagesPerPlatform: null }) === true, 'null pagesPerPlatform reads as unlimited');
@@ -157,6 +183,12 @@ export default [
       assert(resolvePageCeiling({ pagesPerPlatform: '' }) === JOB_COLLECTION_PAGE_CEILING,
         'blank → null resolves to the finite backstop, the exact round-trip a saved hub with an emptied input box goes through');
       assert(resolvePageCeiling({ pagesPerPlatform: 7 }) === 7, 'an explicit page count is its own ceiling');
+      assert(isAutoJobCollection({}) && resolveJobsPerPlatform({}) === JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform,
+        'a saved null configuration resolves to the finite Auto job cap without migration');
+      const budgets = resolveBrowserPageBudgets({}, 13);
+      assert(budgets.length === 13 && budgets.reduce((sum, n) => sum + n, 0) === JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform
+        && budgets[0] === 4 && budgets.slice(1).every(n => n === 3),
+      `Auto allocation must deterministically fit 40 pages across 13 queries, got ${budgets}`);
 
       // resolvePageCeiling must NEVER hand a walker loop something non-finite,
       // for any shape of input a caller might pass it.
@@ -172,11 +204,11 @@ export default [
     },
   },
   {
-    name: 'describeJobCollectionLimits: "All" fields read as human text naming the backstop; explicit/clamped numbers as plain digits',
+    name: 'describeJobCollectionLimits: Auto fields name finite effective budgets; explicit/clamped numbers stay plain',
     run: () => {
       const allDescribed = describeJobCollectionLimits({});
-      assert(allDescribed.jobs === 'all' && allDescribed.pages === `all (backstop ${JOB_COLLECTION_PAGE_CEILING})`,
-        `default breadth must read as all/all with the backstop named, got ${JSON.stringify(allDescribed)}`);
+      assert(allDescribed.jobs === `auto (${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform})` && allDescribed.pages.includes(`${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery}/query`),
+        `default breadth must read as Auto, got ${JSON.stringify(allDescribed)}`);
       const explicitDescribed = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
       assert(explicitDescribed.jobs === '12' && explicitDescribed.pages === '3',
         `explicit numbers render as plain strings with no backstop caveat, got ${JSON.stringify(explicitDescribed)}`);
