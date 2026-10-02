@@ -22,7 +22,6 @@ import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart } from './applicationBundle.js';
 import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
-import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 import { ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import {
@@ -662,22 +661,39 @@ const EDU_LINE_RE = /<div\b[^>]*class=(?:"[^"]*\bedu-line\b[^"]*"|'[^']*\bedu-li
 // glue words together — correct for its other consumers, but it inflates the
 // count by one for every mid-token tag, which is exactly where `.nowrap` and a
 // `data-achievement-id` span sit. Measure the budget with the gate's own rule.
+function resumeTextDocument(markup) {
+  // `new JSDOM()` creates a complete Window realm. These helpers run once per
+  // text-bearing résumé field (and several times per bullet), so retaining
+  // those realms until a later GC made one validation pass consume gigabytes.
+  // A fragment has the same HTML-parser/entity-decoding behavior we need here
+  // without allocating a browsing context. It also keeps this parser-backed:
+  // malformed tags and entities are interpreted by jsdom, never by a regex.
+  const root = JSDOM.fragment(String(markup || ''));
+  const document = root.ownerDocument;
+  // `<br>` and `<hr>` are visible separators even though DOM textContent does
+  // not include a character for them.
+  for (const separator of root.querySelectorAll('br, hr')) {
+    separator.replaceWith(document.createTextNode(' '));
+  }
+  return root;
+}
+
 function resumeBudgetTextFromHtml(markup) {
-  return decodeHtmlEntities(String(markup || '')
-    .replace(/<!--[^]*?-->/g, ' ')
-    .replace(/<(?:br|hr)\b[^>]*\/?\s*>/gi, ' ')
-    .replace(/<[^>]+>/g, '')
+  return resumeTextDocument(markup).textContent
     .replace(/[\s\u00a0]+/g, ' ')
-    .trim());
+    .trim();
 }
 
 function resumeTextFromHtml(markup) {
-  return decodeHtmlEntities(String(markup || '')
-    .replace(/<!--[^]*?-->/g, ' ')
-    .replace(/<(?:br|hr)\b[^>]*\/?\s*>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+  const root = resumeTextDocument(markup);
+  const walker = root.ownerDocument.createTreeWalker(root, 4);
+  const text = [];
+  while (walker.nextNode()) text.push(walker.currentNode.nodeValue);
+  // Separating text nodes retains the old extractor's block and inline-tag
+  // boundary semantics without relying on an incomplete HTML regex.
+  return text.join(' ')
     .replace(/[\s\u00a0]+/g, ' ')
-    .trim());
+    .trim();
 }
 
 // A whole class token, not `\b<class>\b`: hyphens are non-word characters, so

@@ -25,6 +25,7 @@ import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, i
 import { shouldUseNativeRead } from './browser/nativeChromeReader.js';
 import { tryGetStore } from './settings.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
+import { htmlToText } from 'html-to-text';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
@@ -423,10 +424,7 @@ export async function verifySellMonitorLogin(platformId, { signal = null } = {})
 // Cheap tag stripper for the body sniff. Not a full HTML parser — we only
 // need the first few hundred chars of visible text for the sign-in regex.
 function stripTags(html) {
-  return String(html || '')
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+  return htmlToText(String(html || ''), { wordwrap: false, selectors: [] })
     .replace(/\s+/g, ' ')
     .trim();
 }

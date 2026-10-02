@@ -685,7 +685,7 @@ function registerAuthWindowCloser(key, close) {
  * discriminate "login confirmed" from "login never completed". PURE for tests.
  */
 export function buildAuthAttemptRecord(diag = {}) {
-  const title = String(diag.title || '').replace(/\|/g, '\\|').replace(/`/g, "'").slice(0, 120);
+  const title = String(diag.title || '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, "'").slice(0, 120);
   // How long the window stayed open. A window that auto-detected login within a
   // couple of seconds cannot have hosted a typed sign-in, so the duration is the
   // fact that separates "the user logged in here" from "the session was already

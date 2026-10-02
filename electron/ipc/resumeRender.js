@@ -339,10 +339,12 @@ async function renderPdfOnce(html, { signal, document = null } = {}) {
       // Its tab script is synchronous, so selecting cover before the font
       // check guarantees printToPDF sees the cover panel rather than hidden
       // résumé content. No caller-controlled JavaScript is interpolated here.
-      const tabId = document === 'cover' ? 'ic-cover-tab' : 'ic-resume-tab';
       const label = document === 'cover' ? 'cover letter' : 'résumé';
+      const selectDocumentScript = document === 'cover'
+        ? "(function () { var tab = document.getElementById('ic-cover-tab'); if (!tab) throw new Error('cover letter panel is unavailable.'); tab.click(); })()"
+        : "(function () { var tab = document.getElementById('ic-resume-tab'); if (!tab) throw new Error('résumé panel is unavailable.'); tab.click(); })()";
       await withTimeout(
-        wc.executeJavaScript(`(function () { var tab = document.getElementById(${JSON.stringify(tabId)}); if (!tab) throw new Error(${JSON.stringify(`${label} panel is unavailable.`)}); tab.click(); })()`),
+        wc.executeJavaScript(selectDocumentScript),
         RENDER_TIMEOUT_MS,
         `renderPdf: select ${label}`,
         signal,

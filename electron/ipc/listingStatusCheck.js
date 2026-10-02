@@ -36,6 +36,7 @@ import { MARKETPLACE_HUB_SCAN_SCHEMA } from './aiSchemas.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
+import { htmlToText } from 'html-to-text';
 
 // Structural thresholds (absolute by design — not page-baseline candidates):
 //   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
@@ -254,31 +255,18 @@ export function summarizeReadState(html) {
 
 export function stripHtmlForAnalysis(html) {
   if (!html) return '';
-  let s = String(html);
-
-  // Drop noisy structural blocks entirely (including their contents).
-  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ');
-  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
-  s = s.replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ');
-  s = s.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ');
-  s = s.replace(/<nav\b[^>]*>[\s\S]*?<\/nav>/gi, ' ');
-  s = s.replace(/<header\b[^>]*>[\s\S]*?<\/header>/gi, ' ');
-  s = s.replace(/<footer\b[^>]*>[\s\S]*?<\/footer>/gi, ' ');
-  s = s.replace(/<aside\b[^>]*>[\s\S]*?<\/aside>/gi, ' ');
-  // HTML comments.
-  s = s.replace(/<!--[\s\S]*?-->/g, ' ');
-  // Remaining tags → space (preserves word boundaries).
-  s = s.replace(/<[^>]+>/g, ' ');
-  // Decode the handful of common entities that matter for keyword matching.
-  s = s.replace(/&nbsp;/g, ' ')
-       .replace(/&amp;/g, '&')
-       .replace(/&lt;/g, '<')
-       .replace(/&gt;/g, '>')
-       .replace(/&quot;/g, '"')
-       .replace(/&#39;/g, "'");
-  // Collapse whitespace runs.
-  s = s.replace(/\s+/g, ' ').trim();
-  return s;
+  // A parser-backed conversion handles malformed/uppercase tags and entities.
+  // Keep non-content structural regions out of the model input just as the
+  // previous implementation did: marketplace chrome is both token-heavy and
+  // not evidence about the seller's account. `skip` removes each element with
+  // all of its descendants rather than merely removing its tag.
+  return htmlToText(String(html), {
+    wordwrap: false,
+    selectors: ['script', 'style', 'svg', 'noscript', 'nav', 'header', 'footer', 'aside']
+      .map(selector => ({ selector, format: 'skip' })),
+  })
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Derive the platform-level hub status from its per-page source outcomes. */

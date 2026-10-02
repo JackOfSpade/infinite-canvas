@@ -3,6 +3,7 @@
  */
 import { handleSafe, abortNodeTasks, abortNodeTasksAndWait, nodeCancellationError } from './ipcUtils.js';
 import electronPkg from 'electron';
+import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 const { ipcMain } = electronPkg;
 
 /** Pre-compiled once at module level to avoid recompilation on every fetch. */
@@ -76,12 +77,7 @@ export function registerNetworkHandlers() {
       const match = text.match(TITLE_REGEX);
       if (!match) return { title: null };
       let title = match[1].trim();
-      // Simple HTML entity decode for common characters
-      title = title.replace(/&amp;/g, '&')
-                   .replace(/&lt;/g, '<')
-                   .replace(/&gt;/g, '>')
-                   .replace(/&quot;/g, '"')
-                   .replace(/&#39;/g, "'");
+      title = decodeHtmlEntities(title);
       return { title };
     } catch {
       return { title: null };

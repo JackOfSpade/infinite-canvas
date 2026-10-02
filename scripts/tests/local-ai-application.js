@@ -4907,6 +4907,22 @@ export default [
       const midToken = extractResumeEvidence(role('<li>Cut <b data-achievement-id="a1">p99</b>-latency on the district ingest path.</li>'));
       assert(midToken.roles[0].bullets[0].budgetText.includes('p99-latency'),
         'the budget measurement must not insert a space at a mid-token tag boundary');
+      // Text extraction is invoked for every title, metadata field, and
+      // bullet. Keep this finite but deliberately role/bullet-heavy: creating
+      // a full JSDOM Window for each fragment made this routine retain enough
+      // realms to exhaust Node's heap before the suite completed. The parser
+      // must still preserve entity decoding, `<br>` separation, and the
+      // tag-free character-budget spelling on every pass.
+      const stressRole = '<article class="role"><span class="title">Engineer</span><span class="company">Acme</span><span class="role-dates">2020 – 2024</span><p class="role-summary">Reliable systems work.</p><ul class="highlights">'
+        + Array.from({ length: 6 }, (_, index) => `<li>Cut <b>p${index + 90}</b>-latency &amp; preserved service availability.<br>Measured weekly.</li>`).join('')
+        + '</ul></article>';
+      const stressMarkup = `<main class="page">${stressRole.repeat(3)}</main>`;
+      let stressEvidence;
+      for (let pass = 0; pass < 100; pass += 1) stressEvidence = extractResumeEvidence(stressMarkup);
+      assert(stressEvidence.roles.length === 3 && stressEvidence.roles.every(item => item.bullets.length === 6)
+        && stressEvidence.roles[0].bullets[0].text === 'Cut p90 -latency & preserved service availability. Measured weekly.'
+        && stressEvidence.roles[0].bullets[0].budgetText === 'Cut p90-latency & preserved service availability. Measured weekly.',
+      `bounded parser stress keeps visible-text and budget semantics (evidence=${JSON.stringify(stressEvidence.roles[0].bullets[0])})`);
       // Every over-budget bullet is collected, and the printed list is
       // bounded — so what the bound left out has to be stated, or a résumé
       // with ten of them reads as a résumé with eight and the round that
@@ -4918,7 +4934,7 @@ export default [
         `the over-budget bullets this list left out are disclosed as a count, got ${JSON.stringify(ten.detail)}`);
       assert(!/additional observation/u.test(rejected.detail),
         'a list that printed every observation says nothing about omissions');
-      return { enforced: true };
+      return { enforced: true, parserStressPasses: 100 };
     },
   },
   {

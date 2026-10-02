@@ -9,10 +9,14 @@ export const LANE_REASONS = Object.freeze([
 ]);
 
 export function makeChatKey(random = randomBytes) {
-  const bytes = random(CONSTANTS.CHAT_KEY_LENGTH_CHARS);
+  const alphabetLength = CONSTANTS.CHAT_KEY_ALPHABET.length;
+  // The fixed protocol alphabet has a power-of-two size. A bit mask maps the
+  // uniformly random byte to equally sized buckets (unlike arbitrary modulo).
+  if ((alphabetLength & (alphabetLength - 1)) !== 0) throw new RangeError('Chat-key alphabet must have a power-of-two size');
+  const alphabetMask = alphabetLength - 1;
   let key = '';
-  for (let index = 0; index < CONSTANTS.CHAT_KEY_LENGTH_CHARS; index += 1) {
-    key += CONSTANTS.CHAT_KEY_ALPHABET[bytes[index] % CONSTANTS.CHAT_KEY_ALPHABET.length];
+  for (const byte of random(CONSTANTS.CHAT_KEY_LENGTH_CHARS)) {
+    key += CONSTANTS.CHAT_KEY_ALPHABET[byte & alphabetMask];
   }
   return key;
 }

@@ -522,6 +522,36 @@ export default [
     },
   },
 {
+    name: 'stripHtmlForAnalysis: excludes structural chrome while retaining visible hub text and read-state markers',
+    run: () => {
+      // Marketplace HTML is remote and can have inconsistent casing or
+      // malformed visible markup. Structural chrome must never enter the LLM
+      // snippet, while a real message-card marker and visible main text remain.
+      const html = `
+        <HEADER>HEADER_CHROME</HEADER>
+        <NAV>NAV_CHROME</NAV>
+        <ASIDE>ASIDE_CHROME</ASIDE>
+        <svg><text>SVG_CHROME</text></svg>
+        <NoScRiPt>NOSCRIPT_CHROME</NoScRiPt>
+        <style>.hidden::after { content: 'STYLE_CHROME'; }</style>
+        <script>const scriptChrome = 'SCRIPT_CHROME';</script>
+        <MAIN>Visible &amp; account text <DIV class="card__content-read">Buyer question</DIV><P>Malformed visible tail
+        </MAIN>
+        <FOOTER>FOOTER_CHROME</FOOTER>
+      `;
+      const stripped = stripHtmlForAnalysis(annotateReadState(html));
+      for (const chrome of ['HEADER_CHROME', 'NAV_CHROME', 'ASIDE_CHROME', 'SVG_CHROME', 'NOSCRIPT_CHROME', 'STYLE_CHROME', 'SCRIPT_CHROME', 'FOOTER_CHROME']) {
+        assert(!stripped.includes(chrome), `${chrome} is excluded with its structural element`);
+      }
+      assert(stripped.includes('Visible & account text'), 'visible main content is retained and entities are decoded');
+      assert(stripped.includes('Buyer question'), 'visible message text is retained');
+      assert(stripped.includes('Malformed visible tail'), 'malformed visible markup is still converted to text');
+      assert(stripped.includes(READ_STATE_READ_TOKEN), 'read-state marker survives structural filtering');
+      assert(stripped.indexOf(READ_STATE_READ_TOKEN) < stripped.indexOf('Buyer question'), 'read-state marker remains before its message text');
+      return { ok: true };
+    },
+  },
+{
     name: 'buildMarketplaceModuleRollup: surfaces flagged-item evidence + read/unread signal',
     run: () => {
       const nodes = [{

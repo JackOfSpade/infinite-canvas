@@ -50,6 +50,7 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { logger } from '../logger.js';
 import { ledgerById, derivationTooltip } from '../../src/utils/achievementLedger.js';
+import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 // One definition of the `<dt>` casing rule, shared with the structured-résumé
 // renderer: a created row here sits in the same `<dl class="skills">` as the
 // rows that module rendered, so a second spelling of the rule would show up as
@@ -1400,14 +1401,9 @@ function normaliseSkillHistogram(raw) {
 // Response" (already-decoded résumé markup) resolve to the identical key
 // regardless of case, punctuation, or nested tags.
 function skillLabelKey(raw) {
-  return String(raw || '')
+  return decodeHtmlEntities(String(raw || '')
     .replace(/<[^>]*>/g, '')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&#x27;/gi, "'")
-    .replace(/&nbsp;/gi, ' ')
+  )
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim()
@@ -1533,7 +1529,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
       pairs.push({
         key: skillLabelKey(pairMatch[1]),
         ddCloseIndex: pairMatch.index + pairMatch[0].length - '</dd>'.length,
-        blank: /^\s*$/.test(pairMatch[2].replace(/<[^>]*>/g, '')),
+        blank: !new JSDOM(pairMatch[2]).window.document.body.textContent?.trim(),
       });
     }
 

@@ -185,7 +185,9 @@ function stripHtml(html) {
   try {
     return htmlToText(html, { wordwrap: false, selectors: [] });
   } catch {
-    return String(html).replace(/<[^>]*>?/gm, ''); // Fallback regex stripping
+    // Do not attempt a regex parser on malformed external HTML. A missing
+    // snippet is safer than preserving markup in a text-only pipeline.
+    return '';
   }
 }
 
@@ -2758,15 +2760,7 @@ export async function fetchAptDecoComps(query, signal = null, { category } = {})
 // by refreshDiceApiKey() when the server returns 500 — see stealthBrowser.js.
 
 function decodeScriptText(text) {
-  return String(text || '')
-    .replace(/&quot;/g, '"')
-    .replace(/&#34;/g, '"')
-    .replace(/&#x22;/gi, '"')
-    .replace(/&amp;/g, '&')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
+  return decodeHtmlEntities(String(text || ''));
 }
 
 function compactText(value, maxLen = 500) {

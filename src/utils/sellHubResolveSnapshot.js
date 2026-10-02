@@ -3,7 +3,7 @@ function shortId(id) {
 }
 
 function escapeCell(value) {
-  return String(value ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  return String(value ?? '-').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
 // Bounded prose with an explicit truncation marker, and always applied BEFORE

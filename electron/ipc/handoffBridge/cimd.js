@@ -157,7 +157,7 @@ export function createGuardedJsonFetcher({
 
 export function validateClientMetadata(document, clientId) {
   if (!isObject(document) || document.client_id !== clientId) return null;
-  if (!Array.isArray(document.redirect_uris) || document.redirect_uris.length === 0 || !document.redirect_uris.includes(REDIRECT_URI)) return null;
+  if (!Array.isArray(document.redirect_uris) || document.redirect_uris.length === 0 || !document.redirect_uris.some(uri => uri === REDIRECT_URI)) return null;
   if (document.redirect_uris.some(uri => uri !== REDIRECT_URI)) return null;
   if (Object.keys(document).some(key => /^client_secret(?:_|$)/.test(key))) return null;
   const methods = document.token_endpoint_auth_methods_supported;

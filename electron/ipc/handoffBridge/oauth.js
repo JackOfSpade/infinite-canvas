@@ -616,7 +616,7 @@ export function createOAuthServer({
     try {
       const client = await fetchClientMetadata(clientId);
       if (!isObject(client) || client.id !== clientId || client.clientKind !== 'cimd' || !Array.isArray(client.redirectUris)
-        || !client.redirectUris.includes(REDIRECT_URI) || !Array.isArray(client.authMethods)) return null;
+        || !client.redirectUris.some(uri => uri === REDIRECT_URI) || !Array.isArray(client.authMethods)) return null;
       const persisted = copyClient(client);
       clients.set(client.id, persisted);
       return persisted;

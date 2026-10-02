@@ -917,7 +917,7 @@ function buildMissingPreviewRelinkMarkdown() {
   const attempts = Array.isArray(snapshot?.attempts) ? snapshot.attempts : [];
   if (attempts.length === 0) return '';
 
-  const cell = (value) => String(value ?? '—').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+  const cell = (value) => String(value ?? '—').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
   const rows = attempts.slice(-15).reverse().map((attempt) => {
     const ageSeconds = Number.isFinite(attempt.ts)
       ? `${Math.max(0, Math.round((Date.now() - attempt.ts) / 1000))}s ago`
@@ -1578,8 +1578,8 @@ function buildActiveEditableMarkdown(activeEditableText) {
 ## Active Editable At Report Time
 - Editing node: \`${a.editingNodeId || '(unknown)'}\`
 - Diverges from saved data.text: ${a.divergent === true ? '⚠️ YES' : a.divergent === false ? 'no' : 'unknown'}
-- Live DOM text: \`${(a.liveText || '').replace(/`/g, '\\`')}\`
-- Saved data.text: \`${(a.savedText || '').replace(/`/g, '\\`')}\`
+    - Live DOM text: \`${(a.liveText || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\`
+    - Saved data.text: \`${(a.savedText || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\`
 `;
   }
   return activeEditableMarkdown;

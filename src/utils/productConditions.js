@@ -197,7 +197,9 @@ export function stripConditionFromGeneratedTitle(title, selectedCondition = '') 
 
   return cleaned
     .replace(/\s{2,}/g, ' ')
-    .replace(/(?:\s*[-–—|,:/]\s*)+$/g, '')
-    .replace(/^(?:\s*[-–—|,:/]\s*)+/g, '')
+    // A separator run is a character class; avoiding nested repetition keeps
+    // this cleanup linear even for a malformed, very long title.
+    .replace(/[\s\-–—|,:/]+$/g, '')
+    .replace(/^[\s\-–—|,:/]+/g, '')
     .trim();
 }

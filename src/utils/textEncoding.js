@@ -135,7 +135,7 @@ export function stripHtmlToText(s) {
   if (typeof s !== 'string' || !s) return s;
   if (!/<[a-z!/]/i.test(s)) return decodeHtmlEntities(s);
   const withBreaks = s
-    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, ' ')
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/\s*(?:script|style)\s*>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<\s*(?:br|hr)\s*\/?\s*>/gi, '\n')
     .replace(/<\s*\/\s*(?:p|div|li|tr|h[1-6]|ul|ol|table|section|article|blockquote)\s*>/gi, '\n')

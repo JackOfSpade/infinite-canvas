@@ -147,6 +147,7 @@ export function projectReportDiagnostic(value, fallback = 'not recorded', max = 
   const normalized = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))))
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
+    .replace(/\\/g, '\\\\')
     .replace(/`/g, "'")
     .replace(/\|/g, '\\|')
     .trim();

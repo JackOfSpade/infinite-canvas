@@ -299,6 +299,8 @@ const tests = [
     run: () => {
       const key = makeChatKey(() => Buffer.alloc(26, 0));
       assert(key.length === 26 && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]+$/.test(key), 'chat key alphabet and length must be frozen');
+      const upperBucket = makeChatKey(() => Buffer.alloc(26, 255));
+      assert(upperBucket === 'Z'.repeat(26), 'chat-key generation maps the upper byte bucket to the final alphabet symbol without modulo bias');
       const lanes = [createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff() }), createApplicationLane({ ord: 2, jobId: JOB_B, canvasFilePath: PATH_B })];
       holdLane(lanes[1], 'user_hold'); assert(JSON.stringify(remainingCounts(lanes)) === JSON.stringify({ ready: 1, working: 0, needsYou: 1 }), 'queue counts must hide identifiers');
     },

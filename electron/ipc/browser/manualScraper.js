@@ -3589,9 +3589,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               for (const d of candidates) {
                 if (!d || !matchesType(d['@type'])) continue;
                 if (!desc && d[field]) {
-                  const tmp = document.createElement('div');
-                  tmp.innerHTML = d[field];
-                  desc = tmp.innerText?.trim() || '';
+                  const parsed = new DOMParser().parseFromString(String(d[field]), 'text/html');
+                  desc = parsed.body?.innerText?.trim() || '';
                 }
                 // schema.org JobPosting standardizes on `datePosted`; some feeds
                 // emit `datePublished` — accept either.
@@ -3650,9 +3649,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                   node = node[p];
                 }
                 if (!node || typeof node !== 'string') return '';
-                const tmp = document.createElement('div');
-                tmp.innerHTML = node;
-                return tmp.innerText?.trim() || '';
+                const parsed = new DOMParser().parseFromString(node, 'text/html');
+                return parsed.body?.innerText?.trim() || '';
               } catch { return ''; }
             }, cfg.nextDataField).catch(() => '');
             if (text) descriptionCapture = 'next-data-job-description';
@@ -3711,9 +3709,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               .catch(() => false);
             const delayed = await fetchPage.evaluate((sel, jsonLdType, jsonLdField, nextDataField) => {
               const asText = (html) => {
-                const tmp = document.createElement('div');
-                tmp.innerHTML = String(html || '');
-                return tmp.innerText?.trim() || '';
+                const parsed = new DOMParser().parseFromString(String(html || ''), 'text/html');
+                return parsed.body?.innerText?.trim() || '';
               };
               const matchesType = (value) => Array.isArray(value) ? value.includes(jsonLdType) : value === jsonLdType;
               if (jsonLdType && jsonLdField) {
@@ -4574,9 +4571,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               const decodeEntities = (raw) => {
                 let out = String(raw || '');
                 for (let pass = 0; pass < 3; pass++) {
-                  const holder = document.createElement('textarea');
-                  holder.innerHTML = out;
-                  const next = holder.value;
+                  const next = new DOMParser().parseFromString(out, 'text/html').documentElement.textContent || '';
                   if (next === out) break;
                   out = next;
                 }
@@ -4700,9 +4695,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         const decodeEntities = (raw) => {
           let out = String(raw || '');
           for (let pass = 0; pass < 3; pass++) {
-            const holder = document.createElement('textarea');
-            holder.innerHTML = out;
-            const next = holder.value;
+            const next = new DOMParser().parseFromString(out, 'text/html').documentElement.textContent || '';
             if (next === out) break;
             out = next;
           }

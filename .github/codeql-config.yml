@@ -1,0 +1,11 @@
+# The application, including every shipped design-system resource, is analyzed
+# in full. In particular, `Job Application Design System/build/dual-mode-pdf.js`
+# is packaged and evaluated by the Electron PDF renderer, so it must never be
+# excluded here.
+#
+# These paths contain only test fixtures, test stubs, or disposable protocol
+# experiments; they are not shipped application code.
+paths-ignore:
+  - scripts/tests/**
+  - scripts/test-stubs/**
+  - scripts/chatgpt-handoff-spike/**

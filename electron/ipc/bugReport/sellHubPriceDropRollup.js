@@ -1,7 +1,7 @@
 import { reportCorrelationDigest, visitCanvasNodes } from './helpers.js';
 
 function escapeCell(value) {
-  return String(value ?? '—').replace(/\|/g, '\\|').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim();
+  return String(value ?? '—').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`').replace(/\s+/g, ' ').trim();
 }
 
 function formatMoney(value) {

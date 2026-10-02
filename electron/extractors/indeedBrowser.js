@@ -812,7 +812,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     await updateOverlay(page, { srcName: 'Indeed', srcLabel: 'Checking session…', count: 0, status: 'Verifying login…' });
     await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 600)));
     let cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
-    let hasPPID = cookies.some(c => c.name === 'PPID' && c.domain?.includes('indeed.com'));
+    let hasPPID = cookies.some(c => c.name === 'PPID' && (c.domain === 'indeed.com' || c.domain?.endsWith('.indeed.com')));
     let hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
     let hasCfBm = cookies.some(c => c.name === '__cf_bm');
     let cookieNameList = cookies.map(c => c.name);
