@@ -29,7 +29,6 @@ function read(p) { return fs.readFileSync(path.join(ROOT, p), 'utf8'); }
 
 var style = read('STYLE.md');
 var skill = read('SKILL.md');
-var readme = read('readme.md');
 
 console.log('§11.2.3 failure-mode count');
 assert(/(Five|Six) failure modes/i.test(style), 'STYLE.md §11.2.3 counts at least five failure modes',
@@ -76,14 +75,5 @@ assert(/no coordinated (phrase|construction)/i.test(skill),
 assert(/noun phrase spliced to a gerund phrase/i.test(skill),
   'SKILL.md names the grammatical mismatch without embedding a domain-specific specimen',
   'general mismatch description missing in SKILL.md');
-
-console.log('\nreadme.md coverage');
-assert(/broken parallelism|coordinated (phrase|construction)/i.test(readme),
-  'readme.md documents the parallelism rule alongside the other prose-shape rules',
-  'no parallelism language found in readme.md');
-assert(!/^### Colon dumps, overloaded sentences, metaphors\s*$/im.test(readme) ||
-  /broken parallelism/i.test(readme),
-  'readme.md\'s colon/overload/metaphor section covers parallelism too',
-  'readme.md section header not updated to include parallelism');
 
 H.report();

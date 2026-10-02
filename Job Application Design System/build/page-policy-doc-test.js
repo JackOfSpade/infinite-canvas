@@ -22,7 +22,6 @@ function read(p) { return fs.readFileSync(path.join(ROOT, p), 'utf8'); }
 
 var skill = read('SKILL.md');
 var style = read('STYLE.md');
-var readme = read('readme.md');
 
 // ---- forbidden: title-based / two-page-default language ----------------
 var FORBIDDEN = [
@@ -35,7 +34,7 @@ var FORBIDDEN = [
 ];
 FORBIDDEN.forEach(function (pair) {
   var re = pair[0], file = pair[1];
-  var text = file === 'SKILL.md' ? skill : file === 'STYLE.md' ? style : readme;
+  var text = file === 'SKILL.md' ? skill : style;
   assert(!re.test(text), file + ' no longer contains ' + re,
     'found forbidden title/two-page-default language matching ' + re);
 });

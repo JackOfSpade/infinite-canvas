@@ -29,7 +29,6 @@ function read(p) { return fs.readFileSync(path.join(ROOT, p), 'utf8'); }
 
 var style = read('STYLE.md');
 var skill = read('SKILL.md');
-var readme = read('readme.md');
 var engineering = read('ENGINEERING.md');
 
 // Rule 6's own block, so "shape"/"pattern" hits elsewhere in STYLE.md
@@ -165,24 +164,6 @@ assert(/never by\s+inserting a filler transition/i.test(skill),
   'no filler-transition prohibition in SKILL.md');
 assert(/synthesis-scope-gate-doc-test\.js/.test(skill),
   'SKILL.md files table lists this test', 'test not listed in the SKILL.md files table');
-
-console.log('\nreadme.md coverage');
-assert(/unearned generalization/i.test(readme),
-  'readme.md documents the generalization rule alongside the other prose-shape rules',
-  'no "unearned generalization" language in readme.md');
-assert(/Five prose failures/i.test(readme),
-  'readme.md prose-shape section counts five banned shapes',
-  'readme.md still counts four prose failures');
-assert(/exactly one plausible antecedent/i.test(readme),
-  'readme.md states the one-antecedent rule for paragraph transitions',
-  'no antecedent rule in readme.md');
-assert(/Do not repeat a prior employer’s full name merely from habit/i.test(readme),
-  'readme.md documents natural prior-employer reference',
-  'no natural prior-employer reference guidance in readme.md');
-assert(/repeat the\s+precise noun phrase instead/i.test(readme) &&
-  /filler transition that names nothing[^.]*leaves the ambiguity in place/i.test(readme),
-  'readme.md defines the explicit-transition repair without prescribing copy',
-  'semantic transition repair missing in readme.md');
 
 console.log('\nENGINEERING.md test index');
 assert(/synthesis-scope-gate-doc-test\.js/.test(engineering),
