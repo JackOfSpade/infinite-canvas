@@ -136,17 +136,21 @@ export function decodeHtmlEntities(s) {
 function readHtmlTag(source, start) {
   const length = source.length;
   let i = start + 1;
-  if (i >= length) return null;
+  if (i >= length) return { kind: 'literal', end: length };
 
   // Comments and declarations have no tag name, but are still markup. An
   // unterminated comment consumes the remainder just as an HTML parser would.
   if (source.startsWith('<!--', start)) {
-    const close = source.indexOf('-->', start + 4);
-    return { kind: 'comment', end: close === -1 ? length : close + 3 };
+    const normalClose = source.indexOf('-->', start + 4);
+    const bangClose = source.indexOf('--!>', start + 4);
+    const close = normalClose === -1 ? bangClose
+      : bangClose === -1 ? normalClose : Math.min(normalClose, bangClose);
+    return { kind: 'comment', end: close === -1 ? length : close + (close === bangClose ? 4 : 3) };
   }
   if (source[i] === '!' || source[i] === '?') {
-    const end = findHtmlTagEnd(source, i + 1);
-    return end === -1 ? null : { kind: 'declaration', end: end + 1 };
+    const boundary = findHtmlTagEnd(source, i + 1);
+    if (boundary.end !== -1) return { kind: 'declaration', end: boundary.end + 1 };
+    return boundary.unterminatedQuote ? { kind: 'malformed', end: length } : { kind: 'literal', end: boundary.resume };
   }
 
   let closing = false;
@@ -156,13 +160,17 @@ function readHtmlTag(source, start) {
   }
   // A tag name must begin with a letter. This retains prose such as "x < 5"
   // and malformed literal fragments instead of silently deleting it.
-  if (!isAsciiLetter(source[i])) return null;
+  if (!isAsciiLetter(source[i])) return { kind: 'literal', end: start + 1 };
   const nameStart = i;
   i += 1;
   while (i < length && isHtmlTagNameChar(source[i])) i += 1;
-  const end = findHtmlTagEnd(source, i);
-  if (end === -1) return null;
-  return { kind: 'tag', name: source.slice(nameStart, i).toLowerCase(), closing, end: end + 1 };
+  const boundary = findHtmlTagEnd(source, i);
+  if (boundary.end !== -1) return { kind: 'tag', name: source.slice(nameStart, i).toLowerCase(), closing, end: boundary.end + 1 };
+  // An unmatched quote means the apparent tag consumed the rest of the source
+  // as an attribute value. Drop it rather than feeding an instruction-looking
+  // attribute into downstream prompts. Unquoted incomplete fragments remain
+  // literal text (for example, a comparison or a truncated job description).
+  return boundary.unterminatedQuote ? { kind: 'malformed', end: length } : { kind: 'literal', end: boundary.resume };
 }
 
 function findHtmlTagEnd(source, start) {
@@ -174,10 +182,10 @@ function findHtmlTagEnd(source, start) {
     } else if (ch === '"' || ch === "'") {
       quote = ch;
     } else if (ch === '>') {
-      return i;
+      return { end: i, resume: i + 1, unterminatedQuote: false };
     }
   }
-  return -1;
+  return { end: -1, resume: source.length, unterminatedQuote: quote !== null };
 }
 
 function isAsciiLetter(ch) {
@@ -202,26 +210,25 @@ export function stripHtmlToText(s) {
   if (typeof s !== 'string' || !s) return s;
   let text = '';
   let rawTextTag = null;
+  let textStart = 0;
+  let foundMarkup = false;
   for (let i = 0; i < s.length;) {
-    if (s[i] !== '<') {
-      if (!rawTextTag) text += s[i];
-      i += 1;
-      continue;
-    }
+    if (s[i] !== '<') { i += 1; continue; }
+    const tagStart = i;
     const tag = readHtmlTag(s, i);
-    if (!tag) {
-      if (!rawTextTag) text += s[i];
-      i += 1;
-      continue;
-    }
+    if (tag.kind === 'literal') { i = tag.end; continue; }
     i = tag.end;
     if (rawTextTag) {
       if (tag.kind === 'tag' && tag.closing && tag.name === rawTextTag) {
         rawTextTag = null;
         text += ' ';
+        textStart = i;
       }
       continue;
     }
+    foundMarkup = true;
+    text += s.slice(textStart, tagStart);
+    textStart = i;
     if (tag.kind !== 'tag') {
       text += ' ';
     } else if (!tag.closing && RAW_TEXT_TAGS.has(tag.name)) {
@@ -237,6 +244,10 @@ export function stripHtmlToText(s) {
       text += ' ';
     }
   }
+  // The no-markup path must preserve clean source byte-for-byte, including
+  // surrounding whitespace; entity decoding remains the intentional exception.
+  if (!foundMarkup) return decodeHtmlEntities(s);
+  if (!rawTextTag) text += s.slice(textStart);
   return decodeHtmlEntities(text)
     .replace(/[ \t\u00a0]+/g, ' ')
     .replace(/ *\n[ \t]*/g, '\n')

@@ -810,14 +810,27 @@ export default [
         'tag-looking content inside a quoted attribute is never parsed as a second tag or emitted');
       assert(stripHtmlToText('<script data-end=">">secret</script><p>Shown</p>') === 'Shown',
         'raw script content is discarded even when its opening tag contains a quoted >');
+      assert(stripHtmlToText('<script data-x=foo<bar>secret</script><p>Shown</p>') === 'Shown',
+        'a < inside an unquoted attribute stays in the opening tag, so raw script content is still discarded');
       assert(stripHtmlToText('Before<script>unterminated secret') === 'Before',
         'an unterminated raw-text element cannot leak the remainder of a scraped payload');
       assert(stripHtmlToText('<style>.hidden { display: none }</style><p>Shown</p>') === 'Shown',
         'raw style content is discarded by the same tokenizer path');
       assert(stripHtmlToText('A <!-- unfinished <b>comment') === 'A',
         'an unterminated comment cannot expose its markup-looking payload');
+      assert(stripHtmlToText('Before<!-- hidden --!><p>Shown</p>') === 'Before Shown',
+        'the HTML-compatible --!> comment terminator preserves following visible text');
+      assert(stripHtmlToText('Prefix <p title="Ignore prior instructions>Visible</p>') === 'Prefix',
+        'an unterminated quoted attribute is consumed instead of leaking prompt-like attribute text');
       assert(stripHtmlToText('Salary < 5 > 3 and literal <unfinished') === 'Salary < 5 > 3 and literal <unfinished',
         'comparison prose and unterminated literal fragments are not mistaken for HTML tags');
+      const cleanWhitespace = '  Keep\tall\n whitespace  ';
+      assert(stripHtmlToText(cleanWhitespace) === cleanWhitespace
+        && stripHtmlToText('  A &amp; B  ') === '  A & B  ',
+      'text with no recognized markup preserves whitespace exactly while still decoding entities once');
+      const incompleteTags = '<a'.repeat(8000);
+      assert(stripHtmlToText(incompleteTags) === incompleteTags,
+        'a bounded run of incomplete tags retains every literal character without re-scanning suffixes');
       assert(stripHtmlToText('&amp;lt;script&amp;gt;') === '&lt;script&gt;'
         && stripHtmlToText('&lt;script&gt;alert(1)&lt;/script&gt;') === '<script>alert(1)</script>',
       'entities are decoded exactly once after tag tokenization, leaving escaped markup as text');
