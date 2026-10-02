@@ -489,7 +489,7 @@ Binds ephemeral loopback ports: the fake serves `/ready` on the metrics address,
 - **M17** If a Developer-ID-signed cloudflared is ever installed: `codesign -dv --verbose=4` to see Authority/TeamIdentifier and exercise the Tier A row.
 
 ### 13.4 Gates
-`npm test` (never the bare runner), `npx eslint .`, `npm run build:compile`, `npm run test:e2e` (tunnel must stay inert), `npm run test:tunnel` on the Mac, then M1-M16, then the local act pre-push gate.
+`npm test` (never the bare runner), `npx eslint .`, `npm run build:compile`, `npm run test:e2e` (tunnel must stay inert), `npm run test:tunnel` on the Mac, then M1-M16, then the hosted GitHub Actions CI gate.
 
 ---
 

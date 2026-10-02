@@ -20,7 +20,7 @@ Running note for the Phase 1 build (plan: `build-plan.md`, design: `addendum.md`
 
 Per-file baseline: `~/ic-baseline-units.txt`, 49 lines; non-api-ai 75/75, job-diagnostics 269/269, platform-utils 56/56, electron-regressions 40/40, application-handoff-dock 42/42. Node 26.4 locally (CI is Node 22). Nothing running (`pgrep -fl "node server.js|cloudflared"` empty).
 
-G7 (act) at this commit: green in 40 s with the command below (CI workflow only, never `auto-merge-to-main.yml`).
+G7 (hosted GitHub Actions CI) at this commit: green in 40 s. The hosted workflow is the authoritative CI gate; `auto-merge-to-main.yml` remains outside this check.
 
 ## Handoff to ChatGPT Codex (2026-09-27)
 
@@ -28,11 +28,11 @@ Jack stopped the Claude build to hand it to Codex. **Stage B0 was started and st
 
 Checked before the stop (still true at this commit):
 - The frozen files and the anchors the plan cites are unchanged since the planning commit 3773b2e (`nonApiAi.js`, `localAiApplication.js`, `App.jsx`, `SettingsPanel.jsx`, `Sidebar.jsx`, `main.js`, `preload.js`), and `push-seam-prototype/nonApiAi.seam.patch` still applies cleanly to `electron/ipc/nonApiAi.js` (`git apply --check`).
-- Node 22 is not installed locally (Homebrew has node 23, 25, 26); the act run is the only Node 22 check.
+- Node 22 is not installed locally (Homebrew has node 23, 25, 26); hosted GitHub Actions is the Node 22 check.
 
 Practical notes for whoever continues:
 - **Worktrees:** do not put worktrees inside the repo (for example under `.claude/`): `npx eslint .` in the main checkout lints everything that is not in its `globalIgnores`, so a worktree inside the tree gets linted twice. A worktree outside the repo needs `ln -s "<repo>/node_modules" node_modules` (the `.gitignore` pattern `node_modules` without a slash also ignores the symlink) and, for the B0.6 golden generator, the same symlink for `scripts/chatgpt-handoff-spike/node_modules` (git-ignored, so absent in a fresh worktree).
-- **G7 without pushing:** run the CI-only command from clean local `main` at the target SHA or an isolated full clone, **not** a linked detached worktree: act's container cannot resolve the linked worktree `.git` pointer for git-aware tests. The event file may live outside the checkout: `printf '{"ref":"refs/heads/main","after":"<sha>","before":"0000000000000000000000000000000000000000"}' > /tmp/ic-act-event.json && timeout --preserve-status 900 act push -W .github/workflows/ci.yml --eventpath /tmp/ic-act-event.json --container-architecture linux/arm64 --concurrent-jobs 1`. `-W` keeps act away from `auto-merge-to-main.yml`.
+- **G7 hosted CI:** GitHub Actions is authoritative. Push the target SHA or open a pull request and confirm the `ci.yml` run is green; `auto-merge-to-main.yml` is a separate workflow. Before doing so, run the direct local checks listed above from a clean checkout as ordinary developer tests.
 - **Invisible characters:** after writing any file that mentions `•`, `…`, `\u200B`, `\u2028` or similar, scan it for Unicode categories Zs (other than a plain space), Zl, Zp and Cf and re-escape any literal character; then lint.
 - **Starter mask:** the UI analysis shows `STARTER_MASK` as `'•••••-•••••'` (the old 10-character code); round 2 made the chat key 26 symbols with no separator, so the mask must follow the 26-symbol key.
 - **Parallel streams after B0** (disjoint files, at most four worktrees): B1 and B2 in one worktree (B2.1 imports B1.1's `wire.js` and `respond.js`); B3 alone; B4 and B5a together (B5b needs B4.2, B4.4 and B5a.2); B7.1 to B7.4 plus B7.2 can start right after B0 (they depend only on B0.5 and B0.4). Then B5b, B6, B7.5, B8.
