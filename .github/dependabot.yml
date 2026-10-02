@@ -2,21 +2,26 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /Job Application Design System/build
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /scripts/chatgpt-handoff-spike
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /scripts/handoff-bridge-conformance
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
