@@ -1,6 +1,0 @@
-# Local configuration for nektos/act. GitHub Actions never reads this file.
-#
-# The global pre-push hook selects a native container by default on Apple
-# Silicon, with ACT_ARCH=amd64 as an explicit compatibility fallback. Do not
-# force a Node toolcache directory onto PATH here: architecture-specific paths
-# make a native runner fail after actions/setup-node updates PATH.
