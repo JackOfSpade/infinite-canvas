@@ -147,10 +147,14 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   };
 
   return (
-    <Panel position="bottom-center" className="mb-4 flex flex-col items-center gap-2" style={{ zIndex: 200 }}>
-      {/* onPointerDown stop-propagation prevents toolbar clicks from bleeding through to the canvas drawing layer */}
+    <Panel position="bottom-center" className="nodrag nopan mb-4 flex flex-col items-center gap-2" style={{ zIndex: 200 }}>
+      {/* React Flow handles pointer gestures in a native/capture listener, so
+          stopPropagation alone is too late to protect a toolbar click. Keep
+          its nodrag/nopan markers on both the panel and its hit area: buttons
+          remain real pointer targets instead of being consumed as a canvas
+          pan/selection gesture. */}
       <div
-        className="glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center"
+        className="nodrag nopan glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center"
         onPointerDown={e => e.stopPropagation()}
       >
 
@@ -394,6 +398,8 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         <ToolbarTooltip label="Settings" shortcut="?">
           <button
+            type="button"
+            data-testid="canvas-settings-button"
             onClick={onSettingsClick}
             className="p-3 rounded-full transition text-white/30 hover:text-white/70 hover:bg-white/10"
           >

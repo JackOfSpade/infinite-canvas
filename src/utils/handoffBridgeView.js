@@ -10,15 +10,14 @@ import { applicationStageLabel } from './applicationHandoffDock.js';
 
 export const HEALTH_IDS = Object.freeze([
   'off', 'setup', 'alarm', 'fault', 'paused', 'restart', 'tunnel-problem', 'starting',
-  'tunnel-unreachable', 'link-problem', 'needs-you', 'duplicate-serve', 'stalled',
-  'chat-full', 'working', 'saving', 'reached', 'first-call', 'nudge', 'chat-idle', 'ready',
+  'tunnel-unreachable', 'link-problem', 'needs-you', 'duplicate-serve',
+  'response-overdue', 'chat-full', 'working', 'saving', 'reached', 'first-call', 'nudge', 'chat-idle', 'ready',
 ]);
 
 const NOTE_IDS = new Set([
-  'tunnel-problem', 'tunnel-unreachable', 'link-problem', 'needs-you', 'duplicate-serve', 'stalled',
+  'tunnel-problem', 'tunnel-unreachable', 'link-problem', 'needs-you', 'duplicate-serve',
 ]);
 const count = value => Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-const minutes = (at, now) => Math.max(0, Math.floor((now - at) / 60000));
 
 function action(id, kind = 'primary') {
   return { id, label: BRIDGE_ACTION_COPY[id], kind };
@@ -41,6 +40,20 @@ function unreadWhileIdle(status) {
   return status.queue.jobs.filter(job => job?.phase === 'unread').length;
 }
 
+// Exact selected, eligible push routes waiting for a ChatGPT claim. These are
+// opaque correlation ids, so only their count may influence renderer copy.
+function selectedPushReady(status) {
+  return Array.isArray(status?.push?.available) ? count(status.push.available.length) : 0;
+}
+
+// This is a closed, renderer-safe liveness observation for a specific pool
+// worker. It does not explain why the worker stopped calling the bridge.
+function hasAnswerSilentWorker(status) {
+  const pool = status?.chat?.pool;
+  return pool?.active === true && Array.isArray(pool.workers)
+    && pool.workers.some(worker => worker?.state === 'quiet' && worker?.quietReason === 'answer_silent');
+}
+
 function finish(matches, status) {
   const primary = matches[0] || entry('ready', 'ok', BRIDGE_COPY.health.ready, ['new-chat']);
   const notes = [];
@@ -51,13 +64,12 @@ function finish(matches, status) {
     notes.push(item.headline);
   }
   const applications = status?.queue?.applications || {};
-  const stalled = status?.chat?.outstanding?.stalled ? 1 : 0;
   const nudge = matches.some(item => item.id === 'nudge')
-    ? count(applications.ready) + unreadWhileIdle(status) + (status?.config?.scope?.scoring ? count(status?.queue?.scoring?.pending) : 0)
+    ? count(applications.ready) + unreadWhileIdle(status) + selectedPushReady(status)
     : 0;
   return {
     ...primary,
-    badge: count(applications.needsYou) + stalled + nudge,
+    badge: count(applications.needsYou) + nudge,
     notes,
   };
 }
@@ -69,6 +81,7 @@ export function deriveBridgeHealth(status, now = 0) {
   const link = value.link || {};
   const chat = value.chat || {};
   const applications = value.queue?.applications || {};
+  const pushReady = selectedPushReady(value);
   const matches = [];
 
   if (!value.availability?.ok || !value.enabled) {
@@ -139,13 +152,12 @@ export function deriveBridgeHealth(status, now = 0) {
   if (chat.servedTwice) {
     matches.push(entry('duplicate-serve', 'attention', BRIDGE_COPY.health['duplicate-serve'], ['new-chat']));
   }
-  if (chat.outstanding?.stalled) {
-    const age = minutes(chat.outstanding.stalledSince || chat.outstanding.servedAt || now, now);
-    const stageLabel = chat.outstanding.stage ? applicationStageLabel(chat.outstanding.stage) : null;
-    const work = stageLabel && stageLabel !== 'Application handoff'
-      ? `${stageLabel.charAt(0).toLowerCase()}${stageLabel.slice(1)}`
-      : chat.outstanding.task === 'job-scoring' ? 'job scoring' : 'this handoff';
-    matches.push(entry('stalled', 'attention', BRIDGE_DYNAMIC_COPY.stalled(age, work), ['new-chat', 'open-dock']));
+  // An old generic `stalled` flag is not liveness proof. A worker with the
+  // closed `answer_silent` reason is different: it owns a response and has
+  // made no bridge call for the configured five-minute window. That must lead
+  // the panel over aggregate pool activity from sibling workers.
+  if (hasAnswerSilentWorker(value)) {
+    matches.push(entry('response-overdue', 'attention', BRIDGE_COPY.health['response-overdue']));
   }
   if (chat.state === 'full') {
     matches.push(entry('chat-full', 'attention', BRIDGE_COPY.health['chat-full'], ['new-chat']));
@@ -157,7 +169,7 @@ export function deriveBridgeHealth(status, now = 0) {
   // they are waiting for ChatGPT, not being saved: lead with Continue.
   const idleUnread = unreadWhileIdle(value);
   if (idleUnread) {
-    matches.push(entry('nudge', 'nudge', BRIDGE_DYNAMIC_COPY.nudge(count(applications.ready) + idleUnread, chat.ordinal), ['new-chat']));
+    matches.push(entry('nudge', 'nudge', BRIDGE_DYNAMIC_COPY.nudge(count(applications.ready) + idleUnread + pushReady, chat.ordinal), ['new-chat']));
   }
   if (count(applications.working)) {
     matches.push(entry('saving', 'working', BRIDGE_COPY.health.saving));
@@ -168,8 +180,9 @@ export function deriveBridgeHealth(status, now = 0) {
   if (chat.state === 'awaiting-first-call') {
     matches.push(entry('first-call', 'nudge', BRIDGE_DYNAMIC_COPY.firstCall(chat.ordinal), ['copy-starter']));
   }
-  if (count(applications.ready) && (!chat.ordinal || chat.state === 'idle' || chat.state === 'ended')) {
-    matches.push(entry('nudge', 'nudge', BRIDGE_DYNAMIC_COPY.nudge(count(applications.ready), chat.ordinal), ['new-chat']));
+  const readyForChat = count(applications.ready) + pushReady;
+  if (readyForChat && (!chat.ordinal || chat.state === 'idle' || chat.state === 'ended')) {
+    matches.push(entry('nudge', 'nudge', BRIDGE_DYNAMIC_COPY.nudge(readyForChat, chat.ordinal), ['new-chat']));
   }
   if (chat.state === 'idle') {
     matches.push(entry('chat-idle', 'ok', BRIDGE_DYNAMIC_COPY.chatIdle(chat.ordinal, formatAgo(chat.lastCallAt, now)), ['new-chat']));

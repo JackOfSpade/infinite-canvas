@@ -10,7 +10,8 @@ import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
 import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
-import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
+import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLifecycle } from '../jobAnalysisRecoveryLifecycle.js';
+import { hasProviderGatheredBoundary, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
 import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText } from './helpers.js';
@@ -22,7 +23,7 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // import into electron/ from src/ is an established pattern (electron/ipc/
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
-import { JOB_COLLECTION_AUTO_LIMITS } from '../../../src/utils/jobCollectionLimits.js';
+import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
@@ -915,10 +916,15 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
         ? ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} = ${scoringInput} terminal scoring input`
         : ` · recovery ${recoveryNet >= 0 ? '+' : '−'}${Math.abs(recoveryNet)} recorded`;
     const windowFirst = nonnegativeCount(funnel.windowEligible);
+    const platformUnique = nonnegativeCount(funnel.platformUnique);
+    const platformCapped = nonnegativeCount(funnel.platformCapped);
+    const platformStage = platformUnique != null && platformCapped != null
+      ? ` → ${platformUnique} source-unique${Number(funnel.platformCapDropped) > 0 ? ` (platform-cap-dropped ${funnel.platformCapDropped})` : ''} → ${platformCapped} within platform allowance`
+      : '';
     const admissionFlow = windowFirst != null
-      ? `${funnel.raw} raw → ${windowFirst} within automatic window → ${funnel.deduped} deduped → ${funnel.kept} kept`
+      ? `${funnel.raw} raw → ${windowFirst} within automatic window${platformStage} → ${funnel.deduped} cross-platform deduped → ${funnel.kept} kept`
       : `${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept`;
-    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -1057,28 +1063,37 @@ function reportMetadataTimestamp(value) {
 
 function validatedSnapshotReportMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const expectedKeys = [
+  const v1Keys = [
     'schemaVersion', 'createdAt', 'canvasFilePath', 'sourceHubId', 'nodeId', 'runId',
     'gatheredJobCount', 'candidatePoolJobCount', 'descriptionRecoveryJobCount',
   ];
+  const v2Keys = [...v1Keys, 'recoveryMode', 'analysisRevisionId'];
   const keys = Object.keys(value);
-  if (keys.length !== expectedKeys.length || expectedKeys.some(key => !Object.hasOwn(value, key))) return null;
+  const isV1 = value.schemaVersion === 1 && keys.length === v1Keys.length && v1Keys.every(key => Object.hasOwn(value, key));
+  const isV2 = value.schemaVersion === 2 && keys.length === v2Keys.length && v2Keys.every(key => Object.hasOwn(value, key));
+  if (!isV1 && !isV2) return null;
   const owner = safeSnapshotMetadataIdentifier(value.sourceHubId);
   const nodeId = safeSnapshotMetadataIdentifier(value.nodeId);
   const runId = safeSnapshotMetadataIdentifier(value.runId);
+  const analysisRevisionId = safeSnapshotMetadataIdentifier(value.analysisRevisionId);
   const createdAt = reportMetadataTimestamp(value.createdAt);
   const gatheredJobCount = reportMetadataCount(value.gatheredJobCount);
   const candidatePoolJobCount = reportMetadataCount(value.candidatePoolJobCount);
   const descriptionRecoveryJobCount = reportMetadataCount(value.descriptionRecoveryJobCount);
-  if (value.schemaVersion !== 1 || !owner || owner !== nodeId || !runId || !createdAt
+  if (!owner || owner !== nodeId || !createdAt
     || typeof value.canvasFilePath !== 'string' || !value.canvasFilePath.trim() || value.canvasFilePath.length > 4_096
     || gatheredJobCount == null || candidatePoolJobCount == null || descriptionRecoveryJobCount == null
-    || gatheredJobCount > candidatePoolJobCount) return null;
+    || gatheredJobCount > candidatePoolJobCount
+    || (isV1 && !runId)
+    // A null source run is valid only for this exact downstream operation,
+    // whose revision is the durable identity. Do not generalize the exception.
+    || (isV2 && (value.recoveryMode !== 'reanalyze-saved-jobs' || !analysisRevisionId
+      || (value.runId != null && !runId)))) return null;
   let canvasFilePath;
   try { canvasFilePath = path.resolve(value.canvasFilePath); }
   catch { return null; }
   return {
-    schemaVersion: 1,
+    schemaVersion: isV2 ? 2 : 1,
     createdAt,
     canvasFilePath,
     sourceHubId: owner,
@@ -1087,6 +1102,7 @@ function validatedSnapshotReportMetadata(value) {
     gatheredJobCount,
     candidatePoolJobCount,
     descriptionRecoveryJobCount,
+    ...(isV2 ? { recoveryMode: value.recoveryMode, analysisRevisionId } : {}),
   };
 }
 
@@ -1156,10 +1172,170 @@ function firstTopLevelReportMetadata(text) {
   return { metadata };
 }
 
+// Snapshots written before the reportMetadata envelope used this fixed leading
+// layout.  A large one must not be fully parsed by report generation, but its
+// leading operation marker is still useful to avoid accidentally reconciling
+// a downstream saved-job reanalysis with an earlier source-search receipt.
+//
+// This is deliberately *not* an ownership or completion proof.  In
+// particular, JSON permits a later duplicate key outside this bounded prefix,
+// and no counts or job rows are available here.  Accept only the exact legacy
+// writer order so a nested object, a reordered field, or a duplicate inside
+// the observed prefix cannot masquerade as this compatibility hint.
+function firstTopLevelLegacySavedReanalysisHeader(text) {
+  if (typeof text !== 'string') return { error: 'missing' };
+  let index = 0;
+  const skipWhitespace = () => {
+    while (index < text.length && /[ \t\r\n]/.test(text[index])) index++;
+  };
+  const stringEnd = (start) => {
+    if (text[start] !== '"') return -1;
+    for (let cursor = start + 1; cursor < text.length; cursor++) {
+      if (text[cursor] === '\\') { cursor++; continue; }
+      if (text[cursor] === '"') return cursor;
+    }
+    return -1;
+  };
+  const objectEnd = (start) => {
+    if (text[start] !== '{') return -1;
+    let depth = 0;
+    let quoted = false;
+    for (let cursor = start; cursor < text.length; cursor++) {
+      const char = text[cursor];
+      if (quoted) {
+        if (char === '\\') { cursor++; continue; }
+        if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') { quoted = true; continue; }
+      if (char === '{') depth++;
+      else if (char === '}') {
+        depth--;
+        if (depth === 0) return cursor + 1;
+        if (depth < 0) return -1;
+      }
+    }
+    return -1;
+  };
+  const readString = () => {
+    skipWhitespace();
+    const start = index;
+    const end = stringEnd(start);
+    if (end < 0) return null;
+    index = end + 1;
+    try { return JSON.parse(text.slice(start, end + 1)); }
+    catch { return null; }
+  };
+  const readPair = (expectedKey, valueReader) => {
+    const key = readString();
+    if (key !== expectedKey) return { ok: false };
+    skipWhitespace();
+    if (text[index++] !== ':') return { ok: false };
+    const value = valueReader();
+    return value == null ? { ok: false } : { ok: true, value };
+  };
+  const comma = () => {
+    skipWhitespace();
+    return text[index++] === ',';
+  };
+  const readObject = () => {
+    skipWhitespace();
+    const start = index;
+    const end = objectEnd(start);
+    if (end < 0) return null;
+    index = end;
+    try { return { value: JSON.parse(text.slice(start, end)), source: text.slice(start, end) }; }
+    catch { return null; }
+  };
+
+  skipWhitespace();
+  if (text[index++] !== '{') return { error: 'missing' };
+  const version = readPair('version', () => {
+    skipWhitespace();
+    const match = /^(\d{1,4})(?![\d.])/.exec(text.slice(index));
+    if (!match) return null;
+    index += match[1].length;
+    return Number(match[1]);
+  });
+  if (!version.ok || version.value !== 2 || !comma()) return { error: 'not-legacy-order' };
+  const createdAt = readPair('createdAt', readString);
+  if (!createdAt.ok || !comma()) return { error: 'not-legacy-order' };
+  const nodeId = readPair('nodeId', readString);
+  if (!nodeId.ok || !comma()) return { error: 'not-legacy-order' };
+  const sourceHubId = readPair('sourceHubId', readString);
+  if (!sourceHubId.ok || !comma()) return { error: 'not-legacy-order' };
+  const readLegacyRunId = () => {
+    skipWhitespace();
+    if (text.startsWith('null', index)) {
+      index += 4;
+      return { value: null };
+    }
+    const value = readString();
+    return value == null ? null : { value };
+  };
+  const runId = readPair('runId', readLegacyRunId);
+  if (!runId.ok || !comma()) return { error: 'not-legacy-order' };
+  const canvasFilePath = readPair('canvasFilePath', readString);
+  if (!canvasFilePath.ok || !comma()) return { error: 'not-legacy-order' };
+  const snapshotContext = readPair('snapshotContext', readObject);
+  if (!snapshotContext.ok) return { error: 'not-legacy-order' };
+  skipWhitespace();
+  // The observed header must continue with another top-level property. A
+  // metadata-only object/truncated object cannot claim to be a full snapshot.
+  if (text[index++] !== ',') return { error: 'not-legacy-order' };
+  skipWhitespace();
+  if (text[index] !== '"') return { error: 'not-legacy-order' };
+
+  const context = snapshotContext.value.value;
+  // JSON.parse collapses duplicate keys. The legacy context is tiny and its
+  // accepted values cannot contain whitespace, so a whitespace-insensitive
+  // canonical comparison safely rejects duplicate/reordered nested keys.
+  const canonicalContext = snapshotContext.value.source.replace(/[ \t\r\n]/g, '');
+  const contextKeys = context && typeof context === 'object' && !Array.isArray(context)
+    ? Object.keys(context)
+    : [];
+  const safeNodeId = safeSnapshotMetadataIdentifier(nodeId.value);
+  const safeOwner = safeSnapshotMetadataIdentifier(sourceHubId.value);
+  const safeRunId = runId.value.value == null ? null : safeSnapshotMetadataIdentifier(runId.value.value);
+  const revision = safeSnapshotMetadataIdentifier(context?.analysisRevisionId);
+  const timestamp = reportMetadataTimestamp(createdAt.value);
+  if (canonicalContext !== JSON.stringify(context)
+    || contextKeys.length !== 2 || contextKeys[0] !== 'recoveryMode' || contextKeys[1] !== 'analysisRevisionId'
+    || context?.recoveryMode !== 'reanalyze-saved-jobs' || !revision
+    || !safeNodeId || safeNodeId !== safeOwner || !timestamp
+    || (runId.value.value != null && !safeRunId)
+    || typeof canvasFilePath.value !== 'string' || !canvasFilePath.value.trim() || canvasFilePath.value.length > 4_096) {
+    return { error: 'invalid' };
+  }
+  let canvas;
+  try { canvas = path.resolve(canvasFilePath.value); }
+  catch { return { error: 'invalid' }; }
+  return {
+    header: {
+      createdAt: timestamp,
+      canvasFilePath: canvas,
+      sourceHubId: safeOwner,
+      nodeId: safeNodeId,
+      runId: safeRunId,
+      recoveryMode: 'reanalyze-saved-jobs',
+      analysisRevisionId: revision,
+    },
+  };
+}
+
 function snapshotReportMetadataOwnedByHub(metadata, canvasFilePath, ownerId) {
   const expectedOwner = safeSnapshotMetadataIdentifier(ownerId);
   if (!metadata || !expectedOwner || metadata.sourceHubId !== expectedOwner || metadata.nodeId !== expectedOwner) return false;
   try { return metadata.canvasFilePath === path.resolve(canvasFilePath); }
+  catch { return false; }
+}
+
+function legacySavedReanalysisHeaderMatchesScope(header, canvasFilePath, ownerId) {
+  const expectedOwner = safeSnapshotMetadataIdentifier(ownerId);
+  if (!header || !expectedOwner || header.sourceHubId !== expectedOwner || header.nodeId !== expectedOwner
+    || (header.runId != null && !safeSnapshotMetadataIdentifier(header.runId))
+    || header.recoveryMode !== 'reanalyze-saved-jobs' || !header.analysisRevisionId) return false;
+  try { return header.canvasFilePath === path.resolve(canvasFilePath); }
   catch { return false; }
 }
 
@@ -1173,15 +1349,21 @@ function snapshotReportMetadataMatchesPayload(metadata, snapshot) {
   ));
   const rootTimestamp = typeof snapshot.createdAt === 'string' ? Date.parse(snapshot.createdAt) : Number(snapshot.createdAt);
   const rootRunId = safeSnapshotMetadataIdentifier(snapshot.runId);
+  const rootRecoveryMode = snapshot?.snapshotContext?.recoveryMode;
+  const rootRevision = safeSnapshotMetadataIdentifier(
+    snapshot?.analysisRevisionId ?? snapshot?.snapshotContext?.analysisRevisionId,
+  );
   const jobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
   const recoveryJobs = Array.isArray(snapshot.descriptionRecoveryJobs) ? snapshot.descriptionRecoveryJobs.length : 0;
   if (normalizedOwners.some(value => !value || value !== metadata.sourceHubId)
     || rawCanvases.some(value => value != null && typeof value !== 'string')
     || normalizedOwners.length === 0
     || !Number.isSafeInteger(rootTimestamp) || !Number.isFinite(new Date(rootTimestamp).getTime())
-    || rootTimestamp <= 0 || rootRunId !== metadata.runId
+    || rootTimestamp <= 0 || !Object.hasOwn(snapshot, 'runId')
+    || (snapshot.runId != null && !rootRunId) || rootRunId !== metadata.runId
     || reportMetadataCount(snapshot.gatheredJobCount) !== metadata.gatheredJobCount
-    || jobs !== metadata.candidatePoolJobCount || recoveryJobs !== metadata.descriptionRecoveryJobCount) return false;
+    || jobs !== metadata.candidatePoolJobCount || recoveryJobs !== metadata.descriptionRecoveryJobCount
+    || (metadata.schemaVersion === 2 && (rootRecoveryMode !== metadata.recoveryMode || rootRevision !== metadata.analysisRevisionId))) return false;
   try {
     return suppliedCanvases.length > 0
       && suppliedCanvases.every(value => path.resolve(value) === metadata.canvasFilePath)
@@ -1199,6 +1381,8 @@ function sameSnapshotReportMetadata(left, right) {
     && left.sourceHubId === right.sourceHubId
     && left.nodeId === right.nodeId
     && left.runId === right.runId
+    && left.recoveryMode === right.recoveryMode
+    && left.analysisRevisionId === right.analysisRevisionId
     && left.gatheredJobCount === right.gatheredJobCount
     && left.candidatePoolJobCount === right.candidatePoolJobCount
     && left.descriptionRecoveryJobCount === right.descriptionRecoveryJobCount;
@@ -1210,6 +1394,10 @@ function oversizedSnapshotMetadataParse(filePath) {
   const { text, ...readMetadata } = read;
   const envelope = firstTopLevelReportMetadata(text);
   if (envelope.metadata) return { ...readMetadata, metadataOnly: true, reportMetadata: envelope.metadata };
+  const legacyHeader = firstTopLevelLegacySavedReanalysisHeader(text);
+  if (legacyHeader.header) {
+    return { ...readMetadata, legacyReanalysisHeaderOnly: true, legacyReanalysisHeader: legacyHeader.header };
+  }
   // Legacy large snapshots predate the writer envelope. Keep their bounded
   // header hint explicitly unverified for compatibility; it never establishes
   // ownership or completion correlation.
@@ -1334,10 +1522,21 @@ function snapshotOwnedByHub(snapshot, canvasFilePath, ownerId) {
 function ownedSnapshotRecord(canvasFilePath, fallbackDir, ownerId, kind) {
   const paths = getJobAnalysisPaths(canvasFilePath, fallbackDir, ownerId);
   const isCurrent = kind === 'current';
+  const successfulGenerationIndex = kind === 'last-success'
+    ? 0
+    : (() => {
+      const matched = /^last-success-(\d+)$/.exec(String(kind || ''));
+      return matched ? Math.max(0, Number(matched[1]) - 1) : 0;
+    })();
+  const successfulGenerationPath = (paths.lastSuccessJsonPaths || [paths.lastSuccessJsonPath])[successfulGenerationIndex] || null;
   const candidates = [
-    { filePath: isCurrent ? paths.jsonPath : paths.lastSuccessJsonPath, legacy: false },
-    { filePath: isCurrent ? paths.legacyCanvasJsonPath : paths.legacyCanvasLastSuccessJsonPath, legacy: true, canvasHashed: true },
-    { filePath: isCurrent ? paths.legacyJsonPath : paths.legacyLastSuccessJsonPath, legacy: true },
+    { filePath: isCurrent ? paths.jsonPath : successfulGenerationPath, legacy: false },
+    // Compatibility records exist only for the historical generation 1
+    // filename. Numbered generations are always owner-scoped modern files.
+    ...(successfulGenerationIndex === 0 ? [
+      { filePath: isCurrent ? paths.legacyCanvasJsonPath : paths.legacyCanvasLastSuccessJsonPath, legacy: true, canvasHashed: true },
+      { filePath: isCurrent ? paths.legacyJsonPath : paths.legacyLastSuccessJsonPath, legacy: true },
+    ] : []),
   ].filter(candidate => candidate.filePath);
   let observed = false;
   // Unlike the owner-scoped primary, legacy paths are shared by every hub on
@@ -1353,6 +1552,21 @@ function ownedSnapshotRecord(canvasFilePath, fallbackDir, ownerId, kind) {
     if (!parsed.exists) continue;
     observed = true;
     if (!candidate.legacy) primaryObserved = true;
+    if (parsed.legacyReanalysisHeaderOnly) {
+      // This is a compatibility marker, not an envelope: it establishes only
+      // that the bounded leading bytes declare this downstream operation.
+      // Never promote it to the ordinary parseable/owned state, which would
+      // let an uninspected legacy payload participate in count reconciliation.
+      if (legacySavedReanalysisHeaderMatchesScope(parsed.legacyReanalysisHeader, canvasFilePath, ownerId)) {
+        return {
+          state: 'legacy-reanalysis-header', parsed: { ...parsed, legacyOwned: candidate.legacy }, ownerId,
+          observed, primaryObserved, ignored, primaryInvalid, metadataEnvelopeRejected,
+        };
+      }
+      invalid = { ...parsed, legacyReanalysisHeaderScopeMismatch: true };
+      if (!candidate.legacy) primaryInvalid = true;
+      continue;
+    }
     if (!parsed.metadataOnly && (parsed.errorCode || parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value))) {
       // A malformed primary may use an ownership-verified older snapshot, but
       // the final report keeps an explicit warning. Legacy parse failures
@@ -1435,6 +1649,14 @@ function snapshotRecoveryLine(label, record, canvasFilePath, currentNodeIds) {
   if (parsed.metadataEnvelopePayloadMismatch) {
     return `- ${label}: ⚠️ report metadata does not match the parsed snapshot payload${integrityWarnings()}`;
   }
+  if (parsed.legacyReanalysisHeaderScopeMismatch) {
+    return `- ${label}: ⚠️ legacy saved-job reanalysis header does not declare this owner/canvas; oversized payload was not loaded${integrityWarnings()}`;
+  }
+  if (parsed.legacyReanalysisHeaderOnly) {
+    const header = parsed.legacyReanalysisHeader;
+    const sourceRun = header.runId ? `source run \`${snapshotRunIdentifier(header.runId)}\`` : 'source run not recorded (valid only for this declared mode)';
+    return `- ${label}: legacy oversized saved-job reanalysis header (bounded prefix only; payload, counts, ownership, and completion are unverified) · mode \`${header.recoveryMode}\` · revision \`${reportCorrelationDigest(header.analysisRevisionId)}\` · ${sourceRun} · header declares this canvas and current hub${integrityWarnings()}`;
+  }
   if (parsed.errorCode) {
     const envelopeHint = parsed.metadataEnvelopeError
       ? ` · report metadata envelope ${parsed.metadataEnvelopeError}; oversized payload was not loaded`
@@ -1458,7 +1680,10 @@ function snapshotRecoveryLine(label, record, canvasFilePath, currentNodeIds) {
     const jobCountLabel = metadata.candidatePoolJobCount !== metadata.gatheredJobCount
       ? `${metadata.gatheredJobCount} score-ready job(s) · ${metadata.candidatePoolJobCount} retained for preference re-evaluation`
       : `${metadata.gatheredJobCount} score-ready job(s)`;
-    return `- ${label}: ownership-verified report metadata only (bounded prefix) · ${jobCountLabel} · ${metadata.descriptionRecoveryJobCount} recovery-pool job(s) · field audit omitted (metadata-only bounded prefix) · created ${recoveryTimestampLabel(metadata.createdAt)} · run \`${snapshotRunIdentifier(metadata.runId)}\` · ${recoveryHubCorrelation(metadata.sourceHubId, currentNodeIds)} · ${recoveryCanvasCorrelation(metadata.canvasFilePath, canvasFilePath)}${integrityWarnings()}`;
+    const reanalysis = metadata.schemaVersion === 2
+      ? ` · mode \`${metadata.recoveryMode}\` · revision \`${reportCorrelationDigest(metadata.analysisRevisionId)}\``
+      : '';
+    return `- ${label}: ownership-verified report metadata only (bounded prefix) · ${jobCountLabel} · ${metadata.descriptionRecoveryJobCount} recovery-pool job(s) · field audit omitted (metadata-only bounded prefix) · created ${recoveryTimestampLabel(metadata.createdAt)} · run \`${snapshotRunIdentifier(metadata.runId)}\`${reanalysis} · ${recoveryHubCorrelation(metadata.sourceHubId, currentNodeIds)} · ${recoveryCanvasCorrelation(metadata.canvasFilePath, canvasFilePath)}${integrityWarnings()}`;
   }
   if (parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
     return `- ${label}: ⚠️ present but not parseable JSON${integrityWarnings()}`;
@@ -1930,9 +2155,12 @@ function snapshotFactFromRecord(record, canvasFilePath, currentNodeIds) {
     const metadata = parsed.reportMetadata;
     return {
       state: 'parseable',
+      createdAtMs: Date.parse(metadata.createdAt),
       jobs: metadata.gatheredJobCount,
       candidatePoolJobs: metadata.candidatePoolJobCount,
       runId: metadata.runId,
+      recoveryMode: metadata.recoveryMode || null,
+      analysisRevisionId: metadata.analysisRevisionId || null,
       nodeId: metadata.sourceHubId,
       hubPresent: !!currentNodeIds?.has?.(metadata.sourceHubId),
       canvasMatches: recoveryCanvasCorrelation(metadata.canvasFilePath, canvasFilePath) === 'canvas matches this report',
@@ -1943,6 +2171,7 @@ function snapshotFactFromRecord(record, canvasFilePath, currentNodeIds) {
   const snapshot = parsed?.value;
   if (!parsed?.exists || !snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return { state: 'invalid' };
   const candidatePoolJobs = Array.isArray(snapshot.jobs) ? snapshot.jobs.length : null;
+  const createdAtMs = typeof snapshot.createdAt === 'string' ? Date.parse(snapshot.createdAt) : Number(snapshot.createdAt);
   // New preference-aware snapshots intentionally retain every post-history
   // candidate so a later edit can re-evaluate previously filtered listings.
   // `gatheredJobCount` remains the score-ready input count. Older snapshots
@@ -1955,9 +2184,16 @@ function snapshotFactFromRecord(record, canvasFilePath, currentNodeIds) {
     : recoveryCanvasCorrelation(snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath, canvasFilePath) === 'canvas matches this report';
   return {
     state: 'parseable',
+    createdAtMs: Number.isSafeInteger(createdAtMs) && Number.isFinite(new Date(createdAtMs).getTime()) && createdAtMs > 0
+      ? createdAtMs
+      : null,
     jobs,
     candidatePoolJobs,
     runId: recordedRunToken(snapshot.runId),
+    recoveryMode: snapshot?.snapshotContext?.recoveryMode === 'reanalyze-saved-jobs'
+      ? 'reanalyze-saved-jobs'
+      : null,
+    analysisRevisionId: safeSnapshotMetadataIdentifier(snapshot?.analysisRevisionId ?? snapshot?.snapshotContext?.analysisRevisionId),
     nodeId: receiptIdentifier(nodeId, ''),
     hubPresent: !nodeId ? null : !!currentNodeIds?.has?.(nodeId),
     canvasMatches,
@@ -1999,6 +2235,92 @@ function currentSavedSnapshotFact(canvasFilePath, currentNodeIds, expectedGenera
     return records.some(record => record.state === 'invalid') ? { state: 'invalid' } : { state: 'absent' };
   }
   return snapshotFactFromRecord(valid[0], canvasFilePath, currentNodeIds);
+}
+
+// Reanalysis is not a source-search generation. Its source run can be null,
+// so it must never be selected through the terminal receipt's run token.
+function currentSavedReanalysisSnapshotFact(canvasFilePath, currentNodeIds) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return { state: 'unavailable' };
+  const records = ownedSnapshotRecords(canvasFilePath, currentNodeIds, 'current');
+  const matching = records.filter(record => {
+    const metadata = record.parsed?.reportMetadata;
+    return record.state === 'parseable'
+      && metadata?.schemaVersion === 2
+      && metadata.recoveryMode === 'reanalyze-saved-jobs'
+      && !!metadata.analysisRevisionId;
+  });
+  if (matching.length === 1) return snapshotFactFromRecord(matching[0], canvasFilePath, currentNodeIds);
+  if (matching.length > 1) return { state: 'multiple-owned-reanalysis-snapshots', count: matching.length };
+  // Legacy oversized snapshots have no writer-authored envelope. Preserve a
+  // strictly weaker state so completion assessment can keep this downstream
+  // operation apart from a prior source receipt without treating the prefix as
+  // ownership/count/completion proof.
+  const legacy = records.filter(record => record.state === 'legacy-reanalysis-header'
+    && record.parsed?.legacyReanalysisHeader?.recoveryMode === 'reanalyze-saved-jobs');
+  if (legacy.length === 1) {
+    const header = legacy[0].parsed.legacyReanalysisHeader;
+    return {
+      state: 'legacy-header',
+      createdAtMs: Date.parse(header.createdAt),
+      jobs: null,
+      candidatePoolJobs: null,
+      runId: header.runId,
+      recoveryMode: header.recoveryMode,
+      analysisRevisionId: header.analysisRevisionId,
+      nodeId: header.sourceHubId,
+      hubPresent: !!currentNodeIds?.has?.(header.sourceHubId),
+      canvasMatches: recoveryCanvasCorrelation(header.canvasFilePath, canvasFilePath) === 'canvas matches this report',
+      legacyHeaderOnly: true,
+      legacyOwned: !!legacy[0].parsed.legacyOwned,
+    };
+  }
+  if (legacy.length > 1) return { state: 'multiple-legacy-reanalysis-headers', count: legacy.length };
+  return { state: records.some(record => record.state === 'invalid') ? 'invalid' : 'absent' };
+}
+
+function matchingReanalysisCompletionEvidence(canvasFilePath, hubIds, snapshot, telemetry) {
+  if (snapshot?.state !== 'parseable' || snapshot.recoveryMode !== 'reanalyze-saved-jobs'
+    || !snapshot.analysisRevisionId || !snapshot.nodeId || !snapshot.createdAtMs
+    || snapshot.canvasMatches !== true || snapshot.hubPresent !== true) {
+    return { live: null, lifecycle: null, clean: null };
+  }
+  const revision = reportCorrelationDigest(snapshot.analysisRevisionId, null);
+  const sameCounts = (entry) => {
+    const input = nonnegativeCount(entry?.scoringInputCount ?? entry?.selectedForScoring ?? entry?.input);
+    const scored = nonnegativeCount(entry?.scored ?? entry?.scoredJobCount);
+    const placeholders = nonnegativeCount(entry?.placeholders ?? entry?.placeholderCount);
+    const unscored = nonnegativeCount(entry?.unscored ?? entry?.unscoredJobCount);
+    const failedBatches = nonnegativeCount(entry?.failedBatches ?? entry?.failedBatchCount);
+    const candidates = nonnegativeCount(entry?.candidatePoolJobCount);
+    return input != null && scored != null && placeholders != null && unscored != null && failedBatches != null
+      && candidates != null && candidates === snapshot.candidatePoolJobs
+      && input === snapshot.jobs && input === scored
+      && placeholders === 0 && unscored === 0 && failedBatches === 0;
+  };
+  const live = telemetry?.nodeId === snapshot.nodeId
+    && telemetry?.scoring?.recoveryMode === 'reanalyze-saved-jobs'
+    && telemetry?.scoring?.analysisRevisionId === snapshot.analysisRevisionId
+    && telemetry?.scoring?.snapshotCreatedAtMs === snapshot.createdAtMs
+    && Number.isSafeInteger(telemetry?.scoring?.ts) && telemetry.scoring.ts >= snapshot.createdAtMs
+    && sameCounts(telemetry.scoring)
+    ? telemetry.scoring
+    : null;
+  let lifecycle = null;
+  try {
+    const journal = readJobAnalysisRecoveryLifecycle(path.join(app.getPath('userData'), 'job-search', 'analysis-recovery-lifecycle.json'), {
+      canvasFilePath,
+      ownerIds: hubIds,
+    });
+    lifecycle = (journal.events || []).find(event => event.operation === 'reanalysis-score-complete'
+      && event.result === 'completed'
+      && event.recoveryMode === 'reanalyze-saved-jobs'
+      && event.analysisRevision === revision
+      && event.owner === reportCorrelationDigest(snapshot.nodeId, null)
+      && event.snapshotCreatedAtMs === snapshot.createdAtMs
+      && Number.isSafeInteger(event.at) && event.at >= snapshot.createdAtMs
+      && sameCounts(event)) || null;
+  } catch { /* lifecycle evidence is optional */ }
+  return { live, lifecycle, clean: live || lifecycle || null };
 }
 
 // After an app restart, the process-local search/scoring/taxonomy facts are
@@ -2045,10 +2367,182 @@ function formatRecoveryManifest(manifest, currentNodeIds, label, absentNote = ''
     .map(([sourceId, source]) => `\`${receiptIdentifier(sourceId, 'unknown')}\`=${receiptIdentifier(source?.status, 'unknown')}`)
     .join(', ');
   const extraSources = sourceEntries.length > 20 ? ` · ${sourceEntries.length - 20} more` : '';
+  // `stage: searching` can continue through role screening/manual handoffs
+  // after every provider has atomically checkpointed. This is an explicit
+  // receipt only: old all-terminal ledgers lack the post-filter checkpoint a
+  // strict source resolver needs, so never infer readiness from them.
+  const providerGathered = hasProviderGatheredBoundary(run);
+  const providerBoundary = providerGathered
+    ? 'provider collection is durably checkpointed; source Solve can queue behind downstream processing'
+    : 'provider collection is not yet checkpointed; source Solve remains gated';
+  const recoveryDisposition = run.recoveryDisposition === 'manual' ? 'manual' : 'automatic';
+  const recoveryDispositionDetail = recoveryDisposition === 'manual'
+    ? 'explicit user Pause & Save; automatic restart is disabled until Resume'
+    : 'eligible for automatic crash recovery unless a source requires human action';
   return [
     `- ${label}: parseable · stage **${receiptIdentifier(run.stage, 'unknown')}** · run \`${reportOpaqueIdentifier(run.runId)}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${recoveryHubCorrelation(recordedOwner, currentNodeIds)} · canvas is this report`,
     `- Sources (${sourceEntries.length}): ${sourceSummary || '(none recorded)'}${extraSources}`,
+    `- Provider collection boundary: providerGathered=\`${providerGathered ? 'true' : 'false'}\` · ${providerBoundary}.`,
+    `- Recovery disposition: \`${recoveryDisposition}\` · ${recoveryDispositionDetail}.`,
+    ...formatRecoveryQueryResumePlans(run),
   ];
+}
+
+// A report needs enough cursor data to answer "what will restart?" without
+// printing a role query. Keep the listing deliberately small: the page ledger
+// is indexed by generated-query slot, so slot numbers are sufficient to join a
+// restart decision to the durable manifest and reveal neither the query text
+// nor a provider URL. The manifest itself is bounded before parsing, but this
+// independent cap also protects reports made from a hand-edited sidecar with a
+// very large array of tiny query strings.
+const RECOVERY_QUERY_SLOT_INSPECTION_LIMIT = 24;
+const RECOVERY_QUERY_SLOT_RENDER_LIMIT = 12;
+const RECOVERY_PAGE_RESUME_SOURCES = Object.freeze({
+  indeed: 'addressable',
+  ziprecruiter: 'addressable',
+  google: 'one-view',
+  glassdoor: 'replay',
+});
+
+function durableRecoveryPage(value) {
+  const page = Number(value);
+  return Number.isSafeInteger(page) && page >= 1 && page <= 1_000_000 ? page : null;
+}
+
+// This mirrors resolveBrowserPageBudgets without allocating an array sized by
+// an untrusted manifest. It is only used to explain the already-authoritative
+// resume plan: an explicit page limit applies to every query; Auto shares 40
+// pages, front-loading one extra page to earlier slots.
+function recoveryQueryPageBudget(collectionLimits, queryCount, index) {
+  const totalQueries = Math.max(0, Math.floor(Number(queryCount) || 0));
+  if (totalQueries === 0 || index < 0 || index >= totalQueries) return null;
+  const explicit = normalizeJobCollectionLimits(collectionLimits).pagesPerPlatform;
+  if (explicit != null) return explicit;
+  const totalPages = Math.min(
+    JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform,
+    JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery * totalQueries,
+  );
+  const base = Math.floor(totalPages / totalQueries);
+  return base + (index < (totalPages % totalQueries) ? 1 : 0);
+}
+
+function recoveryQuerySlotCursor(source, query, queryIndex, occurrenceCounts, allowLegacyLookup) {
+  const stored = source?.queries && typeof source.queries === 'object' && !Array.isArray(source.queries)
+    ? source.queries
+    : {};
+  const indexed = stored[`#${queryIndex}`];
+  // Manifests written before indexed slots used the query string as a key. It
+  // remains usable only for a non-duplicated query; duplicated strings need a
+  // position to be safe. The text is used strictly as a lookup and never
+  // interpolated into a report.
+  const legacy = allowLegacyLookup && !indexed && typeof query === 'string' && query
+    && occurrenceCounts.get(query) === 1
+    ? stored[query]
+    : null;
+  const record = indexed || legacy;
+  const page = durableRecoveryPage(record?.lastPage);
+  return {
+    page,
+    exact: !!indexed && page != null,
+    legacy: !!legacy && page != null,
+    // A query can be terminal even though its source remains interrupted by a
+    // later sibling. This is stronger than a page cursor: no browser task is
+    // constructed for it, including Glassdoor where an ordinary cursor would
+    // otherwise require replaying its load-more view.
+    terminal: record?.terminal === true,
+  };
+}
+
+function formatRecoveryQueryResumePlans(run) {
+  const inputQueries = Array.isArray(run?.inputs?.queries) ? run.inputs.queries : null;
+  const sources = run?.sources && typeof run.sources === 'object' && !Array.isArray(run.sources)
+    ? run.sources
+    : null;
+  if (!inputQueries || !sources) return [];
+
+  const occurrenceCounts = new Map();
+  for (const query of inputQueries.slice(0, RECOVERY_QUERY_SLOT_INSPECTION_LIMIT)) {
+    if (typeof query === 'string' && query) occurrenceCounts.set(query, (occurrenceCounts.get(query) || 0) + 1);
+  }
+  const inspectCount = Math.min(inputQueries.length, RECOVERY_QUERY_SLOT_INSPECTION_LIMIT);
+  const omittedSlots = Math.max(0, inputQueries.length - inspectCount);
+  // A legacy text key is safe only after proving it is unique among the whole
+  // exact query list. Once the list exceeds the bounded inspection window we
+  // cannot prove that without reading more private strings, so classify it as
+  // missing/restart rather than falsely claiming an exact continuation.
+  const allowLegacyLookup = omittedSlots === 0;
+  const lines = [];
+  for (const [sourceId, strategy] of Object.entries(RECOVERY_PAGE_RESUME_SOURCES)) {
+    const source = sources[sourceId];
+    // A terminal source is already proved complete/skipped and never belongs
+    // in the restart task set. Its status remains in the compact Sources row;
+    // omitting a speculative page plan here avoids implying it will run again.
+    if (!source || source.status === 'done' || source.status === 'skipped') continue;
+    if (inputQueries.length === 0) {
+      lines.push(`- Query resume plan (\`${sourceId}\`): no generated query slots were retained; no page restart plan can be derived.`);
+      continue;
+    }
+    let durableExact = 0;
+    let durableLegacy = 0;
+    let missingRestart = 0;
+    let skippedOneView = 0;
+    let skippedExhausted = 0;
+    let skippedTerminal = 0;
+    let unaddressableReplay = 0;
+    const slotDetails = [];
+    for (let index = 0; index < inspectCount; index += 1) {
+      const cursor = recoveryQuerySlotCursor(source, inputQueries[index], index, occurrenceCounts, allowLegacyLookup);
+      const slot = `q${index + 1}`;
+      if (cursor.exact) durableExact += 1;
+      else if (cursor.legacy) durableLegacy += 1;
+      // Keep this before the cursor/source-strategy branches. A terminal
+      // marker means the exact query is absent from a resume task list; it is
+      // neither an addressable continuation nor a Glassdoor replay.
+      if (cursor.terminal) {
+        skippedTerminal += 1;
+        if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) {
+          slotDetails.push(cursor.page == null
+            ? `${slot}: terminal marker → skip`
+            : `${slot}: durable page ${cursor.page} → skip (terminal)`);
+        }
+        continue;
+      }
+      if (cursor.page == null) {
+        missingRestart += 1;
+        if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: no durable page → restart 1`);
+        continue;
+      }
+      const startPage = cursor.page + 1;
+      if (strategy === 'one-view') {
+        skippedOneView += 1;
+        if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} → skip (one view)`);
+      } else if (strategy === 'replay') {
+        unaddressableReplay += 1;
+        if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} → replay from 1 (load-more view)`);
+      } else {
+        const budget = recoveryQueryPageBudget(run?.inputs?.collectionLimits, inputQueries.length, index);
+        if (budget != null && startPage > budget) {
+          skippedExhausted += 1;
+          if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) slotDetails.push(`${slot}: durable page ${cursor.page} → skip (page budget exhausted)`);
+        } else if (slotDetails.length < RECOVERY_QUERY_SLOT_RENDER_LIMIT) {
+          slotDetails.push(`${slot}: durable page ${cursor.page} → start ${startPage}`);
+        }
+      }
+    }
+    const aggregate = [
+      `durable/exact ${durableExact}`,
+      durableLegacy ? `durable/legacy-compatible ${durableLegacy}` : null,
+      `missing/restart ${missingRestart}`,
+      skippedOneView ? `skipped one-view ${skippedOneView}` : null,
+      skippedExhausted ? `skipped exhausted ${skippedExhausted}` : null,
+      skippedTerminal ? `skipped terminal ${skippedTerminal}` : null,
+      unaddressableReplay ? `unaddressable replay ${unaddressableReplay}` : null,
+    ].filter(Boolean).join(' · ');
+    const omitted = omittedSlots > 0 ? ` · first ${inspectCount} slots inspected; ${omittedSlots} later slot(s) omitted` : '';
+    const shown = slotDetails.length ? ` · ${slotDetails.join('; ')}` : '';
+    lines.push(`- Query resume plan (\`${sourceId}\`): ${aggregate}${omitted}${shown}.`);
+  }
+  return lines;
 }
 
 function formatRecoveryStaging(staging, label, absentNote = '') {
@@ -2277,6 +2771,52 @@ export function buildJobCompletionAssessment(
   const receiptUnscored = nonnegativeCount(receiptScoring?.unscored);
   const receiptFailedBatches = nonnegativeCount(receiptScoring?.failedBatches);
   const receiptCappedForBudget = nonnegativeCount(receiptScoring?.cappedForBudget);
+  // An old source-search receipt can be ambiguous while a current saved-job
+  // reanalysis is still uniquely owner/revision-bound. Keep the operations
+  // independent instead of letting receipt ambiguity hide this snapshot.
+  const reanalysisSnapshot = currentSavedReanalysisSnapshotFact(canvasFilePath, hubIds);
+  const reanalysisEvidence = matchingReanalysisCompletionEvidence(
+    canvasFilePath, hubIds, reanalysisSnapshot, telemetry,
+  );
+  if (reanalysisSnapshot.state === 'legacy-header') {
+    const sourceReceiptFact = !receipt
+      ? 'not retained'
+      : `${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · terminal score-ready ${receiptScoreReady ?? '?'} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}`;
+    return `
+## Job Completion Assessment
+> Separate compatibility assessment for a legacy saved-job reanalysis header. The bounded header is not a payload, ownership, count, or scoring-completion receipt.
+
+- ⚠️ **INDETERMINATE** — an oversized legacy snapshot declares a saved-job reanalysis, but no inspectable count/payload or matching clean scoring completion evidence was retained.
+- Saved-job reanalysis context: the unverified legacy header declares this downstream mode, current hub, canvas, and revision. It declares that source collection/search was not rerun for this operation; this is not independently verified from the payload.
+- Source collection/search: prior terminal receipt remains a separate source-run fact and was not reconciled against this legacy reanalysis header.
+- Prior source terminal receipt: ${sourceReceiptFact}.
+- Reanalysis scoring: not retained as a matching completion receipt; no green completion verdict is available.
+- Saved reanalysis snapshot: legacy bounded header only · ${reanalysisSnapshot.runId ? `source run \`${snapshotRunIdentifier(reanalysisSnapshot.runId)}\`` : 'source run not recorded (valid only for the declared saved-job reanalysis mode)'} · revision \`${reportCorrelationDigest(reanalysisSnapshot.analysisRevisionId)}\` · payload was not inspected.
+`;
+  }
+  if (reanalysisSnapshot.state === 'parseable') {
+    const completion = reanalysisEvidence.clean;
+    const completionInput = nonnegativeCount(completion?.scoringInputCount ?? completion?.selectedForScoring ?? completion?.input);
+    const completionScored = nonnegativeCount(completion?.scoredJobCount ?? completion?.scored);
+    const evidenceSource = reanalysisEvidence.lifecycle ? 'durable lifecycle receipt' : 'live scoring telemetry';
+    const sourceReceiptFact = !receipt
+      ? 'not retained'
+      : `${receiptCompleted ? 'completed' : receipt.terminal?.status || 'unknown'} · terminal score-ready ${receiptScoreReady ?? '?'} · cleanup ${receiptCleanupConfirmed ? 'confirmed' : 'not confirmed'}`;
+    const verdict = completion
+      ? `✅ **SAVED-JOB REANALYSIS SCORING COMPLETE** — ${completionInput} input → ${completionScored} scored with no placeholders, unscored rows, or failed batches.`
+      : '⚠️ **INDETERMINATE** — saved-job reanalysis has a current owned snapshot, but no matching clean scoring completion evidence was retained.';
+    return `
+## Job Completion Assessment
+> Separate reconciliation for a saved-job reanalysis. It is downstream of collection and does not reinterpret an earlier source-search terminal receipt.
+
+- ${verdict}
+- Saved-job reanalysis: owner + canvas + revision agree on the current snapshot${completion ? ` and ${evidenceSource}` : ''} · ${reanalysisSnapshot.jobs ?? '?'} score-ready job(s) · ${reanalysisSnapshot.candidatePoolJobs ?? '?'} candidate job(s). This proves scoring completion only; it does not by itself prove that the renderer applied or saved the scored result.
+- Source collection/search: not rerun for this operation; the prior terminal receipt remains a separate source-run fact.
+- Prior source terminal receipt: ${sourceReceiptFact}.
+- Reanalysis scoring: ${completion ? `input ${completionInput} → scored ${completionScored} · placeholders 0 · unscored 0 · failed batches 0` : 'completion not retained or does not correlate to this saved-job revision'}.
+- Saved reanalysis snapshot: metadata schema v2 · source run ${reanalysisSnapshot.runId ? `\`${snapshotRunIdentifier(reanalysisSnapshot.runId)}\`` : 'not recorded (valid for saved-job reanalysis)'} · revision \`${reportCorrelationDigest(reanalysisSnapshot.analysisRevisionId)}\`${reanalysisSnapshot.metadataOnly ? ' · verified from bounded ownership/count metadata only; payload not inspected' : ''}.
+`;
+  }
   const receiptInitialKept = nonnegativeCount(receipt?.funnel?.kept);
   const receiptRecovery = signedCount(receipt?.recovery?.mergeNet);
   const receiptRecoveryExpectedInput = receiptInitialKept != null && receiptRecovery != null
@@ -4003,13 +4543,21 @@ export function buildJobRecoverySnapshot(canvasFilePath, currentNodeIds = new Se
 
   lines.push(...ownedSnapshotLines('Current saved scrape', canvasFilePath, currentNodeIds, currentJobHubIds, 'current'));
   lines.push(...ownedSnapshotLines('Last successful saved scrape', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success'));
+  lines.push(...ownedSnapshotLines('Successful saved scrape generation 2', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success-2'));
+  lines.push(...ownedSnapshotLines('Successful saved scrape generation 3 (oldest)', canvasFilePath, currentNodeIds, currentJobHubIds, 'last-success-3'));
   lines.push(...descriptionRecoveryCheckpointLines(canvasFilePath, currentNodeIds));
+  const lifecycleMarkdown = formatJobAnalysisRecoveryLifecycleMarkdown(
+    readJobAnalysisRecoveryLifecycle(path.join(app.getPath('userData'), 'job-search', 'analysis-recovery-lifecycle.json'), {
+      canvasFilePath,
+      ownerIds: currentJobHubIds,
+    }),
+  );
   return `
 ## Job Recovery Diagnostics
 > Durable crash/quit-recovery and terminal-run metadata read from the saved canvas directory. Job contents, search inputs, URLs, profile data, and AI prompt/response text are never included. A clean canvas state after restart is expected; the terminal receipt is the durable completion fact, while the manifest/staging sidecars determine whether recovery is possible.
 
 ${lines.join('\n')}
-`;
+${lifecycleMarkdown}`;
 }
 
 /**
@@ -4121,11 +4669,13 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   try { lifecycleSnapshot = getNonApiAiHandoffLifecycleSnapshot({ windowId: reportWindowId }); }
   catch { return ''; }
   const lifecycles = lifecycleSnapshot?.lifecycles;
-  if (!Array.isArray(lifecycles) || lifecycles.length === 0) return '';
+  const aggregate = lifecycleSnapshot?.aggregate && typeof lifecycleSnapshot.aggregate === 'object'
+    ? lifecycleSnapshot.aggregate
+    : {};
+  const aggregateIssued = boardDiagnosticNumber(aggregate.issued) ?? 0;
+  if (!Array.isArray(lifecycles) || (lifecycles.length === 0 && aggregateIssued === 0)) return '';
 
   const currentIds = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
-  const settled = lifecycles.filter(item => boardDiagnosticValue(item, 'settledAt')).length;
-  const pending = lifecycles.length - settled;
   // Request and node IDs are correlation tokens, not user-visible diagnostic
   // content. They can be custom/imported values in test and migration seams,
   // so keep labels collision-safe without copying the opaque token itself.
@@ -4137,15 +4687,26 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   const lifecycleCode = (value, fallback) => (
     typeof value === 'string' && /^[A-Za-z0-9:_-]{1,80}$/.test(value) ? value : fallback
   );
-  const total = boardDiagnosticNumber(lifecycleSnapshot?.total) ?? lifecycles.length;
-  const omitted = boardDiagnosticNumber(lifecycleSnapshot?.omitted) ?? 0;
   const limit = boardDiagnosticNumber(lifecycleSnapshot?.limit) ?? lifecycles.length;
   const sourceLimit = boardDiagnosticNumber(lifecycleSnapshot?.sourceLimit) ?? limit;
-  const retention = omitted > 0
-    ? ` · ${omitted} older request(s) omitted from this report (newest ${limit} of ${total} process receipts shown)`
-    : ` · newest ${limit} of ${total} process receipt(s) shown`;
+  const sourceRetained = boardDiagnosticNumber(lifecycleSnapshot?.sourceRetained)
+    ?? boardDiagnosticNumber(lifecycleSnapshot?.total)
+    ?? lifecycles.length;
+  const sourceEvicted = boardDiagnosticNumber(lifecycleSnapshot?.sourceEvicted) ?? 0;
+  const detailedRetained = boardDiagnosticNumber(lifecycleSnapshot?.detailedRetained) ?? sourceRetained;
+  const detailedOmitted = boardDiagnosticNumber(lifecycleSnapshot?.detailedOmitted)
+    ?? Math.max(0, detailedRetained - lifecycles.length);
+  const activeRecovered = boardDiagnosticNumber(lifecycleSnapshot?.activeRecoveredFromSourceEviction) ?? 0;
+  const aggregateNumber = (key) => boardDiagnosticNumber(aggregate[key]) ?? 0;
+  const bridgeRejected = aggregateNumber('bridgeRejectionAttempts');
+  const bridgeRequestsRejected = aggregateNumber('requestsEverBridgeRejected');
+  const bridgeRecovered = aggregateNumber('acceptedAfterBridgeRejection');
+  const bridgePending = aggregateNumber('pendingAfterBridgeRejection');
+  const bridgeOtherSettled = Math.max(0, bridgeRequestsRejected - bridgeRecovered - bridgePending);
   const lines = [
-    `- Retained: ${lifecycles.length} request(s) · ${settled} settled · ${pending} pending${retention} · lifecycle source keeps newest ${sourceLimit} request(s) per process`,
+    `- Detailed receipts: ${lifecycles.length} shown · ${detailedRetained} retained for this report window · ${detailedOmitted} retained receipt(s) omitted by the ${limit}-row report cap · lifecycle source currently retains ${sourceRetained}/${sourceLimit} row(s) · ${sourceEvicted} earlier receipt(s) evicted by the source cap${activeRecovered ? ` · ${activeRecovered} live receipt(s) restored from the active registry` : ''}.`,
+    `- Cumulative registry (this process window): ${aggregateIssued} issued · ${aggregateNumber('settled')} settled (accepted ${aggregateNumber('accepted')} · cancelled ${aggregateNumber('cancelled')} · stepped back ${aggregateNumber('steppedBack')} · failed ${aggregateNumber('failed')}) · ${aggregateNumber('rejectionAttempts')} rejection attempt(s) across ${aggregateNumber('requestsEverRejected')} request(s) · ${aggregateNumber('acceptedAfterRejection')} rejected request(s) later accepted · ${aggregateNumber('pendingAfterRejection')} still pending after rejection.`,
+    `- Bridge-route reconciliation: ${bridgeRejected} bridge validation rejection attempt(s) across ${bridgeRequestsRejected} request(s) · ${bridgeRecovered} bridge-rejected request(s) later accepted on that same lifecycle · ${bridgePending} still pending after a bridge rejection${bridgeOtherSettled ? ` · ${bridgeOtherSettled} settled without later acceptance` : ''}. This is route-specific registry evidence; Handoff Bridge Diagnostics' submit counters are transport-wide and are not paired to these rows.`,
   ];
   const failureSummary = (item) => {
     const failures = Array.isArray(item?.failures) ? item.failures.slice(-8) : [];
@@ -4254,6 +4815,15 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const origin = channel !== 'not retained'
       ? ` · IPC \`${channel}\``
       : '';
+    // A Job Search dock can offer its non-destructive Pause & save action only
+    // when this handoff retained its exact workflow run scope. Report that
+    // boolean fact, never the opaque run identifier itself, so a report can
+    // distinguish a missing IPC propagation from a stale/mismatched owner.
+    const workflowRunScope = typeof boardDiagnosticValue(item, 'runId') === 'string'
+      && boardDiagnosticValue(item, 'runId').trim()
+      ? 'present'
+      : 'missing';
+    const workflowScope = ` · workflow run scope ${workflowRunScope}`;
     const boardProgress = manualAiBoardProgressForNode(nodes, nodeId);
     const orchestration = boardProgress ? ` · ${boardProgress}` : '';
     // Absolute UTC clock, not just an elapsed span. Every other field here is
@@ -4263,7 +4833,10 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const issuedClock = issuedAt
       ? ` · issued ${new Date(issuedAt).toISOString()}`
       : '';
-    const deliveries = `delivered ${Math.max(0, Number(boardDiagnosticValue(item, 'deliveries')) || 0)} time(s)`;
+    // `deliveries` is renderer dispatch count, not evidence of an MCP GET.
+    // Name the route so a report cannot mistake "shown in the local dock" for
+    // "claimed by ChatGPT" (the bridge section owns that latter evidence).
+    const deliveries = `sent to local dock ${Math.max(0, Number(boardDiagnosticValue(item, 'deliveries')) || 0)} time(s)`;
     const retries = [];
     const codeMismatches = Number(boardDiagnosticValue(item, 'codeMismatches')) || 0;
     const totalRejected = Number(boardDiagnosticValue(item, 'rejected')) || 0;
@@ -4281,7 +4854,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     // The visible handoff code is derived from the private prompt. Exporting
     // it would give a report reader a small offline membership oracle for
     // guessed prompt contents; request/batch labels already provide correlation.
-    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${poolProgress}${planSize}${origin}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${failureSummary(item)}${accepted}${terminal}${orchestration}`);
+    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${poolProgress}${planSize}${origin}${workflowScope}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${failureSummary(item)}${accepted}${terminal}${orchestration}`);
   }
 
   // Detect and flag duplicate response body collisions across accepted handoffs
@@ -4315,8 +4888,9 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   // receipts that record manual-handoff issue order are easy to locate.
   return `
 ## Non-API AI Handoff Lifecycle
-> Redacted delivery/validation receipts for manual job-AI copy/paste, in the order
-> the prompts were ISSUED. Prompts, pasted responses, attachment paths, and
+> Redacted registry/dock validation receipts for job-AI handoffs, in the order
+> the prompts were ISSUED. "Sent to local dock" is renderer delivery only, not
+> an MCP claim or tool call. Prompts, pasted responses, attachment paths, and
 > validation-error text are never exported. Prompt-derived handoff codes are
 > withheld; response receipt tags are process-keyed and cannot be reproduced
 > outside this app process.
@@ -4989,6 +5563,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const relevanceStage = s.relevanceDropped > 0
       ? ` → title-relevance-dropped ${s.relevanceDropped}`
       : '';
+    const countryScopeStage = Number(s.countryScopeDropped) > 0
+      ? ` → confirmed-cross-border-dropped ${s.countryScopeDropped}`
+      : '';
     const descriptionDeferred = Number(s.descriptionEvidenceDropped?.total) || 0;
     const finalDedupDropped = Number(s.finalDedupDropped) || 0;
     const finalDedupStage = finalDedupDropped > 0
@@ -5005,13 +5582,32 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       ? ` → role-screen-dropped: ${s.roleDropped}`
       : '';
     const windowFirst = nonnegativeCount(s.windowEligible);
+    const platformDuplicateDropped = Math.max(0, Number(s.platformDuplicateDropped) || 0);
+    const platformCapDropped = Math.max(0, Number(s.platformCapDropped) || 0);
+    const platformUnique = nonnegativeCount(s.platformUnique);
+    const platformCapped = nonnegativeCount(s.platformCapped);
+    const platformAdmission = platformUnique != null && platformCapped != null
+      ? `${platformDuplicateDropped > 0 ? ` → same-platform-duplicate-dropped: ${platformDuplicateDropped}` : ''}` +
+        ` → source-unique: ${platformUnique}` +
+        `${platformCapDropped > 0 ? ` → platform-cap-dropped: ${platformCapDropped}` : ''}` +
+        ` → within platform allowance: ${platformCapped}`
+      : '';
     const admissionFlow = windowFirst != null
-      ? ` → within automatic window: ${windowFirst} (age-dropped: ${s.ageDropped}) → after dedup: ${s.deduped}`
+      ? ` → within automatic window: ${windowFirst} (age-dropped: ${s.ageDropped})${platformAdmission} → after cross-platform dedup: ${s.deduped}`
       : ` → after dedup: ${s.deduped} → age-dropped: ${s.ageDropped}`;
     lines.push(
-      `- Found (raw): ${s.raw}${relevanceStage}${admissionFlow}${roleStage} → ` +
+      `- Found (raw): ${s.raw}${relevanceStage}${countryScopeStage}${admissionFlow}${roleStage} → ` +
       `history-dropped: ${s.historyDropped}${evidenceStage}`,
     );
+    if (Number(s.countryScopeDropped) > 0) {
+      const bySource = s.countryScopeDroppedBySource && typeof s.countryScopeDroppedBySource === 'object'
+        ? Object.entries(s.countryScopeDroppedBySource)
+          .filter(([, count]) => Number.isFinite(Number(count)) && Number(count) > 0)
+          .map(([sourceId, count]) => `${sourceId}=${Math.floor(Number(count))}`)
+          .join(', ')
+        : '';
+      lines.push(`- Country-scope admission: excluded ${s.countryScopeDropped} listing(s) with confirmed foreign-country evidence before scoring${bySource ? ` (${bySource})` : ''}; remote, unclear, and no-location listings were retained.`);
+    }
     if (Number(s.roleDropped) > 0) {
       const bySource = s.roleDroppedBySource && typeof s.roleDroppedBySource === 'object'
         ? Object.entries(s.roleDroppedBySource).map(([id, n]) => `${id} ${n}`).join(', ')
@@ -5455,6 +6051,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           flag = ' ⚠️ (two consecutive pages returned only rows already gathered, so the pager stopped advancing. Whether the board ran out or re-served a page is NOT established — later results may be missing.)';
         } else if (v.stopReason === 'data-stop') {
           flag = ' ⚠️ (the per-page stop hook ended the walk without naming a reason; the shipped hook always names one, so coverage here is unknown.)';
+        } else if (v.stopReason === 'query-retrieval-budget') {
+          flag = ' ℹ️ (a bounded retrieval budget ended at least one generated query. This is not proof that the platform-wide Jobs-per-platform allowance fired; the final platform cap is reported only when its post-window aggregate overflowed.)';
         }
         // Dice/API pagination can fan a source out into several independent
         // query walks. Its `pagesWalked` is their SUM, not one query's deepest

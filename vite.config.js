@@ -26,6 +26,14 @@ export default defineConfig({
       {
         entry: 'electron/main.js',
         vite: {
+          // The CommonJS main bundle does not have a native import.meta. Vite's
+          // dynamic-import preload helper contains an optional import.meta
+          // branch even though that branch is disabled for CJS output; define
+          // it away in this build only so Rollup does not emit EMPTY_IMPORT_META
+          // diagnostics. Renderer/preload builds keep their normal semantics.
+          define: {
+            'import.meta': '{}',
+          },
           build: {
             // Main-process dependencies are intentionally bundled into a few
             // desktop-only chunks; they are not downloaded by the renderer.
@@ -50,6 +58,19 @@ export default defineConfig({
                 // and refuses to run require(). .cjs bypasses that entirely.
                 entryFileNames: '[name].cjs',
                 chunkFileNames: '[name].cjs',
+                // Keep heavyweight, independently-used IPC surfaces out of
+                // the startup entry. CJS chunks are loaded with relative
+                // require() calls by Rollup, and electron-builder ships every
+                // file in dist-electron, so this preserves the runtime
+                // contract while making the entry auditable.
+                manualChunks(id) {
+                  const normalized = id.replaceAll('\\', '/');
+                  if (normalized.endsWith('/electron/ipc/jobs.js')) return 'jobs';
+                  if (normalized.endsWith('/electron/ipc/localAiApplication.js')) return 'local-application';
+                  if (normalized.endsWith('/electron/ipc/bugReport/jobsSnapshot.js')) return 'bug-report-jobs';
+                  if (normalized.endsWith('/electron/ipc/browser/manualScraper.js')) return 'manual-scraper';
+                  return undefined;
+                },
               },
               external: [
                 'puppeteer-core',

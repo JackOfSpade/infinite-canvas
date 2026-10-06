@@ -38,6 +38,7 @@ import job_resume_ingestion from './tests/job-resume-ingestion.js';
 import non_api_ai from './tests/non-api-ai.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
 import job_run_staging from './tests/job-run-staging.js';
+import job_autoresume_recovery from './tests/job-autoresume-recovery.js';
 import job_api_probe from './tests/job-api-probe.js';
 import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
 import packaging_integrity from './tests/packaging-integrity.js';
@@ -66,6 +67,8 @@ import handoff_bridge_source_scan from './tests/handoff-bridge-source-scan.js';
 import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
 import handoff_bridge_render from './tests/handoff-bridge-render.js';
 import issue_reporter from './tests/issue-reporter.js';
+import network_rolling_scheduler from './tests/network-rolling-scheduler.js';
+import handoff_scheduler from './tests/handoff-scheduler.js';
 
 // Keep the file name beside its group so omissions and stale registrations
 // fail before a green test run gives a false signal.
@@ -109,6 +112,7 @@ const testGroups = [
   ['non-api-ai.js', non_api_ai],
   ['job-workflow-documentation.js', job_workflow_documentation],
   ['job-run-staging.js', job_run_staging],
+  ['job-autoresume-recovery.js', job_autoresume_recovery],
   ['job-api-probe.js', job_api_probe],
   ['application-pdf-reconcile.js', application_pdf_reconcile],
   ['packaging-integrity.js', packaging_integrity],
@@ -137,6 +141,8 @@ const testGroups = [
   ['handoff-bridge-ui.js', handoff_bridge_ui],
   ['handoff-bridge-render.js', handoff_bridge_render],
   ['issue-reporter.js', issue_reporter],
+  ['network-rolling-scheduler.js', network_rolling_scheduler],
+  ['handoff-scheduler.js', handoff_scheduler],
 ];
 
 function validateTestRegistry(groups) {

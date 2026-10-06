@@ -81,6 +81,7 @@ export function JobBoardSearchSelection({
   onCancel = null,
   recoveryError = null,
   onRetry = null,
+  recoveryActionLabel = 'Retry recovery',
   recoveryCanCancel = true,
   onRuntimeSnapshot = null,
 }) {
@@ -336,7 +337,7 @@ export function JobBoardSearchSelection({
             className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-indigo-500/25 bg-indigo-500/20 px-2 py-1.5 text-[10px] font-medium text-indigo-100 transition-colors hover:bg-indigo-500/30 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Search size={11} />
-            Retry recovery
+            {recoveryActionLabel}
           </button>
           <button
             type="button"

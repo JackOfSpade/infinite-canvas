@@ -384,6 +384,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // for the same job, and whichever response lands last would win the
   // setLocalApplication call even if it was the stale one.
   const localStatusCheckInFlightRef = useRef(new Set());
+  // A persisted render-retry state is normally idle. Probe it once after a
+  // restart so its durable revision fence can replace stale card state, then
+  // stop again rather than turning an app-fix block into a polling loop.
+  const localRenderRetryProbeRef = useRef(new Set());
   // jobId → already asked main to open this saved bundle's output folder.
   // A poll tick keeps re-observing 'saved' long after the one save that
   // earned it, so this guards the one-time reveal the same way the fallback
@@ -398,7 +402,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // a remounted card from accidentally enqueueing a second application.
   const queuedApplicationRun = moduleRunSnapshot.queued.find((entry) => entry.nodeId === id && entry.kind === 'application');
   // Application handoffs queue in their own 'application' lane (see
-  // generateApplication) so 10 concurrent Generate clicks never wait behind an
+  // generateApplication) so a full-capacity set of Generate clicks never waits behind an
   // unrelated marketplace run. moduleRunSnapshot.active prefers the shared
   // 'global' lane whenever it is occupied, so it is not reliably this card's
   // active entry; activeRuns carries one active entry per lane instead.
@@ -574,15 +578,21 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         return;
       }
       if (local.status === 'render-retry-required') {
+        const retryReproducesFailure = local.retryReproducesFailure === true || local.localJob?.retryReproducesFailure === true;
         if (isMountedRef.current) {
           setLocalApplication((current) => current?.id === jobId ? {
             ...current, ...local.localJob,
             status: 'render-retry-required',
-            message: local.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.',
+            retryReproducesFailure,
+            message: local.renderMessage || (retryReproducesFailure
+              ? 'This PDF comparison needs an application update; the AI draft does not need another rewrite.'
+              : 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.'),
           } : current);
           addToast({
-            title: 'Local AI Layout Check Unavailable',
-            description: 'No bundle was saved and no AI revision was requested. Retry when PDF rendering and web fonts are available.',
+            title: retryReproducesFailure ? 'Local AI Needs an App Fix' : 'Local AI Layout Check Unavailable',
+            description: retryReproducesFailure
+              ? 'No bundle was saved. This result is waiting for an application update; do not retry or rewrite the AI draft.'
+              : 'No bundle was saved and no AI revision was requested. Retry when PDF rendering and web fonts are available.',
             type: 'error',
           });
         }
@@ -743,10 +753,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // once the result validates.
   useEffect(() => {
     const jobId = localApplication?.id;
-    if (!jobId || !window.electronAPI?.getLocalApplicationStatus || LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplication.status)) return undefined;
+    const needsRenderRetryProbe = localApplication?.status === 'render-retry-required'
+      && !localRenderRetryProbeRef.current.has(jobId);
+    if (!jobId || !window.electronAPI?.getLocalApplicationStatus
+      || (LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplication.status) && !needsRenderRetryProbe)) return undefined;
     const canvasFilePath = localApplication?.canvasFilePath
       || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
     let cancelled = false;
+    let interval = null;
     const check = async () => {
       // check() had no in-flight guard of its own (only the IMPORT step does,
       // via localImportingRef): a slow getLocalApplicationStatus round trip
@@ -771,6 +785,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           return;
         }
         if (!result?.success || !result.localJob) throw new Error(result?.error || 'Could not check Local AI job status.');
+        // A restart probe ends only after a valid durable status response.
+        // Transient IPC/filesystem failures stay on this bounded interval;
+        // this successful read triggers state adoption and the next effect
+        // observes the ref, returning to idle rather than polling forever.
+        if (needsRenderRetryProbe) {
+          localRenderRetryProbeRef.current.add(jobId);
+          // State can be byte-for-byte unchanged after a restart probe, so do
+          // not depend on a React effect rerun to stop this interval.
+          if (interval !== null) {
+            window.clearInterval(interval);
+            interval = null;
+          }
+        }
         localStatusErrorStreakRef.current.delete(jobId);
         const next = result.localJob;
         if (next.status === 'importing') {
@@ -869,8 +896,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
     };
     check();
-    const interval = window.setInterval(check, 2500);
-    return () => { cancelled = true; window.clearInterval(interval); };
+    interval = window.setInterval(check, 2500);
+    return () => { cancelled = true; if (interval !== null) window.clearInterval(interval); };
   }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
@@ -1474,7 +1501,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               Repair bundle
             </button>
           )}
-          {localApplication.status === 'render-retry-required' && (
+          {localApplication.status === 'render-retry-required' && !localApplication.retryReproducesFailure && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -1485,6 +1512,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             >
               Retry layout check
             </button>
+          )}
+          {localApplication.status === 'render-retry-required' && localApplication.retryReproducesFailure && (
+            <div className="mt-2 text-[10px] font-medium text-amber-200">
+              App update required before this layout check can continue.
+            </div>
           )}
           {localApplication.status === 'invalid' && (
             <button

@@ -367,7 +367,9 @@ export default [
       assert(perPlatformLoop.includes('await prepareHubPages('),
         'the per-platform loop must scrape via prepareHubPages');
       const inlineFinalizeIndex = perPlatformLoop.indexOf('llmInputs.length === 0');
-      const pendingPushIndex = perPlatformLoop.indexOf('pendingScans.push(');
+      // A restored prepared checkpoint is also pushed before this branch; the
+      // assertion concerns the fresh prepareHubPages branch specifically.
+      const pendingPushIndex = perPlatformLoop.indexOf('pendingScans.push(', inlineFinalizeIndex);
       assert(inlineFinalizeIndex >= 0 && pendingPushIndex > inlineFinalizeIndex,
         'a platform may only be scanned inline (no queued handoff) when its prepared payload has zero llm-eligible pages; every other platform must be queued onto pendingScans instead');
       assert(marketplaceSource.includes('scanPreparedHubPageBatch({'),
@@ -472,7 +474,7 @@ export default [
         && resultsDeclIndex < lockCallIndex && pendingScansDeclIndex < lockCallIndex,
         'results/pendingScans must be declared OUTSIDE (before) the withStatusCheckLock callback so pass 2 can still use them after release');
       const releaseMarkerIndex = marketplaceSource.indexOf('statusCheckLock released above', lockCallIndex);
-      const pass2Index = marketplaceSource.indexOf('await mapWithConcurrency(', releaseMarkerIndex);
+      const pass2Index = marketplaceSource.indexOf('await mapManualHandoffWaves(', releaseMarkerIndex);
       const returnResultsIndex = marketplaceSource.lastIndexOf('return { results };');
       assert(releaseMarkerIndex > lockCallIndex && pass2Index > releaseMarkerIndex && returnResultsIndex > pass2Index,
         'pass 2 (the bounded AI handoff pool) and the final return must sit textually AFTER the lock is released, never inside the withStatusCheckLock callback');

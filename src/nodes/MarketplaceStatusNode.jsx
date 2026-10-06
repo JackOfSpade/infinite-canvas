@@ -26,6 +26,16 @@ import {
 import { generateId } from '../utils/idGenerator';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import {
+  isRestorableMarketplaceStatusRecovery,
+  marketplaceTerminalReceiptApplied,
+  markMarketplaceTerminalApplied,
+  marketplaceStatusInputMatches,
+  mergeMarketplaceStatusPrepared,
+  newMarketplaceStatusRecovery,
+  recordMarketplaceStatusResult,
+} from '../utils/marketplaceRunRecovery';
+import { EventLogger } from '../utils/EventLogger';
 
 /**
  * MarketplaceStatusNode — the Marketplace Status Module.
@@ -93,6 +103,15 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   const activeCheckRuns = useMemo(() => getMarketplaceStatusActiveRuns(id), [id]);
   const [checkingIds, setCheckingIds] = useState(() => marketplaceStatusCheckingIds(activeCheckRuns));
   const checkingIdsRef = useRef(checkingIds);
+  const [recoveryHydrated, setRecoveryHydrated] = useState(false);
+  const recoveryPeekScopeRef = useRef(null);
+  const autoResumedRunRef = useRef(null);
+  const recoveryRef = useRef(data.marketplaceStatusRunResume || null);
+  const canvasFilePath = navigation?.getCurrentFile?.() || navigation?.currentFile || null;
+
+  useEffect(() => {
+    recoveryRef.current = data.marketplaceStatusRunResume || null;
+  }, [data.marketplaceStatusRunResume]);
 
   // Collect the marketplace listings across this canvas + its sub-canvases. The
   // signature-based equality makes this re-render only when the listing set
@@ -117,6 +136,62 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
     });
     return () => { cancelled = true; cleanup?.(); };
   }, []);
+
+  useEffect(() => {
+    const scope = `${canvasFilePath || '(unsaved)'}\u0000${id}`;
+    if (recoveryPeekScopeRef.current === scope) return;
+    recoveryPeekScopeRef.current = scope;
+    setRecoveryHydrated(false);
+    let disposed = false;
+    void (async () => {
+      try {
+        if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
+        const result = await window.electronAPI.peekMarketplaceRecovery({
+          canvasFilePath, nodeId: id, kind: 'marketplace-status',
+        });
+        if (disposed || !result?.success) return;
+        if (!result.found) {
+          const local = recoveryRef.current;
+          if (['abandoned', 'completed'].includes(result.status)
+            && local?.runId === result.runId
+            && local?.inputKey === result.inputKey) {
+            recoveryRef.current = null;
+            updateGlobal(id, { marketplaceStatusRunResume: null });
+          }
+          return;
+        }
+        if (!isRestorableMarketplaceStatusRecovery(result.recovery)) return;
+        const recovered = result.recovery;
+        const completed = recovered.completedResults || {};
+        const alreadyApplied = marketplaceTerminalReceiptApplied(recovered, recoveryRef.current);
+        if (alreadyApplied) {
+          const ack = await window.electronAPI?.acknowledgeMarketplaceRecovery?.({
+            canvasFilePath, nodeId: id, kind: 'marketplace-status', runId: recovered.runId,
+            inputKey: recovered.inputKey,
+            appliedProcessEpoch: recoveryRef.current?.terminalApplied?.appliedProcessEpoch,
+            reason: 'exact-terminal-result-observed-after-restart',
+          });
+          if (!disposed && ack?.success && ack?.completed) {
+            updateGlobal(id, { marketplaceStatusRunResume: null });
+          }
+          return;
+        }
+        const rendererRecovery = recovered.phase === 'status-result'
+          ? markMarketplaceTerminalApplied(recovered, result.processEpoch)
+          : recovered;
+        recoveryRef.current = rendererRecovery;
+        updateGlobal(id, (node) => ({
+          marketplaceStatusRunResume: rendererRecovery,
+          platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, completed),
+        }));
+      } catch (error) {
+        EventLogger.error(`[MarketplaceStatus][${id}] Recovery hydration failed:`, error);
+      } finally {
+        if (!disposed) setRecoveryHydrated(true);
+      }
+    })();
+    return () => { disposed = true; };
+  }, [canvasFilePath, id, updateGlobal]);
 
   const platformStatus = useMemo(() => data.platformStatus || {}, [data.platformStatus]);
 
@@ -151,6 +226,18 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
     publishMarketplaceStatusCheckingIds(id);
   }, [id]);
 
+  useEffect(() => {
+    if (!window.electronAPI?.onMarketplaceStatusCheckpoint) return undefined;
+    return window.electronAPI.onMarketplaceStatusCheckpoint((payload) => {
+      if (payload?.nodeId !== id) return;
+      updateGlobal(id, (node) => {
+        const previous = node?.data?.marketplaceStatusRunResume;
+        const next = mergeMarketplaceStatusPrepared(previous, payload);
+        return next === previous ? {} : { marketplaceStatusRunResume: next };
+      });
+    });
+  }, [id, updateGlobal]);
+
   // The main process scrapes every platform first (browser automation, one at a
   // time, fully unattended), THEN issues every remaining platform's AI handoff
   // together — so a platform's row can sit at "Checking…" for a while after its
@@ -167,41 +254,91 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
       if (!completion.accepted) return;
       // updateGlobal also reaches a temporarily hidden/nested node and safely
       // no-ops when the node was actually deleted.
-      updateGlobal(id, (node) => ({
-        platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, {
+      updateGlobal(id, (node) => {
+        const previousRecovery = node?.data?.marketplaceStatusRunResume;
+        let nextRecovery = recordMarketplaceStatusResult(
+          previousRecovery,
+          payload.platformId,
+          payload.result,
+          { retryable: payload.result?.status !== 'ok' },
+        );
+        if (nextRecovery?.remainingPlatformIds?.length === 0) {
+          nextRecovery = { ...nextRecovery, phase: 'status-result', updatedAt: Date.now() };
+          nextRecovery = markMarketplaceTerminalApplied(nextRecovery, payload.processEpoch);
+        }
+        recoveryRef.current = nextRecovery;
+        return {
+          platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, {
           [payload.platformId]: payload.result,
-        }),
-      }));
+          }),
+          ...(nextRecovery && nextRecovery !== previousRecovery ? { marketplaceStatusRunResume: nextRecovery } : {}),
+        };
+      });
       publishCheckingIds();
     });
   }, [id, updateGlobal, activeCheckRuns, publishCheckingIds]);
 
-  // Run a hub scan for a specific set of platform ids — shared by the bulk
-  // "Check All" button (all eligible) and each row's own check button (just
-  // that one). Per-id tracking lets one row spin without freezing the rest, and
-  // the FUNCTIONAL updateNodeData merge means a single-platform result patches
-  // only its own key — it never clobbers the others' verdicts, even if two
-  // checks overlap.
-  //
-  // Checks CAN now genuinely overlap: the backend holds the status-check lock
-  // only for its scrape pass, then releases it before the AI copy/paste handoff
-  // (which waits on a human and is unbounded). So overlap safety rests on two
-  // renderer-side guards, not on backend serialization:
-  //   1. the `checkingIdsRef` filter below never starts a second run for a
-  //      platform this node is already checking, so one platform can never be
-  //      in two live runs here; and
-  //   2. completeMarketplaceStatusPlatform accepts a progress payload only when
-  //      its nodeId AND runId match one of THIS node's active runs, so another
-  //      hub's late handoff result can never land on this node's cards.
-  const runCheck = useCallback(async (platformIds) => {
+  // One node has one canonical recovery owner/sidecar. Serialize its row and
+  // bulk checks even while pass 2 waits on AI; otherwise a disjoint row B would
+  // abandon or overwrite row A's exact recovery marker.
+  const runCheck = useCallback(async (platformIds, options = {}) => {
     const candidates = Array.isArray(platformIds) ? platformIds : [];
-    const ids = [...new Set(candidates)].filter((p) => p && !checkingIdsRef.current.has(p));
+    if (checkingIdsRef.current.size > 0 || activeCheckRuns.size > 0) return;
+    const ids = [...new Set(candidates)].filter(Boolean);
     if (ids.length === 0) return;
-    const runId = generateId();
+    const requestedRecovery = options.recovery || recoveryRef.current;
+    const recoveryInputIds = Array.isArray(requestedRecovery?.input?.platformIds)
+      ? requestedRecovery.input.platformIds
+      : ids;
+    const currentWatchSnapshot = Object.fromEntries(recoveryInputIds.map(platformId => [
+      platformId,
+      normalizeMarketplaceWatchUrls((watchUrlsByPlatform || {})[platformId]),
+    ]));
+    const canResume = isRestorableMarketplaceStatusRecovery(requestedRecovery)
+      && marketplaceStatusInputMatches(requestedRecovery, recoveryInputIds, currentWatchSnapshot)
+      && ids.every(platformId => requestedRecovery.remainingPlatformIds.includes(platformId));
+    if (requestedRecovery && !canResume) {
+      const abandoned = await window.electronAPI?.abandonMarketplaceRecovery?.({
+        canvasFilePath,
+        nodeId: id,
+        kind: 'marketplace-status',
+        runId: requestedRecovery.runId,
+        inputKey: requestedRecovery.inputKey,
+        reason: 'input-changed',
+      });
+      const safeAbsent = ['missing', 'completed'].includes(abandoned?.reason);
+      if (canvasFilePath && (!abandoned?.success || (!abandoned?.abandoned && !safeAbsent))) {
+        addToast({
+          title: 'Status check not started',
+          description: `Could not retire the stale recovery (${abandoned?.reason || abandoned?.error || 'unknown'}).`,
+          type: 'error',
+        });
+        return;
+      }
+    }
+    const runRecovery = canResume
+      ? requestedRecovery
+      : newMarketplaceStatusRecovery({
+        runId: generateId(),
+        platformIds: ids,
+        watchUrlsByPlatform: Object.fromEntries(ids.map(platformId => [platformId, currentWatchSnapshot[platformId] || []])),
+      });
+    const runId = runRecovery.runId;
+    autoResumedRunRef.current = runId;
+    recoveryRef.current = runRecovery;
+    updateGlobal(id, { marketplaceStatusRunResume: runRecovery });
     beginMarketplaceStatusRun(activeCheckRuns, runId, ids);
     publishCheckingIds();
     try {
-      const res = await window.electronAPI?.checkMarketplaceStatus?.({ platformIds: ids, nodeId: id, runId });
+      const res = await window.electronAPI?.checkMarketplaceStatus?.({
+        platformIds: ids,
+        nodeId: id,
+        runId,
+        manualAiRunId: runId,
+        canvasFilePath,
+        recovery: runRecovery,
+        autoResume: options.autoResume === true,
+      });
       if (!res || res.success === false) {
         if (isMountedRef.current) {
           addToast({ title: 'Status check failed', description: res?.error || 'The marketplace status check did not complete.', type: 'error' });
@@ -209,9 +346,25 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
         return;
       }
       const results = res.results || {};
+      if (res.recovery && isRestorableMarketplaceStatusRecovery(res.recovery)) {
+        const rendererRecovery = res.recovery.phase === 'status-result'
+          ? markMarketplaceTerminalApplied(res.recovery, res.processEpoch)
+          : res.recovery;
+        recoveryRef.current = rendererRecovery;
+        updateGlobal(id, (node) => ({
+          marketplaceStatusRunResume: rendererRecovery,
+          platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, res.recovery.completedResults || {}),
+        }));
+      }
       const checkedCount = Object.keys(results).length;
       if (checkedCount === 0) {
-        if (isMountedRef.current) {
+        if (options.autoResume && Array.isArray(res.pausedNativeIds) && res.pausedNativeIds.length > 0) {
+          if (isMountedRef.current) addToast({
+            title: 'Some status checks are paused',
+            description: 'A native-browser marketplace check needs you to click its refresh button; it was not opened automatically.',
+            type: 'info',
+          });
+        } else if (isMountedRef.current) {
           addToast({ title: 'Status check failed', description: 'The marketplace status check returned no platform results.', type: 'error' });
         }
         return;
@@ -259,7 +412,42 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
       finishMarketplaceStatusRun(activeCheckRuns, runId);
       publishCheckingIds();
     }
-  }, [id, updateGlobal, addToast, isMountedRef, activeCheckRuns, publishCheckingIds]);
+  }, [id, updateGlobal, addToast, isMountedRef, activeCheckRuns, publishCheckingIds, watchUrlsByPlatform, canvasFilePath]);
+
+  // One automatic attempt per app process. The main process filters native-
+  // reader platforms during auto-resume, so this can restore prepared/headless
+  // work without ever opening Chrome or a captcha/login window on startup.
+  useEffect(() => {
+    if (!recoveryHydrated || !watchLoaded || data.locked) return;
+    const recovery = data.marketplaceStatusRunResume;
+    if (!isRestorableMarketplaceStatusRecovery(recovery) || recovery.remainingPlatformIds.length === 0) return;
+    if (recovery.manualPause?.status === 'manual-required') return;
+    if (autoResumedRunRef.current === recovery.runId) return;
+    const snapshot = Object.fromEntries(recovery.input.platformIds.map(platformId => [
+      platformId,
+      normalizeMarketplaceWatchUrls((watchUrlsByPlatform || {})[platformId]),
+    ]));
+    if (!marketplaceStatusInputMatches(recovery, recovery.input.platformIds, snapshot)) {
+      autoResumedRunRef.current = recovery.runId;
+      void window.electronAPI?.abandonMarketplaceRecovery?.({
+        canvasFilePath,
+        nodeId: id,
+        kind: 'marketplace-status',
+        runId: recovery.runId,
+        inputKey: recovery.inputKey,
+        reason: 'input-changed',
+      }).then((result) => {
+        const safeAbsent = ['missing', 'completed'].includes(result?.reason);
+        if (result?.success && (result?.abandoned || safeAbsent)) {
+          updateGlobal(id, { marketplaceStatusRunResume: null });
+        }
+      }).catch(error => EventLogger.error(`[MarketplaceStatus][${id}] Could not tombstone changed-input recovery:`, error));
+      return;
+    }
+    autoResumedRunRef.current = recovery.runId;
+    EventLogger.log(`[MarketplaceStatus][${id}] Auto-resuming interrupted status scan run=${recovery.runId}`);
+    void runCheck(recovery.remainingPlatformIds, { recovery, autoResume: true });
+  }, [canvasFilePath, data.locked, data.marketplaceStatusRunResume, id, recoveryHydrated, runCheck, updateGlobal, watchLoaded, watchUrlsByPlatform]);
 
   const handleCheck = useCallback(() => { runCheck(eligibleIds); }, [runCheck, eligibleIds]);
 
@@ -384,6 +572,7 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
                   key={row.platform.id}
                   row={row}
                   checking={checkingIds.has(row.platform.id)}
+                  checkingAny={checkingIds.size > 0}
                   onCheck={runCheck}
                 />
               ))}
@@ -395,7 +584,7 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   );
 });
 
-function PlatformRow({ row, checking, onCheck }) {
+function PlatformRow({ row, checking, checkingAny, onCheck }) {
   const { platform, listingCount, watchCount, eligible, result } = row;
   return (
     <div className="rounded-lg border border-white/10 bg-white/[0.03] overflow-hidden">
@@ -410,12 +599,11 @@ function PlatformRow({ row, checking, onCheck }) {
         </div>
         <StatusPill result={result} checking={checking} />
         {eligible && (
-          // Check this platform only — the bulk "Check All" is disabled while any
-          // scan runs, but each row stays independently re-checkable.
+          // A node owns one durable status run, so every row pauses together.
           <button
             onClick={() => onCheck([platform.id])}
             onPointerDown={(e) => e.stopPropagation()}
-            disabled={checking}
+            disabled={checkingAny}
             title={`Check ${platform.name} only`}
             className="nodrag shrink-0 p-1 rounded-md text-sky-300/70 hover:text-sky-200 hover:bg-sky-500/15 disabled:opacity-40 disabled:cursor-default transition-colors"
           >

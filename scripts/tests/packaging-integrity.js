@@ -197,7 +197,7 @@ export default [
   {
     name: 'macOS packaging: every emitted app gets strict deep codesign verification',
     run: async () => {
-      const { findCurrentMacApplications, findMacApplications, snapshotMacApplications, verifyMacApplications } = await import('../../scripts/build-macos.mjs');
+      const { findCurrentMacApplications, findMacApplications, signMacApplications, snapshotMacApplications, verifyMacApplications } = await import('../../scripts/build-macos.mjs');
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-package-integrity-'));
       const releaseDir = path.join(root, 'release');
       const appPath = path.join(releaseDir, 'mac-arm64', 'infinite-canvas.app');
@@ -210,6 +210,29 @@ export default [
           `the emitted macOS app must be discovered under the platform output directory, got ${JSON.stringify(apps)}`);
 
         const calls = [];
+        const signed = signMacApplications({
+          apps,
+          identity: 'Example Signing Identity',
+          platform: 'darwin',
+          runCommand: (command, args) => {
+            calls.push({ command, args });
+            return { status: 0, stdout: '', stderr: '' };
+          },
+        });
+        assert(signed[0] === appPath
+          && calls.length === 1
+          && calls[0].command === '/usr/bin/codesign'
+          && JSON.stringify(calls[0].args) === JSON.stringify([
+            '--force',
+            '--deep',
+            '--preserve-metadata=identifier,entitlements,requirements,flags,runtime',
+            '--sign',
+            'Example Signing Identity',
+            appPath,
+          ]),
+        'each freshly emitted bundle must be explicitly sealed with the configured identity while retaining Electron/runtime signature metadata before verification');
+
+        calls.length = 0;
         const verified = verifyMacApplications({
           apps,
           identity: 'Example Signing Identity',
@@ -304,8 +327,9 @@ export default [
       assert(packageConfig.scripts?.build === 'node scripts/build-macos.mjs',
         'npm run build must use the macOS signing/integrity entry point');
       assert(packageConfig.build?.forceCodeSigning == null && packageConfig.build?.mac?.forceCodeSigning === true
-        && packageConfig.build?.mac?.identity,
-      'electron-builder must enforce signing only for macOS and retain its configured identity');
+        && packageConfig.build?.mac?.identity
+        && packageConfig.build?.mac?.timestamp === 'none',
+      'electron-builder must enforce local macOS signing, retain its configured identity, and avoid an unavailable timestamp authority');
       assert(usesMacIntegrityGate('darwin') && !usesMacIntegrityGate('linux') && !usesMacIntegrityGate('win32'),
         'only Darwin dispatches through codesign preflight and final integrity verification; other platforms retain the generic build flow');
       const checked = [];

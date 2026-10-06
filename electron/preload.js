@@ -105,6 +105,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Fired when the open canvas file is renamed on disk (e.g. in Finder) and the
   // main process followed it by inode. Payload: the new absolute path.
   onCanvasFileRenamed: createListener('canvas:file-renamed'),
+  // The file moved on disk, but recovery ownership could not be safely rebound.
+  // Keep the old renderer path authoritative and prompt a manual retry instead.
+  onCanvasFileRenameRecoveryFailed: createListener('canvas:file-rename-recovery-failed'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),
@@ -166,6 +169,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Crash/quit recovery: detect an incomplete prior run, or clear it. Resuming
   // re-invokes searchJobs({ resume:true }), so no separate resume channel is needed.
   peekJobRun:     (args) => ipcRenderer.invoke('peek-job-run', args),
+  pauseJobRun:    (args) => ipcRenderer.invoke('pause-job-run', args),
+  pauseJobRunAndCancel: (args) => ipcRenderer.invoke('pause-job-run-and-cancel', args),
+  beginJobContinuation: (args) => ipcRenderer.invoke('begin-job-continuation', args),
+  listJobContinuations: (args) => ipcRenderer.invoke('list-job-continuations', args),
+  claimJobContinuation: (args) => ipcRenderer.invoke('claim-job-continuation', args),
+  readJobContinuationResult: (args) => ipcRenderer.invoke('read-job-continuation-result', args),
+  completeJobContinuation: (args) => ipcRenderer.invoke('complete-job-continuation', args),
+  releaseJobContinuation: (args) => ipcRenderer.invoke('release-job-continuation', args),
+  pauseJobContinuations: (args) => ipcRenderer.invoke('pause-job-continuations', args),
+  claimJobBoardRun: (args) => ipcRenderer.invoke('claim-job-board-run', args),
+  releaseJobBoardRun: (args) => ipcRenderer.invoke('release-job-board-run', args),
   completeJobRun: (args) => ipcRenderer.invoke('complete-job-run', args),
   discardJobRun:  (args) => ipcRenderer.invoke('discard-job-run', args),
   discardUnknownOwnerJobRun: (args) => ipcRenderer.invoke('discard-unknown-owner-job-run', args),
@@ -186,7 +200,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // handoffs so an app-level dialog remount cannot leave a live prompt in the
   // listener/replay gap. A true renderer navigation cancels its job instead.
   replayPendingNonApiAiRequests: () => ipcRenderer.invoke('replay-pending-non-api-ai-requests'),
+  inspectNonApiAiRun: (runId) => ipcRenderer.invoke('inspect-non-api-ai-run', { runId }),
   submitNonApiAiResponse: (args) => ipcRenderer.invoke('submit-non-api-ai-response', args),
+  claimNonApiAiManual: (requestId) => ipcRenderer.invoke('claim-non-api-ai-manual', { requestId }),
   updateNonApiAiDraft,
   flushNonApiAiPersistence,
   completeNonApiAiRun: (runId) => ipcRenderer.invoke('complete-non-api-ai-run', { runId }),
@@ -209,6 +225,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Settings) for anything needing the seller's attention — NOT per-listing.
   checkMarketplaceStatus: (args) => ipcRenderer.invoke('check-marketplace-status', args),
   onMarketplaceStatusProgress: createListener('marketplace-status-progress'),
+  onMarketplaceStatusCheckpoint: createListener('marketplace-status-checkpoint'),
+  peekMarketplaceRecovery: (args) => ipcRenderer.invoke('peek-marketplace-recovery', args),
+  checkpointMarketplaceRecovery: (args) => ipcRenderer.invoke('checkpoint-marketplace-recovery', args),
+  abandonMarketplaceRecovery: (args) => ipcRenderer.invoke('abandon-marketplace-recovery', args),
+  abandonMarketplaceRecoveryBatch: (args) => ipcRenderer.invoke('abandon-marketplace-recovery-batch', args),
+  acknowledgeMarketplaceRecovery: (args) => ipcRenderer.invoke('acknowledge-marketplace-recovery', args),
   checkSellMonitorAuth: async (args) => {
     const res = await ipcRenderer.invoke('check-sell-monitor-auth', args);
     return res.success ? res : { platform: args.platformId, connected: false };
@@ -219,6 +241,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onPriceSourceProgress: createListener('price-source-progress'),
+  onMarketplaceScrapeCheckpoint: createListener('marketplace-scrape-checkpoint'),
+  onMarketplaceAnalysisCheckpoint: createListener('marketplace-analysis-checkpoint'),
   // Emitted while a sell-side browser op is serialized behind another (queued
   // behind N), then with queuedBehind:0 once it acquires the shared browser.
   onPriceQueueStatus: createListener('price-queue-status'),
@@ -273,7 +297,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelNodeTaskAndWait: (nodeId, cause = null) => ipcRenderer.invoke('cancel-node-task-and-wait', { nodeId, cause }),
 
   // ── ChatGPT handoff bridge ──────────────────────────────────────────────
-  // This closed surface mirrors contracts.js: 24 invoke channels, one
+  // This closed surface mirrors contracts.js: 27 invoke channels, one
   // renderer-to-main publisher, and the three main-to-renderer notifications.
   handoffBridgeGetStatus: () => ipcRenderer.invoke('handoff-bridge:get-status'),
   handoffBridgeSetEnabled: (payload) => ipcRenderer.invoke('handoff-bridge:set-enabled', payload),
@@ -288,6 +312,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   handoffBridgeCancelPairing: () => ipcRenderer.invoke('handoff-bridge:cancel-pairing'),
   handoffBridgeNewChat: () => ipcRenderer.invoke('handoff-bridge:new-chat'),
   handoffBridgeContinueChat: () => ipcRenderer.invoke('handoff-bridge:continue-chat'),
+  // Keep the bounded optional target intact for compatibility callers. The
+  // normal UI lets the planner decide, but a dropped payload made an explicit
+  // capacity request silently look like a successful no-op.
+  handoffBridgeStartWorkerPool: (payload) => ipcRenderer.invoke('handoff-bridge:start-worker-pool', payload),
+  handoffBridgeCopyWorkerStarter: (payload) => ipcRenderer.invoke('handoff-bridge:copy-worker-starter', payload),
+  handoffBridgeRestartWorker: (payload) => ipcRenderer.invoke('handoff-bridge:restart-worker', payload),
   handoffBridgePause: () => ipcRenderer.invoke('handoff-bridge:pause'),
   handoffBridgeResume: () => ipcRenderer.invoke('handoff-bridge:resume'),
   handoffBridgeRevokeAll: () => ipcRenderer.invoke('handoff-bridge:revoke-all'),

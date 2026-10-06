@@ -72,6 +72,22 @@ export function classifyJobTargetLocation(target, structuredLocation = null) {
     };
   }
 
+  // `deriveLocationParam` deliberately returns an empty value for a known
+  // subdivision paired with the wrong country. Preserve WHY it returned empty
+  // before the country fallback below: otherwise Ontario + United States would
+  // degrade to an apparently valid country-only US search and the policy layer
+  // would dispatch sources after the formatter had already rejected the input.
+  const structuredSubdivision = clean(
+    structured?.stateCode || structured?.subdivision || structured?.region,
+  );
+  const structuredConflictProbe = structured
+    ? normalizeLocationInput([
+      clean(structured.city),
+      structuredSubdivision,
+      clean(structured.country),
+    ].filter(Boolean).join(', '))
+    : null;
+
   // One parser owns both board-ready normalization and source policy. Keeping a
   // second country/state table here previously created two subtly different
   // answers for the same input (notably postal-code forms such as Denver, CO).
@@ -93,7 +109,7 @@ export function classifyJobTargetLocation(target, structuredLocation = null) {
     subdivision: normalized.subdivisionCode
       ? { code: normalized.subdivisionCode.toLowerCase(), name: normalized.subdivision, country: normalized.country }
       : null,
-    countryConflict: normalized.countryConflict,
+    countryConflict: normalized.countryConflict || !!structuredConflictProbe?.countryConflict,
   };
 }
 

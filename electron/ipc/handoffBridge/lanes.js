@@ -4,7 +4,7 @@ import { CONSTANTS } from './constants.js';
 export const LANE_PHASES = Object.freeze(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 export const LANE_REASONS = Object.freeze([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
-  'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
+  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
 
@@ -130,6 +130,15 @@ export function createApplicationLane({ ord, jobId, canvasFilePath, releasedAt =
     // submit. The engine turns them into status only for the CURRENT chat.
     awaitingAnswer: false,
     servedEpochN: null,
+    // A worker-pool session owns a live application handoff until its next
+    // stage or terminal result. This is memory-only: pool aliases disappear
+    // on restart and restored lanes are deliberately re-read before serving.
+    servedWorkerId: null,
+    // A short-lived application-pool reservation held while the engine checks
+    // that a candidate bundle still exists. It is memory-only and never
+    // survives a save/restart; without it concurrent workers can all probe the
+    // first available lane before any one of them marks it served.
+    pendingWorkerId: null,
     answeredAt: null,
     submittedAt: null,
     // Floor for the quiet clock (memory only): set when the lane comes back
@@ -168,11 +177,13 @@ export function holdLane(lane, reason = 'user_hold', now = 0) {
   // re-served, so it owes no answer and has no serve time until the next get.
   lane.awaitingAnswer = false;
   lane.servedAt = null;
+  lane.servedWorkerId = null;
+  lane.pendingWorkerId = null;
   // ...and the serve that just ended is not a "repeat" if the same code goes out
   // again after the hold.
   lane.lastServedDigest = null;
   lane.servedCodeAgain = false;
-  lane.phase = ['job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
+  lane.phase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
     ? 'needs_user'
     : 'held';
   lane.reason = reason;

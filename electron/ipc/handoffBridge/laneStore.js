@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
 
 export const LANE_STORE_VERSION = 1;
 export const LANES_FILE_NAME = 'lanes.json';
@@ -16,7 +17,7 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 const LANE_REASONS = new Set([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
-  'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
+  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
 const COUNTER_KEYS = new Set(['rejections', 'junkStreak', 'revisedRounds', 'errStreak', 'attemptByStage']);
@@ -106,7 +107,7 @@ function copyLane(value, { strict = true } = {}) {
 // the person would have to Resume (which produced a snapshot-less lane that
 // never aged out). The store cap is therefore the SAME rule the engine
 // enforces on release: at most MAX_LIVE_LANES live lanes.
-export const MAX_LIVE_LANES = 10;
+export const MAX_LIVE_LANES = HANDOFF_CONCURRENCY;
 const TERMINAL_PHASES = new Set(['done', 'gone']);
 const isLiveLane = lane => !TERMINAL_PHASES.has(lane?.phase);
 

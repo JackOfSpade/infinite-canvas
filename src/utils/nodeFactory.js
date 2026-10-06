@@ -173,6 +173,7 @@ function sanitizeJobHubClone(data) {
   delete data.manualAiCleanupReceipts;
   delete data.terminalFinalizationRecovery;
   delete data.queuedModuleRun;
+  delete data.providerPhaseAwaitingResume;
   // Fresh-import capability is node-scoped user intent, not reusable career
   // data. A copy (including a nested/group copy that later remaps its id) must
   // never be able to start provider work from the original node's import.

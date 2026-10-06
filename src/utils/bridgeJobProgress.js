@@ -14,10 +14,10 @@
 //    file uses for it. servedToChat alone is not: after an accepted answer the
 //    job keeps its slot while the next stage is not served yet.
 //  - job.servedAt: when that stage was served (null unless awaitingAnswer).
-//    job.answeredAt: the last accepted answer. job.stalled / job.stalledSince:
-//    the engine's own "quiet for STALL_NOTICE_MS" verdict for THIS job;
-//    stalledSince is when the quiet BEGAN (the last time the chat was heard),
-//    so `now - stalledSince` is the real quiet age.
+//    job.answeredAt: the last accepted answer. A quiet owner with the closed
+//    `answer_silent` reason is the one exception: it proves no bridge call
+//    from the worker that owns this exact handoff for at least five minutes,
+//    but does not prove why that happened.
 //  - 'host': the app is building the documents. The lane also reaches 'host'
 //    when the source adapter reports it (a job finished in the dock), so it
 //    does not prove ChatGPT answered every stage.
@@ -41,7 +41,6 @@ export const PROGRESS_ACTIONS = Object.freeze(['start-chat', 'continue-chat']);
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const object = value => (isObject(value) ? value : {});
 const time = value => (Number.isFinite(value) && value >= 0 ? value : null);
-const lowerFirst = text => `${text.charAt(0).toLowerCase()}${text.slice(1)}`;
 const upperFirst = text => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
 function stepsFor(stage, allDone) {
@@ -91,12 +90,24 @@ function needsYouDetail(text) {
   return stripped ? upperFirst(stripped) : null;
 }
 
-function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, bridge: rawBridge }) {
+function ownerLastHeard(chat, owner) {
+  if (owner && typeof owner === 'object') return time(owner.lastCallAt);
+  // A legacy, non-pool chat has one possible owner. A pool's aggregate last
+  // call may be another worker polling, so it must never stand in for this
+  // exact handoff's owner.
+  return chat?.pool?.active === true ? null : time(chat?.lastCallAt);
+}
+
+function answerSilent(owner) {
+  return owner?.state === 'quiet' && owner?.quietReason === 'answer_silent';
+}
+
+function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, bridge: rawBridge, ownerWorker: rawOwnerWorker }) {
   const job = object(rawJob);
   const chat = object(rawChat);
   const item = object(rawItem);
   const bridge = object(rawBridge);
-  const now = time(rawNow);
+  const ownerWorker = isObject(rawOwnerWorker) ? rawOwnerWorker : null;
   const phase = job.phase;
   if (!JOB_PHASES.includes(phase) || phase === 'unknown') return generic();
 
@@ -156,22 +167,13 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
   if (!CHAT_STATES.includes(state) || state === 'unknown') return unread ? unreadLine() : generic(steps);
   const ordinal = time(chat.ordinal);
   const hasChat = state !== 'none' && ordinal !== null && ordinal > 0;
-  const lastHeard = hasChat ? time(chat.lastCallAt) : null;
+  const lastHeard = hasChat ? ownerLastHeard(chat, ownerWorker) : null;
   // Given a slot in this chat (it may have been answered since) vs proven to be
   // waiting on ChatGPT's answer right now.
   const served = !unread && time(job.servedToChat) !== null;
   const awaiting = !unread && job.awaitingAnswer === true;
 
-  // 3. This job's current stage was served and ChatGPT has been quiet too long.
-  if (awaiting && job.stalled === true) {
-    const anchor = time(job.stalledSince) ?? time(job.servedAt);
-    const age = anchor !== null && now !== null ? Math.max(0, Math.floor((now - anchor) / 60000)) : 0;
-    const stalledLabel = label ? lowerFirst(label) : 'this handoff';
-    const [headline, detail] = BRIDGE_DYNAMIC_COPY.stalled(age, stalledLabel);
-    return build({ kind: 'stalled', steps }, { headline, detail, tone: 'attention', since: anchor, lastHeard, action: 'start-chat' });
-  }
-
-  // 4. Nobody to hand the job to yet.
+  // 3. Nobody to hand the job to yet.
   if (!hasChat) {
     const [headline, detail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
     return build({ kind: 'no-chat', steps }, { headline, detail, tone: 'attention', action: 'start-chat' });
@@ -194,6 +196,19 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
   // Nothing reads an unread job until ChatGPT calls; only the two chat states
   // that mean "no call is coming yet" have something to press.
   if (unread) return unreadLine();
+
+  // The quiet state belongs to the worker that owns this exact response, not
+  // any other worker in the pool. It is evidence of a missing bridge call,
+  // not evidence of a particular client-side failure.
+  if (awaiting && answerSilent(ownerWorker)) {
+    return build({ kind: 'response-overdue', steps }, {
+      headline: BRIDGE_PROGRESS_COPY.responseOverdue[0],
+      detail: BRIDGE_PROGRESS_COPY.responseOverdue[1],
+      tone: 'attention',
+      since: time(job.servedAt),
+      lastHeard,
+    });
+  }
 
   // 5. The chat cannot take this job. A job ChatGPT is answering is different:
   // the hard cap fences get() but not submit(), so it may still be answered.
@@ -236,9 +251,9 @@ function deriveInner({ job: rawJob, chat: rawChat, item: rawItem, now: rawNow, b
 }
 
 /**
- * @param {{job?: object, chat?: object, item?: object, now?: number, bridge?: {paused?: boolean, pluginName?: string}}} input
+ * @param {{job?: object, chat?: object, item?: object, ownerWorker?: object, now?: number, bridge?: {paused?: boolean, pluginName?: string}}} input
  * `job` is one status.queue.jobs entry, `chat` is status.chat, `item` is the
- * dock item (stage, corrections, rejectionEscalation), `now` is epoch ms,
+ * dock item (stage, corrections, rejectionEscalation), and
  * `bridge.pluginName` is status.config.pluginName (named in the no-chat line).
  * Never throws: malformed input becomes a neutral generic line.
  */
@@ -248,6 +263,74 @@ export function deriveBridgeJobProgress(input) {
   } catch {
     return generic();
   }
+}
+
+// Push handoffs do not have an application lane or stage. A claim is made
+// only by ChatGPT's get_handoff call; awaitingClaim deliberately reports the
+// absence of that exact claim rather than borrowing a task name or guessing
+// from aggregate queue counts.
+export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, ownerWorker: rawOwnerWorker, awaitingClaim = false } = {}) {
+  const chat = object(rawChat);
+  const bridge = object(rawBridge);
+  const ownerWorker = isObject(rawOwnerWorker) ? rawOwnerWorker : null;
+  const steps = [{ key: 'handoff', label: 'Handoff', state: 'current' }];
+  if (bridge.paused === true) {
+    return build({ kind: 'push-paused', steps }, {
+      headline: BRIDGE_COPY.health.paused[0], detail: BRIDGE_COPY.health.paused[1], tone: 'attention',
+    });
+  }
+  if (awaitingClaim === true && (bridge.enabled !== true || bridge.serving !== 'live' || bridge.tunnelReachable !== true || bridge.linked !== true)) {
+    return build({ kind: 'push-not-ready', steps }, {
+      headline: 'ChatGPT handoff is not ready',
+      detail: 'Turn on the bridge and make sure its tunnel and ChatGPT link are reachable before this selected handoff can be delivered.',
+      tone: 'attention',
+    });
+  }
+  const state = typeof chat.state === 'string' ? chat.state : 'none';
+  const ordinal = time(chat.ordinal);
+  const hasChat = state !== 'none' && ordinal !== null && ordinal > 0;
+  const lastHeard = hasChat ? ownerLastHeard(chat, ownerWorker) : null;
+  if (!hasChat) {
+    const [headline, detail] = BRIDGE_PROGRESS_COPY.noChat(bridge.pluginName);
+    return build({ kind: 'push-no-chat', steps }, { headline, detail, tone: 'attention', action: 'start-chat' });
+  }
+  if (state === 'awaiting-first-call') {
+    const [headline, detail] = BRIDGE_DYNAMIC_COPY.firstCall(ordinal);
+    return build({ kind: 'push-first-call', steps }, {
+      headline, detail, tone: 'attention', action: 'start-chat', actionLabel: BRIDGE_ACTION_COPY['copy-starter'],
+    });
+  }
+  if (state === 'idle' || state === 'ended') {
+    return build({ kind: 'push-chat-ended', steps }, {
+      headline: BRIDGE_COPY.health.nudge[0], detail: BRIDGE_DYNAMIC_COPY.nudge(1, ordinal)[1], tone: 'attention', action: 'continue-chat', lastHeard,
+    });
+  }
+  if (state === 'full') {
+    return build({ kind: 'push-chat-full', steps }, {
+      headline: BRIDGE_COPY.health['chat-full'][0], detail: BRIDGE_COPY.health['chat-full'][1], tone: 'attention', action: 'start-chat', lastHeard,
+    });
+  }
+  if (awaitingClaim === true) {
+    return build({ kind: 'push-awaiting-poll', steps }, {
+      headline: 'Waiting for ChatGPT to ask for this handoff',
+      detail: 'A ChatGPT chat is active, but it has not claimed this exact handoff. It will be delivered only when the chat calls its next handoff tool.',
+      // `reached` proves the capability was presented but no work call was
+      // admitted. Continuing is safe there; a working chat may own another
+      // request, so it stays deliberately passive.
+      tone: 'attention', action: state === 'reached' ? 'continue-chat' : null, lastHeard,
+    });
+  }
+  if (answerSilent(ownerWorker)) {
+    return build({ kind: 'push-response-overdue', steps }, {
+      headline: BRIDGE_PROGRESS_COPY.responseOverdue[0],
+      detail: BRIDGE_PROGRESS_COPY.responseOverdue[1],
+      tone: 'attention',
+      lastHeard,
+    });
+  }
+  return build({ kind: 'push-working', steps }, {
+    headline: 'ChatGPT is working on this handoff', detail: 'This exact request was delivered to the active ChatGPT chat.', tone: 'working', lastHeard,
+  });
 }
 
 /** 20s, 4 min, 1 h 5 min. Null for a value that is not a non-negative number. */

@@ -26,6 +26,7 @@ import { shouldUseNativeRead } from './browser/nativeChromeReader.js';
 import { tryGetStore } from './settings.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 import { htmlToText } from 'html-to-text';
+import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
@@ -951,16 +952,15 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
     finishPlatformVerification(platformId, notify);
   };
 
-  // Bounded-concurrency pool: a fixed number of workers drain a shared queue.
-  // queue.shift() is atomic relative to the length check (no await between them),
-  // so no platform is processed twice and none is dropped.
+  // The shared rolling scheduler serializes claims and immediately refills a
+  // freed verifier slot. VERIFY_CONCURRENCY remains intentionally separate:
+  // this is a browser-auth safety limit, not an AI handoff capacity.
   const queue = [...allIds];
-  const workers = Array.from({ length: Math.min(VERIFY_CONCURRENCY, queue.length) }, async () => {
-    while (queue.length) {
-      await verifyOne(queue.shift());
-    }
+  await runRollingWorkers({
+    workerCount: Math.min(VERIFY_CONCURRENCY, queue.length),
+    claim: () => queue.shift() ?? null,
+    work: (platformId) => verifyOne(platformId),
   });
-  await Promise.all(workers);
 
   // Every normal verifier page closes in fetchHtmlClean's finally block. Once
   // its worker pool has drained, release an idle singleton that this startup

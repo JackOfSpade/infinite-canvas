@@ -13,7 +13,7 @@ import { IPC_CHANNELS, IPC_EVENTS } from '../../electron/ipc/handoffBridge/contr
 import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiDialogs.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createRequestHandler } from '../../electron/ipc/handoffBridge/http.js';
-import { composeHandoffBridge, resolveTestMode, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
+import { composeHandoffBridge, getHandoffBridgeBootstrapDiagnostic, resolveTestMode, tunnelLogLinesForUi } from '../../electron/ipc/handoffBridge/index.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
@@ -23,7 +23,7 @@ import {
   redactReportUrlsInText,
   setReportRedactedHosts,
 } from '../../electron/ipc/bugReport/helpers.js';
-import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
+import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, getBridgeQueueDiagnostic, reduceBridgeQueue, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordBridgeChatCopyDiagnostic, recordBridgeChatCopyResult, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 
 const fixtureDirectory = fileURLToPath(new URL('./fixtures/handoff-bridge/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -100,6 +100,66 @@ function syntheticTimers(start = 0) {
 }
 
 export default [{
+  name: 'handoff bridge: privacy: answer-silent diagnostics identify the stale worker without exporting its claim or session',
+  run: () => {
+    const claim = '22222222-2222-4222-8222-222222222222';
+    const secret = 'PRIVATE-ANSWER-SILENT-SESSION';
+    const raw = {
+      at: 100_000, enabled: true, serving: 'live', autoRelease: false, paused: null, fault: null,
+      queue: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 },
+      chat: { state: 'working', jobsAssigned: 0, jobsCap: 2, pool: {
+        active: true, workerCount: 2,
+        workers: [
+          { ordinal: 1, state: 'waiting', completed: 3, lastCallAt: 99_999, lastOutcome: 'waiting' },
+          { ordinal: 2, state: 'quiet', completed: 1, lastCallAt: 80_000, lastOutcome: 'served', quietReason: 'answer_silent', sessionCode: secret },
+        ],
+        claimWorkers: [{ claimId: claim, workerOrdinal: 2 }],
+      } }, lanes: [], counts: {}, scope: { applications: false, scoring: true, marketplace: false },
+      push: { claimWorkers: [{ claimId: claim, workerOrdinal: 2 }] }, keys: {}, activity: [],
+    };
+    try {
+      setBridgeQueueDiagnosticProvider(() => raw);
+      const report = generateMarkdown({ description: 'A chat stopped before submit.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [], filterCode: 'FULL' }).markdown;
+      assert(report.includes('no MCP response since this handoff was served') && report.includes('worker 2') && report.includes('last call'),
+        'FULL records the bounded stale-worker evidence needed to distinguish it from another healthy poller');
+      assert(!report.includes(claim) && !report.includes(secret),
+        'claim ownership and session material remain outside retained diagnostics');
+    } finally { clearBridgeQueueDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL and BRIDGEWORKERS retain a bounded closed pool receipt without worker capabilities',
+  run: () => {
+    const secret = 'PRIVATE-CLOSED-POOL-CAPABILITY /Users/jack/private.example.test';
+    const base = { description: 'Worker stopped after waiting.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const raw = (reason = 'drained') => ({
+      at: 100_000, enabled: true, serving: 'live', autoRelease: false, paused: null, fault: null,
+      queue: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 },
+      chat: { state: 'none', jobsAssigned: 0, jobsCap: 2, pool: {
+        active: false, workerCount: 0, workers: [],
+        history: [{ endedAt: 99_000, reason, workerCount: 1,
+          workers: [{ ordinal: 1, state: 'quiet', completed: 2, lastCallAt: 98_000, lastOutcome: 'waiting', quietReason: 'polling_stopped', restarts: 1, session: secret, prompt: secret }],
+          plan: { recommended: 1, queued: 8, expandBy: 0, reason: 'one_work_item', secret } }],
+      } }, lanes: [], counts: {}, scope: { applications: false, scoring: true, marketplace: false }, push: {}, keys: {}, activity: [],
+    });
+    try {
+      setBridgeQueueDiagnosticProvider(raw);
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const focused = generateMarkdown({ ...base, filterCode: 'BRIDGEWORKERS' }).markdown;
+      assert(full.includes('Recent closed worker pools') && full.includes('close `drained`')
+        && full.includes('polling_stopped') && full.includes('restarted-1'),
+        'FULL preserves a recent closed worker pool instead of calling it a legacy chat');
+      assert(focused.includes('## Handoff Bridge Diagnostics') && focused.includes('Recent closed worker pools'),
+        'the BRIDGEWORKERS lens includes the worker lifecycle diagnostic');
+      setBridgeQueueDiagnosticProvider(() => raw('source_ended'));
+      const sourceEnded = generateMarkdown({ ...base, filterCode: 'BRIDGEWORKERS' }).markdown;
+      assert(sourceEnded.includes('close `source_ended`'),
+        'the worker-pool diagnostic retains the neutral source_ended close reason');
+      for (const privateValue of ['PRIVATE-CLOSED-POOL-CAPABILITY', '/Users/jack', 'private.example.test']) {
+        assert(!full.includes(privateValue) && !focused.includes(privateValue) && !sourceEnded.includes(privateValue), `closed worker diagnostics never disclose ${privateValue}`);
+      }
+    } finally { clearBridgeQueueDiagnostic(); }
+  },
+}, {
   name: 'handoff bridge: privacy: FULL and BRIDGE reports retain only closed starter/Continue interaction receipts',
   run: () => {
     const privateAction = 'PRIVATE_STARTER_ACTION';
@@ -183,11 +243,62 @@ export default [{
       assert(liveEmpty.length === 0 && liveThrow.length === 0,
         'a live supervisor owns its empty or failed log view and must never receive an older failed-start receipt');
       recordFailedStartDiagnostic({ telemetry: false, phase: 'tunnel-readiness', cause: 'readiness-timeout', tunnel: { state: 'connecting' } });
-      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('## Handoff Bridge Diagnostics'),
-        'telemetry opt-out must omit the failed-start receipt entirely');
+      const noTelemetryReceipt = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(noTelemetryReceipt.includes('## Handoff Bridge Diagnostics') && !noTelemetryReceipt.includes('Failed start:'),
+        'the always-present bootstrap receipt must not retain an opted-out failed-start event');
       assert(getFailedStartDiagnosticLines().length === 0 && (await tunnelLogLinesForUi(null)).length === 0,
         'the post-disposal tunnel-log fallback must respect diagnostics opt-out');
     } finally { clearFailedStartDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL and BRIDGE retain a closed bootstrap receipt without runtime telemetry',
+  run: () => {
+    const secretHost = 'private-bridge.example.test';
+    const secretPath = '/private/bridge-secret/cloudflared';
+    const setup = {
+      binaryPath: secretPath,
+      binaryTrusted: true,
+      credentialsPath: '/private/bridge-secret/credentials.json',
+      pin: 'a'.repeat(64),
+      approvedAt: 1,
+    };
+    const context = {
+      userData: '/tmp/bridge-bootstrap-report', isPackaged: true,
+      deps: {
+        env: {}, isPackaged: true,
+        readConfig: () => ({ state: 'ok', config: { hostname: secretHost, autoStart: true, consentVersion: 1 } }),
+        readTunnelState: () => setup,
+      },
+    };
+    const stale = getHandoffBridgeBootstrapDiagnostic(context);
+    assert(stale.config === 'present' && stale.consent === 'stale' && stale.autoStart === 'on'
+      && stale.enabled === 'off' && stale.runtime === 'inactive' && stale.tunnel === 'off'
+      && stale.setup.hostname === 'ready' && stale.setup.binary === 'ready' && stale.setup.credentials === 'ready'
+      && stale.startup.decision === 'stale-consent' && stale.startup.refusal === 'stale-consent',
+    'a stale receipt explains a skipped configured auto-start without exposing its version');
+    const current = getHandoffBridgeBootstrapDiagnostic({
+      ...context,
+      deps: { ...context.deps, readConfig: () => ({ state: 'ok', config: { hostname: secretHost, autoStart: true, consentVersion: 2 } }) },
+    });
+    const missing = getHandoffBridgeBootstrapDiagnostic({
+      ...context,
+      deps: { ...context.deps, readConfig: () => ({ state: 'missing', config: null }) },
+    });
+    assert(current.consent === 'current' && current.startup.decision === 'eligible-not-observed'
+      && missing.config === 'missing' && missing.consent === 'missing' && missing.autoStart === 'unknown'
+      && missing.startup.refusal === 'config-missing',
+    'current and missing consent/config states remain closed and actionable');
+    for (const value of [secretHost, secretPath, 'credentials.json', 'consentVersion']) {
+      assert(!JSON.stringify(stale).includes(value), `bootstrap receipt must never retain ${value}`);
+    }
+    const base = { description: 'Bridge did not auto-start.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+    const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+    const focused = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+    const heading = '## Handoff Bridge Diagnostics';
+    assert(full.includes(heading) && full.split(heading).length === 2 && full.includes('Bridge bootstrap:')
+      && bridge.includes('Bridge bootstrap:') && bridge.split(heading).length === 2 && !focused.includes('Bridge bootstrap:'),
+    'FULL and BRIDGE include bootstrap evidence even when no runtime event was recorded');
   },
 }, {
   name: 'handoff bridge: privacy: FULL reports render only closed opted-in OAuth origin-refusal facts',
@@ -268,6 +379,34 @@ export default [{
       assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Refused caller networks'),
         'the diagnostics opt-out cannot retain a later source refusal');
     } finally { clearSourceRejectionDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL and BRIDGEWORKERS retain aggregate authenticated MCP throttles outside the waiting-log ring',
+  run: () => {
+    const base = {
+      description: 'Workers stopped after rate limits.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+      eventLogs: Array.from({ length: 500 }, (_value, index) => `[HandoffBridge] tool_call tool=get outcome=waiting ms=${index}`),
+    };
+    try {
+      recordMcpRateLimitDiagnostic({ telemetry: true, retryAfterSeconds: 7, at: 4_700 });
+      recordMcpRateLimitDiagnostic({ telemetry: true, retryAfterSeconds: 3, at: 4_900 });
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const workers = generateMarkdown({ ...base, filterCode: 'BRIDGEWORKERS' }).markdown;
+      const unrelated = generateMarkdown({ ...base, filterCode: 'JOBS' }).markdown;
+      assert(full.includes('Authenticated MCP rate limits: 2')
+        && full.includes('latest Retry-After 3s')
+        && workers.includes('Authenticated MCP rate limits: 2')
+        && !unrelated.includes('Authenticated MCP rate limits'),
+      'FULL and BRIDGEWORKERS preserve a bounded rate-limit receipt even after waiting-log spam');
+      const secret = 'PRIVATE-GRANT-OR-SESSION';
+      recordMcpRateLimitDiagnostic({ telemetry: true, retryAfterSeconds: secret, at: 5_000 });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes(secret),
+        'the rate-limit receipt accepts no grant, session, token, or arbitrary retry value');
+      clearMcpRateLimitDiagnostic();
+      recordMcpRateLimitDiagnostic({ telemetry: false, retryAfterSeconds: 1 });
+      assert(!generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Authenticated MCP rate limits'),
+        'the diagnostics opt-out cannot retain a later authenticated MCP throttle');
+    } finally { clearMcpRateLimitDiagnostic(); }
   },
 }, {
   // The token endpoint computed this outcome and dropped it, so the choice
@@ -482,7 +621,7 @@ export default [{
     }
     // Every telemetry recorder composition imports must also be cleared, or a
     // stale observation outlives the link it described.
-    for (const cleared of ['clearClientAuthDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic', 'clearBridgeQueueDiagnostic']) {
+    for (const cleared of ['clearClientAuthDiagnostic', 'clearMcpRateLimitDiagnostic', 'clearOAuthRejectionDiagnostic', 'clearSourceRejectionDiagnostic', 'clearBridgeQueueDiagnostic']) {
       assert(index.includes(`${cleared}()`), `${cleared} must be called so a stale observation cannot outlive its link`);
     }
   },
@@ -496,13 +635,19 @@ export default [{
     const raw = () => (enabled ? {
       at: 100_000, enabled: true, serving: 'live', autoRelease: true, paused: null, fault: null,
       queue: { ready: 0, working: 2, needsYou: 0, held: 0, done: 0 },
-      chat: { state: 'working', jobsAssigned: 1, jobsCap: 2, note: secret },
+      chat: {
+        state: 'working', jobsAssigned: 1, jobsCap: 2, note: secret,
+        pool: {
+          active: true, workerCount: 6,
+          plan: { recommended: 10, queued: 200, materialized: 5, expandBy: 4, reason: 'maximum_parallelism', secret },
+        },
+      },
       lanes: [
         { jobId: JOB_UUID, phase: 'unread', stage: null, reason: null, servedToChat: null, changedAt: 40_000, canvasFilePath: secret, title: secret },
         { jobId: secret, phase: secret, stage: secret, reason: secret, servedToChat: 3, changedAt: 99_000 },
         { jobId: '11111111-1111-4111-8111-111111111111', phase: secret, stage: secret, reason: secret, servedToChat: 3, changedAt: 99_000 },
       ],
-      counts: { releaseCalls: 3, releaseNoops: 2, unreleaseCalls: 0, lanesDropped: 4, droppedDiscarded: 1, droppedPruned: 1, droppedMissing: 1, droppedSaved: 1, prompt: secret },
+      counts: { releaseCalls: 3, releaseNoops: 2, unreleaseCalls: 0, lanesDropped: 4, droppedDiscarded: 1, droppedPruned: 1, droppedMissing: 1, droppedSaved: 1, submitAccepted: 8, submitRejected: 2, submitDuplicate: 1, submitJunk: 3, submitTooLarge: 4, submitSuperseded: 5, submitMisrouted: 6, submitHeld: 7, prompt: secret },
     } : null);
     try {
       setBridgeQueueDiagnosticProvider(raw);
@@ -512,6 +657,10 @@ export default [{
       assert(full.includes('## Handoff Bridge Diagnostics') && full.includes('job `01f8d94c` · phase `unread` · stage `none` · reason `none` · served to current chat `no` · in this phase 1m'),
         'the report shows the lane a discarded bundle would leave behind, by its 8-hex prefix and closed phase');
       assert(full.includes('live lanes 2/10') && full.includes('release calls 3 (added nothing: 2)') && full.includes('lanes dropped by the app 4 (discard event 1 · prune event 1 · status probe found the bundle gone 1 · status probe reported it saved 1)'), 'queue capacity and lifecycle counters are visible, each drop cause by what was observed');
+      assert(full.includes('Worker pool planner: current 6 · recommended 10 · materialized now 5 · total forecast 200 · expandable 4 · reason `maximum_parallelism`'),
+        'FULL diagnostics retain only aggregate worker planning evidence, including the reason a six-worker pool can expand');
+      assert(full.includes('Bridge submit outcomes: accepted 8 · rejected 2 · duplicate 1 · invalid 7 · superseded/misrouted 11 · held 7'),
+        'the closed bridge receipt retains aggregate submit rejection evidence independently of the activity ring');
       assert(!full.includes('discarded or pruned'), 'a dropped lane is never labelled with a cause that was not observed');
       assert(full.includes('job `11111111` · phase `unread`') && full.includes('served to current chat `yes`'), 'a hostile enum falls back to a closed value');
       assert(bridge.includes('Application lanes') && !focused.includes('Application lanes'), 'FULL and BRIDGE carry it; other focus codes do not');
@@ -530,6 +679,75 @@ export default [{
       assert(generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('job `01f8d94c`'), 'a retired runtime leaves its final view for a report generated afterwards');
       clearBridgeQueueDiagnostic();
       assert(getBridgeQueueDiagnostic() === null && !generateMarkdown({ ...base, filterCode: 'FULL' }).markdown.includes('Application lanes'), 'clearing removes it');
+    } finally { clearBridgeQueueDiagnostic(); }
+  },
+}, {
+  name: 'handoff bridge: privacy: FULL and BRIDGE reports retain only closed push discovery, selection, scope, and refresh evidence',
+  run: () => {
+    const base = { description: 'Push work stayed in the dock.', nodes: [], edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], eventLogs: [] };
+    const selected = 'a'.repeat(64); const unselected = 'b'.repeat(64);
+    const secret = '/Users/jack/Private Canvas/Ada https://private.example.test/request-123';
+    const raw = {
+      at: 100_000, enabled: true, serving: 'live', autoRelease: false, paused: null, fault: null,
+      scope: { applications: true, scoring: true, marketplace: false, private: secret },
+      queue: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 },
+      chat: { state: 'working', jobsAssigned: 0, jobsCap: 2, startedAt: 90_000, firstCallAt: 91_000, lastCallAt: 99_500, lastCallKind: 'get', calls: 7 },
+      activity: [
+        { kind: 'chat-started', at: 90_000 },
+        { kind: 'get-served', outcome: 'served', at: 99_500 },
+        { kind: secret, outcome: secret, at: 99_900 },
+      ],
+      lanes: [], counts: {},
+      push: {
+        selectedHubs: [selected, secret],
+        optedOutHubs: 1,
+        claimed: ['22222222-2222-4222-8222-222222222222'],
+        served: 1, held: 2,
+        discovered: [
+          { key: selected, pending: 9, tasks: [{ task: 'job-role-screen-batch', pending: 9 }, { task: secret, pending: 99 }], secret },
+          { key: unselected, pending: 2, tasks: [{ task: 'price-synthesis', pending: 2 }], secret },
+        ],
+        diagnostics: {
+          refreshAttempts: 3, refreshFailures: 1, lastRefreshAt: 96_000, lastRefreshOk: true,
+          selectedPolls: 5, selectedPollFailures: 2, lastSelectedPollAt: 99_000, lastSelectedPollOk: false,
+          exclusionScope: 'selected', exclusions: { attachment: 4, person_editing: 1, task_not_allowed: 2, private: 99 },
+        },
+      },
+    };
+    const reduced = reduceBridgeQueue(raw);
+    assert(reduced.scope.scoring && !reduced.scope.marketplace && reduced.push.discoveredHubs === 2
+      && reduced.push.selectedHubs === 1 && reduced.push.optedOutHubs === 1 && reduced.push.selectedPending === 9 && reduced.push.unselectedPending === 2,
+    'the reduced view distinguishes consent and selected work from work still in an unselected dock hub');
+    assert(reduced.push.tasks.some(item => item.task === 'job-role-screen-batch' && item.pending === 9)
+      && reduced.push.exclusions.attachment === 4 && reduced.push.exclusions.person_editing === 1
+      && reduced.push.refreshAttempts === 3 && reduced.push.lastSelectedPoll === 'failed'
+      && reduced.push.lastRefreshAt === 96_000 && reduced.push.lastSelectedPollAt === 99_000
+      && reduced.push.served === 1 && reduced.push.held === 2 && reduced.push.claimed === 1
+      && reduced.chat.calls === 7 && reduced.chat.lastCallKind === 'get' && reduced.activity.length === 2,
+    'closed task, exclusion, exact timing, activity, and aggregate ownership evidence survives reduction');
+    try {
+      setBridgeQueueDiagnosticProvider(() => raw);
+      const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      const bridge = generateMarkdown({ ...base, filterCode: 'BRIDGE' }).markdown;
+      assert(full.includes('Push/MCP consent: scoring `on` · marketplace `off`')
+        && full.includes('1 explicitly unselected') && full.includes('pending 11 total / 9 selected / 2 left in unselected hubs')
+        && full.includes('Push delivery routes: local registry has 9 selected pending · MCP-delivered and awaiting an answer 1 outstanding MCP handoff · active MCP claim 1 · selected and available for the next MCP get 0 · returned to local manual dock 2')
+        && full.includes('`job-role-screen-batch` 9') && full.includes('`attachment` 4')
+        && full.includes('all-hub discovery 3 call(s), 1 failure(s), latest `succeeded` at 1970-01-01T00:01:36.000Z (4s ago)')
+        && full.includes('selected-hub MCP polls 5, 2 failure(s), latest `failed` at 1970-01-01T00:01:39.000Z (1s ago)')
+        && full.includes('MCP chat calls: 7 · started 1970-01-01T00:01:30.000Z · first tool call 1970-01-01T00:01:31.000Z · latest `get` at 1970-01-01T00:01:39.500Z')
+        && full.includes('Recent bridge activity: 2 event(s), oldest first (bounded to 20)')
+        && full.includes('1970-01-01T00:01:39.500Z · `get-served` · outcome `served`'),
+      'FULL names the configuration, selection split, task counts, exclusions, exact refresh/poll clocks, and bounded activity needed to diagnose docked work');
+      assert(bridge.includes('Push/MCP consent') && full.includes('local `non-api-ai` registry')
+        && full.includes('eligible task from a released, selected hub may instead be served'),
+      'the BRIDGE lens includes push evidence and AI configuration describes the local registry plus optional MCP route');
+      for (const leaked of [secret, selected, unselected, 'request-123', 'private.example.test', '22222222-2222-4222-8222-222222222222']) assert(!full.includes(leaked) && !bridge.includes(leaked), `push diagnostics must not leak ${leaked}`);
+      setBridgeQueueDiagnosticProvider(() => ({ ...raw, push: {} }));
+      const noPush = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+      assert(noPush.includes('MCP-delivered and awaiting an answer no outstanding MCP handoffs · active MCP claims 0 · selected and available for the next MCP get 0 · returned to local manual dock 0')
+        && noPush.includes('no result recorded') && !noPush.includes('latest `none` never ago'),
+      'an unobserved push channel states no outstanding handoff, claim, or hand-back plainly instead of emitting contradictory ownership or refresh wording');
     } finally { clearBridgeQueueDiagnostic(); }
   },
 }, {
@@ -702,16 +920,16 @@ export default [{
     assert(specs.filter(spec => spec.message === 'Allow ChatGPT to fetch released handoffs?').length === 1, 'only the long critical enable consent may reach a native sheet');
     const longEnable = specs.find(spec => spec.title === 'Turn on ChatGPT bridge' && spec.detail.includes('bridge.example.com'));
     for (const disclosure of [
-      'Only ChatGPT chats you start', 'Job listings, your career data, and drafts', 'Cloudflare and ChatGPT can read this data',
-      'ChatGPT stores the chat', 'Pause or Revoke anytime', 'Quitting ends active chats',
-      'After a restart, confirm released jobs again', 'After 1 hour without action, serving pauses until Resume; the tunnel and link stay up',
+      'Only ChatGPT chats you start', 'Job and marketplace listings, pricing comparisons, career data, research prompts and results, and drafts', 'Cloudflare and ChatGPT can read this data',
+      'ChatGPT stores the chat', 'Pause or Revoke anytime', 'Quitting ends chats',
+      'After restart, confirm released jobs', 'After 1 hour idle, serving pauses until Resume; tunnel and link stay up',
     ]) assert(longEnable?.detail.includes(disclosure), `long enable consent retains: ${disclosure}`);
     assert(!longEnable?.detail.includes('Delete the chat when done.') && !longEnable?.detail.includes('Copy/paste still works.'), 'long enable consent excludes noncritical follow-up advice');
     assert(longEnable.detail.trim().split(/\s+/).length <= 70, 'long enable consent must stay under the native-sheet readability budget');
     const buttonsFor = title => specs.find(spec => spec.title === title)?.buttons;
     for (const [title, label] of [
       ['Turn off ChatGPT bridge', 'Turn off'], ['Change bridge address', 'Change address'], ['Copy a starter for a new ChatGPT chat', 'Copy starter'],
-      ['Resume bridge serving', 'Resume'], ['Release work to ChatGPT', 'Release'], ['Release scoring work', 'Release'], ['Forget bridge setup', 'Forget setup'],
+      ['Resume bridge serving', 'Resume'], ['Release work to ChatGPT', 'Release'], ['Release selected text work', 'Release'], ['Forget bridge setup', 'Forget setup'],
     ]) assert(JSON.stringify(buttonsFor(title)) === JSON.stringify(['Cancel', label]), `${title} uses its specific affirmative label with Cancel as the safe default`);
     const releaseSpec = specs.find(spec => spec.title === 'Release work to ChatGPT');
     for (const disclosure of ['1 released job:', 'Disk title — Disk company', 'Canvas: Disk.canvas', 'Destination: bridge.example.com', 'career data, job listings, and drafts through Cloudflare']) assert(releaseSpec?.detail.includes(disclosure), `release consent retains: ${disclosure}`);
@@ -728,18 +946,18 @@ export default [{
     const sender = { id: 1, __isCanvasRenderer: true }; const window = { webContents: sender, isDestroyed: () => false };
     const cases = [
       [0, null],
-      [30, 'After 30 minutes without action'],
-      [90, 'After 1 hour 30 minutes without action'],
-      [1440, 'After 1 day without action'],
-      [1500, 'After 1 day 1 hour without action'],
-      [2881, 'After 2 days 1 minute without action'],
+      [30, 'After 30 minutes idle'],
+      [90, 'After 1 hour 30 minutes idle'],
+      [1440, 'After 1 day idle'],
+      [1500, 'After 1 day 1 hour idle'],
+      [2881, 'After 2 days 1 minute idle'],
     ];
     for (const [idlePauseMinutes, expected] of cases) {
       let spec;
       const dialogs = createHandoffBridgeDialogs({ getCanvasWindows: () => [window], dialog: { showMessageBox: async (_parent, value) => { spec = value; return { response: 0 }; } } });
       await dialogs.ask(sender, 'enable', { hostname: 'bridge.example.com', idlePauseMinutes, long: true });
       if (expected) assert(spec.detail.includes(expected), `idle pause ${idlePauseMinutes} must be stated exactly`);
-      else assert(!spec.detail.includes('without action'), 'disabled idle pause must not claim that a timer is active');
+      else assert(!spec.detail.includes(' idle, serving pauses'), 'disabled idle pause must not claim that a timer is active');
     }
   },
 }, {

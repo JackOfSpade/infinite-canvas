@@ -1,3 +1,5 @@
+import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
+
 // The bridge deliberately keeps operational values in one inert module.  The
 // names carry their units so callers do not accidentally compare milliseconds
 // with seconds or bytes with characters.
@@ -72,7 +74,10 @@ export const CONSTANTS = Object.freeze({
   VALIDATION_ERROR_MAX_ITEMS: 30,
   VALIDATION_ERROR_MAX_CHARS: 1500,
 
-  MAX_LANES: 10,
+  // Keep the bridge's chat roster and the workflow scheduler on the same
+  // single source of truth. A worker cap change must not require hunting down
+  // a second numeric limit in transport policy.
+  MAX_LANES: HANDOFF_CONCURRENCY,
   CODE_INDEX_PER_LANE: 16,
   APPLICATION_MAX_JUNK_STREAK: 5,
   APPLICATION_ERROR_STREAK: 3,
@@ -86,9 +91,14 @@ export const CONSTANTS = Object.freeze({
   // ceiling of 3 only meant a new chat every three application bundles however
   // small they were. Raised to the lane ceiling; the default stays 2, so this
   // widens what can be chosen rather than changing anyone's behaviour.
-  JOBS_PER_CHAT_MAX: 10,
-  EPOCH_SOFT_BYTES: 500_000,
-  EPOCH_HARD_BYTES: 900_000,
+  JOBS_PER_CHAT_MAX: HANDOFF_CONCURRENCY,
+  // Conversation-byte rollover is deliberately opt-in. It used to force a
+  // fresh ChatGPT starter after roughly 900 KB of otherwise valid bridge
+  // traffic, which made a worker pool unable to drain a long-lived run. The
+  // transport and per-response caps above remain the security boundary; a
+  // positive persisted value still enables an operator's explicit rollover.
+  EPOCH_SOFT_BYTES: 0,
+  EPOCH_HARD_BYTES: 0,
   STALL_NOTICE_MS: 5 * 60_000,
   // Ended chats remembered by digest (in memory, and persisted as retired-chats.json
   // so a chat from before a restart still reads as ended). Matches MAX_RETIRED_CHATS
@@ -100,7 +110,12 @@ export const CONSTANTS = Object.freeze({
 
   SUCCESSOR_GRACE_MS: 15_000,
   GET_POLL_MS: 250,
-  PUSH_BURST_MAX_COUNT: 0,
+  // A linked MCP grant refills at one request/second. Ten independently
+  // polling workers must leave room for submits and retries, so the engine
+  // spaces pool-only waiting polls over a 15–20 second range instead of
+  // telling every worker to retry every five seconds.
+  POOL_WAIT_MIN_SECONDS: 15,
+  POOL_WAIT_MAX_SECONDS: 20,
   KEEP_AWAKE_ENABLED: false,
   KEEP_AWAKE_MINUTES: 15,
   KEEP_AWAKE_LATENCY_FACTOR: 2,

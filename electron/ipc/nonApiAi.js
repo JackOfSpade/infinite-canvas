@@ -1,15 +1,15 @@
 /**
- * In-memory human handoff — the app's ONLY AI transport.
+ * Canonical local AI-handoff lifecycle registry.
  *
- * Every AI call, for every task, is routed here: the app shows the user a
- * prompt, they paste it into their own chat application, and paste the reply
- * back. Prompts are deliberately sent only to the WebContents that started
- * the IPC request. The renderer copies that material into the user's chosen
- * chat application and invokes `submit-non-api-ai-response` with the pasted
- * reply. Active promises remain process-local, but renderer-created workflow
- * ids let us checkpoint accepted responses and the current draft. After
- * restart the owning renderer re-invokes its workflow: accepted steps replay
- * immediately and the first unfinished step is shown with its draft restored.
+ * Every AI call enters this owner-bound pending registry. The dock remains the
+ * universal handoff registry. Structurally MCP-eligible text work is served
+ * only through the separately consented local MCP bridge; tasks that need an
+ * attachment, vision, or local-file extraction retain the local handoff UI.
+ * Both routes use the same registry, validation path, and durable recovery.
+ * Active promises remain process-local, but renderer-created workflow ids let
+ * us checkpoint accepted responses and the current draft. After restart the
+ * owning renderer re-invokes its workflow: accepted steps replay immediately
+ * and the first unfinished step is shown with its draft restored.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -26,6 +26,10 @@ const { app, ipcMain, shell } = electronPkg;
 export const NON_API_AI_TRANSPORT = 'non-api-ai';
 
 const pendingRequests = new Map();
+// The MCP bridge needs to notice a newly parked handoff before it can offer
+// its main-owned hub selector. Keep this deliberately content-free: listeners
+// are only told that the pending registry changed, never which request did.
+const nonApiAiEventListeners = new Set();
 // Overall progress is deliberately transport-local and display-only. Callers
 // often start a bounded window with planned batch offsets, but a planned
 // offset is not completed work. Keep one accepted-submission counter for each
@@ -33,6 +37,11 @@ const pendingRequests = new Map();
 const handoffProgressScopes = new Map();
 const EPHEMERAL_PROGRESS_SCOPE_MAX_INACTIVE = 200;
 const EPHEMERAL_PROGRESS_SCOPE_MAX_AGE_MS = 30 * 60 * 1000;
+// A worker-pool planner needs to see beyond the small active wave of a long
+// manual run. Keep that projection strictly aggregate-only and bounded: it is
+// process-local planning metadata, never prompt/durable/renderer/report data.
+const MAX_QUEUED_WORK_FORECAST_UNITS = 10_000;
+const QUEUED_WORK_FORECAST_SCOPE_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Code derivation happens before the first durable write and before a request
 // enters `pendingRequests`. Reserve a selected code synchronously in that gap
 // so two simultaneous handoffs cannot both observe it as free.
@@ -59,11 +68,123 @@ let durableDeferredWriteTimer = null;
 // bounded process-local trail.
 const HANDOFF_LIFECYCLE_LIMIT = 40;
 const HANDOFF_LIFECYCLE_REPORT_LIMIT = 20;
+// Receipt detail is intentionally a small FIFO. Its aggregate companion has
+// no prompt-, response-, code-, path-, or validation-derived fields, so it can
+// survive that FIFO without creating a second sensitive history. Window keys
+// are only main-process ownership ids; cap inactive windows so a succession of
+// closed canvases cannot make this process-local diagnostic unbounded.
+const HANDOFF_LIFECYCLE_AGGREGATE_WINDOW_LIMIT = 64;
 // A single bad paste can be retried indefinitely, but an in-memory diagnostic
 // receipt must never become an unbounded record of a user's attempts. Keep the
 // newest failures because they explain the currently visible correction.
 const HANDOFF_FAILURES_PER_LIFECYCLE_LIMIT = 8;
 const handoffLifecycles = [];
+const handoffLifecycleAggregates = new Map();
+// requestNonApiAi creates a receipt before its durable pending-step write
+// finishes and before it can enter pendingRequests. Keep that short interval
+// protected too, otherwise a burst of new windows could prune the aggregate
+// for a request that is about to become active.
+const handoffLifecycleAggregateReservations = new Map();
+
+function lifecycleAggregateKey(windowId) {
+  return Number.isInteger(windowId) ? `window:${windowId}` : 'window:none';
+}
+
+function emptyHandoffLifecycleAggregate() {
+  return {
+    issued: 0,
+    settled: 0,
+    accepted: 0,
+    cancelled: 0,
+    steppedBack: 0,
+    failed: 0,
+    rejectionAttempts: 0,
+    requestsEverRejected: 0,
+    acceptedAfterRejection: 0,
+    bridgeRejectionAttempts: 0,
+    requestsEverBridgeRejected: 0,
+    acceptedAfterBridgeRejection: 0,
+  };
+}
+
+function hasPendingLifecycleForAggregateKey(key) {
+  for (const record of pendingRequests.values()) {
+    if (record?.lifecycle && lifecycleAggregateKey(record.lifecycle.windowId) === key) return true;
+  }
+  return false;
+}
+
+function reserveHandoffLifecycleAggregateWindow(windowId) {
+  const key = lifecycleAggregateKey(windowId);
+  handoffLifecycleAggregateReservations.set(key, (handoffLifecycleAggregateReservations.get(key) || 0) + 1);
+}
+
+function releaseHandoffLifecycleAggregateWindow(windowId) {
+  const key = lifecycleAggregateKey(windowId);
+  const count = handoffLifecycleAggregateReservations.get(key) || 0;
+  if (count <= 1) handoffLifecycleAggregateReservations.delete(key);
+  else handoffLifecycleAggregateReservations.set(key, count - 1);
+  pruneHandoffLifecycleAggregates();
+}
+
+function aggregateWindowHasLiveLifecycle(key) {
+  return hasPendingLifecycleForAggregateKey(key) || (handoffLifecycleAggregateReservations.get(key) || 0) > 0;
+}
+
+function pruneHandoffLifecycleAggregates() {
+  while (handoffLifecycleAggregates.size > HANDOFF_LIFECYCLE_AGGREGATE_WINDOW_LIMIT) {
+    // Never discard an aggregate while it still owns a live request. Do not
+    // stop at an active oldest entry, though: a later inactive entry can be
+    // evicted safely and keeps the window map bounded in ordinary operation.
+    let oldestInactive = null;
+    for (const key of handoffLifecycleAggregates.keys()) {
+      if (!aggregateWindowHasLiveLifecycle(key)) {
+        oldestInactive = key;
+        break;
+      }
+    }
+    // More than the cap of simultaneously active windows is not a normal
+    // renderer state. Retaining those active owners is safer than silently
+    // losing their live lifecycle accounting; the next settlement prunes it.
+    if (oldestInactive === null) break;
+    handoffLifecycleAggregates.delete(oldestInactive);
+  }
+}
+
+function handoffLifecycleAggregateForWindow(windowId) {
+  const key = lifecycleAggregateKey(windowId);
+  let aggregate = handoffLifecycleAggregates.get(key);
+  if (!aggregate) {
+    aggregate = emptyHandoffLifecycleAggregate();
+    handoffLifecycleAggregates.set(key, aggregate);
+  } else {
+    // Map iteration is the inactive-window LRU order used by the small cap.
+    handoffLifecycleAggregates.delete(key);
+    handoffLifecycleAggregates.set(key, aggregate);
+  }
+  pruneHandoffLifecycleAggregates();
+  return aggregate;
+}
+
+function incrementLifecycleAggregate(aggregate, key) {
+  aggregate[key] = Math.min(999_999, (aggregate[key] || 0) + 1);
+}
+
+function cumulativeHandoffLifecycleAggregate(windowId) {
+  const total = emptyHandoffLifecycleAggregate();
+  const entries = windowId == null
+    ? handoffLifecycleAggregates.values()
+    : [handoffLifecycleAggregates.get(lifecycleAggregateKey(windowId))];
+  for (const aggregate of entries) {
+    if (!aggregate) continue;
+    for (const key of Object.keys(total)) total[key] = Math.min(999_999, total[key] + (aggregate[key] || 0));
+  }
+  return total;
+}
+
+export function __nonApiAiHandoffLifecycleAggregateCountForTests() {
+  return handoffLifecycleAggregates.size;
+}
 // Bug reports need a stable-in-this-process tag to detect the same pasted body
 // crossing two handoffs, but an ordinary SHA digest would let a report reader
 // test guessed private responses offline. This key never leaves memory and is
@@ -92,10 +213,12 @@ const ACCEPTED_RESPONSE_FINGERPRINT_MAX = 200;
 export const DUPLICATE_RESPONSE_MIN_LENGTH = 400;
 const NON_API_AI_HANDLER_CHANNELS = [
   'replay-pending-non-api-ai-requests',
+  'inspect-non-api-ai-run',
   'submit-non-api-ai-response',
   'step-back-non-api-ai-request',
   'cancel-non-api-ai-request',
   'reveal-non-api-ai-attachment',
+  'claim-non-api-ai-manual',
   'update-non-api-ai-draft',
   'flush-non-api-ai-persistence',
   'complete-non-api-ai-run',
@@ -583,7 +706,7 @@ async function durableStepByLogicalOrRawKey(runId, keys) {
  * This deliberately reports only whether a requested task has a live durable
  * step; it neither mutates state nor exposes a prompt, response, or draft.
  */
-export async function durableRunHasAnyTask(runId, taskIds) {
+export async function durableRunHasAnyTask(runId, taskIds, { batchTotal = null } = {}) {
   const clean = cleanRunId(runId);
   const requestedTasks = new Set(
     (Array.isArray(taskIds) ? taskIds.slice(0, 64) : [])
@@ -596,12 +719,55 @@ export async function durableRunHasAnyTask(runId, taskIds) {
   const state = await loadDurableState();
   const steps = state?.runs?.[clean]?.steps;
   if (!steps || typeof steps !== 'object' || Array.isArray(steps)) return false;
-  return Object.values(steps).some(step => (
-    step
-    && typeof step === 'object'
-    && requestedTasks.has(step.task)
-    && (step.status === 'accepted' || step.status === 'pending')
-  ));
+  return Object.values(steps).some(step => {
+    if (!step || typeof step !== 'object' || !requestedTasks.has(step.task)
+      || (step.status !== 'accepted' && step.status !== 'pending')) return false;
+    // Contract migrations occasionally need to distinguish two layouts under
+    // one task id. Keep the default two-argument probe unchanged; the optional
+    // filter only exposes whether the durable metadata has a batch total, not
+    // its value or any prompt/response content.
+    if (batchTotal === 'present') return step.batchTotal != null;
+    if (batchTotal === 'absent') return step.batchTotal == null;
+    return true;
+  });
+}
+
+/**
+ * Read-only settlement summary for one durable workflow.  Recovery code uses
+ * this only to retire a *completed* pre-search marker after a separately
+ * owned Job Search staging manifest has been proven.  It intentionally omits
+ * prompts, responses, drafts, task names, and step identities.
+ */
+export async function durableRunSettlementSummary(runId) {
+  const clean = cleanRunId(runId);
+  if (!clean) return { found: false, accepted: 0, pending: 0, other: 0, acceptedOnly: false };
+
+  const state = await loadDurableState();
+  const steps = state?.runs?.[clean]?.steps;
+  if (!steps || typeof steps !== 'object' || Array.isArray(steps)) {
+    return { found: false, accepted: 0, pending: 0, other: 0, acceptedOnly: false };
+  }
+  let accepted = 0;
+  let pending = 0;
+  let other = 0;
+  for (const step of Object.values(steps)) {
+    if (!step || typeof step !== 'object') {
+      other += 1;
+    } else if (step.status === 'accepted') {
+      accepted += 1;
+    } else if (step.status === 'pending') {
+      pending += 1;
+    } else {
+      other += 1;
+    }
+  }
+  return {
+    found: accepted + pending + other > 0,
+    accepted,
+    pending,
+    other,
+    acceptedOnly: accepted > 0 && pending === 0 && other === 0,
+  };
 }
 
 /**
@@ -990,10 +1156,12 @@ export function isNonApiAiStepBackError(error) {
 
 function createHandoffLifecycle({ requestId, handoffCode, runId, sender, nodeId, channel, task, batch, batchTotal, itemCount, itemsDone, itemsTotal, planItemCount, attemptKind, rootBatchSize, materializedPrompt }) {
   const issuedAt = Date.now();
+  const windowId = sender?.id ?? null;
+  reserveHandoffLifecycleAggregateWindow(windowId);
   const lifecycle = {
     requestId: String(requestId || '').slice(0, 12),
     handoffCode: handoffCode || null,
-    windowId: sender?.id ?? null,
+    windowId,
     nodeId: nodeId || null,
     // Kept in-memory only for exact active-controller correlation. It is never
     // rendered into the report; visible receipts use the separate request id.
@@ -1032,6 +1200,12 @@ function createHandoffLifecycle({ requestId, handoffCode, runId, sender, nodeId,
     replays: 0,
     reissues: 0,
     rejected: 0,
+    // Closed state only. These flags let the cumulative aggregate preserve a
+    // correction/recovery fact after this detail row leaves the FIFO.
+    everRejected: false,
+    acceptedAfterRejectionRecorded: false,
+    everBridgeRejected: false,
+    acceptedAfterBridgeRejectionRecorded: false,
     codeMismatches: 0,
     // Every entry is a deliberately tiny, typed failure receipt. Never add a
     // prompt, pasted response, validation message, path, property name, or
@@ -1043,13 +1217,39 @@ function createHandoffLifecycle({ requestId, handoffCode, runId, sender, nodeId,
   };
   handoffLifecycles.push(lifecycle);
   if (handoffLifecycles.length > HANDOFF_LIFECYCLE_LIMIT) handoffLifecycles.shift();
+  incrementLifecycleAggregate(handoffLifecycleAggregateForWindow(windowId), 'issued');
   return lifecycle;
 }
 
 function updateHandoffLifecycle(record, update) {
   const lifecycle = record?.lifecycle;
   if (!lifecycle) return;
+  const aggregate = handoffLifecycleAggregateForWindow(lifecycle.windowId);
   const now = Date.now();
+  const recordRejection = () => {
+    incrementLifecycleAggregate(aggregate, 'rejectionAttempts');
+    if (!lifecycle.everRejected) {
+      lifecycle.everRejected = true;
+      incrementLifecycleAggregate(aggregate, 'requestsEverRejected');
+    }
+    if (update?.transport === 'bridge') {
+      incrementLifecycleAggregate(aggregate, 'bridgeRejectionAttempts');
+      if (!lifecycle.everBridgeRejected) {
+        lifecycle.everBridgeRejected = true;
+        incrementLifecycleAggregate(aggregate, 'requestsEverBridgeRejected');
+      }
+    }
+  };
+  const recordAcceptance = () => {
+    if (lifecycle.everRejected && !lifecycle.acceptedAfterRejectionRecorded) {
+      lifecycle.acceptedAfterRejectionRecorded = true;
+      incrementLifecycleAggregate(aggregate, 'acceptedAfterRejection');
+    }
+    if (lifecycle.everBridgeRejected && !lifecycle.acceptedAfterBridgeRejectionRecorded) {
+      lifecycle.acceptedAfterBridgeRejectionRecorded = true;
+      incrementLifecycleAggregate(aggregate, 'acceptedAfterBridgeRejection');
+    }
+  };
   lifecycle.updatedAt = now;
   if (update === 'delivered') lifecycle.deliveries += 1;
   else if (update === 'replayed') {
@@ -1058,13 +1258,18 @@ function updateHandoffLifecycle(record, update) {
   } else if (update === 'reissued') {
     lifecycle.reissues += 1;
     lifecycle.deliveries += 1;
-  } else if (update === 'rejected') lifecycle.rejected += 1;
+  } else if (update === 'rejected') {
+    lifecycle.rejected += 1;
+    recordRejection();
+  }
   else if (update === 'code_mismatch') {
     lifecycle.codeMismatches += 1;
     lifecycle.rejected += 1;
+    recordRejection();
   }
   else if (update?.rejected) {
     lifecycle.rejected += 1;
+    recordRejection();
     if (update.code === 'HANDOFF_CODE_MISMATCH') lifecycle.codeMismatches += 1;
     const failure = {
       at: now,
@@ -1081,9 +1286,13 @@ function updateHandoffLifecycle(record, update) {
     lifecycle.failures.push(failure);
     if (lifecycle.failures.length > HANDOFF_FAILURES_PER_LIFECYCLE_LIMIT) lifecycle.failures.shift();
   }
-  else if (update === 'accepted') lifecycle.acceptedAt = now;
+  else if (update === 'accepted') {
+    lifecycle.acceptedAt = now;
+    recordAcceptance();
+  }
   else if (update?.accepted) {
     lifecycle.acceptedAt = now;
+    recordAcceptance();
     if (Number.isFinite(update.responseChars)) {
       // Keep the LARGEST response seen for this handoff: a re-paste after a
       // truncated first attempt is exactly the case worth reporting.
@@ -1096,6 +1305,14 @@ function updateHandoffLifecycle(record, update) {
   else if (update?.settled) {
     lifecycle.settledAt = now;
     lifecycle.outcome = update.settled;
+    if (!lifecycle.aggregateSettled) {
+      lifecycle.aggregateSettled = true;
+      incrementLifecycleAggregate(aggregate, 'settled');
+      if (update.settled === 'accepted') incrementLifecycleAggregate(aggregate, 'accepted');
+      else if (update.settled === 'cancelled') incrementLifecycleAggregate(aggregate, 'cancelled');
+      else if (update.settled === 'stepped_back') incrementLifecycleAggregate(aggregate, 'steppedBack');
+      else incrementLifecycleAggregate(aggregate, 'failed');
+    }
   }
 }
 
@@ -1106,13 +1323,23 @@ function updateHandoffLifecycle(record, update) {
  * retained here.
  */
 function cloneHandoffLifecycleReceipts(lifecycles) {
-  return lifecycles.map(lifecycle => ({
-      ...lifecycle,
+  return lifecycles.map(lifecycle => {
+    const receipt = { ...lifecycle };
+    // Aggregate bookkeeping must not become a second per-request report API.
+    // The aggregate exposes its own numeric truth at snapshot level.
+    delete receipt.everRejected;
+    delete receipt.acceptedAfterRejectionRecorded;
+    delete receipt.everBridgeRejected;
+    delete receipt.acceptedAfterBridgeRejectionRecorded;
+    delete receipt.aggregateSettled;
+    return {
+      ...receipt,
       failures: Array.isArray(lifecycle.failures) ? lifecycle.failures.map(failure => ({
         ...failure,
         validationDiagnostic: cloneSafeValidationDiagnostic(failure?.validationDiagnostic),
       })) : [],
-    }));
+    };
+  });
 }
 
 /**
@@ -1123,13 +1350,46 @@ function cloneHandoffLifecycleReceipts(lifecycles) {
 export function getNonApiAiHandoffLifecycleSnapshot({ windowId = null } = {}) {
   const matching = handoffLifecycles
     .filter(lifecycle => windowId == null || lifecycle.windowId === windowId);
-  const omitted = Math.max(0, matching.length - HANDOFF_LIFECYCLE_REPORT_LIMIT);
+  // A pending record remains owned by pendingRequests even if a busy process
+  // has pushed its older diagnostic row out of the detailed FIFO. Promote that
+  // live receipt back into the report selection so a report can never say
+  // there are no pending handoffs merely because the source ring wrapped.
+  const active = [...pendingRequests.values()]
+    .map(record => record?.lifecycle)
+    .filter(lifecycle => lifecycle
+      && (windowId == null || lifecycle.windowId === windowId));
+  const sourceSet = new Set(matching);
+  const activeOnly = active.filter(lifecycle => !sourceSet.has(lifecycle));
+  const activeSet = new Set(active);
+  const inactive = matching.filter(lifecycle => !activeSet.has(lifecycle));
+  const activeForReport = active.slice(-HANDOFF_LIFECYCLE_REPORT_LIMIT);
+  const remainingCapacity = Math.max(0, HANDOFF_LIFECYCLE_REPORT_LIMIT - activeForReport.length);
+  const visible = [...inactive.slice(-remainingCapacity), ...activeForReport]
+    .sort((left, right) => (left.issuedAt || 0) - (right.issuedAt || 0));
+  const aggregate = cumulativeHandoffLifecycleAggregate(windowId);
+  const pendingAfterRejection = active.filter(lifecycle => lifecycle.everRejected).length;
+  const pendingAfterBridgeRejection = active.filter(lifecycle => lifecycle.everBridgeRejected).length;
+  const sourceRetained = matching.length;
+  const detailedRetained = sourceRetained + activeOnly.length;
+  const sourceEvicted = Math.max(0, aggregate.issued - sourceRetained);
   return {
-    lifecycles: cloneHandoffLifecycleReceipts(matching.slice(-HANDOFF_LIFECYCLE_REPORT_LIMIT)),
-    total: matching.length,
-    omitted,
+    lifecycles: cloneHandoffLifecycleReceipts(visible),
+    // Legacy fields retain their old source-FIFO meanings until every caller
+    // moves to the explicit fields below.
+    total: sourceRetained,
+    omitted: Math.max(0, sourceRetained - visible.length),
     limit: HANDOFF_LIFECYCLE_REPORT_LIMIT,
     sourceLimit: HANDOFF_LIFECYCLE_LIMIT,
+    sourceRetained,
+    sourceEvicted,
+    detailedRetained,
+    detailedOmitted: Math.max(0, detailedRetained - visible.length),
+    activeRecoveredFromSourceEviction: activeOnly.length,
+    aggregate: {
+      ...aggregate,
+      pendingAfterRejection,
+      pendingAfterBridgeRejection,
+    },
   };
 }
 
@@ -1141,6 +1401,8 @@ export function getNonApiAiHandoffLifecycle({ windowId = null } = {}) {
 // restarts, matching the process-local scope stated in the report.
 export function _resetNonApiAiHandoffLifecycle() {
   handoffLifecycles.length = 0;
+  handoffLifecycleAggregates.clear();
+  handoffLifecycleAggregateReservations.clear();
   // Calibration is process-session scoped. Tests share one process, so clear
   // it alongside lifecycle receipts to keep their sizing evidence isolated.
   sessionCalibration.clear();
@@ -1215,6 +1477,22 @@ function cleanProgressIdentifier(value) {
   if (typeof value !== 'string') return null;
   const clean = value.trim();
   return clean && clean.length <= 240 ? clean : null;
+}
+
+// This data crosses only the in-process nonApiAi -> push source seam.  A
+// UUID scope lets the source de-duplicate the several visible handoffs that
+// belong to one longer run without retaining a node id, listing, prompt, or
+// caller-controlled label.  Requiring it to match the existing progress
+// scope also prevents a generic caller from smuggling arbitrary text into the
+// planning cache.
+function cleanQueuedWorkForecast(value, progressScopeId) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const scopeId = typeof value.scopeId === 'string' ? value.scopeId : '';
+  const units = Number(value.remainingUnits);
+  if (!QUEUED_WORK_FORECAST_SCOPE_RE.test(scopeId)
+    || scopeId !== cleanProgressIdentifier(progressScopeId)
+    || !Number.isSafeInteger(units) || units < 1 || units > MAX_QUEUED_WORK_FORECAST_UNITS) return null;
+  return Object.freeze({ scopeId, remainingUnits: units });
 }
 
 function progressMetadataForRecord(record) {
@@ -1297,7 +1575,7 @@ function pruneInactiveEphemeralProgressScopes(now = Date.now()) {
     }
   }
   // An interrupted no-run operation has no durable completion receipt. Keep a
-  // generous recent window for a fixed-wave gap, then bound abandoned scalar
+  // generous recent window for an interrupted scheduling gap, then bound abandoned scalar
   // scope state without ever evicting an active prompt.
   if (inactive.length > EPHEMERAL_PROGRESS_SCOPE_MAX_INACTIVE) {
     inactive.sort(([, a], [, b]) => a.updatedAt - b.updatedAt);
@@ -1824,6 +2102,13 @@ function publicRequest(record, validationError = record.validationError || null)
   const retry = promptForRetry(record, validationError);
   return {
     requestId: record.requestId,
+    // Renderer-only correlation token for the bridge-held projection. It is
+    // random per request and is never accepted as authorization by main.
+    bridgeClaimId: record.bridgeClaimId,
+    // This route is fixed by main when the request is issued. In particular it
+    // does not follow an asynchronous status snapshot: unavailable delivery
+    // is a bridge setup/progress state, never permission to revive paste UI.
+    mcpEligible: record.handoffRoute === 'mcp',
     handoffCode: record.handoffCode || null,
     runId: record.runId || null,
     stepKey: record.stepKey || null,
@@ -1879,6 +2164,7 @@ function settle(record, outcome) {
   updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : outcome?.steppedBack ? 'stepped_back' : 'failed' });
   detachProgressRecord(record);
   send(record, 'non-api-ai-settled', { requestId: record.requestId, ...outcome });
+  emitNonApiAiEvent();
 }
 
 function abortPending(record, reason) {
@@ -1901,6 +2187,7 @@ function sendRequest(record, deliveryKind = 'initial') {
     updateHandoffLifecycle(record, deliveryKind === 'replay'
       ? 'replayed'
       : deliveryKind === 'reissue' ? 'reissued' : 'delivered');
+    emitNonApiAiEvent();
     return true;
   }
   // A failed retry/replay delivery is just as terminal as a failed first
@@ -1908,6 +2195,23 @@ function sendRequest(record, deliveryKind = 'initial') {
   // ever complete, particularly during a window-close race.
   abortPending(record, new Error('Originating window closed before the Non-API AI request could be shown.'));
   return false;
+}
+
+/**
+ * Subscribe to changes in the pending handoff registry without exposing its
+ * records. This is an in-process wake-up only: callers must re-read through
+ * their own allowlisted, ownership-checked bridge seam.
+ */
+export function onNonApiAiEvent(listener) {
+  if (typeof listener !== 'function') return () => undefined;
+  nonApiAiEventListeners.add(listener);
+  return () => { nonApiAiEventListeners.delete(listener); };
+}
+
+function emitNonApiAiEvent() {
+  for (const listener of nonApiAiEventListeners) {
+    try { listener(); } catch { /* an observer must never affect a handoff */ }
+  }
 }
 
 /**
@@ -1943,6 +2247,10 @@ export async function requestNonApiAi({
   progressUnitId,
   progressUnits,
   measureProgressUnits,
+  // Aggregate-only estimate for a long workflow whose scheduler has emitted
+  // only its current bounded wave. This deliberately stays out of durable
+  // identity and every renderer/report projection.
+  queuedWorkForecast,
   // What the caller sizes its batches by (listings x preference items for
   // listing evaluation). Recorded so an accepted response can teach the next
   // batch how big it can safely be.
@@ -2167,6 +2475,10 @@ export async function requestNonApiAi({
 
   const record = {
     requestId: crypto.randomUUID(),
+    // Do not project request ids into bridge status. This opaque, per-request
+    // token lets only the dock that received this handoff recognise a bridge
+    // claim, without task- or node-level guessing.
+    bridgeClaimId: crypto.randomUUID(),
     handoffCode,
     handoffReservationId,
     // A pre-enforcement legacy pending alias must remain code-optional when
@@ -2191,6 +2503,7 @@ export async function requestNonApiAi({
     progressUnitId,
     progressUnits,
     measureProgressUnits: typeof measureProgressUnits === 'function' ? measureProgressUnits : null,
+    queuedWorkForecast: cleanQueuedWorkForecast(queuedWorkForecast, progressScopeId),
     matchCount: cleanProgressCount(matchCount),
     measureResponseUnits: typeof measureResponseUnits === 'function' ? measureResponseUnits : null,
     planItemCount: cleanProgressCount(planItemCount),
@@ -2199,6 +2512,11 @@ export async function requestNonApiAi({
     task,
     responseSchema: effectiveResponseSchema,
     responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
+    // Keep the raw/structured distinction private and closed. The bridge may
+    // use it to choose one of two reviewed wire formats, but arbitrary caller
+    // request-kind strings never reach MCP tools, status, logs, or reports.
+    requestKind: requestKind === 'raw-text' ? 'raw-text' : 'structured-text',
+    grounded: grounding === true,
     attachmentPaths: normalizedAttachmentPaths,
     canStepBack: canStepBack === true,
     stepBackLabel: cleanStepBackLabel(stepBackLabel),
@@ -2218,6 +2536,14 @@ export async function requestNonApiAi({
     progressScopeKey: null,
     progressCandidateToken: null,
   };
+  // Immutable before the first renderer delivery/replay.  The dock must never
+  // consult a live bridge status packet to choose its workflow: an unavailable
+  // bridge is a setup state for reviewed text, not a reason to offer a second
+  // manual answer path.
+  record.handoffRoute = isMcpEligibleNonApiAiRecord(record)
+    && !(typeof record.initialResponse === 'string' && record.initialResponse.trim())
+    ? 'mcp'
+    : 'manual';
   record.lifecycle = createHandoffLifecycle(record);
   const progressScope = registerProgressRecord(record);
   // A sibling can arrive after another batch's planned offset. Tell already
@@ -2228,6 +2554,12 @@ export async function requestNonApiAi({
   try {
     await updateDurableStep(record, { status: 'pending', draft: record.initialResponse || '', response: null });
   } catch (error) {
+    // This request never entered pendingRequests, so settle() cannot own its
+    // terminal receipt. Record the failed initial durable admission directly:
+    // otherwise its issued aggregate/detail row would look permanently pending
+    // after the reservation is released.
+    updateHandoffLifecycle(record, { settled: 'failed' });
+    releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
     unregisterProgressRecord(record);
     publishProgressScope(progressScope, record);
     releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
@@ -2238,6 +2570,7 @@ export async function requestNonApiAi({
     record.reject = reject;
     record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));
     pendingRequests.set(record.requestId, record);
+    releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
     // The durable-step reads/writes above yield to the event loop, so a
     // cancellation can land between the entry check and this point — and
     // addEventListener never fires on an already-aborted signal. Without this
@@ -2370,7 +2703,7 @@ export function validateNonApiAiSubmission({
  * no await before this call: the check-then-set on `settling` is the only thing
  * that keeps two simultaneous submissions from both committing.
  */
-async function acceptNonApiAiResponse(record, args) {
+async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}) {
   // Where the write stands, so the caller can tell a rejected answer from a failed save.
   let phase = 'validate';
   try {
@@ -2449,6 +2782,11 @@ async function acceptNonApiAiResponse(record, args) {
     record.validationDiagnostic = validationDiagnostic;
     updateHandoffLifecycle(record, {
       rejected: true,
+      // The bridge exposes a durable-save failure as `commit_failed`, not as
+      // its submit-rejected outcome. Route-specific rejection accounting must
+      // follow that wire contract while the general receipt still records the
+      // failed local acceptance attempt.
+      transport: phase === 'validate' && transport === 'bridge' ? 'bridge' : 'local',
       code: validationCode,
       validationDiagnostic,
       ...responseReceipt,
@@ -2470,12 +2808,12 @@ async function acceptNonApiAiResponse(record, args) {
 // through acceptNonApiAiResponse above, the same body the dock's paste uses.
 //
 // Default-deny on purpose. A handoff is offered only when it needs nothing a
-// text-only tool connection cannot supply (no attachment, a structured
-// answer), its task id is on the caller's allowlist, and nobody is typing an
-// answer for it in the dock. Grounded (web-research) handoffs are eligible
-// too: the tool framing permits the chat's own web research and forbids only
-// acting on instructions the untrusted prompt text contains. The structural
-// checks run before the allowlist so a wrong allowlist can never unblock them.
+// text-only tool connection cannot supply, its task id is on the caller's
+// allowlist, and nobody is typing an answer for it in the dock. Structured
+// text is eligible by shape. Raw text needs a narrower reviewed contract: an
+// exact research task id, the raw-text request kind, grounding enabled, and a
+// caller-provided validator. The structural checks run before the allowlist so
+// a wrong allowlist can never unblock arbitrary prose.
 
 /** Why a pending handoff is not offered to an external session, in precedence order. */
 export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
@@ -2483,17 +2821,87 @@ export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
   'task_not_allowed', 'node_not_allowed', 'person_editing',
 ]);
 
-function bridgeExclusionReason(record, { allowTasks, allowNodeIds } = {}) {
+// Schema-less responses are otherwise indistinguishable from arbitrary prose.
+// Keep the exception literal and cross-pinned to the push policy in tests.
+export const BRIDGE_RAW_RESEARCH_TASKS = Object.freeze([
+  'job-compensation-research',
+  'job-compensation-research-batch',
+  'job-preference-research',
+  'job-preference-research-batch',
+]);
+const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
+
+// Single, main-owned policy projection for the renderer. This is capability,
+// not current delivery: a bridge can be disabled, paused, unlinked, or not yet
+// polled and this must still say that the task belongs to the MCP route. The
+// source policy imports this list and adds its explicit never rows, so a new
+// task is manual by default until it is deliberately reviewed here.
+export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
+  'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
+  'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
+  'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
+  'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-taxonomy-classify',
+  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
+  'price-synthesis-batch', 'resume-parse',
+]);
+const bridgeReleaseOneTasks = new Set(BRIDGE_RELEASE_ONE_TASKS);
+
+function bridgeResponseFormat(record) {
+  if (record?.responseSchema) return 'json';
+  const reviewedRawResearch = bridgeRawResearchTasks.has(record?.task)
+    && record?.requestKind === 'raw-text'
+    && record?.grounded === true
+    && typeof record?.responseValidator === 'function';
+  return reviewedRawResearch ? 'text' : null;
+}
+
+// Deliberately excludes mutable transport state such as selection, link/chat
+// health, claims, and pause. It also excludes a restored local draft: that
+// draft is an existing user-owned manual session and cannot be silently hidden
+// or discarded by the migration to plugin-only delivery.
+export function isMcpEligibleNonApiAiRecord(record) {
+  return Boolean(
+    record
+    && bridgeReleaseOneTasks.has(record.task)
+    && Array.isArray(record.attachmentPaths)
+    && record.attachmentPaths.length === 0
+    && bridgeResponseFormat(record),
+  );
+}
+
+function bridgeWindowNodeKey(windowId, nodeId) {
+  return Number.isInteger(windowId) && typeof nodeId === 'string' && nodeId
+    ? `${windowId}\u0000${nodeId}`
+    : null;
+}
+
+function bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs = null } = {}) {
   // The window is closing or the workflow was cancelled: the record is about to settle.
   if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
   if (record.settling) return 'settling';
   if (record.attachmentPaths.length > 0) return 'attachment';
-  if (!record.responseSchema) return 'free_text';
+  if (!bridgeResponseFormat(record)) return 'free_text';
+  // Preserve the existing local-draft diagnostic before applying the route
+  // fence. A restored manual answer must be reported as person-owned, while
+  // an unreviewed task with no draft is simply never bridge-eligible.
+  if (record.handoffRoute !== 'mcp'
+    && (record.manualIntent === true || (typeof record.initialResponse === 'string' && record.initialResponse.trim() !== ''))) return 'person_editing';
+  // The source allow-list is an additional scope fence, not permission to
+  // override the immutable route minted with the record. This also keeps an
+  // accidental future caller from serving an unreviewed schema task merely by
+  // passing its name in allowTasks.
+  if (record.handoffRoute === 'manual') return 'task_not_allowed';
   if (!(allowTasks instanceof Set) || !allowTasks.has(record.task)) return 'task_not_allowed';
   if (allowNodeIds != null && !(allowNodeIds instanceof Set && allowNodeIds.has(record.nodeId))) return 'node_not_allowed';
+  // Node ids are not globally unique: two canvas windows can expose the same
+  // node id. This private source seam therefore requires the selected exact
+  // sender-window/node pair when one is supplied. It remains an internal
+  // authorization input, never a renderer/status/tool/report value.
+  const windowNodeKey = bridgeWindowNodeKey(record.sender?.id, record.nodeId);
+  if (allowWindowNodePairs != null && !(allowWindowNodePairs instanceof Set && windowNodeKey && allowWindowNodePairs.has(windowNodeKey))) return 'node_not_allowed';
   // `initialResponse` is the person's unsent draft, or the accepted answer a Back
   // step restored for editing. Either way the dock is not done with this handoff.
-  if (typeof record.initialResponse === 'string' && record.initialResponse.trim() !== '') return 'person_editing';
   return null;
 }
 
@@ -2529,14 +2937,80 @@ function bridgeDockOrder(records) {
   return ordered;
 }
 
+function bridgeQueuedWorkForecast(record) {
+  // A rolling research scheduler can settle a later batch while an earlier
+  // sibling is still open. Its ordinal forecast (batchTotal - batch + 1)
+  // then includes batches that have already completed. Progress scopes update
+  // every live record at each durable acceptance, so their item counter is
+  // the authoritative live remaining-work signal when a stable root batch
+  // size is available. Old runs did not retain that size and deliberately
+  // continue through the explicit/ordinal compatibility paths below.
+  if (record?.task === 'job-preference-research-batch') {
+    const unitSize = cleanBatchNumber(record?.rootBatchSize);
+    const itemsDone = cleanProgressCount(record?.itemsDone);
+    const itemsTotal = cleanProgressCount(record?.itemsTotal);
+    if (unitSize && itemsDone != null && itemsTotal != null) {
+      // A live record should normally be gone once the scope is complete. If
+      // it is not, do not revive a stale ordinal/explicit forecast and claim
+      // future work that the authoritative progress counter says is finished.
+      if (itemsDone >= itemsTotal) return null;
+      const live = cleanQueuedWorkForecast({
+        scopeId: record?.progressScopeId,
+        remainingUnits: Math.ceil((itemsTotal - itemsDone) / unitSize),
+      }, record?.progressScopeId);
+      if (live) return live;
+    }
+  }
+  // Listing evaluation uses the same rolling execution pattern. Its root
+  // size can vary between adaptive planning groups, but the live progress
+  // counter is still the authoritative answer for an already-materialized
+  // root. Prefer it to the issue-time forecast so a straggler cannot keep
+  // advertising work that later siblings have already completed. Older
+  // records without usable progress metadata retain their explicit estimate.
+  if (record?.task === 'job-preference-evaluation') {
+    const unitSize = cleanBatchNumber(record?.rootBatchSize) ?? cleanBatchNumber(record?.itemCount);
+    const itemsDone = cleanProgressCount(record?.itemsDone);
+    const itemsTotal = cleanProgressCount(record?.itemsTotal);
+    if (unitSize && itemsDone != null && itemsTotal != null) {
+      if (itemsDone >= itemsTotal) return null;
+      const live = cleanQueuedWorkForecast({
+        scopeId: record?.progressScopeId,
+        remainingUnits: Math.ceil((itemsTotal - itemsDone) / unitSize),
+      }, record?.progressScopeId);
+      if (live) return live;
+    }
+  }
+  const explicit = cleanQueuedWorkForecast(record?.queuedWorkForecast, record?.progressScopeId);
+  if (explicit) return explicit;
+  // Existing in-flight preference runs predate queuedWorkForecast, but they
+  // already carry bounded progress counters. Derive the same aggregate only
+  // for this reviewed task so an app update can size a pool for the CURRENT
+  // run rather than waiting until a wholly new run starts.
+  if (record?.task === 'job-preference-research-batch') {
+    const batch = cleanBatchNumber(record?.batch);
+    const batchTotal = cleanBatchNumber(record?.batchTotal);
+    if (!batch || !batchTotal || batch > batchTotal) return null;
+    return cleanQueuedWorkForecast({
+      scopeId: record?.progressScopeId,
+      remainingUnits: batchTotal - batch + 1,
+    }, record?.progressScopeId);
+  }
+  return null;
+}
+
 function bridgeListEntry(record) {
   return Object.freeze({
     requestId: record.requestId,
+    // This stays inside the main-process push seam. The MCP framing never
+    // returns it to ChatGPT; source status uses it only as an opaque renderer
+    // correlation token for an already-delivered dock request.
+    bridgeClaimId: record.bridgeClaimId,
     handoffCode: record.handoffCode,
     windowId: record.sender?.id ?? null,
     nodeId: record.nodeId || null,
     runId: record.runId || null,
     task: record.task || null,
+    responseFormat: bridgeResponseFormat(record),
     batch: record.batch ?? null,
     batchTotal: record.batchTotal ?? null,
     itemCount: record.itemCount ?? null,
@@ -2551,6 +3025,10 @@ function bridgeListEntry(record) {
     codeEnforced: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
     durable: Boolean(record.stepKey),
     issuedAt: record.lifecycle?.issuedAt ?? null,
+    // Private main-process planning metadata. The push source folds this into
+    // a count before status is built; neither scope id nor the forecast itself
+    // reaches ChatGPT, a renderer, a persisted step, or a bug report.
+    queuedWorkForecast: bridgeQueuedWorkForecast(record),
   });
 }
 
@@ -2559,17 +3037,27 @@ function bridgeListEntry(record) {
  * the ones it may not. Read-only and cheap (no prompt text is built), so a held
  * `get_handoff` can poll it several times a second.
  */
-export function listBridgeableNonApiAiHandoffs({ allowTasks, allowNodeIds = null } = {}) {
+export function listBridgeableNonApiAiHandoffs({ allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
   const excluded = Object.fromEntries(BRIDGE_EXCLUSION_REASONS.map(reason => [reason, 0]));
   const eligible = [];
+  // This is an internal seam-only reconciliation aid. A settling record is
+  // still pending but intentionally absent from `handoffs`; retaining its
+  // exact opaque request id lets the push source preserve a bridge route
+  // through a validation/save attempt. It never crosses the source status,
+  // MCP frame, renderer IPC, or bug-report boundary.
+  const settlingRequestIds = [];
   for (const record of pendingRequests.values()) {
-    const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
-    if (reason) excluded[reason] += 1;
+    const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
+    if (reason) {
+      excluded[reason] += 1;
+      if (reason === 'settling') settlingRequestIds.push(record.requestId);
+    }
     else eligible.push(record);
   }
   return Object.freeze({
     handoffs: Object.freeze(bridgeDockOrder(eligible).map(bridgeListEntry)),
     excluded: Object.freeze(excluded),
+    settlingRequestIds: Object.freeze(settlingRequestIds),
     pending: pendingRequests.size,
   });
 }
@@ -2599,12 +3087,19 @@ function bridgeRetryView(record) {
  * The prompt for one handoff, byte-identical to what the dock shows and copies
  * (publicRequest(record).prompt), or the reason it may not be served.
  */
-export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTasks, allowNodeIds = null } = {}) {
+export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
   const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
   if (!record || record.handoffCode !== handoffCode) return Object.freeze({ ok: false, reason: 'not_pending' });
-  const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
+  const reason = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
   if (reason) return Object.freeze({ ok: false, reason });
-  return Object.freeze({ ok: true, requestId: record.requestId, handoffCode: record.handoffCode, task: record.task || null, ...bridgeRetryView(record) });
+  return Object.freeze({
+    ok: true,
+    requestId: record.requestId,
+    handoffCode: record.handoffCode,
+    task: record.task || null,
+    responseFormat: bridgeResponseFormat(record),
+    ...bridgeRetryView(record),
+  });
 }
 
 /**
@@ -2614,16 +3109,16 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
  * path: only the outcome enum, the safe classification the dock's own receipts
  * use, and the correction block the dock would have you copy.
  */
-export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, response, allowTasks, allowNodeIds = null } = {}) {
+export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, response, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
   const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
   if (!record || record.handoffCode !== handoffCode) return bridgeOutcome('not_pending');
   if (typeof response !== 'string') return bridgeOutcome('invalid_argument');
-  const excluded = bridgeExclusionReason(record, { allowTasks, allowNodeIds });
+  const excluded = bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs });
   if (excluded === 'settling') return bridgeOutcome('busy');
   if (excluded) return bridgeOutcome('ineligible', { exclusion: excluded });
   // No await between the checks above and this call: acceptNonApiAiResponse sets
   // `settling` synchronously, which is what makes a second submit see `busy`.
-  const result = await acceptNonApiAiResponse(record, { response });
+  const result = await acceptNonApiAiResponse(record, { response }, { transport: 'bridge' });
   switch (result.reason) {
     case 'accepted': return bridgeOutcome('accepted');
     case 'validation': {
@@ -2641,7 +3136,7 @@ export async function submitNonApiAiResponseForBridge({ requestId, handoffCode, 
   }
 }
 
-export function registerNonApiAiHandlers() {
+export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } = {}) {
   // Electron rejects a second `handle` registration for the same channel.
   // Main currently calls this once, but removing the old handlers makes a
   // controlled re-registration (dev reload/test harness) safe without
@@ -2663,11 +3158,19 @@ export function registerNonApiAiHandlers() {
     return { count };
   });
 
+  // The renderer never receives a prompt, response, draft, task name, or
+  // durable step id from this probe. It merely needs to distinguish a fully
+  // accepted pre-search workflow from one that is still awaiting a person.
+  ipcMain.handle('inspect-non-api-ai-run', async (_event, args = {}) => {
+    return await durableRunSettlementSummary(args?.runId);
+  });
+
   ipcMain.handle('submit-non-api-ai-response', async (event, args = {}) => {
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const record = pendingRequests.get(requestId);
     if (!record) return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
     if (event.sender !== record.sender) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
+    if (record.handoffRoute === 'mcp') return { accepted: false, validationErrors: ['This handoff is handled through the Infinite Canvas ChatGPT plugin.'] };
     if (record.settling) return { accepted: false, validationErrors: ['This response is already being submitted.'] };
     // `reason` is internal (the in-process bridge reads it); the renderer contract stays
     // exactly { accepted } or { accepted: false, validationErrors }.
@@ -2680,6 +3183,7 @@ export function registerNonApiAiHandlers() {
     const record = pendingRequests.get(requestId);
     if (!record) return { steppedBack: false, error: 'This Non-API AI request is no longer pending.' };
     if (event.sender !== record.sender) return { steppedBack: false, error: 'This response belongs to a different window.' };
+    if (record.handoffRoute === 'mcp') return { steppedBack: false, error: 'This handoff is handled through the Infinite Canvas ChatGPT plugin.' };
     if (record.settling) return { steppedBack: false, error: 'This response is already being saved.' };
     if (!record.canStepBack) return { steppedBack: false, error: 'There is no previous handoff step available for this request.' };
 
@@ -2722,11 +3226,40 @@ export function registerNonApiAiHandlers() {
     return { cancelled: true, nodeCancelled: false };
   });
 
+  // Copying a prompt is an explicit choice of the local copy/paste route. Do
+  // the clipboard write and ownership transition in one main-process turn:
+  // Electron's clipboard API is synchronous, so failure leaves manualIntent
+  // untouched and the bridge may still claim the request. Setting the flag
+  // first would strand work when clipboard access failed; copying in the
+  // renderer first would open a race in which ChatGPT claimed the same prompt.
+  // The bridge list consults manualIntent before both read and submit.
+  ipcMain.handle('claim-non-api-ai-manual', (event, args = {}) => {
+    const record = pendingRequests.get(args?.requestId);
+    if (!record || event.sender !== record.sender || record.settling) return { claimed: false, copied: false };
+    if (record.handoffRoute === 'mcp') return { claimed: false, copied: false, code: 'MCP_ROUTE' };
+    const prompt = promptForRetry(record, record.validationError || null).prompt;
+    if (typeof prompt !== 'string' || !prompt || typeof clipboard?.writeText !== 'function') {
+      return { claimed: false, copied: false, code: 'CLIPBOARD_FAILED' };
+    }
+    try { clipboard.writeText(prompt); }
+    catch { return { claimed: false, copied: false, code: 'CLIPBOARD_FAILED' }; }
+    const changed = record.manualIntent !== true;
+    record.manualIntent = true;
+    if (changed) emitNonApiAiEvent();
+    return { claimed: true, copied: true };
+  });
+
   ipcMain.handle('update-non-api-ai-draft', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
     if (!record || event.sender !== record.sender || record.settling) return { saved: false };
+    if (record.handoffRoute === 'mcp') return { saved: false, code: 'MCP_ROUTE' };
     const draft = typeof args.response === 'string' ? args.response.slice(0, 8_000_000) : '';
     record.initialResponse = draft;
+    // Editing is also an explicit local answer path, including an empty edit
+    // after a previously non-empty draft.
+    const changed = record.manualIntent !== true;
+    record.manualIntent = true;
+    if (changed) emitNonApiAiEvent();
     await updateDurableStep(record, { status: 'pending', draft, response: null }, { deferWrite: true });
     return { saved: true };
   });

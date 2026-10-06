@@ -123,7 +123,7 @@ function senderTaskMap(sender, create = false) {
  * Register an AbortController for a specific node.
  * Allows cancelling background tasks (e.g. search, analysis) when the node is deleted.
  */
-function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null) {
+function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null, logTaskRegistration = true) {
   if (!sender || !nodeId) return;
   ensureSenderRegistryCleanup(sender);
   const tasks = senderTaskMap(sender, true);
@@ -146,7 +146,9 @@ function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null) {
   // channel the line cannot be told apart from the same channel being
   // dispatched twice, which would be a renderer-side duplicate. A reader of
   // the bug report had to correlate against source to reach "benign".
-  logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId} channel ${channel || '?'}`);
+  if (logTaskRegistration) {
+    logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId} channel ${channel || '?'}`);
+  }
 }
 
 /**
@@ -364,14 +366,38 @@ function ipcErrorCapability(error) {
 }
 
 /**
+ * Report-safe top frames of a thrown error. A bare `error.message` such as
+ * "Cannot read properties of undefined (reading 'length')" names no code, so a
+ * bug report could not locate the throw. Bug-report redaction blanks everything
+ * from an absolute path to the end of its line, which would erase the
+ * file:line:col, so reduce each frame to its basename here. Frames are joined
+ * on one line because the report renders each log entry as a single line.
+ */
+function compactErrorStack(error, maxFrames = 6) {
+  const stack = typeof error?.stack === 'string' ? error.stack : '';
+  const frames = stack.split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('at '))
+    .slice(0, maxFrames)
+    .map(frame => frame.replace(/(?:file:\/\/)?(?:[^\s()]*[\\/])([^\\/\s():]+:\d+(?::\d+)?)/g, '$1'));
+  return frames.join(' ← ');
+}
+
+/**
  * Wraps an IPC handler with standardized error handling, lifecycle-aware abort signaling,
  * and standard `{ success, data, error }` return payloads.
  *
  * @param {string} channel - The IPC channel name
  * @param {Function} handler - Async function taking (event, args, signal)
- * @param {number} timeoutMs - Optional timeout
+ * @param {number|object} timeoutOrOptions - Optional timeout, or lifecycle hooks.
+ * Set `logTaskRegistration: false` only for high-frequency routine probes;
+ * node-task registration and cancellation remain active.
  */
-export function handleSafe(channel, handler, timeoutMs = 0) {
+export function handleSafe(channel, handler, timeoutOrOptions = 0) {
+  const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
+    ? timeoutOrOptions
+    : {};
+  const timeoutMs = Number.isFinite(timeoutOrOptions) ? timeoutOrOptions : 0;
   ipcMain.handle(channel, async (event, args) => {
     const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
     const nodeId = args?.nodeId;
@@ -383,6 +409,7 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
         ac,
         channel,
         typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
+        options.logTaskRegistration !== false,
       );
     }
 
@@ -390,6 +417,7 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
       const result = await ipcRequestContext.run(
         {
           sender: event.sender,
+          abortController: ac,
           nodeId: nodeId || null,
           channel,
           // A renderer-created id spanning every manual AI step in one logical
@@ -405,6 +433,14 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
         },
         () => handler(event, args, signal),
       );
+
+      // Some workflows must make the handler's terminal result crash-durable
+      // before the invoke can resolve. Keep this inside the same try/finally so
+      // a failed durability barrier is reported as an operation failure and the
+      // normal task/sender cleanup still runs.
+      const beforeReplyResult = typeof options.beforeReply === 'function'
+        ? await options.beforeReply({ event, args, signal, result, channel })
+        : null;
       
       // Guard: Window may have been closed during await
       if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
@@ -412,12 +448,17 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
       // fired. Do not report that detached work as successful.
       if (signal.aborted) return { success: false, error: abortErrorMessage(signal) };
       
-      return { success: true, ...result };
+      return {
+        success: true,
+        ...result,
+        ...(beforeReplyResult && typeof beforeReplyResult === 'object' ? beforeReplyResult : {}),
+      };
     } catch (e) {
       if (signal.aborted) {
         return { success: false, error: abortErrorMessage(signal, e) };
       }
-      logger.error(`[${channel}] failed:`, e?.message || String(e));
+      const failureStack = compactErrorStack(e);
+      logger.error(`[${channel}] failed:`, e?.message || String(e), ...(failureStack ? [`stack: ${failureStack}`] : []));
       return { 
         success: false, 
         error: e?.message || String(e),

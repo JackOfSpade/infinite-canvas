@@ -42,6 +42,21 @@ import {
 import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useRenderStorm } from '../hooks/useRenderStorm';
+import {
+  isAutomaticMarketplaceResolveIntent,
+  isRestorableMarketplaceRecovery,
+  marketplacePhotoInputKey,
+  marketplacePhotoInputMatches,
+  marketplaceResearchInput,
+  marketplaceResearchInputKey,
+  marketplaceResearchIdentityMatches,
+  marketplaceResearchInputMatches,
+  marketplaceSynthesisInputKey,
+  marketplaceTerminalReceiptApplied,
+  markMarketplaceTerminalApplied,
+  mergeMarketplaceSourceCheckpoint,
+  newMarketplaceRecovery,
+} from '../utils/marketplaceRunRecovery';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -96,6 +111,11 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const pendingMergesRef = useRef([]);
   const activeResolveSourceIdsRef = useRef(new Set());
   const initialDropAcceptedRef = useRef(false);
+  const autoResumedRunRef = useRef(null);
+  const autoResumedResolveRef = useRef(null);
+  const recoveryPeekScopeRef = useRef(null);
+  const terminalAppliedThisProcessRef = useRef(new Set());
+  const marketplaceRecoveryRef = useRef(data.marketplaceRunResume || null);
   const isMountedRef = useIsMountedRef();
   // Cancellation epoch — see hooks/useEpochCancellation.js. In-flight async
   // workflows (startAnalysis / handleConfirmDraft / synthesizeAndPrice)
@@ -110,6 +130,45 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     handleFieldEdit, handlePricingNotesChange, toggleJustification,
     scrapePriceComps, rescrapeSource, synthesizePricesBatch, synthesizeBundlePrice,
   } = useListingActions(id, data);
+  const canvasFilePath = nav?.getCurrentFile?.() || nav?.currentFile || null;
+  useEffect(() => {
+    marketplaceRecoveryRef.current = data.marketplaceRunResume || null;
+  }, [data.marketplaceRunResume]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onMarketplaceAnalysisCheckpoint) return undefined;
+    return window.electronAPI.onMarketplaceAnalysisCheckpoint((payload) => {
+      if (payload?.nodeId !== id || payload?.recovery?.phase !== 'analysis') return;
+      marketplaceRecoveryRef.current = payload.recovery;
+      updateGlobal(id, { marketplaceRunResume: payload.recovery });
+    });
+  }, [id, updateGlobal]);
+
+  const checkpointRecovery = useCallback(async (recovery, expectedInputKey = recovery?.inputKey) => {
+    const api = window.electronAPI?.checkpointMarketplaceRecovery;
+    if (!api) {
+      if (canvasFilePath) throw new Error('Marketplace recovery checkpoint API unavailable.');
+      return;
+    }
+    const result = await api({
+      canvasFilePath, nodeId: id, kind: 'sellhub', expectedInputKey, recovery,
+    });
+    if (canvasFilePath && (!result?.success || !result?.saved)) {
+      throw new Error(`Could not save marketplace recovery checkpoint (${result?.reason || result?.error || 'unknown'}).`);
+    }
+    return result;
+  }, [canvasFilePath, id]);
+
+  const abandonRecovery = useCallback(async (runId, reason, inputKey = marketplaceRecoveryRef.current?.inputKey) => {
+    if (!runId || !window.electronAPI?.abandonMarketplaceRecovery) return;
+    const result = await window.electronAPI.abandonMarketplaceRecovery({
+      canvasFilePath, nodeId: id, kind: 'sellhub', runId, inputKey, reason,
+    });
+    const safeAbsent = ['missing', 'completed'].includes(result?.reason);
+    if (canvasFilePath && (!result?.success || (!result?.abandoned && !safeAbsent))) {
+      throw new Error(result?.error || `Could not abandon marketplace recovery (${result?.reason || 'unknown'}).`);
+    }
+  }, [canvasFilePath, id]);
 
   // ── Phase-2 marketplace cards ──────────────────────────────────────────
   // Each platform the user is selling on becomes its own canvas node spawned
@@ -231,6 +290,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // ops (marketplaceBrowserLock); a queued op emits queuedBehind>0, then 0 once
   // it acquires the shared browser.
   const [queueWait, setQueueWait] = useState(0);
+  const [recoveryHydrated, setRecoveryHydrated] = useState(false);
   const [resolveQueueWait, setResolveQueueWait] = useState(0);
 
   const syncResolveWorkCount = useCallback(() => {
@@ -312,6 +372,23 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     progress: compProgress,
     reset: resetCompProgress,
   } = useSourceProgress(window.electronAPI?.onPriceSourceProgress, id);
+
+  // Persist each completed marketplace source into the owning run marker. A
+  // restart can then skip those exact source/query pairs instead of replaying
+  // network work that already completed. The run id + full normalized input key
+  // fences late events from an older attempt or from an edited draft.
+  useEffect(() => {
+    const subscribe = window.electronAPI?.onMarketplaceScrapeCheckpoint;
+    if (!subscribe) return undefined;
+    return subscribe((payload) => {
+      if (payload?.nodeId !== id) return;
+      updateGlobal(id, (node) => {
+        const previous = node?.data?.marketplaceRunResume;
+        const next = mergeMarketplaceSourceCheckpoint(previous, payload);
+        return next === previous ? {} : { marketplaceRunResume: next };
+      });
+    });
+  }, [id, updateGlobal]);
 
   // Subscribe to the serialization queue status so the hub can show a transient
   // "waiting behind N" banner while another sell-side browser op runs first.
@@ -409,13 +486,24 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   }, [compProgress, id, getNodes, scheduleCleanCompCardDismiss, cancelCleanCompCardDismiss, isApplyingResolves, queuedResolvesCount]);
 
 
-  const startAnalysis = useCallback(async (imagePaths) => {
+  const startAnalysis = useCallback(async (imagePaths, recovery = null, options = {}) => {
     // Ensure no null/empty paths slip through
     const validPaths = (imagePaths || []).filter(p => typeof p === 'string' && p.trim().length > 0);
     if (validPaths.length === 0 || !window.electronAPI || processingRef.current) return;
 
     processingRef.current = true;
     const currentId = id;
+    const canResume = marketplacePhotoInputMatches(recovery, validPaths);
+    const manualAiRunId = canResume ? recovery.runId : generateId();
+    const runRecovery = canResume ? recovery : newMarketplaceRecovery({
+      runId: manualAiRunId,
+      phase: 'analysis',
+      input: { imagePaths: validPaths },
+      inputKey: marketplacePhotoInputKey(validPaths),
+    });
+    autoResumedRunRef.current = runRecovery.runId;
+    marketplaceRecoveryRef.current = runRecovery;
+    updateGlobal(currentId, { marketplaceRunResume: runRecovery });
     // Capture epoch so a later resetHandler can invalidate this attempt's
     // settlement. Also clear any leftover errorMessage so a successful run
     // doesn't leave a stale banner around after the next render.
@@ -452,7 +540,14 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         },
       });
 
-      const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
+      const result = await window.electronAPI.analyzePhotos({
+        imagePaths: validPaths,
+        nodeId: currentId,
+        manualAiRunId,
+        canvasFilePath,
+        recovery: runRecovery,
+        autoResume: options.autoResume === true,
+      });
 
       if (cancelled()) return; // user cancelled — let resetHandler's state stand
 
@@ -461,10 +556,20 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         throw err;
       }
 
+      const completedRecovery = result.recovery || {
+        ...runRecovery,
+        phase: 'analysis-result',
+        result: { product: result.product },
+        updatedAt: Date.now(),
+      };
+      const appliedRecovery = markMarketplaceTerminalApplied(completedRecovery, result.processEpoch);
+      marketplaceRecoveryRef.current = appliedRecovery;
+      terminalAppliedThisProcessRef.current.add(completedRecovery.runId);
       updateGlobal(currentId, {
         hubState: 'draft',
         product: result.product,
         errorMessage: null,
+        marketplaceRunResume: appliedRecovery,
       });
     } catch (error) {
       // User cancelled OR deleted the hub mid-analysis. Bail silently in
@@ -478,10 +583,15 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       const updates = {
         hubState: 'empty',
         errorMessage: message,
+        marketplaceRunResume: runRecovery,
       };
       if (isOversizedImageError(message)) {
+        void abandonRecovery(runRecovery.runId, 'terminal-invalid-input').catch((err) => {
+          EventLogger.error('[SellHub] Could not tombstone invalid photo run:', err);
+        });
         updates.imagePaths = null;
         updates.inputLocked = false;
+        updates.marketplaceRunResume = null;
         initialDropAcceptedRef.current = false;
       }
       updateGlobal(currentId, updates);
@@ -492,12 +602,121 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         processingRef.current = false;
       }
     }
-  }, [id, updateGlobal, addToast, epoch, resetCompProgress, moduleRunQueue, isMountedRef]);
+  }, [id, updateGlobal, addToast, epoch, resetCompProgress, moduleRunQueue, isMountedRef, canvasFilePath, abandonRecovery]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   useEffect(() => {
     startAnalysisRef.current = startAnalysis;
   }, [startAnalysis]);
+
+  // Hydrate the renderer mirror from the canonical main-process sidecar before
+  // any restart effect is allowed to run. This closes the debounce window where
+  // the sidecar reached disk but the canvas JSON did not.
+  useEffect(() => {
+    const scope = `${canvasFilePath || '(unsaved)'}\u0000${id}`;
+    if (recoveryPeekScopeRef.current === scope) return;
+    recoveryPeekScopeRef.current = scope;
+    setRecoveryHydrated(false);
+    let disposed = false;
+    void (async () => {
+      try {
+        if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
+        const result = await window.electronAPI.peekMarketplaceRecovery({
+          canvasFilePath, nodeId: id, kind: 'sellhub',
+        });
+        if (disposed || !result?.success) return;
+        if (!result.found) {
+          const local = marketplaceRecoveryRef.current;
+          if (['abandoned', 'completed'].includes(result.status)
+            && local?.runId === result.runId
+            && local?.inputKey === result.inputKey) {
+            marketplaceRecoveryRef.current = null;
+            updateGlobal(id, { marketplaceRunResume: null });
+          }
+          return;
+        }
+        if (!isRestorableMarketplaceRecovery(result.recovery)) return;
+        if (marketplaceTerminalReceiptApplied(result.recovery, marketplaceRecoveryRef.current)) {
+          const acknowledgement = await window.electronAPI?.acknowledgeMarketplaceRecovery?.({
+            canvasFilePath,
+            nodeId: id,
+            kind: 'sellhub',
+            runId: result.recovery.runId,
+            inputKey: result.recovery.inputKey,
+            appliedProcessEpoch: marketplaceRecoveryRef.current?.terminalApplied?.appliedProcessEpoch,
+            reason: 'exact-terminal-result-observed-after-restart',
+          });
+          if (!disposed && acknowledgement?.success && acknowledgement?.completed) {
+            updateGlobal(id, { marketplaceRunResume: null });
+          }
+          return;
+        }
+        updateGlobal(id, {
+          marketplaceRunResume: { ...result.recovery, receiptObservedProcessEpoch: result.processEpoch },
+        });
+      } catch (error) {
+        EventLogger.error(`[SellHub][${id}] Recovery hydration failed:`, error);
+      } finally {
+        if (!disposed) setRecoveryHydrated(true);
+      }
+    })();
+    return () => { disposed = true; };
+  }, [canvasFilePath, id, updateGlobal]);
+
+  // Replay terminal receipts without repeating their AI/network work. Receipts
+  // created in this process remain until a later launch observes the canvas
+  // already contains the result; only that later observation acknowledges the
+  // receipt, which protects the debounced-autosave crash window.
+  useEffect(() => {
+    if (!recoveryHydrated || data.locked) return;
+    const recovery = data.marketplaceRunResume;
+    if (!isRestorableMarketplaceRecovery(recovery)) return;
+    if (recovery.phase === 'comps-ready') {
+      if (hubState !== 'comps-ready') {
+        terminalAppliedThisProcessRef.current.add(recovery.runId);
+        pendingItemsRef.current = recovery.pendingItems;
+        scrapeWarningsRef.current = recovery.scrapeWarnings;
+        hubStateRef.current = 'comps-ready';
+        updateGlobal(id, {
+          hubState: 'comps-ready',
+          pendingItems: recovery.pendingItems,
+          scrapeWarnings: recovery.scrapeWarnings,
+          errorMessage: null,
+        });
+      }
+      return; // deliberate human pause; never auto-synthesize
+    }
+    const terminalResult = recovery.result;
+    if (!terminalResult || !['analysis-result', 'priced-result'].includes(recovery.phase)) return;
+    if (terminalAppliedThisProcessRef.current.has(recovery.runId)) return;
+    const alreadyApplied = marketplaceTerminalReceiptApplied(recovery, data.marketplaceRunResume);
+    if (alreadyApplied) {
+      void window.electronAPI?.acknowledgeMarketplaceRecovery?.({
+        canvasFilePath, nodeId: id, kind: 'sellhub', runId: recovery.runId,
+        inputKey: recovery.inputKey,
+        appliedProcessEpoch: recovery.terminalApplied?.appliedProcessEpoch,
+        reason: 'exact-terminal-result-observed-after-restart',
+      }).then((result) => {
+        if (result?.success && result?.completed) updateGlobal(id, { marketplaceRunResume: null });
+      }).catch((error) => EventLogger.error(`[SellHub][${id}] Recovery acknowledgement failed:`, error));
+      return;
+    }
+    terminalAppliedThisProcessRef.current.add(recovery.runId);
+    const appliedRecovery = markMarketplaceTerminalApplied(recovery, recovery.receiptObservedProcessEpoch);
+    marketplaceRecoveryRef.current = appliedRecovery;
+    if (recovery.phase === 'analysis-result') {
+      hubStateRef.current = 'draft';
+      updateGlobal(id, {
+        hubState: 'draft',
+        product: terminalResult.product,
+        errorMessage: null,
+        marketplaceRunResume: appliedRecovery,
+      });
+    } else {
+      hubStateRef.current = 'priced';
+      updateGlobal(id, { ...terminalResult, marketplaceRunResume: appliedRecovery });
+    }
+  }, [canvasFilePath, data.locked, data.marketplaceRunResume, data.pricing, data.product, hubState, id, recoveryHydrated, updateGlobal]);
 
   // Auto-start analysis if images were dropped (must come after startAnalysis is declared
   // — referencing it earlier would hit the const TDZ on first render).
@@ -508,13 +727,20 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   useEffect(() => {
     if (
       data.imagePaths?.length > 0 &&
+      // A fresh drop may start analysis, but a persisted analysis marker is a
+      // manual-vision boundary. Reopening that handoff on app launch would
+      // silently create a new human task (or duplicate an existing one).
+      // Leave it for the explicit Continue control below.
+      !data.marketplaceRunResume &&
       hubState === 'empty' &&
+      !data.locked &&
       !data.errorMessage &&
+      recoveryHydrated &&
       !processingRef.current
     ) {
       startAnalysis(data.imagePaths);
     }
-  }, [data.imagePaths, hubState, data.errorMessage, startAnalysis]);
+  }, [data.imagePaths, data.marketplaceRunResume, data.locked, hubState, data.errorMessage, recoveryHydrated, startAnalysis]);
 
   // A settings-changed listener used to live here, logging (but not acting
   // on) changes to the 'ai' section for bug-report telemetry. The 'ai'
@@ -657,8 +883,9 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // in 'comps-ready' (some sources blocked) so the user can resolve or skip
   // before we spend AI tokens. Extracted because both the initial run and
   // the "Skip & price now" button funnel through the same synthesis step.
-  const synthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
+  const synthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled, synthesisRecovery, options = {}) => {
     const currentId = id;
+    const manualAiRunId = synthesisRecovery?.runId || generateId();
     try {
       // The comp snapshot is final once AI pricing starts. Remove every source
       // card so a stale Solve/Retry action cannot misleadingly appear to affect
@@ -697,7 +924,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // deliberately dependent and runs after these results return.
       const pricedByKey = new Map(cannedPricings);
       if (aiItems.length > 0) {
-        const synthResults = await synthesizePricesBatch(aiItems);
+        const synthResults = await synthesizePricesBatch(aiItems, manualAiRunId, synthesisRecovery, options.autoResume === true);
         if (cancelled()) return;
         for (const item of synthResults.items || []) {
           const original = aiItems.find(candidate => candidate.key === item.itemKey);
@@ -741,6 +968,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           try {
             bundlePricing = await synthesizeBundlePrice(
               itemPricings.map(it => ({
+                itemKey: it.key,
                 label: it.label || it.query,
                 condition: it.condition,
                 recommended_price: it.pricing?.recommended_price ?? null,
@@ -751,6 +979,9 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
                 notes: it.pricingNotes || '',
               })),
               bundleTotal,
+              manualAiRunId,
+              synthesisRecovery,
+              options.autoResume === true,
             );
             if (cancelled()) return;
           } catch (err) {
@@ -769,7 +1000,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // render immediately (missing/pending fit data already falls back to
       // "good" below) and reshuffle in place once a verdict lands.
       const willAssessFit = !!(window.electronAPI?.assessPlatformFit && data.product);
-      updateGlobal(currentId, {
+      const pricedState = {
         hubState: 'priced',
         pricing: primary.pricing,
         comps: primary.comps,
@@ -783,7 +1014,21 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         platformFit: null,
         platformFitPending: false,
         errorMessage: null,
-      });
+        pendingItems: null,
+      };
+      const pricedRecovery = {
+        ...synthesisRecovery,
+        phase: 'priced-result',
+        inputKey: marketplaceSynthesisInputKey(items, scrapeWarnings),
+        result: pricedState,
+        updatedAt: Date.now(),
+      };
+      const pricedCheckpoint = await checkpointRecovery(pricedRecovery, synthesisRecovery?.inputKey);
+      if (cancelled()) return;
+      const appliedRecovery = markMarketplaceTerminalApplied(pricedRecovery, pricedCheckpoint?.processEpoch);
+      marketplaceRecoveryRef.current = appliedRecovery;
+      terminalAppliedThisProcessRef.current.add(pricedRecovery.runId);
+      updateGlobal(currentId, { ...pricedState, marketplaceRunResume: appliedRecovery });
       // Attached marketplace cards survive a price recheck. Refresh only their
       // listing snapshot so status checks use the new whole-bundle title/price;
       // card URLs, statuses, attention, and watch URLs remain untouched.
@@ -847,12 +1092,31 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
+        marketplaceRunResume: synthesisRecovery,
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
-  }, [id, updateGlobal, synthesizePricesBatch, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes, syncResolveWorkCount]);
+  }, [id, updateGlobal, synthesizePricesBatch, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes, syncResolveWorkCount, checkpointRecovery]);
 
-  const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
+  const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled, recovery = null, options = {}) => {
+    const priorRecovery = recovery || marketplaceRecoveryRef.current;
+    const manualAiRunId = priorRecovery?.runId || generateId();
+    const synthesisRecovery = priorRecovery?.phase === 'synthesis'
+      ? priorRecovery
+      : newMarketplaceRecovery({
+        runId: manualAiRunId,
+        phase: 'synthesis',
+        input: null,
+        inputKey: '',
+        pendingItems: items,
+        skippedWarnings: scrapeWarnings,
+      });
+    autoResumedRunRef.current = synthesisRecovery.runId;
+    marketplaceRecoveryRef.current = synthesisRecovery;
+    updateGlobal(id, {
+      marketplaceRunResume: synthesisRecovery,
+      pendingItems: items,
+    });
     let lease = null;
     try {
       lease = await moduleRunQueue.acquireModuleRun({
@@ -874,11 +1138,17 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           updateGlobal(id, { hubState: 'researching', queuedModuleRun: null });
         },
       });
-      await synthesizeAndPrice(items, scrapeWarnings, cancelled);
+      if (priorRecovery?.inputKey !== synthesisRecovery.inputKey) {
+        await checkpointRecovery(synthesisRecovery, priorRecovery?.inputKey);
+      } else {
+        await checkpointRecovery(synthesisRecovery, synthesisRecovery.inputKey);
+      }
+      marketplaceRecoveryRef.current = synthesisRecovery;
+      await synthesizeAndPrice(items, scrapeWarnings, cancelled, synthesisRecovery, options);
     } finally {
       lease?.release();
     }
-  }, [id, moduleRunQueue, synthesizeAndPrice, updateGlobal]);
+  }, [id, moduleRunQueue, synthesizeAndPrice, updateGlobal, checkpointRecovery]);
 
   // Merge a (re)solved comp source back into per-item comps. SINGLE item →
   // inline-extracted items are preferred (cheap, and avoids re-hitting
@@ -893,6 +1163,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     category,
     warning: resolvedWarning,
     noChallengeConfirmed = false,
+    autoResume = false,
   }, cancelled) => {
     if (items.length <= 1) {
       let useItems = Array.isArray(inlineItems) ? inlineItems : null;
@@ -903,7 +1174,13 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // fallback rescrape must re-arm the normal gate.
       let usedInline = !!useItems;
       if (!useItems) {
-        const r = await rescrapeSource(sourceId);
+        const r = await rescrapeSource(
+          sourceId,
+          null,
+          false,
+          marketplaceRecoveryRef.current,
+          autoResume,
+        );
         useItems = r.items || [];
         cat = r.category || cat;
         rawWarning = r.warning;
@@ -924,7 +1201,13 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     // not a block to re-arm. Without this a multi-item bundle whose source is
     // truly empty stays stuck in error/retry-empty forever (the "swappa/ebay
     // unable to finish" report) — the single-item path already trusts this proof.
-    const res = await rescrapeSource(sourceId, researchItems.map(ri => ({ key: ri.key, query: ri.query })), noChallengeConfirmed);
+    const res = await rescrapeSource(
+      sourceId,
+      researchItems.map(ri => ({ key: ri.key, query: ri.query })),
+      noChallengeConfirmed,
+      marketplaceRecoveryRef.current,
+      autoResume,
+    );
     if (cancelled()) return { items, warning: null };
     const perItem = Array.isArray(res.perItem) ? res.perItem : [];
     const mergedItems = items.map((it, k) => {
@@ -1015,12 +1298,36 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     updateGlobal(id, { extraItems: (data.extraItems || []).filter(it => it.id !== itemId) });
   }, [id, data.extraItems, updateGlobal]);
 
-  const handleConfirmDraft = useCallback(async () => {
+  const handleConfirmDraft = useCallback(async (requestedRecovery = null, options = {}) => {
     if (processingPriceRef.current || !data.product) return;
     processingPriceRef.current = true;
     const currentId = id;
     const cancelled = epoch.start();
     let lease = null;
+    const researchItems = buildRefreshResearchItems(data.product, data.extraItems, data.itemPricings, data.pricingNotes);
+    const offeredRecovery = requestedRecovery || (data.marketplaceRunResume?.phase === 'scrape' ? data.marketplaceRunResume : null);
+    const sourcePlan = ACTIVE_COMP_SOURCES.map(source => source.id);
+    const canResume = marketplaceResearchInputMatches(offeredRecovery, researchItems, data.product?.category, sourcePlan);
+    if (offeredRecovery && !canResume) {
+      try {
+        await abandonRecovery(offeredRecovery.runId, 'input-changed');
+      } catch (error) {
+        processingPriceRef.current = false;
+        updateGlobal(currentId, { errorMessage: 'The prior price-check marker could not be retired. Use Reset before starting a changed search.' });
+        addToast({ title: 'Price check not started', description: error?.message || String(error), type: 'error' });
+        return;
+      }
+    }
+    const manualAiRunId = canResume ? offeredRecovery.runId : generateId();
+    const runRecovery = canResume ? offeredRecovery : newMarketplaceRecovery({
+      runId: manualAiRunId,
+      phase: 'scrape',
+      input: marketplaceResearchInput(researchItems, data.product?.category, sourcePlan),
+      inputKey: marketplaceResearchInputKey(researchItems, data.product?.category, sourcePlan),
+    });
+    autoResumedRunRef.current = runRecovery.runId;
+    marketplaceRecoveryRef.current = runRecovery;
+    updateGlobal(currentId, { marketplaceRunResume: runRecovery });
 
     try {
       // Check the same cached marketplace sessions as the backend first so a
@@ -1042,6 +1349,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           scrapeWarnings: [],
           platformFit: null,
           platformFitPending: false,
+          marketplaceRunResume: runRecovery,
         });
         addToast({
           title: 'Log in to run a price check',
@@ -1093,8 +1401,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
       // Primary item (from the AI photo analysis) + any user-added extras —
       // each gets its OWN complete pass through the comp sources server-side.
-      const researchItems = buildRefreshResearchItems(data.product, data.extraItems, data.itemPricings, data.pricingNotes);
-      const scrapeResult = await scrapePriceComps(researchItems);
+      const scrapeResult = await scrapePriceComps(researchItems, runRecovery, options.autoResume === true);
       scrapeInFlightRef.current = false;
       if (cancelled()) return;
 
@@ -1104,12 +1411,15 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // to 'draft' so logging in (Settings > Accounts) and re-confirming re-runs.
       if (scrapeResult.preflightBlocked) {
         const missing = Array.isArray(scrapeResult.missingLogins) ? scrapeResult.missingLogins : [];
+        const pausedRecovery = scrapeResult.recovery || marketplaceRecoveryRef.current || runRecovery;
+        marketplaceRecoveryRef.current = pausedRecovery;
         hubStateRef.current = 'draft';
         updateGlobal(currentId, {
           hubState: 'draft',
           errorMessage: `Price check needs login on: ${missing.join(', ')}. Log in (Settings → Accounts) and re-run.`,
           pendingItems: null, scrapeWarnings: [],
           platformFit: null, platformFitPending: false,
+          marketplaceRunResume: pausedRecovery,
         });
         addToast({
           title: 'Log in to run a price check',
@@ -1125,6 +1435,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       const scrapedItems = Array.isArray(scrapeResult.items) ? scrapeResult.items : [];
       let pendingItems = researchItems.map((ri, k) => ({
         key: ri.key, label: ri.label, query: ri.query, condition: ri.condition, pricingNotes: ri.pricingNotes,
+        productSpec: ri.productSpec,
         comps: scrapedItems[k]?.comps || { sold: [], active: [] },
       }));
 
@@ -1151,6 +1462,17 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // cards). AI synthesis is skipped here so we don't spend tokens on partial
       // data without consent.
       if (effectiveWarnings.length > 0) {
+        const compsReadyRecovery = {
+          ...(marketplaceRecoveryRef.current?.runId === runRecovery.runId ? marketplaceRecoveryRef.current : runRecovery),
+          phase: 'comps-ready',
+          pendingItems,
+          scrapeWarnings: effectiveWarnings,
+          updatedAt: Date.now(),
+        };
+        await checkpointRecovery(compsReadyRecovery, runRecovery.inputKey);
+        if (cancelled()) return;
+        marketplaceRecoveryRef.current = compsReadyRecovery;
+        terminalAppliedThisProcessRef.current.add(compsReadyRecovery.runId);
         hubStateRef.current = 'comps-ready';
         pendingItemsRef.current = pendingItems;
         scrapeWarningsRef.current = effectiveWarnings;
@@ -1159,6 +1481,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           pendingItems,
           scrapeWarnings: effectiveWarnings,
           errorMessage: null,
+          marketplaceRunResume: compsReadyRecovery,
         });
         addToast({
           title: 'Sources blocked',
@@ -1170,7 +1493,21 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
       // All clean → price every item. Items with no comps are stamped "set your
       // own price" without an AI call (handled inside synthesizeAndPrice).
-      await synthesizeAndPrice(pendingItems, effectiveWarnings, cancelled);
+      const synthesisRecovery = newMarketplaceRecovery({
+        runId: manualAiRunId,
+        phase: 'synthesis',
+        input: null,
+        inputKey: '',
+        pendingItems,
+        skippedWarnings: effectiveWarnings,
+      });
+      updateGlobal(currentId, {
+        marketplaceRunResume: synthesisRecovery,
+        pendingItems,
+      });
+      await checkpointRecovery(synthesisRecovery, runRecovery.inputKey);
+      marketplaceRecoveryRef.current = synthesisRecovery;
+      await synthesizeAndPrice(pendingItems, effectiveWarnings, cancelled, synthesisRecovery, options);
     } catch (err) {
       if (cancelled() || isNodeDeletedAbort(err)) return;
       EventLogger.error('[SellHub] Price scrape failed:', err);
@@ -1178,6 +1515,9 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
+        marketplaceRunResume: marketplaceRecoveryRef.current?.runId === runRecovery.runId
+          ? marketplaceRecoveryRef.current
+          : runRecovery,
       });
       addToast({ title: 'Scrape Error', description: err?.message || String(err), type: 'error' });
     } finally {
@@ -1187,7 +1527,74 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // Source cards are removed when synthesis begins; warned cards remain only
       // while the hub is paused in comps-ready awaiting Resolve/Skip.
     }
-  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, data.itemPricings, data.pricingNotes, drainQueuedResolves, spawnCompSourceCards, epoch, resetCompProgress, syncResolveWorkCount, moduleRunQueue]);
+  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, data.itemPricings, data.pricingNotes, data.marketplaceRunResume, drainQueuedResolves, spawnCompSourceCards, epoch, resetCompProgress, syncResolveWorkCount, moduleRunQueue, checkpointRecovery, abandonRecovery]);
+
+  // A persisted active marker means the process stopped, not that the user
+  // clicked Reset (Reset clears the marker below). Reacquire the module queue
+  // once and continue the exact phase. Scrape recovery is accepted only while
+  // the normalized product/query input is byte-for-byte unchanged. Analysis
+  // and synthesis invoke a manual-AI handoff, so they deliberately remain
+  // paused for an explicit Continue rather than opening a human task on launch.
+  useEffect(() => {
+    const recovery = data.marketplaceRunResume;
+    // A locked hub must remain a deliberate pause after restart. The marker is
+    // retained so unlocking can re-run the same exact input, but no hidden
+    // nested recovery mirror may consume it while the user has it locked.
+    if (
+      !recoveryHydrated
+      || data.locked
+      || !isRestorableMarketplaceRecovery(recovery)
+      || ['analysis', 'synthesis'].includes(recovery.phase)
+    ) return;
+    if (recovery.manualPause?.status === 'manual-required') return;
+    if (autoResumedRunRef.current === recovery.runId || processingPriceRef.current) return;
+
+    if (recovery.phase === 'scrape') {
+      const currentItems = buildRefreshResearchItems(data.product, data.extraItems, data.itemPricings, data.pricingNotes);
+      if (!data.product || !marketplaceResearchInputMatches(
+        recovery,
+        currentItems,
+        data.product?.category,
+        ACTIVE_COMP_SOURCES.map(source => source.id),
+      )) {
+        autoResumedRunRef.current = recovery.runId;
+        hubStateRef.current = data.product ? 'draft' : 'empty';
+        void abandonRecovery(recovery.runId, 'input-changed')
+          .then(() => updateGlobal(id, {
+            hubState: data.product ? 'draft' : 'empty',
+            marketplaceRunResume: null,
+            errorMessage: 'The saved price-check input changed, so the interrupted scrape was not resumed. Review the current item and start a new price check.',
+          }))
+          .catch((error) => {
+            EventLogger.error(`[SellHub][${id}] Could not tombstone changed-input recovery:`, error);
+            updateGlobal(id, {
+              hubState: data.product ? 'draft' : 'empty',
+              errorMessage: 'The saved price-check input changed, but its restart marker could not be retired. Try Reset before closing the app.',
+            });
+          });
+        return;
+      }
+      autoResumedRunRef.current = recovery.runId;
+      EventLogger.log(`[SellHub][${id}] Auto-resuming interrupted marketplace scrape run=${recovery.runId}`);
+      void handleConfirmDraft(recovery, { autoResume: true });
+      return;
+    }
+
+  }, [
+    addToast,
+    abandonRecovery,
+    data.extraItems,
+    data.itemPricings,
+    data.locked,
+    data.marketplaceRunResume,
+    data.pricingNotes,
+    data.product,
+    epoch,
+    handleConfirmDraft,
+    id,
+    recoveryHydrated,
+    updateGlobal,
+  ]);
 
   // Per-source skip — fired by a comp card's Skip button. Drops the source
   // from data.scrapeWarnings, deletes the card, then if the warnings list
@@ -1199,7 +1606,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // cross-trigger.
   //
   useEffect(() => {
-    const onSkip = (e) => {
+    const onSkip = async (e) => {
       if (e.detail?.hubId !== id) return;
       const skippedSourceId = e.detail?.sourceId;
       if (!skippedSourceId) return;
@@ -1213,7 +1620,26 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       // synthesized without this source once every blocker clears.
       if (skippedWarning) skippedWarningsRef.current = [...skippedWarningsRef.current, skippedWarning];
       EventLogger.log(`[SellHub][${id}] user skipped ${skippedSourceId}; ${remainingWarnings.length} blocked source(s) remaining`);
-      updateGlobal(id, { scrapeWarnings: remainingWarnings });
+      const priorRecovery = marketplaceRecoveryRef.current;
+      if (priorRecovery?.phase === 'comps-ready') {
+        const nextRecovery = {
+          ...priorRecovery,
+          scrapeWarnings: remainingWarnings,
+          skippedWarnings: skippedWarningsRef.current,
+          updatedAt: Date.now(),
+        };
+        try {
+          await checkpointRecovery(nextRecovery, priorRecovery.inputKey);
+          marketplaceRecoveryRef.current = nextRecovery;
+          updateGlobal(id, { scrapeWarnings: remainingWarnings, marketplaceRunResume: nextRecovery });
+        } catch (error) {
+          EventLogger.error(`[SellHub][${id}] Could not persist source skip:`, error);
+          addToast({ title: 'Skip not saved', description: error?.message || String(error), type: 'error' });
+          return;
+        }
+      } else {
+        updateGlobal(id, { scrapeWarnings: remainingWarnings });
+      }
 
       // Delete the skipped card (and its edge, auto-pruned by ReactFlow).
       const cardNode = getNodes().find(n => n.type === 'compsourcecard' && n.data?.hubId === id && n.data?.sourceId === skippedSourceId);
@@ -1247,7 +1673,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     };
     document.addEventListener('comp-source-skip', onSkip);
     return () => document.removeEventListener('comp-source-skip', onSkip);
-  }, [id, updateGlobal, getNodes, deleteElements, queueSynthesizeAndPrice, epoch, addToast]);
+  }, [id, updateGlobal, getNodes, deleteElements, queueSynthesizeAndPrice, epoch, addToast, checkpointRecovery]);
 
   // After a comp card's captcha-resolve window auto-detects the challenge as
   // cleared, refetch ONLY the unblocked source and merge into the pending items
@@ -1292,7 +1718,14 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       //  - anything else: user moved on (Cancel/Refresh) → discard.
       if (hubStateRef.current === 'researching') {
         if (scrapeInFlightRef.current || resolveDrainInFlightRef.current) {
-          const status = queueSourceResolve({ sourceId: resolvedSourceId, inlineItems, category, warning: resolvedWarning, noChallengeConfirmed });
+          const status = queueSourceResolve({
+            sourceId: resolvedSourceId,
+            inlineItems,
+            category,
+            warning: resolvedWarning,
+            noChallengeConfirmed,
+            autoResume: e.detail?.autoResume === true,
+          });
           const stage = resolveDrainInFlightRef.current ? 'active resolve drain' : 'scrape completion';
           EventLogger.log(
             status === 'active'
@@ -1309,7 +1742,14 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         return;
       }
 
-      const queueStatus = queueSourceResolve({ sourceId: resolvedSourceId, inlineItems, category, warning: resolvedWarning, noChallengeConfirmed });
+      const queueStatus = queueSourceResolve({
+        sourceId: resolvedSourceId,
+        inlineItems,
+        category,
+        warning: resolvedWarning,
+        noChallengeConfirmed,
+        autoResume: e.detail?.autoResume === true,
+      });
       if (resolveDrainInFlightRef.current) {
         EventLogger.log(
           queueStatus === 'active'
@@ -1354,6 +1794,20 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       const remainingWarnings = drained.warnings;
       pendingItemsRef.current = mergedItems;
       scrapeWarningsRef.current = remainingWarnings;
+      const priorRecovery = marketplaceRecoveryRef.current;
+      if (priorRecovery?.phase === 'comps-ready') {
+        const nextRecovery = {
+          ...priorRecovery,
+          pendingItems: mergedItems,
+          scrapeWarnings: remainingWarnings,
+          resolveIntent: null,
+          manualPause: null,
+          updatedAt: Date.now(),
+        };
+        await checkpointRecovery(nextRecovery, priorRecovery.inputKey);
+        marketplaceRecoveryRef.current = nextRecovery;
+        updateGlobal(id, { marketplaceRunResume: nextRecovery });
+      }
       if (remainingWarnings.length > 0) {
         hubStateRef.current = 'comps-ready';
         updateGlobal(id, { hubState: 'comps-ready', pendingItems: mergedItems, scrapeWarnings: remainingWarnings });
@@ -1388,7 +1842,82 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     };
     document.addEventListener('comp-captcha-resolved', onResolved);
     return () => document.removeEventListener('comp-captcha-resolved', onResolved);
-  }, [id, addToast, updateGlobal, epoch, queueSynthesizeAndPrice, drainQueuedResolves, queueSourceResolve]);
+  }, [id, addToast, updateGlobal, epoch, queueSynthesizeAndPrice, drainQueuedResolves, queueSourceResolve, checkpointRecovery]);
+
+  // A headless source retry is safe to continue once per process. A native
+  // CAPTCHA window is never reopened automatically; only a result that was
+  // already durably captured before interruption is replayed into the normal
+  // merge path.
+  useEffect(() => {
+    if (!recoveryHydrated || data.locked) return undefined;
+    const recovery = data.marketplaceRunResume;
+    if (recovery?.phase !== 'comps-ready') return undefined;
+    const resolveIntent = recovery.resolveIntent;
+    const capturedManualResult = recovery.manualPause?.status === 'resolved'
+      ? recovery.manualPause.result
+      : null;
+    const automaticResolve = isAutomaticMarketplaceResolveIntent(recovery);
+    const sourceId = resolveIntent?.input?.sourceId || recovery.manualPause?.sourceId;
+    if (!sourceId || (!automaticResolve && !capturedManualResult)) return undefined;
+    const attemptKey = `${recovery.runId}\u0000${sourceId}\u0000${resolveIntent?.inputKey || 'captured-native'}`;
+    if (autoResumedResolveRef.current === attemptKey) return undefined;
+    autoResumedResolveRef.current = attemptKey;
+    const currentItems = buildRefreshResearchItems(
+      data.product,
+      data.extraItems,
+      data.itemPricings,
+      data.pricingNotes,
+    );
+    if (!data.product || !marketplaceResearchIdentityMatches(
+      recovery,
+      currentItems,
+      data.product?.category,
+    )) {
+      updateGlobal(id, {
+        errorMessage: 'The saved source retry input no longer matches this item. Review the current item and start a new price check.',
+      });
+      return undefined;
+    }
+    pendingItemsRef.current = recovery.pendingItems;
+    scrapeWarningsRef.current = recovery.scrapeWarnings;
+    hubStateRef.current = 'comps-ready';
+    updateGlobal(id, {
+      hubState: 'comps-ready',
+      pendingItems: recovery.pendingItems,
+      scrapeWarnings: recovery.scrapeWarnings,
+      errorMessage: null,
+    });
+    const timer = setTimeout(() => {
+      document.dispatchEvent(new CustomEvent('comp-captcha-resolved', {
+        detail: capturedManualResult ? {
+          hubId: id,
+          sourceId,
+          items: capturedManualResult.items,
+          category: capturedManualResult.category,
+          warning: capturedManualResult.warning,
+          noChallengeConfirmed: capturedManualResult.resolved === true
+            && capturedManualResult.diag?.sawChallenge === false,
+          autoResume: true,
+        } : {
+          hubId: id,
+          sourceId,
+          noChallengeConfirmed: resolveIntent.input?.noChallengeConfirmed === true,
+          autoResume: true,
+        },
+      }));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [
+    data.extraItems,
+    data.itemPricings,
+    data.locked,
+    data.marketplaceRunResume,
+    data.pricingNotes,
+    data.product,
+    id,
+    recoveryHydrated,
+    updateGlobal,
+  ]);
 
   const acceptImagePaths = useCallback((paths, attemptedCount = paths?.length || 0) => {
     const validPaths = [...new Set((paths || []).filter(p => typeof p === 'string' && p.trim()))];
@@ -1651,7 +2180,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
   }, [acceptImagePaths, data.locked, handleAddDisplayPhotos, hubState, id, inputDropsBlocked, platformsVerifying]);
 
-  const resetHandler = useCallback((e) => {
+  const resetHandler = useCallback(async (e) => {
     e?.stopPropagation();
     if (data.locked) return;
 
@@ -1664,11 +2193,40 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     epoch.bump();
     moduleRunQueue.cancelQueuedRunsForNode(id);
 
-    // Actually cancel the backend pipeline. The IPC is fire-and-forget; the
-    // backend's finally{} clears its own progress. We don't await it. The cause
-    // is named so diagnostics report a Reset as a Reset — every node-scoped
-    // abort otherwise shares the "Node deleted" sentinel.
-    window.electronAPI?.cancelNodeTask?.(id, 'user-reset');
+    const recoveryRunId = marketplaceRecoveryRef.current?.runId || data.marketplaceRunResume?.runId;
+    if (recoveryRunId) {
+      try {
+        await abandonRecovery(recoveryRunId, 'user-reset');
+      } catch (error) {
+        EventLogger.error(`[SellHub][${id}] Reset could not tombstone recovery:`, error);
+        updateGlobal(id, { errorMessage: 'Reset could not safely retire its restart marker. Try Reset again before closing the app.' });
+        addToast({ title: 'Reset incomplete', description: error?.message || String(error), type: 'error' });
+        return;
+      }
+    }
+
+    // The durable tombstone is committed before aborting the main handler.
+    // Wait for that handler's finally block as well: it owns the process-local
+    // recovery claim, and admitting a new run before release would turn a
+    // successful Reset into a spurious owner-busy failure.
+    try {
+      if (!window.electronAPI?.cancelNodeTaskAndWait) {
+        throw new Error('Acknowledged marketplace cancellation is unavailable.');
+      }
+      const acknowledgement = await window.electronAPI.cancelNodeTaskAndWait(id, 'user-reset');
+      if (acknowledgement?.settled !== true) {
+        throw new Error('The marketplace task did not finish cancelling before the safety timeout.');
+      }
+    } catch (error) {
+      // A best-effort raw abort still limits work if the acknowledgement IPC
+      // itself failed. Keep the renderer marker and controls intact so the user
+      // has an explicit Reset retry state instead of racing into a new run.
+      window.electronAPI?.cancelNodeTask?.(id, 'user-reset-acknowledgement-failed');
+      EventLogger.error(`[SellHub][${id}] Reset cancellation was not acknowledged:`, error);
+      updateGlobal(id, { errorMessage: 'Reset is waiting for the active task to stop. Try Reset again before starting a new run.' });
+      addToast({ title: 'Reset incomplete', description: error?.message || String(error), type: 'error' });
+      return;
+    }
 
     // Revert intelligently: when aborting price research the user wants to
     // keep their draft (title/description/condition they already approved),
@@ -1694,6 +2252,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       errorMessage: hadImages ? 'Analysis canceled.' : null,
       pendingItems: null,
       bundlePricing: null,
+      marketplaceRunResume: null,
     };
     if (revertTo === 'empty' && !hadImages) updates.imagePaths = null;
     updateGlobal(id, updates);
@@ -1710,10 +2269,80 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     setIsApplyingResolves(false);
     processingRef.current = false;
     processingPriceRef.current = false;
-  }, [data.locked, data.product, data.imagePaths, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue, syncResolveWorkCount]);
+  }, [data.locked, data.product, data.imagePaths, data.marketplaceRunResume, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue, syncResolveWorkCount, abandonRecovery, addToast]);
+
+  // Restarted analysis and synthesis can each surface a manual non-API AI
+  // handoff. They must not be re-opened merely because the node remounted:
+  // doing so can duplicate a pending human prompt. This is the explicit owner
+  // action for the exact durable marker; terminal receipts are still replayed
+  // by the recovery effect without any user action.
+  const resumePausedManualAiRecovery = useCallback(() => {
+    if (data.locked || processingRef.current || processingPriceRef.current) return;
+    const recovery = marketplaceRecoveryRef.current || data.marketplaceRunResume;
+    if (!isRestorableMarketplaceRecovery(recovery)) return;
+
+    if (recovery.phase === 'analysis') {
+      const imagePaths = Array.isArray(data.imagePaths) ? data.imagePaths : [];
+      if (!marketplacePhotoInputMatches(recovery, imagePaths)) {
+        updateGlobal(id, {
+          errorMessage: 'The saved photo-analysis input changed. Reset this module before starting analysis with different photos.',
+        });
+        return;
+      }
+      EventLogger.log(`[SellHub][${id}] User continued saved photo analysis run=${recovery.runId}`);
+      startAnalysis(imagePaths, recovery);
+      return;
+    }
+
+    if (recovery.phase !== 'synthesis') return;
+    const expectedKey = marketplaceSynthesisInputKey(
+      recovery.pendingItems,
+      recovery.skippedWarnings,
+    );
+    if (recovery.inputKey !== expectedKey) {
+      updateGlobal(id, {
+        errorMessage: 'The saved pricing input no longer matches its recovered comps. Reset this module before pricing again.',
+      });
+      return;
+    }
+    processingPriceRef.current = true;
+    const cancelled = epoch.start();
+    const warnings = Array.isArray(recovery.skippedWarnings) ? recovery.skippedWarnings : [];
+    EventLogger.log(`[SellHub][${id}] User continued saved price synthesis run=${recovery.runId}`);
+    void queueSynthesizeAndPrice(recovery.pendingItems, warnings, cancelled, recovery)
+      .catch((error) => {
+        if (cancelled() || isNodeDeletedAbort(error)) return;
+        hubStateRef.current = 'draft';
+        updateGlobal(id, {
+          hubState: 'draft',
+          marketplaceRunResume: recovery,
+          errorMessage: error?.message || String(error),
+        });
+        addToast({ title: 'Pricing Error', description: error?.message || String(error), type: 'error' });
+      })
+      .finally(() => { processingPriceRef.current = false; });
+  }, [
+    addToast,
+    data.imagePaths,
+    data.locked,
+    data.marketplaceRunResume,
+    epoch,
+    id,
+    queueSynthesizeAndPrice,
+    startAnalysis,
+    updateGlobal,
+  ]);
+
+  const pausedManualAiRecovery = recoveryHydrated
+    && !processingRef.current
+    && !processingPriceRef.current
+    && isRestorableMarketplaceRecovery(data.marketplaceRunResume)
+    && ['analysis', 'synthesis'].includes(data.marketplaceRunResume?.phase);
 
   const nodeWidth = 280;
-  const nodeHeight = hubState === 'empty'
+  const nodeHeight = pausedManualAiRecovery
+    ? 170
+    : hubState === 'empty'
     ? 140
     : hubState === 'draft' || hubState === 'priced'
       ? 320
@@ -1752,18 +2381,28 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     EventLogger.log(`[SellHub][${id}] User clicked Try Again on error banner`);
     updateGlobal(id, { errorMessage: null });
     if (data.product) {
-      handleConfirmDraft();
+      handleConfirmDraft(data.marketplaceRunResume);
     } else if (data.imagePaths?.length > 0) {
-      startAnalysis(data.imagePaths);
+      startAnalysis(data.imagePaths, data.marketplaceRunResume);
     }
-  }, [data.locked, data.product, data.imagePaths, id, updateGlobal, handleConfirmDraft, startAnalysis]);
+  }, [data.locked, data.product, data.imagePaths, data.marketplaceRunResume, id, updateGlobal, handleConfirmDraft, startAnalysis]);
 
   const retryFailedAvailable = !isOversizedImageError(data.errorMessage) && (
     !!data.product || data.imagePaths?.length > 0
   );
 
-  const handleReresearchFromPriced = useCallback(() => {
+  const handleReresearchFromPriced = useCallback(async () => {
     if (data.locked || !data.product) return;
+
+    const recoveryRunId = marketplaceRecoveryRef.current?.runId || data.marketplaceRunResume?.runId;
+    if (recoveryRunId) {
+      try {
+        await abandonRecovery(recoveryRunId, 'user-reresearch');
+      } catch (error) {
+        addToast({ title: 'Refresh not started', description: error?.message || String(error), type: 'error' });
+        return;
+      }
+    }
 
     EventLogger.log(`[SellHub][${id}] Refresh Prices clicked from priced state — returning to draft before re-research`);
     epoch.bump();
@@ -1801,12 +2440,14 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       platformFitPending: false,
       errorMessage: null,
       extraItems: nextExtraItems,
+      marketplaceRunResume: null,
     });
   }, [
     data.locked,
     data.product,
     data.extraItems,
     data.itemPricings,
+    data.marketplaceRunResume,
     id,
     epoch,
     moduleRunQueue,
@@ -1815,6 +2456,8 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     cleanupCompSourceCards,
     updateGlobal,
     syncResolveWorkCount,
+    abandonRecovery,
+    addToast,
   ]);
 
   const banner = data.errorMessage ? (
@@ -1850,8 +2493,39 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
             Waiting behind {queueWait} price check{queueWait === 1 ? '' : 's'} — serializing the shared browser to avoid collisions…
           </div>
         )}
+        {pausedManualAiRecovery && (
+          <div className="m-3 space-y-2 rounded-md border border-amber-400/30 bg-amber-500/10 p-3" onPointerDown={(event) => event.stopPropagation()}>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-200">
+              {data.marketplaceRunResume?.phase === 'analysis'
+                ? 'Photo analysis is paused'
+                : 'Price synthesis is paused'}
+            </div>
+            <p className="text-[10px] leading-snug text-white/65">
+              This saved step may need a manual AI handoff. Continue only when you are ready to resume this exact task.
+            </p>
+            {banner}
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                className="nodrag rounded bg-amber-400/20 px-2 py-1 text-[10px] font-medium text-amber-100 transition-colors hover:bg-amber-400/30 disabled:cursor-default disabled:opacity-40"
+                disabled={!!data.locked}
+                onClick={(event) => { event.stopPropagation(); resumePausedManualAiRecovery(); }}
+              >
+                Continue
+              </button>
+              <button
+                type="button"
+                className="nodrag rounded bg-white/10 px-2 py-1 text-[10px] text-white/70 transition-colors hover:bg-white/20 disabled:cursor-default disabled:opacity-40"
+                disabled={!!data.locked}
+                onClick={(event) => { event.stopPropagation(); resetHandler(); }}
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+        )}
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}
-        {hubState === 'empty' && (
+        {!pausedManualAiRecovery && hubState === 'empty' && (
           <>
             {banner}
             <div className="flex flex-col items-center justify-center py-8 px-4 cursor-pointer">
@@ -1877,7 +2551,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         )}
 
         {/* ── Analyzing ──────────────────────────────────────────────────── */}
-        {hubState === 'queued' && (
+        {!pausedManualAiRecovery && hubState === 'queued' && (
           <HubBusyState
             theme="amber"
             label="Waiting to run..."
@@ -1887,7 +2561,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         )}
 
         {/* ── Analyzing ──────────────────────────────────────────────────── */}
-        {hubState === 'analyzing' && (
+        {!pausedManualAiRecovery && hubState === 'analyzing' && (
           <HubBusyState
             theme="amber"
             label="AI analyzing photos..."
@@ -1897,7 +2571,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         )}
 
         {/* ── Draft: editable product info (+ banner if research failed) ─ */}
-        {hubState === 'draft' && (
+        {!pausedManualAiRecovery && hubState === 'draft' && (
           <>
             {banner}
             <SellHubDraftState
@@ -1920,7 +2594,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         )}
 
         {/* ── Researching ────────────────────────────────────────────────── */}
-        {hubState === 'researching' && (
+        {!pausedManualAiRecovery && hubState === 'researching' && (
           <HubBusyState
             theme="amber"
             label={isApplyingResolves ? 'Applying resolved sources...' : 'Researching market prices...'}
@@ -1934,7 +2608,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         {/* ── Comps Ready: scrape finished but some sources blocked ─────── */}
         {/* Pauses before AI synthesis so the user can solve captchas (cards
             already show Solve buttons) or skip and price with partial data. */}
-        {hubState === 'comps-ready' && (
+        {!pausedManualAiRecovery && hubState === 'comps-ready' && (
           <SellHubCompsReadyDecision
             scrapeWarnings={data.scrapeWarnings || []}
             compsTotal={(data.pendingItems || []).reduce((n, it) => n + (it.comps?.sold?.length || 0) + (it.comps?.active?.length || 0), 0)}
@@ -1943,7 +2617,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         )}
 
         {/* ── Priced: price + platform controls ──────────────────────────── */}
-        {hubState === 'priced' && (
+        {!pausedManualAiRecovery && hubState === 'priced' && (
           <SellHubPricedState
             product={product}
             pricing={data.pricing}

@@ -21,6 +21,13 @@
  * `terminalManualSourceIds` in electron/ipc/jobs.js — fence it there, not here.
  */
 export function mergeSourceProgress(prev, payload) {
+  // A source can complete its provider collection and then re-enter
+  // `searching` for a downstream activity (currently LinkedIn description
+  // enrichment). Keep that activity distinct from the source-level
+  // `completed`/`total` counters, whose denominator is usually source/query
+  // work rather than individual descriptions. Terminal source events clear an
+  // activity even when the backend only needs to send its normal status.
+  const clearsActivity = isTerminalSourceStatus(payload.status) || payload.activity === null;
   return {
     status:  payload.status,
     count:   payload.count !== undefined ? payload.count : prev?.count ?? null,
@@ -34,6 +41,15 @@ export function mergeSourceProgress(prev, payload) {
     jobRunId: payload.jobRunId !== undefined ? payload.jobRunId : prev?.jobRunId ?? null,
     completed: payload.completed !== undefined ? payload.completed : prev?.completed ?? null,
     total:     payload.total     !== undefined ? payload.total     : prev?.total     ?? null,
+    activity: payload.activity !== undefined
+      ? payload.activity
+      : (clearsActivity ? null : prev?.activity ?? null),
+    activityCompleted: payload.activityCompleted !== undefined
+      ? payload.activityCompleted
+      : (clearsActivity ? null : prev?.activityCompleted ?? null),
+    activityTotal: payload.activityTotal !== undefined
+      ? payload.activityTotal
+      : (clearsActivity ? null : prev?.activityTotal ?? null),
   };
 }
 

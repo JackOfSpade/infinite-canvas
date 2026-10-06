@@ -49,10 +49,12 @@ export default [
         };
         const result = readConfig('/tmp/ic-handoff-test', { fsImpl });
         assert(reads === 1 && result.state === fixture.state, `${fixture.name} config must be tolerated without a write`);
-        assert(result.config.autoStart === false, `${fixture.name} config must resolve to safe defaults`);
+        assert(result.config.autoStart === true, `${fixture.name} config must resolve to enabled defaults`);
       }
-      assert(emptyConfig().autoStart === false && emptyConfig().pluginName === 'infinite_canvas',
-        'fresh config must preserve auto-start opt-in and a starter-safe plugin name');
+      assert(emptyConfig().autoStart === true && emptyConfig().autoRelease === true
+        && emptyConfig().scope.applications && emptyConfig().scope.scoring && emptyConfig().scope.marketplace
+        && emptyConfig().pluginName === 'infinite_canvas',
+      'fresh config must enable every reviewed handoff family and retain a starter-safe plugin name');
     },
   },
   {
@@ -95,16 +97,16 @@ export default [
     }),
   },
   {
-    name: 'handoff bridge: store: marketplace scope defaults false, accepts a raising patch and rejects an unknown scope key',
+    name: 'handoff bridge: store: every scope defaults on, preserves an explicit opt-out and rejects an unknown scope key',
     run: () => withStore(async userData => {
-      assert(emptyConfig().scope.marketplace === false, 'a fresh config must never default marketplace consent on');
+      assert(emptyConfig().scope.marketplace === true, 'a fresh config defaults marketplace on with the other reviewed handoff families');
       const unknown = await save(userData, { scope: { applications: true, scoring: false, listings: true } });
       assert(unknown.code === 'INVALID' && unknown.fieldErrors.scope, 'an unknown scope key must be rejected rather than silently dropped');
       assert(readConfig(userData).state === 'missing', 'a rejected scope patch must not create config');
-      const accepted = await save(userData, { scope: { marketplace: true } });
+      const accepted = await save(userData, { scope: { marketplace: false } });
       const config = persisted(userData);
-      assert(accepted.ok && config.scope.marketplace === true && config.scope.applications === true && config.scope.scoring === false,
-        'a patch that raises marketplace alone must persist and preserve the untouched fields');
+      assert(accepted.ok && config.scope.marketplace === false && config.scope.applications === true && config.scope.scoring === true,
+        'an explicit marketplace opt-out must persist without changing the default-on sibling scopes');
     }),
   },
   {
@@ -119,8 +121,23 @@ export default [
       fs.writeFileSync(configPathFor(userData), JSON.stringify(legacy));
       const result = readConfig(userData);
       assert(result.state === 'ok', 'a legacy two-key scope must not be treated as unreadable');
-      assert(result.config.scope.applications === true && result.config.scope.scoring === false && result.config.scope.marketplace === false,
-        'the missing marketplace field must fill its safe default rather than rejecting the config');
+      assert(result.config.scope.applications === true && result.config.scope.scoring === false && result.config.scope.marketplace === true,
+        'the missing marketplace field must fill the current default without erasing an explicit older scoring opt-out');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: legacy explicit automatic opt-outs survive default-on migration',
+    run: () => withStore(async userData => {
+      // These false values are a person's prior choice, unlike omitted fields
+      // that now inherit the fresh default. Read directly to exercise config
+      // migration rather than the current write path.
+      const legacy = { ...emptyConfig(), autoStart: false, autoRelease: false, scope: { applications: true, scoring: false } };
+      fs.mkdirSync(path.dirname(configPathFor(userData)), { recursive: true });
+      fs.writeFileSync(configPathFor(userData), JSON.stringify(legacy));
+      const result = readConfig(userData);
+      assert(result.state === 'ok' && result.config.autoStart === false && result.config.autoRelease === false
+        && result.config.scope.scoring === false && result.config.scope.marketplace === true,
+      'legacy false automatic preferences and scoring consent remain opt-outs while missing marketplace takes the current default');
     }),
   },
   {
@@ -163,6 +180,33 @@ export default [
     }),
   },
   {
+    name: 'handoff bridge: store: default byte rollover is disabled and the retired invisible default migrates safely',
+    run: () => withStore(userData => {
+      const base = emptyConfig();
+      assert(base.limits.epochSoftBytes === 0 && base.limits.epochHardBytes === 0,
+        'new bridge configs must not impose an undocumented chat rollover');
+      const file = configPathFor(userData);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const writeLegacy = limits => fs.writeFileSync(file, JSON.stringify({ ...base, limits: { ...base.limits, ...limits } }));
+      // This exact pair was the historical hidden default, not a user-visible
+      // setting. Reading it must upgrade the policy without rewriting the
+      // file merely to inspect it.
+      writeLegacy({ epochSoftBytes: 500_000, epochHardBytes: 900_000 });
+      const migrated = readConfig(userData);
+      assert(migrated.state === 'ok' && migrated.config.limits.epochSoftBytes === 0 && migrated.config.limits.epochHardBytes === 0,
+        'the old invisible byte ceiling must become opt-in rollover on read');
+      const stillOnDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert(stillOnDisk.limits.epochHardBytes === 900_000,
+        'read migration must stay non-mutating until a person saves settings');
+      // A non-default positive pair remains an intentional configured safety
+      // budget rather than being mistaken for the legacy default.
+      writeLegacy({ epochSoftBytes: 500_001, epochHardBytes: 900_000 });
+      const explicit = readConfig(userData);
+      assert(explicit.state === 'ok' && explicit.config.limits.epochSoftBytes === 500_001 && explicit.config.limits.epochHardBytes === 900_000,
+        'a deliberately distinct positive byte budget must survive migration');
+    }),
+  },
+  {
     name: 'handoff bridge: store: limit relationships and unknown nested fields are rejected',
     run: () => withStore(async userData => {
       const relationship = await save(userData, { limits: { epochSoftBytes: 900_001 } });
@@ -194,6 +238,44 @@ export default [
       const config = persisted(userData);
       assert(accepted.ok && config.telemetryInBugReports && config.consentVersion === 2,
         'telemetry and consent must persist');
+    }),
+  },
+  {
+    name: 'handoff bridge: store: serialized consent acceptance and config saves cannot transfer v2 across disclosure shapes',
+    run: () => withStore(async userData => {
+      const changed = (before, after) => before.hostname !== after.hostname
+        || before.scope.scoring !== after.scope.scoring
+        || before.scope.marketplace !== after.scope.marketplace
+        || before.autoStart !== after.autoStart
+        || before.autoRelease !== after.autoRelease
+        || before.prefs.sourcePolicy !== after.prefs.sourcePolicy
+        || before.prefs.pairingNetworkCheck !== after.prefs.pairingNetworkCheck
+        || Object.keys(before.limits).some(key => before.limits[key] !== after.limits[key]);
+      const acceptFor = hostname => save(userData, { consentVersion: 2 }, {
+        isCurrentConfig: config => config.hostname === hostname,
+        isConsentConfigChanged: changed,
+      });
+      await save(userData, { hostname: 'first.example.com' }, { isConsentConfigChanged: changed });
+
+      const hostnameConsent = deferred();
+      const saveFirst = save(userData, { hostname: 'second.example.com' }, {
+        isConsentConfigChanged: changed,
+        confirmHostnameChange: () => hostnameConsent.promise,
+      });
+      await Promise.resolve();
+      const acceptBehindSave = acceptFor('first.example.com');
+      hostnameConsent.resolve(true);
+      const [savedFirst, staleAccept] = await Promise.all([saveFirst, acceptBehindSave]);
+      assert(savedFirst.ok && staleAccept.code === 'CONSENT_STALE' && persisted(userData).hostname === 'second.example.com' && persisted(userData).consentVersion === 0,
+        'a config save ahead of acceptance makes the stale sheet fail inside the same mutation queue');
+
+      await save(userData, { hostname: 'first.example.com' }, { isConsentConfigChanged: changed });
+      const acceptFirst = acceptFor('first.example.com');
+      const saveBehindAccept = save(userData, { scope: { scoring: false } }, { isConsentConfigChanged: changed });
+      const [accepted, savedSecond] = await Promise.all([acceptFirst, saveBehindAccept]);
+      const final = persisted(userData);
+      assert(accepted.ok && savedSecond.ok && savedSecond.consentConfigChanged === true && final.scope.scoring === false && final.consentVersion === 0,
+        'a config save behind acceptance atomically clears v2 instead of inheriting the prior fingerprint receipt');
     }),
   },
   {

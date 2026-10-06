@@ -32,7 +32,7 @@ const TUNNEL_FORBIDDEN = [
 const allBridgeSiblings = [
   './constants.js', './contracts.js', './respond.js', './wire.js', './http.js', './listener.js', './tools.js', './mcp.js',
   './oauth.js', './oauthPages.js', './clientAuth.js', './cimd.js', './egressProbe.js', './oauthStore.js', './store.js',
-  './laneStore.js', './engine.js', './lanes.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
+  './laneStore.js', './engine.js', './lanes.js', './workerPool.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
   './telemetry.js', './restartContext.js', './controller.js', './pairing.js', './ui.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
 ];
 const sibling = (...imports) => [...imports, ...allBridgeSiblings];
@@ -40,7 +40,9 @@ const sibling = (...imports) => [...imports, ...allBridgeSiblings];
 // B0 owns this complete table. Rows for later-stage modules deliberately exist
 // before their files do; an absent row is skipped, an unlisted file is fatal.
 export const SOURCE_SCAN_ROWS = Object.freeze({
-  'constants.js': { allow: [] },
+  // The shared scheduler owns the single capacity value; constants re-exports
+  // it as bridge policy without acquiring capabilities.
+  'constants.js': { allow: ['../../../src/utils/handoffScheduler.js'] },
   'contracts.js': { allow: [] },
   'respond.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'wire.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
@@ -58,25 +60,28 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   // config validator reads the jobsPerChat range from it rather than repeating
   // the numbers, which is how a legal value starts being rejected on save.
   'store.js': { allow: ['node:fs', 'node:path', 'node:crypto', './constants.js', '../../../src/utils/handoffBridgeConfig.js'] },
-  'laneStore.js': { allow: ['node:fs', 'node:path', 'node:crypto'] },
+  'laneStore.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../../../src/utils/handoffScheduler.js'] },
   'engine.js': { allow: sibling('node:crypto') },
   'lanes.js': { allow: sibling('node:crypto') },
+  // Pure, main-process planning math for the manual worker pool. Its only
+  // import is the inert bridge capacity policy.
+  'workerPool.js': { allow: ['./constants.js'] },
   'preflight.js': { allow: sibling('node:crypto', './lanes.js', '../../../src/utils/pasteIdentityGuard.js') },
   'framing.js': { allow: sibling('node:crypto', '../../../src/utils/pasteIdentityGuard.js', '../../../src/utils/handoffBridgeConfig.js') },
   'errors.js': { allow: sibling('node:crypto') },
   'audit.js': { allow: ['node:fs', 'node:path', 'node:crypto', '../logger.js'] },
   'log.js': { allow: ['../logger.js'] },
-  'telemetry.js': { allow: [] },
+  'telemetry.js': { allow: ['./log.js', '../../../src/utils/handoffScheduler.js'] },
   'restartContext.js': { allow: [] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
-  'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js'] },
+  'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
   'controller.js': { allow: sibling('node:crypto') },
   'pairing.js': { allow: sibling('node:crypto') },
   'ui.js': { allow: sibling('electron') },
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },
   'power.js': { allow: sibling('electron') },
-  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js') },
+  'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js') },
   'tunnel/constants.js': { allow: [] },
   'tunnel/validate.js': { allow: ['../../../../src/utils/handoffBridgeConfig.js', '../constants.js', './constants.js'] },
   'tunnel/config.js': { allow: ['./constants.js', './validate.js'] },
@@ -345,7 +350,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 49, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 50, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {
@@ -493,6 +498,7 @@ export default [
         'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
         'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed',
         'epoch_closed', 'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
+        'worker_pool_started', 'worker_pool_expanded',
       ];
       assert(JSON.stringify(CREDENTIAL_LOG_CODES) === JSON.stringify(expectedCodes), 'the logger code surface is the frozen credential/control enum');
       assert(JSON.stringify(Object.keys(LOG_FIELDS_BY_CODE)) === JSON.stringify(expectedCodes), 'each logger code has a closed field allow-list');
@@ -542,10 +548,13 @@ export default [
       'a bounded syntactically valid probe MAC must be computed and timing-compared before nonce lookup');
 
       const epochAuth = namedFunctionSource(engine, 'authenticate');
-      assert(epochAuth.includes('sameDigest(digest, epoch.keyHash)')
+      const workerSession = namedFunctionSource(engine, 'workerForSession');
+      assert(workerSession.includes('for (const worker of epochWorkers(target))')
+        && workerSession.includes('sameDigest(epochHash(boundLinkId, presented), worker.keyHash)')
+        && epochAuth.includes('const worker = workerForSession(epoch, boundLinkId, presented);')
         && epochAuth.includes('sameHex(retired.digest, ended)')
         && !epochAuth.includes('epoch.linkId') && !epochAuth.includes('retired.linkId')
-        && !engine.includes('linkId: epoch.linkId'), 'the epoch digest must be the sole link-binding comparison for the live chat, and ended chats are recognised by a link-free digest compared in constant time');
+        && !engine.includes('linkId: epoch.linkId'), 'each live worker key must stay link-bound through a constant-time digest comparison, and ended chats must remain link-free and constant-time recognised');
       assert(namedFunctionSource(engine, 'sameHex').includes('sameDigest') && /function endedDigest\(key\)/.test(engine) && !/function endedDigest\([^)]*linkId/.test(engine),
         'the ended-chat digest takes the key alone and hex digests are compared through the constant-time helper');
 

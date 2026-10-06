@@ -20,7 +20,7 @@ import {
   closeOwnedBrowserProcess, closeStealthBrowser, getUserDataDir, findChromePath, launchWithProfileLockRetry,
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
-import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
+import { filterJobsByPostedSince, POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay as paintOverlay } from './scraperOverlay.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import { isProfileLockCollision } from '../browserLaunchTelemetry.js';
@@ -546,6 +546,29 @@ export function manualPageCapForTasks(sourceTasks, collectionLimits) {
   const allocated = resolveBrowserPageBudgets(limits, taskCount)
     .reduce((sum, pages) => sum + pages, 0);
   return allocated > 0 ? { type: 'auto-pages-per-platform', limit: allocated } : null;
+}
+
+/**
+ * Pick this browser page's contribution to a source-wide platform allowance.
+ * The caller has normally already de-duped cards against prior pages/queries;
+ * retain the small identity guard here as well so this safety boundary remains
+ * correct when a provider repeats cards in a single extraction payload.
+ */
+export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatform, collectionStartTimestamp) {
+  const existingKeys = new Set((Array.isArray(existingJobs) ? existingJobs : [])
+    .map(sourceJobKey));
+  const unique = [];
+  for (const job of Array.isArray(newJobs) ? newJobs : []) {
+    const key = sourceJobKey(job);
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    unique.push(job);
+  }
+  const eligible = filterJobsByPostedSince(unique, collectionStartTimestamp);
+  const limit = Number.isFinite(Number(jobsPerPlatform)) && Number(jobsPerPlatform) > 0
+    ? Math.floor(Number(jobsPerPlatform))
+    : Infinity;
+  return eligible.slice(0, Math.max(0, limit - (Array.isArray(existingJobs) ? existingJobs.length : 0)));
 }
 
 /**
@@ -6856,6 +6879,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           if (pageNum > maxPages) {
             logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit browser pages/query (${maxPages}) — stopping pagination`);
             hitPageCap = true;
+            if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: Math.max(1, pageNum - 1), jobs: [], terminal: true });
             break;
           }
 
@@ -7040,6 +7064,16 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // exhausted. Preserve all partial rows, but carry an explicit
           // truncated terminal fact rather than green-lighting the source.
           if (extracted.length === 0) {
+            const incompleteZipShortfall = sourceId === 'ziprecruiter'
+              && Number.isFinite(Number(sourceClaimedTotal))
+              && providerSeen.size < Number(sourceClaimedTotal);
+            // A clean empty page is a successful durable page checkpoint even
+            // though it yielded no rows. Do not checkpoint ZipRecruiter's
+            // advertised-total shortfall as complete coverage: that path below
+            // remains retryable/unfinished by design.
+            if (!incompleteZipShortfall && onPageJobs) {
+              await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: [], terminal: true });
+            }
             if (sourceId === 'ziprecruiter'
               && Number.isFinite(Number(sourceClaimedTotal))
               && providerSeen.size < Number(sourceClaimedTotal)) {
@@ -7242,8 +7276,18 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
           // The user-selected aggregate source limit applies across all queries
           // and pages. Stop expanding as soon as its remaining allowance is full.
-          const remainingSourceSlots = Math.max(0, jobsPerPlatform - allJobs.length);
-          const jobsToExpand = newJobs.slice(0, remainingSourceSlots);
+          // This is the fetch-side complement to jobs.js's final platform-cap
+          // boundary.  A browser walker must not stop after N raw cards when
+          // early cards are outside the exact saved window: those rows will be
+          // rejected later and would otherwise leave usable later cards
+          // unreachable.  Unknown dates are retained by filterJobsByPostedSince
+          // exactly as they are by the central admission pass.
+          const jobsToExpand = selectManualSourcePageJobs(
+            newJobs,
+            allJobs,
+            jobsPerPlatform,
+            task.options?.collectionStartTimestamp,
+          );
           const walkPlan = buildPhysicalCardWalkPlan(extracted, jobsToExpand);
           await updateOverlay(page, {
             ...overlayBase,
@@ -7461,13 +7505,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
           allJobs.push(...enhanced);
 
-          // Per-page recovery flush (crash/quit checkpoint) — staged before the
-          // next page turn so a crash keeps everything gathered so far. Best-effort:
-          // never let staging I/O interfere with the scrape.
-          if (onPageJobs && enhanced.length > 0) {
-            try { await onPageJobs({ sourceId, query: task.query || '', page: pageNum, jobs: enhanced }); }
-            catch (e) { logger.warn(`[BrowserScraper] onPageJobs failed (non-fatal): ${e?.message || e}`); }
-          }
+          // Per-page recovery flush is a durability boundary: checkpoint even
+          // a duplicate-only page, and fail this source if it cannot be saved.
+          if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: enhanced });
 
           if (descError) {
             if (!sourceSiteChangedWarning) sourceSiteChangedWarning = descError;
@@ -7566,6 +7606,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               reason: stopDecision.reason,
               detail: stopDecision.detail,
             });
+            if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: [], terminal: true });
             break;
           }
 
@@ -7639,6 +7680,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 count: allJobs.length, label: control.label || 'Next page', href: control.href || null,
               });
             }
+            // No pagination control is a verified natural end. An unhandled
+            // enabled control remains incomplete and must be replayed.
+            if (!nextPage.unhandled && !directAdvance && !hitProviderTotalShortfall && !hitPageTurnStalled && onPageJobs) {
+              await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: [], terminal: true });
+            }
             break;
           }
 
@@ -7661,6 +7707,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             if (grown <= loadMorePrevCount) {
               logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: "show more" added no further jobs after ${loadMorePrevCount} — end of results`);
               hitEmptyPage = true;
+              if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: [], terminal: true });
               break;
             }
             continue;

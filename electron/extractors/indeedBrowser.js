@@ -16,7 +16,7 @@ import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileR
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
 import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
-import { filterJobsByAge } from '../ipc/jobDateFilter.js';
+import { filterJobsByAge, filterJobsByPostedSince } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from '../ipc/browser/backgroundScrapeBrowser.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
@@ -675,7 +675,7 @@ export function resolveIndeedPageBudgets(queryCount, collectionLimits, resumePag
   return isResume ? Array(count).fill(1) : defaults;
 }
 
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null, resumePageBudgets = null, isResume = false, originalQueryIndexes = null, collectionStartTimestamp = null) {
   if (isBackgroundE2E()) {
     const disabled = backgroundE2EDisabledError('Indeed browser extraction');
     return {
@@ -694,8 +694,14 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
   // override or Auto's original per-query allocation rather than silently
   // minting the legacy one-page-per-query fallback.
   const queryList = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
+  const startPages = Array.isArray(startPage) && startPage.length === queryList.length
+    ? startPage.map(page => Math.max(0, Math.floor(Number(page) || 0)))
+    : queryList.map((_query, index) => index === 0 ? Math.max(0, Math.floor(Number(startPage) || 0)) : 0);
   const limits = normalizeJobCollectionLimits(collectionLimits);
   const pageBudgets = resolveIndeedPageBudgets(queryList.length, limits, resumePageBudgets, isResume);
+  const queryIndexes = Array.isArray(originalQueryIndexes) && originalQueryIndexes.length === queryList.length
+    ? originalQueryIndexes
+    : queryList.map((_query, index) => index);
   const reservation = getSharedProfileReservationInfo();
   if (reservation) {
     return {
@@ -706,7 +712,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: `Indeed could not start because the shared browser profile is reserved for ${reservation.reason}.`,
         actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
         suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
-        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
+        resumeState: { remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes },
       },
       gathered: 0,
     };
@@ -766,7 +772,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: error?.message || 'Indeed could not reserve the shared browser profile.',
         actionTitle: 'Retries the Indeed scrape — this failure was a busy browser profile, not your Indeed login',
         suggestion: 'Close the open login or verification window, then click Continue to resume Indeed.',
-        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
+        resumeState: { remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes },
       },
       gathered: 0,
     };
@@ -793,7 +799,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           evidence: `Indeed's Chrome could not start: ${String(launchError?.message || launchError).slice(0, 400)}`,
           actionTitle: 'Retries the Indeed scrape — this failure was a browser that could not start, not your Indeed login',
           suggestion: 'Close any open login or verification window, then click Continue to resume Indeed.',
-        resumeState: { remainingQueries: queryList, startPage, pageBudgets },
+        resumeState: { remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes },
         },
         gathered: 0,
       };
@@ -858,7 +864,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             : 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.',
           resumeState: {
             mode: shouldHandoffIndeedChallengeToNative(preflight.reason) ? 'native-challenge' : 'retry-later',
-            challengeUrl: page.url(), remainingQueries: queryList, startPage, pageBudgets,
+            challengeUrl: page.url(), remainingQueries: queryList, startPage, startPages, pageBudgets, queryIndexes,
           },
         },
         gathered: 0,
@@ -898,7 +904,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           actionTitle: 'Opens a real Chrome window to sign in to Indeed, then resumes this search automatically',
           evidence: `Indeed session check landed at ${landedUrl}. Cookies observed: ${allCookieNames}. PPID — the session proof — was absent.`,
           suggestion: 'Click "Log in" on this card to sign in to Indeed in a real Chrome window — the search resumes automatically afterward.',
-        resumeState: { mode: 'native-login', remainingQueries: queryList, startPage, pageBudgets },
+        resumeState: { mode: 'native-login', remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes },
         },
         gathered: 0,
         sessionDiagnostics,
@@ -919,7 +925,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     let pagesWalked = 0;
     let autoPageBudgetReached = false;
     let explicitPageBudgetReached = false;
-    let jobBudgetReached = false;
+    // A bounded per-query retrieval budget protects explicit small requests
+    // from multiplying into a large crawl. It is deliberately distinct from
+    // the user-visible platform cap, which is applied centrally only when the
+    // post-window/source-unique aggregate actually overflows.
+    let queryRetrievalBudgetReached = false;
     let totalChallenges = 0;
     let loginWallHit = false;
     let challengedQi = -1;
@@ -968,11 +978,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // inside Puppeteer.
     const workList = queryList.map((q, qi) => ({
       q, qi,
-      startPage: qi === 0 ? startPage : 0,
+      startPage: startPages[qi] || 0,
       // `maxPages` is an exclusive absolute page index. A resume consumes only
       // pages that were still inside this query's original allocation; it must
       // not turn Auto's finite cap into a fresh allowance after every crash.
-      maxPages: indeedQueryPageEnd(qi === 0 ? startPage : 0, pageBudgets[qi]),
+      maxPages: indeedQueryPageEnd(startPages[qi] || 0, pageBudgets[qi]),
     // An Auto allocation can legitimately assign zero pages to a query beyond
     // its finite aggregate budget. Drop exhausted entries before the outer
     // loop so they cannot spend an inter-query pacing delay on a no-op.
@@ -1010,6 +1020,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       }
 
       const { q, qi, maxPages } = entry;
+      let queryCollected = 0;
 
       const overlayBase = {
         srcName:  'Indeed',
@@ -1020,7 +1031,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
       for (let p = entry.startPage; p < maxPages; p++) {
         if (signal?.aborted) break outer;
-        if (allJobs.length >= resultCap) { jobBudgetReached = true; break outer; }
+        if (queryCollected >= resultCap) { queryRetrievalBudgetReached = true; break; }
 
         const start = p * 10;
         const url   = `https://${host}/jobs?q=${encodeURIComponent(q)}${locParam}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
@@ -1096,9 +1107,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           pageProviderKeys.add(key);
           newProviderCandidates.push({ key, job });
         }
-        const pageJobs = newProviderCandidates
-          .map(candidate => candidate.job)
-          .slice(0, Math.max(0, resultCap - allJobs.length));
+        const pageJobs = filterJobsByPostedSince(
+          newProviderCandidates.map(candidate => candidate.job),
+          collectionStartTimestamp,
+        ).slice(0, Math.max(0, resultCap - queryCollected));
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
@@ -1120,7 +1132,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         pagesWalked++;
         onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}`);
 
-        if (rawPageJobs.length === 0) break;
+        // A clean, non-soft-block empty page is durable evidence of the end of
+        // this query. Checkpoint it before breaking so a crash cannot restart
+        // this already-observed page forever.
+        if (rawPageJobs.length === 0) {
+          if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
+          break;
+        }
 
         // Click each card on this page to load full descriptions from the right panel.
         await updateOverlay(page, {
@@ -1175,6 +1193,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           if (seenKeys.has(dk)) continue;
           seenKeys.add(dk);
           allJobs.push(job);
+          queryCollected++;
           pageAdded.push(job);
           await updateOverlay(page, {
             ...overlayBase,
@@ -1182,7 +1201,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             status: `Collected ${allJobs.length} jobs…`,
             progressText: `${i + 1}/${pageJobs.length}`,
           });
-          if (allJobs.length >= resultCap) { jobBudgetReached = true; break; }
+          if (queryCollected >= resultCap) { queryRetrievalBudgetReached = true; break; }
         }
         await updateOverlay(page, {
           ...overlayBase,
@@ -1191,12 +1210,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           progressText: `${pageJobs.length}/${pageJobs.length}`,
         });
 
-        // Per-page recovery flush (crash/quit checkpoint). `p` is 0-based here;
-        // record 1-based to match the manual scraper's pageNum. Best-effort.
-        if (onPageJobs && pageAdded.length > 0) {
-          try { await onPageJobs({ sourceId: 'indeed', query: q, page: p + 1, jobs: pageAdded }); }
-          catch (e) { logger.warn(`[Indeed/Browser] onPageJobs failed (non-fatal): ${e?.message || e}`); }
-        }
+        // Checkpoint every successful page, including duplicate/empty output.
+        // A write failure is fatal to this source so it cannot be marked done.
+        if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: pageAdded });
 
         // Data-driven stop (age-window / no-new-jobs) — an ADDITIONAL, possibly
         // EARLIER-terminating signal than the "hasNextPage" heuristic just below,
@@ -1217,14 +1233,19 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
         if (stopDecision?.stop) {
           logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${stopDecision.detail || stopDecision.reason}`);
+          if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
 
-        if (rawPageJobs.length < 10 || hasNextPage === false) break;
+        if (rawPageJobs.length < 10 || hasNextPage === false) {
+          if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
+          break;
+        }
 
         if (p + 1 >= maxPages) {
           if (isUnlimitedPages(limits)) autoPageBudgetReached = true;
           else explicitPageBudgetReached = true;
+          if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
 
@@ -1360,8 +1381,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     }
     logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
 
-    const inWindow = maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
-    const items    = inWindow.slice(0, resultCap);
+    const inWindow = collectionStartTimestamp != null
+      ? filterJobsByPostedSince(allJobs, collectionStartTimestamp)
+      : maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
+    const items = inWindow;
 
     let warning = null;
     if (manualChallenge) {
@@ -1384,7 +1407,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           challengeUrl: manualChallenge.challengeUrl,
           remainingQueries: queryList.slice(manualChallenge.qi),
           startPage: manualChallenge.p,
+          startPages: [manualChallenge.p, ...startPages.slice(manualChallenge.qi + 1)],
           pageBudgets: pageBudgets.slice(manualChallenge.qi),
+          queryIndexes: queryIndexes.slice(manualChallenge.qi),
         },
       };
     } else if (loginWallHit) {
@@ -1399,7 +1424,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           mode: 'native-login',
           remainingQueries: queryList.slice(challengedQi),
           startPage: challengedPage,
+          startPages: [challengedPage, ...startPages.slice(challengedQi + 1)],
           pageBudgets: pageBudgets.slice(challengedQi),
+          queryIndexes: queryIndexes.slice(challengedQi),
         },
       };
     } else if (totalChallenges > 0 && items.length === 0) {
@@ -1419,13 +1446,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       pagesFetched: pagesWalked,
       stopReasons: [
         ...(autoPageBudgetReached ? ['auto-page-budget'] : []),
-        ...(jobBudgetReached ? [limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform'] : []),
+        ...(queryRetrievalBudgetReached ? ['query-retrieval-budget'] : []),
         ...(explicitPageBudgetReached ? ['pages-per-platform'] : []),
       ],
-      truncated: autoPageBudgetReached || explicitPageBudgetReached || jobBudgetReached,
-      cap: jobBudgetReached
-        ? { type: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform', limit: resultCap }
-        : autoPageBudgetReached
+      truncated: autoPageBudgetReached || explicitPageBudgetReached || queryRetrievalBudgetReached,
+      cap: autoPageBudgetReached
           ? { type: 'auto-pages-per-platform', limit: pageBudgets.reduce((sum, value) => sum + value, 0) }
           : explicitPageBudgetReached
             ? { type: 'pages-per-platform', limit: limits.pagesPerPlatform }

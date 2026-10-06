@@ -175,7 +175,9 @@ export default [
       'job-source external opens have a synchronous click latch before awaiting Electron');
       assert(jobSource.includes('const solveFailure = failureError.solveIpcResult || {')
         && jobSource.includes('isSolveIpcCancellation(solveFailure)')
-        && jobSource.includes('!resolverAlive() || !capturedRunIsCurrent()')
+        && jobSource.includes("if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }")
+        && jobSource.includes('retireContinuationAsSuperseded = true;')
+        && jobSource.includes("solveOutcome = 'fenced';")
         && jobSource.includes("title: 'Solve could not open'")
         && jobSource.includes('warningForSolveIpcFailure(prevForRestore?.warning, solveIpcResult)'),
       'job-source rejected invokes are normalized to friendly Solve feedback and restored warning state');
@@ -365,12 +367,15 @@ export default [
     run: () => {
       const jobSource = fs.readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
 
-      const gateLine = jobSource.split('\n').find(line => line.trimStart().startsWith('{warningCanResolve &&'));
-      assert(!!gateLine && gateLine.trimEnd().endsWith('&& ('),
-        'the Solve/Continue button is still rendered behind one conditional-render expression');
+      const gateStart = jobSource.indexOf('const hasVisibleResolverControl = Boolean(');
+      const gateEnd = jobSource.indexOf('\n  );', gateStart);
+      assert(gateStart !== -1 && gateEnd > gateStart
+        && jobSource.includes('{hasVisibleResolverControl && (')
+        && jobSource.includes('!hasVisibleResolverControl\n      || !sourceResolveRunId'),
+      'one visibility predicate gates both the Solve/Continue control and its recovery polling');
       const gate = new Function(
         'warningCanResolve', 'progress', 'hasWarn', 'hasInfo', 'warningBlocksScoring',
-        `return (${gateLine.trim().replace(/^\{/, '').replace(/&&\s*\($/, '')});`,
+        `return Boolean(${jobSource.slice(gateStart + 'const hasVisibleResolverControl = Boolean('.length, gateEnd)});`,
       );
 
       const labelAt = jobSource.indexOf("{resolving ? 'Running…'");
@@ -420,6 +425,12 @@ export default [
       // input and the button disappears entirely. That is the incident shape.
       assert(!gate(...renderInputs({ ...warning, resumeState: undefined })),
         'resumeState is the only disjunct carrying a native-challenge button, so the gate may not be simplified away');
+      assert(!gate(...renderInputs({
+        ...warning,
+        code: 'country-source-skipped',
+        severity: 'info',
+        resumeState: undefined,
+      })), 'an informational non-actionable warning starts neither Resolve nor its recovery poll');
 
       const buttonLabel = label(false, progress);
       const hoverTitle = title(false, false, false, progress);

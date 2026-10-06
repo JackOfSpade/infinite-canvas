@@ -1,5 +1,5 @@
 import React from 'react';
-import { Loader2, XCircle, Terminal } from 'lucide-react';
+import { Loader2, PauseCircle, Terminal } from 'lucide-react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 
 export function JobSearchProcessingState({
@@ -10,16 +10,31 @@ export function JobSearchProcessingState({
   resumeSummary,
   activeSourceId,
   activeSourceDetail,
+  activeSourceProgress,
   resumeCheckpoint,
-  onStop,
+  onPauseAndSave,
   chromeLaunchInfo,
   queuedRun,
 }) {
   const finishingWithSavedListings = resumeCheckpoint?.mode === 'finish-with-saved-listings';
+  const activeSourceName = JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId;
+  const isDescriptionEnrichment = hubState === 'searching'
+    && activeSourceProgress?.activity === 'description-enrichment';
+  const rawActivityCompleted = Number(activeSourceProgress?.activityCompleted);
+  const rawActivityTotal = Number(activeSourceProgress?.activityTotal);
+  const hasDescriptionProgress = isDescriptionEnrichment
+    && Number.isFinite(rawActivityCompleted)
+    && Number.isFinite(rawActivityTotal)
+    && rawActivityTotal > 0;
+  const descriptionProgress = hasDescriptionProgress
+    ? `${Math.max(0, Math.min(rawActivityCompleted, rawActivityTotal))}/${rawActivityTotal} descriptions checked`
+    : null;
   const primaryStatus = finishingWithSavedListings
     ? 'Finishing with saved listings…'
+    : isDescriptionEnrichment
+    ? `Enriching ${activeSourceName} descriptions…`
     : hubState === 'searching' && activeSourceId
-    ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...`
+    ? `Scanning ${activeSourceName}...`
     : statusLabel;
   const queuedStatus = hubState === 'queued'
     ? `${queuedRun?.label || 'Job search'} · Position ${queuedRun?.position || 1}`
@@ -44,7 +59,12 @@ export function JobSearchProcessingState({
         {finishingWithSavedListings ? 'Finishing with saved checkpoint' : 'Resuming saved checkpoint'}
         {' — '}{resumeCheckpoint.gatheredCount || 0} listing{resumeCheckpoint.gatheredCount === 1 ? '' : 's'} retained.
       </p>
-      {!finishingWithSavedListings && (remainingSources.length > 0 || checkpointDate) && (
+      {!finishingWithSavedListings && isDescriptionEnrichment && (
+        <p className="mt-0.5 text-amber-100/55">
+          Source collection is complete; enriching {activeSourceName} descriptions.
+        </p>
+      )}
+      {!finishingWithSavedListings && !isDescriptionEnrichment && (remainingSources.length > 0 || checkpointDate) && (
         <p className="mt-0.5 text-amber-100/55">
           {remainingSources.length > 0
             ? `Continuing ${remainingSources.join(', ')}`
@@ -84,16 +104,18 @@ export function JobSearchProcessingState({
   if (chromeLaunchInfo) {
     return (
       <div className="group flex flex-col py-4 px-3 relative gap-2.5">
-        {onStop && (
+        {onPauseAndSave && (
           <button
             type="button"
-            onClick={onStop}
+            onClick={onPauseAndSave}
             onPointerDown={(e) => e.stopPropagation()}
-            className="absolute top-2 right-2 p-1 text-white/30 hover:text-amber-300 opacity-0 group-hover:opacity-100 transition-all rounded"
-            aria-label="Stop job search and keep saved progress for Resume when available"
-            title="Stop — keep saved progress for Resume when available"
+            className="nodrag absolute top-2 right-2 inline-flex items-center gap-1 rounded border border-amber-300/25 bg-amber-300/10 px-1.5 py-1 text-[9px] font-medium text-amber-100/85 transition-colors hover:border-amber-300/50 hover:bg-amber-300/20 hover:text-amber-50"
+            aria-label="Pause and save job search progress for Resume"
+            title="Pause and save — resume this Job Search later"
+            data-action="pause-and-save"
           >
-            <XCircle size={14} />
+            <PauseCircle size={12} />
+            <span>Pause &amp; save</span>
           </button>
         )}
         <div className="flex items-center gap-1.5 text-amber-400">
@@ -129,16 +151,18 @@ export function JobSearchProcessingState({
 
   return (
     <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
-      {onStop && (
+      {onPauseAndSave && (
         <button
           type="button"
-          onClick={onStop}
+          onClick={onPauseAndSave}
           onPointerDown={(e) => e.stopPropagation()}
-          className="absolute top-2 right-2 p-1 text-white/30 hover:text-amber-300 opacity-0 group-hover:opacity-100 transition-all rounded"
-          aria-label="Stop job search and keep saved progress for Resume when available"
-          title="Stop — keep saved progress for Resume when available"
+          className="nodrag absolute top-2 right-2 inline-flex items-center gap-1 rounded border border-amber-300/25 bg-amber-300/10 px-1.5 py-1 text-[9px] font-medium text-amber-100/85 transition-colors hover:border-amber-300/50 hover:bg-amber-300/20 hover:text-amber-50"
+          aria-label="Pause and save job search progress for Resume"
+          title="Pause and save — resume this Job Search later"
+          data-action="pause-and-save"
         >
-          <XCircle size={14} />
+          <PauseCircle size={12} />
+          <span>Pause &amp; save</span>
         </button>
       )}
       <div className="flex flex-col items-center">
@@ -152,6 +176,9 @@ export function JobSearchProcessingState({
         </p>
         {checkpointContext}
         {queuedStatus && <p className="text-blue-400/60 text-[10px] mt-1">{queuedStatus}</p>}
+        {descriptionProgress && (
+          <p className="text-blue-300/65 text-[10px] mt-1 tabular-nums">{descriptionProgress}</p>
+        )}
         {/* Browser description walks can take minutes without increasing the
             collection count, so expose the current step visually without
             competing with the compact live status announcement above. */}

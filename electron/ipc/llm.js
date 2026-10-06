@@ -377,6 +377,7 @@ export async function callLLMText(prompt, opts = {}) {
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
     itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
     progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+    queuedWorkForecast: hints.queuedWorkForecast,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'structured-text', retryOnTruncation, displayOnlyPromptSuffix, responseValidator, legacyReplay,
     measureResponseUnits: opts?.measureResponseUnits, measureProgressUnits: opts?.measureProgressUnits, signal,
@@ -419,6 +420,7 @@ export async function callLLMRaw(prompt, opts = {}) {
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
     itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
     progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,
+    queuedWorkForecast: hints.queuedWorkForecast,
     attemptKind: hints.attemptKind, rootBatchSize: hints.rootBatchSize,
     requestKind: 'raw-text', retryOnTruncation, displayOnlyPromptSuffix, responseValidator,
     measureProgressUnits: opts?.measureProgressUnits, signal,
@@ -451,8 +453,8 @@ export async function hasExactDurableRawHandoff(prompt, {
 }
 
 /**
- * Exact raw handoff status for fixed-wave scheduling. `accepted` can be
- * replayed before a visible wave; `pending` must hold a position in it.
+ * Exact raw handoff status for stable durable scheduling. `accepted` can be
+ * replayed before the live worker roster; `pending` keeps its planned identity.
  */
 export async function exactDurableRawHandoffStatus(prompt, {
   manualAiRunId,
@@ -536,7 +538,13 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   // through the manual handoff, so this is the replacement gate — it must
   // run before any path is Finder-revealed to the user as an attachment to
   // paste into their chat.
-  for (const imgPath of (Array.isArray(imagePaths) ? imagePaths : [])) {
+  // Immutable recovery staging may replace the attachment path after hashing;
+  // continue applying the sensitive-path policy to the original user-selected
+  // source paths supplied by that trusted staging caller.
+  const attachmentSafetyPaths = Array.isArray(opts?.attachmentSourcePaths)
+    ? opts.attachmentSourcePaths
+    : imagePaths;
+  for (const imgPath of (Array.isArray(attachmentSafetyPaths) ? attachmentSafetyPaths : [])) {
     if (isSensitivePath(path.resolve(String(imgPath || '')))) {
       throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${imgPath}`);
     }

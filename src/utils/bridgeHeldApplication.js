@@ -37,9 +37,9 @@ export function isBridgeHeldJob(status, jobId) {
 //
 // The clock: getSnapshot must return the same value on consecutive calls, so
 // the derivation runs with now = null. The only headline that depends on the
-// clock is the stalled one ("...quiet for N min"); the card shows it without
-// the number (BRIDGE_CARD_COPY.quiet) instead of a stale one. So the card is
-// refreshed by status pushes, never by a timer: the dock owns the live timers.
+// clock is only used by the dock's live elapsed line. The card is refreshed by
+// status pushes, never by a timer: a slow unanswered handoff stays working and
+// age alone must not turn it into a recovery action.
 // The card also lacks the dock item's corrections list, so where the dock says
 // "ChatGPT is fixing N issues" the card says "ChatGPT is working on: <step>",
 // the same tone and a weaker true statement.
@@ -54,8 +54,7 @@ export function bridgeHeldKey(status, jobId) {
     now: null,
     bridge: { paused: status?.paused === true },
   });
-  const headline = view.kind === 'stalled' ? BRIDGE_CARD_COPY.quiet : view.headline;
-  return JSON.stringify([view.tone, headline]);
+  return JSON.stringify([view.tone, view.headline]);
 }
 
 // What the job card's application line says. `heldKey` is bridgeHeldKey(...).

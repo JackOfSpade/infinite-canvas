@@ -31,6 +31,22 @@ export default [
       assert(inferred.country === 'United States' && inferred.scope === 'city', 'state-only legacy target should infer United States');
       const structured = classifyJobTargetLocation('Toronto, ON', { city: 'Toronto', stateCode: 'ON', country: 'Canada' });
       assert(structured.country === 'Canada' && structured.scope === 'city', 'structured location should preserve country scope');
+      const requestedSources = ['indeed', 'google', 'dice', 'usajobs', 'remoteok'];
+      for (const conflicting of [
+        { city: 'Toronto', stateCode: 'Ontario', country: 'United States' },
+        { city: 'Denver', subdivision: 'Colorado', country: 'Canada' },
+      ]) {
+        const classified = classifyJobTargetLocation('', conflicting);
+        assert(classified.countryConflict && classified.boardReady === '',
+          `structured cross-country subdivision must remain rejected at source admission: ${JSON.stringify(conflicting)}`);
+        assert(getCountryApplicableJobSourceIds(requestedSources, '', conflicting).length === 0,
+          'a contradictory structured location must dispatch no source, including global/best-effort sources');
+      }
+      const freeform = classifyJobTargetLocation('', {
+        city: 'Leeds', subdivision: 'West Yorkshire', country: 'United Kingdom',
+      });
+      assert(!freeform.countryConflict && freeform.boardReady === 'Leeds, West Yorkshire, United Kingdom',
+        'a free-form foreign subdivision remains valid at source admission');
       return { cases: cases.length };
     },
   },

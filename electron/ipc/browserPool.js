@@ -803,29 +803,25 @@ export function queueScrape(url, extractorJS, options = {}) {
  * can show "this source was likely blocked/throttled" instead of silently
  * accepting an empty extractor result.
  */
-export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
-  const results = await Promise.allSettled(
-    tasks.map(async (task) => {
-      try {
-        if (signal?.aborted) throw new Error('Aborted');
-        // executeScrape/queueScrape now return { data, warning }; preserve
-        // both on the per-task result.
-        const wrapped = await queueScrape(task.url, task.extractorJS, { ...task.options, signal, sourceLabel: task.id });
-        const data = wrapped?.data ?? null;
-        const warning = wrapped?.warning ?? null;
-        const result = { id: task.id, success: true, data, warning, yieldStats: wrapped?.yieldStats ?? null };
-        onProgress?.(result);
-        return result;
-      } catch (err) {
-        const result = { id: task.id, success: false, error: err?.message || 'Unknown error' };
-        onProgress?.(result);
-        throw err;
-      }
-    })
-  );
-
-  return results.map((r, i) => {
-    if (r.status === 'fulfilled') return r.value;
-    return { id: tasks[i].id, success: false, error: r.reason?.message || 'Unknown error' };
-  });
+export async function scrapeMultiple(tasks, onProgress = null, signal = null, onSettled = null) {
+  return Promise.all(tasks.map(async (task) => {
+    let result;
+    try {
+      if (signal?.aborted) throw new Error('Aborted');
+      // executeScrape/queueScrape now return { data, warning }; preserve
+      // both on the per-task result.
+      const wrapped = await queueScrape(task.url, task.extractorJS, { ...task.options, signal, sourceLabel: task.id });
+      const data = wrapped?.data ?? null;
+      const warning = wrapped?.warning ?? null;
+      result = { id: task.id, success: true, data, warning, yieldStats: wrapped?.yieldStats ?? null };
+    } catch (err) {
+      result = { id: task.id, success: false, error: err?.message || 'Unknown error' };
+    }
+    // Durable callers use this async barrier to persist an individual source
+    // before it is reported/considered settled. A failure here rejects the
+    // aggregate instead of being misclassified as a scraper failure.
+    if (onSettled) await onSettled(result, task);
+    onProgress?.(result);
+    return result;
+  }));
 }

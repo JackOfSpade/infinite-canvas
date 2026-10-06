@@ -87,6 +87,11 @@ export function buildResearchItems(product = {}, extraItems = [], primaryNotes =
     query: buildItemQuery(product),
     condition: primaryCondition,
     pricingNotes: primaryNotes || '',
+    productSpec: {
+      model: product.model || '',
+      color: product.color || '',
+      title: product.generated_title || '',
+    },
   }];
 
   for (const extra of Array.isArray(extraItems) ? extraItems : []) {
@@ -101,6 +106,11 @@ export function buildResearchItems(product = {}, extraItems = [], primaryNotes =
       query,
       condition: extra.condition || primaryCondition,
       pricingNotes: extra.pricingNotes || '',
+      productSpec: {
+        model: extra.model || '',
+        color: extra.color || '',
+        title: extra.generated_title || query,
+      },
     });
   }
   return items;

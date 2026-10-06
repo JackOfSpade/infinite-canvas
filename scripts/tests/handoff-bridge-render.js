@@ -159,6 +159,136 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: render: the worker-pool planner copies only opaque worker metadata through the renderer',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-handoff-worker-pool-'));
+      const entry = path.join(directory, 'WorkerPoolProbe.jsx'); const panel = path.resolve('src/components/HandoffBridgePanel.jsx'); const store = path.resolve('src/utils/handoffBridgeStore.js'); const uiStore = path.resolve('src/utils/handoffBridgeUiStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { HandoffBridgePanel } from ${JSON.stringify(panel)};\nexport { applyHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(store)};\nexport { openBridgePopover, __resetBridgeUiForTests } from ${JSON.stringify(uiStore)};\nexport function WorkerPoolProbe() { return <HandoffBridgePanel />; }\n`);
+      const controller = new AbortController(); let bundle; __resetHandoffBridgeStoreForTests(); __resetBridgeUiForTests();
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 5000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const calls = [];
+          let poolGeneration = 40;
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: status(1) }),
+            onHandoffBridgeStatus: () => () => {},
+            handoffBridgeGetActivity: async () => ({ items: [] }),
+            handoffBridgePublishJobs: () => undefined,
+            handoffBridgeStartWorkerPool: async payload => {
+              calls.push(['start', payload || null]);
+              poolGeneration += 1;
+              const expanded = payload?.requestedWorkers === 10;
+              return {
+                success: true,
+                generation: poolGeneration,
+                workerCount: expanded ? 10 : 3,
+                recommended: expanded ? 6 : 3,
+                queued: expanded ? 6 : 28,
+                materialized: expanded ? 6 : 1,
+              };
+            },
+            handoffBridgeCopyWorkerStarter: async payload => {
+              calls.push(['copy', payload]);
+              // A hostile or accidentally widened preload must not make this
+              // capability observable in the rendered document/state.
+              return { success: true, generation: 41, workerCount: 3, workerOrdinal: payload.workerOrdinal, copied: true, sessionCode: 'PRIVATE-WORKER-SESSION-CODE' };
+            },
+            handoffBridgeRestartWorker: async payload => {
+              calls.push(['restart', payload]);
+              return { success: true, generation: 41, workerCount: 3, workerOrdinal: payload.workerOrdinal, copied: true, sessionCode: 'PRIVATE-RESTART-WORKER-SESSION-CODE' };
+            },
+            // Visible starts are adaptive worker plans now. Leave the legacy
+            // API absent here so this interaction would fail if it regressed
+            // back to minting an ordinary chat.
+          };
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.WorkerPoolProbe)); bundle.module.applyHandoffBridgeStatus(status(2)); bundle.module.openBridgePopover(); await Promise.resolve(); await Promise.resolve(); });
+            const plan = [...window.document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Prepare worker plan');
+            assert(plan && !plan.disabled, 'a live linked bridge offers the dynamic worker-pool planner');
+            await bundle.module.act(async () => { plan.click(); await Promise.resolve(); await Promise.resolve(); });
+            const workers = [...window.document.querySelectorAll('button')].filter(button => /^Copy worker \d+ starter$/.test(button.textContent.trim()));
+            assert(workers.length === 3
+              && window.document.body.textContent.includes('3 worker chats · 1 released now · 28 forecast')
+              && window.document.body.textContent.includes('Copy each starter into a separate pinned ChatGPT chat.')
+              && !window.document.body.textContent.includes('0 handoffs completed'),
+            'the returned bounded plan has one concise summary plus the worker actions');
+            await bundle.module.act(async () => { workers[1].click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(calls) === JSON.stringify([
+              ['start', null],
+              ['copy', { generation: 41, workerOrdinal: 2 }],
+            ]), 'the renderer returns only its numeric generation/worker coordinates to main');
+            assert(!window.document.body.textContent.includes('PRIVATE-WORKER-SESSION-CODE') && window.document.body.textContent.includes('Copied worker 2 of 3.'), 'the UI confirms the copy without ever rendering a session code or starter');
+
+            // The component is permanently mounted. Its local pool shape must
+            // be reconciled with the main-owned status identity when a pool
+            // drains, rather than hiding the adaptive starter behind dead
+            // worker buttons until a page reload.
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(3, { chat: { state: 'working', pool: { active: true, generation: 41, workerCount: 5, plan: { recommended: 5, queued: 5, materialized: 5, expandBy: 0, reason: 'maximum_parallelism' } } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(![...window.document.querySelectorAll('button')].some(button => button.textContent.includes('Add ') && button.textContent.includes('workers to reach 10'))
+              && window.document.body.textContent.includes('5 worker chats · 5 released now · 5 forecast'),
+            'the panel never offers manual capacity inflation');
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(4, { chat: { state: 'working', pool: { active: true, generation: 41, workerCount: 5, plan: { recommended: 8, queued: 8, materialized: 8, expandBy: 3, reason: 'maximum_parallelism' } } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(window.document.body.textContent.includes('3 more worker chats are being prepared automatically.'),
+              'a temporary plan/work-count gap tells the person that the app is adding the needed copyable starters itself');
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(5, { chat: { state: 'working', pool: { active: true, generation: 41, workerCount: 10, workers: [
+                { ordinal: 1, state: 'working', completed: 0 },
+                ...Array.from({ length: 9 }, (_unused, index) => ({ ordinal: index + 2, state: 'waiting', completed: 0 })),
+              ], plan: { recommended: 10, queued: 117, materialized: 1, expandBy: 0, reason: 'maximum_parallelism' } } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(window.document.body.textContent.includes('10 worker chats · 1 released now · 117 forecast')
+              && window.document.body.textContent.includes('Worker 2Ready for later work')
+              && !window.document.body.textContent.includes('0 handoffs completed')
+              && !window.document.body.textContent.includes('needs ChatGPT check')
+              && !window.document.body.textContent.includes('Copy replacement starter'),
+            'a 10-worker later-wave pool keeps worker-specific state without repeating aggregate telemetry');
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(6, { chat: { state: 'none', pool: { active: false, generation: null, workerCount: 0 } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(!window.document.body.textContent.includes('Copy worker 1 starter')
+              && [...window.document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Prepare worker plan'),
+            'a terminal pool status restores the adaptive plan control in the same mounted panel');
+
+            const planAfterDrain = [...window.document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Prepare worker plan');
+            await bundle.module.act(async () => { planAfterDrain.click(); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(7, { chat: { state: 'working', pool: { active: true, generation: 42, workerCount: 3 } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(8, { enabled: false, serving: 'off', chat: { state: 'none', pool: { active: false, generation: null, workerCount: 0 } } }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(9));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const recoveredStarter = [...window.document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Prepare worker plan');
+            assert(recoveredStarter && !recoveredStarter.disabled && !window.document.body.textContent.includes('Copy worker 1 starter'),
+              'Disable then re-enable clears old worker-pool controls before they can trap the panel');
+            await bundle.module.act(async () => { recoveredStarter.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.at(-1)?.[0] === 'start', 'the recovered starter prepares a new adaptive plan, not a stale worker generation');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+          }
+          assert(entries.length === 0, 'worker-pool controls must mount and update without console output');
+        }));
+      } finally {
+        __resetHandoffBridgeStoreForTests(); __resetBridgeUiForTests(); controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'handoff bridge: render: 300 snapshot render-state fuzz cases never throw or retain hostile keys',
     run() {
       __resetHandoffBridgeStoreForTests();
@@ -215,7 +345,17 @@ export default [
         && panel.includes("onClick={() => void call('handoffBridgeSetEnabled', { enabled: false })}"), 'renderer controls must leave the one critical outstanding-work stop confirmation to main');
       assert(setup.includes("onClick={() => void call('handoffBridgeForgetSetup')}") && !setup.includes("confirm === 'forget'"), 'Forget setup must use the single authoritative main-process confirmation');
       for (const count of ['getServed', 'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'stallNotices', 'tunnelRestarts']) assert(panel.includes(`status.counts.${count}`), `panel counts must include ${count}`);
-      for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
+      for (const method of ['handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary', 'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat', 'handoffBridgeStartWorkerPool', 'handoffBridgeCopyWorkerStarter']) assert(panel.includes(method) || dialog.includes(method), `renderer IPC method ${method} must be reachable through an accessible control`);
+      assert(panel.includes('workerPool') && panel.includes('copyWorkerStarter') && !panel.includes('sessionCode') && !panel.includes('.starter'), 'the worker pool controls keep every starter/session capability in main and clipboard');
+      assert(source('electron/preload.js').includes("handoffBridgeStartWorkerPool: (payload) => ipcRenderer.invoke('handoff-bridge:start-worker-pool', payload)"),
+        'the preload must forward the bounded optional worker-pool target instead of silently discarding it');
+      assert(!panel.includes('addWorkers') && !panel.includes('addingWorkers')
+        && !source('src/components/BridgeProgress.jsx').includes('addWorkers')
+        && panel.includes('workerPoolGrowing') && source('src/components/BridgeProgress.jsx').includes('workerPoolGrowing'),
+      'both worker surfaces must explain automatic sizing rather than expose an Add-workers control');
+      assert(panel.includes('copyReplacementStarter') && source('src/components/BridgeProgress.jsx').includes('copyReplacementStarter')
+        && source('src/utils/handoffBridgeCopy.js').includes('If this waiting chat is gone'),
+      'both worker surfaces offer a clearly named replacement-starter path when a quiet ChatGPT chat has no usable composer');
       assert(!panel.includes("setConfirm('new')") && !panel.includes('confirm === \'new\'')
         && !source('src/components/BridgeProgress.jsx').includes('confirmNew')
         && panel.includes('BRIDGE_PROGRESS_COPY.copiedAgain(result.chatOrdinal, pluginName)') && panel.includes('result.recopied === true'),
@@ -969,7 +1109,7 @@ export default [
               await Promise.resolve(); await Promise.resolve();
             });
             const applications = checkbox('Applications');
-            const scoring = checkbox('Let ChatGPT handle scoring handoffs');
+            const scoring = checkbox('Let ChatGPT handle job-search text handoffs');
             assert(!window.document.body.textContent.includes('Include bridge counts in bug reports'), 'the unimplemented bug-report telemetry option must not present a no-op control');
             assert(applications.checked && !scoring.checked, 'the initial scope must enable applications only');
             await bundle.module.act(async () => { applications.click(); scoring.click(); await Promise.resolve(); await Promise.resolve(); });
@@ -1112,6 +1252,34 @@ export default [
             bundle.module.__resetHandoffBridgeStoreForTests(); const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
             await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.SettingsOpenProbe)); bundle.module.applyHandoffBridgeStatus(status(2)); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
             assert(window.document.body.textContent.includes('Marketplace Monitors') && window.document.body.textContent.includes('ChatGPT bridge'), 'the open real SettingsPanel must render the bridge section after Marketplace Monitors');
+            // A config can retain auto-start while its previous consent no
+            // longer covers the current bridge scope. That is a safe launch
+            // skip, but it must be visible and actionable rather than making
+            // the person mistake it for an inert Settings control.
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(3, {
+                enabled: false,
+                autoStart: true,
+                setup: { consentCurrent: false },
+              }));
+              await Promise.resolve();
+            });
+            assert(window.document.body.textContent.includes('needs your confirmation again before it can turn on automatically'),
+              'a skipped auto-start with an old consent receipt must explain the one-click recovery in Settings');
+            // An unavailable build cannot recover by selecting Turn on: the
+            // control is intentionally disabled. Do not leave a stale-consent
+            // instruction pointing at that unavailable action.
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(status(4, {
+                availability: { ok: false, reason: 'dev-build' },
+                enabled: false,
+                autoStart: true,
+                setup: { consentCurrent: false },
+              }));
+              await Promise.resolve();
+            });
+            assert(!window.document.body.textContent.includes('needs your confirmation again before it can turn on automatically'),
+              'an unavailable build must not offer stale-consent recovery through a disabled control');
             await bundle.module.act(async () => rootNode.unmount()); assert(entries.length === 0, 'open real SettingsPanel must emit no console output');
           } finally { if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent; }
         }));
@@ -1131,7 +1299,7 @@ export default [
       const job = (extra = {}) => ({ jobId: JOB, phase: 'awaiting', stage: 'resume', reason: null, servedToChat: 1, changedAt: clock - 600000, servedAt: extra.servedToChat === null ? null : clock - 120000, answeredAt: null, awaitingAnswer: extra.servedToChat !== null, stalled: false, stalledSince: null, ...extra });
       const working = (extra = {}) => ({ ordinal: 1, state: 'working', startedAt: clock - 300000, firstCallAt: clock - 290000, lastCallAt: clock - 20000, lastCallKind: 'get', calls: 3, jobsAssigned: 1, jobsCap: 2, outstanding: { servedAt: clock - 120000, kind: 'application', stage: 'resume', stalled: false, stalledSince: null, stallsLastHour: 0 }, ...extra });
       const view = (jobExtra, chatExtra, top = {}) => normalizeBridgeStatus({ ...status(1, { chat: working(chatExtra), queue: { jobs: [job(jobExtra)] } }), at: clock, ...top });
-      const scenario = async (name, { status: given, item = { jobId: JOB, stage: 'resume', corrections: [] }, api = {}, check }) => {
+      const scenario = async (name, { status: given, item = { jobId: JOB, stage: 'resume', corrections: [] }, isPush = false, awaitingClaim = false, canPauseAndSave = false, onPauseAndSave = null, api = {}, check }) => {
         await withDom(async window => withConsoleCollector(async entries => {
           const calls = []; const timers = new Set();
           const priorSetInterval = globalThis.setInterval; const priorClearInterval = globalThis.clearInterval;
@@ -1139,10 +1307,29 @@ export default [
           Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
           globalThis.setInterval = (fn, ms) => { const id = priorSetInterval(fn, ms); timers.add(id); return id; };
           globalThis.clearInterval = id => { timers.delete(id); return priorClearInterval(id); };
-          window.electronAPI = { handoffBridgeNewChat: async () => { calls.push('new'); return { success: true }; }, handoffBridgeContinueChat: async () => { calls.push('continue'); return { success: true }; }, ...api };
+          window.electronAPI = {
+            // A visible start now asks main to size a persistent worker plan.
+            // The renderer receives only bounded coordinates; each actual
+            // starter remains main/clipboard-owned.
+            handoffBridgeStartWorkerPool: async () => {
+              calls.push('plan');
+              return { success: true, generation: 19, workerCount: 2, recommended: 2, queued: 28, materialized: 1 };
+            },
+            handoffBridgeCopyWorkerStarter: async payload => {
+              calls.push(['copy-worker', payload]);
+              return { success: true, generation: 19, workerCount: 2, workerOrdinal: payload?.workerOrdinal, copied: true };
+            },
+            handoffBridgeRestartWorker: async payload => {
+              calls.push(['restart-worker', payload]);
+              return { success: true, generation: 19, workerCount: 2, workerOrdinal: payload?.workerOrdinal, copied: true };
+            },
+            handoffBridgeNewChat: async () => { calls.push('new'); return { success: true }; },
+            handoffBridgeContinueChat: async () => { calls.push('continue'); return { success: true }; },
+            ...api,
+          };
           const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
           try {
-            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, { status: given, item }))); await Promise.resolve(); });
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, { status: given, item, isPush, awaitingClaim, canPauseAndSave, onPauseAndSave }))); await Promise.resolve(); });
             await check({ window, calls, timers, entries, rootNode, act: bundle.module.act });
           } finally {
             await bundle.module.act(async () => rootNode.unmount());
@@ -1162,7 +1349,7 @@ export default [
         await scenario('awaiting-first-call', {
           status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }),
           item: { jobId: JOB, stage: 'evidence-plan' },
-          async check({ window, calls, timers, act }) {
+          async check({ window, calls, timers, rootNode, act }) {
             assert(window.document.querySelector('section[aria-label="ChatGPT progress"]'), 'the progress region must be labelled');
             assert(text(window).includes('Waiting for chat 1'), 'first-call headline');
             const list = window.document.querySelector('ol[aria-label="Application steps"]');
@@ -1171,32 +1358,182 @@ export default [
             assert(timers.size === 0, `no timer anchors means no interval while mounted: ${timers.size}`);
             const current = [...list.querySelectorAll('li[aria-current="step"]')];
             assert(current.length === 1 && current[0].textContent.includes('Evidence plan') && current[0].textContent.includes('current step'), 'exactly one step is aria-current, and its state is also text');
-            const start = button(window, 'Copy starter');
-            assert(start && !start.disabled, 'the first-call state offers the panel\'s Copy starter button');
+            const start = button(window, 'Prepare worker plan');
+            assert(start && !start.disabled, 'the first-call state offers the adaptive worker-plan action');
             await act(async () => { start.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(calls.join() === 'new', `the button must call the existing handoffBridgeNewChat exactly once: ${calls}`);
-            assert(text(window).includes('Copied. Now switch to ChatGPT, open a new chat, type @ and pick Infinite Canvas, then paste and send.'), 'a successful start tells the person what was copied');
+            assert(JSON.stringify(calls) === JSON.stringify(['plan']), `the button must ask main to prepare one adaptive plan: ${JSON.stringify(calls)}`);
+            assert(text(window).includes('2 worker chats · 1 released now · 28 forecast')
+              && text(window).includes('Copy each starter into a separate pinned ChatGPT chat.')
+              && !text(window).includes('0 handoffs completed'),
+            'the returned bounded worker plan is rendered immediately with one concise summary');
+            const worker = button(window, 'Copy worker 2 starter');
+            assert(worker && !worker.disabled, 'the plan offers a unique copy action for each worker');
+            await act(async () => { worker.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(calls) === JSON.stringify([
+              'plan',
+              ['copy-worker', { generation: 19, workerOrdinal: 2 }],
+            ]), 'only the safe worker coordinates return to main for the clipboard action');
+            assert(text(window).includes('Copied worker 2 of 2.'), 'the UI tells the person which worker starter was copied');
+            await act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, {
+                key: 'prewarmed-later-wave',
+                status: view({ servedToChat: null, stage: 'evidence-plan' }, {
+                  state: 'working',
+                  pool: {
+                    active: true,
+                    generation: 21,
+                    workerCount: 10,
+                    workers: [
+                      { ordinal: 1, state: 'working', completed: 0 },
+                      ...Array.from({ length: 9 }, (_unused, index) => ({ ordinal: index + 2, state: 'waiting', completed: 0 })),
+                    ],
+                    plan: { recommended: 10, queued: 117, materialized: 1, expandBy: 0, reason: 'maximum_parallelism' },
+                  },
+                }, { seq: 2 }),
+                item: { jobId: JOB, stage: 'evidence-plan', corrections: [] },
+              })));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const laterWaveText = text(window);
+            assert(laterWaveText.includes('10 worker chats · 1 released now · 117 forecast')
+              && laterWaveText.includes('Worker 2Ready for later work')
+              && !laterWaveText.includes('0 handoffs completed')
+              && !laterWaveText.includes('needs ChatGPT check')
+              && !button(window, 'Copy replacement starter'),
+            'BridgeProgress reports later-wave worker state without repeating aggregate capacity');
+            await act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, {
+                key: 'fresh-worker-roster',
+                status: view({ servedToChat: null, stage: 'evidence-plan' }, {
+                  state: 'working',
+                  pool: {
+                    active: true,
+                    generation: 19,
+                    workerCount: 2,
+                    workers: [
+                      { ordinal: 1, state: 'available', completed: 0 },
+                      { ordinal: 2, state: 'working', completed: 4 },
+                    ],
+                  },
+                }, { seq: 2 }),
+                item: { jobId: JOB, stage: 'evidence-plan', corrections: [] },
+              })));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const rosterText = text(window);
+            assert(button(window, 'Copy worker 1 starter') && !button(window, 'Copy worker 2 starter')
+              && rosterText.includes('Worker 2Working4 handoffs completed'),
+            'a fresh worker-progress surface keeps the working starter gone and visibly reports workers working and handoffs done');
+            await act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, {
+                key: 'quiet-worker-roster',
+                status: view({ servedToChat: null, stage: 'evidence-plan' }, {
+                  state: 'working',
+                  pool: {
+                    active: true,
+                    generation: 19,
+                    workerCount: 2,
+                    workers: [
+                      { ordinal: 1, state: 'waiting', completed: 0, lastCallAt: clock - 500 },
+                      { ordinal: 2, state: 'quiet', completed: 4, quietReason: 'answer_silent', lastCallAt: clock - 301_000, sessionCode: 'PRIVATE-QUIET-WORKER-SESSION' },
+                    ],
+                  },
+                }, { seq: 3 }),
+                item: { jobId: JOB, stage: 'evidence-plan', corrections: [] },
+              })));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const quietText = text(window);
+            const restart = button(window, 'Copy replacement starter');
+            assert(!button(window, 'Copy worker 1 starter') && !button(window, 'Copy worker 2 starter') && restart && !restart.disabled
+              && quietText.includes('Worker 2')
+              && quietText.includes('Response overdue')
+              && quietText.includes('This worker has not made a bridge call')
+              && !quietText.includes('ChatGPT is working on this handoff')
+              && !quietText.includes('PRIVATE-QUIET-WORKER-SESSION'),
+            'an answer-silent worker gives an ambiguity-safe replacement path based only on its own stale bridge call, not another worker polling');
+            await act(async () => { restart.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(JSON.stringify(calls.at(-1)) === JSON.stringify(['restart-worker', { generation: 19, workerOrdinal: 2 }]),
+              'the quiet-worker restart sends only the current generation and ordinal to the main-process clipboard path');
+            await act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.React.StrictMode, null, bundle.module.React.createElement(bundle.module.ProgressProbe, {
+                key: 'retired-worker-roster',
+                status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }, { seq: 4 }),
+                item: { jobId: JOB, stage: 'evidence-plan', corrections: [] },
+              })));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(!button(window, 'Copy worker 1 starter') && button(window, 'Prepare worker plan'),
+              'a newer status that no longer confirms the generation clears the temporary local worker controls');
           },
         });
 
-        await scenario('awaiting-first-call: a second press re-copies without a renderer confirmation', {
+        await scenario('awaiting-first-call: an existing worker plan locks its claimed starter', {
           status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: clock - 5000, firstCallAt: null, outstanding: null }),
           item: { jobId: JOB, stage: 'evidence-plan' },
-          api: { handoffBridgeNewChat: async () => ({ success: true, copied: true, recopied: true, chatOrdinal: 1 }) },
+          api: {
+            handoffBridgeStartWorkerPool: async () => ({
+              success: true, generation: 20, workerCount: 2, recommended: 2, queued: 6, lockedWorkerOrdinals: [1],
+            }),
+          },
           async check({ window, act }) {
-            await act(async () => { button(window, 'Copy starter').click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(!text(window).includes('Copy a starter for a new chat?'), 'an unused chat never asks for confirmation, even with a recent timestamp');
-            assert(text(window).includes('Copied again: the same starter for chat 1. Paste it into a new ChatGPT chat with Infinite Canvas selected.'), `the note says it was a re-copy: ${text(window)}`);
+            await act(async () => { button(window, 'Prepare worker plan').click(); await Promise.resolve(); await Promise.resolve(); });
+            const available = button(window, 'Copy worker 2 starter');
+            assert(!button(window, 'Copy worker 1 starter') && available && !available.disabled
+              && text(window).includes('Worker 1') && text(window).includes('Starter copied'),
+            'main-owned copied workers become a visible status row while only uncopied starters retain a copy action');
+            assert(!text(window).includes('Copied again:'), 'the worker plan never claims to have copied a legacy chat starter');
           },
         });
 
-        await scenario('awaiting-first-call: main rotated after all, so the note is the ordinary one', {
+        await scenario('a six-worker Job Search handoff explains that no manual workers are needed', {
+          status: view({ servedToChat: null, stage: 'evidence-plan' }, {
+            state: 'working',
+            pool: { active: true, generation: 23, workerCount: 6, workers: [], plan: { recommended: 6, queued: 6, materialized: 6, expandBy: 0, reason: 'maximum_parallelism' } },
+          }),
+          item: { jobId: JOB, stage: 'evidence-plan' },
+          async check({ window }) {
+            assert(!button(window, 'Add 4 workers to reach 10')
+              && text(window).includes('6 worker chats · 6 released now · 6 forecast'),
+            'the Job Search progress surface shows its automatically sized plan instead of offering manual capacity inflation');
+          },
+        });
+
+        await scenario('a Job Search handoff exposes a non-destructive pause and save action', {
+          status: normalizeBridgeStatus({ ...status(1, { chat: working(), queue: { jobs: [] }, push: { claimed: ['22222222-2222-4222-8222-222222222222'] } }), at: clock }),
+          item: {
+            bridgeClaimId: '22222222-2222-4222-8222-222222222222',
+            requestId: 'pause-request',
+            nodeId: 'job-search-hub',
+            runId: 'job-search-run',
+          },
+          isPush: true,
+          canPauseAndSave: true,
+          onPauseAndSave: async payload => {
+            assert(JSON.stringify(payload) === JSON.stringify({ nodeId: 'job-search-hub', runId: 'job-search-run', requestId: 'pause-request' }),
+              'the visible pause sends only the exact owner/request identity to the mounted Job Search');
+            return { success: true };
+          },
+          async check({ window, act }) {
+            const pause = button(window, 'Pause & save Job Search');
+            assert(pause && !pause.disabled
+              && text(window).includes('Keeps accepted work and this unresolved handoff for Resume; it does not clear your response.'),
+            'the worker-progress view exposes a clear saved-pause control and explicitly distinguishes it from destructive cancellation');
+            await act(async () => { pause.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(text(window).includes('Saving this Job Search. Accepted work stays saved; Resume will appear when stopping finishes.'),
+              'acknowledging the node-scoped saved stop gives immediate, non-destructive feedback');
+          },
+        });
+
+        await scenario('awaiting-first-call: a failed worker-plan request is safe and retryable', {
           status: view({ servedToChat: null, stage: 'evidence-plan' }, { state: 'awaiting-first-call', calls: 0, lastCallAt: null, firstCallAt: null, outstanding: null }),
           item: { jobId: JOB, stage: 'evidence-plan' },
-          api: { handoffBridgeNewChat: async () => ({ success: true, copied: true, chatOrdinal: 2 }) },
+          api: { handoffBridgeStartWorkerPool: async () => ({ success: false, code: 'NOT_READY', message: 'PRIVATE DETAIL' }) },
           async check({ window, act }) {
-            await act(async () => { button(window, 'Copy starter').click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(text(window).includes('Copied. Now switch to ChatGPT, open a new chat, type @ and pick Infinite Canvas, then paste and send.') && !text(window).includes('Copied again'), 'main decision wins: no re-copy claim when main rotated');
+            await act(async () => { button(window, 'Prepare worker plan').click(); await Promise.resolve(); await Promise.resolve(); });
+            const retry = button(window, 'Prepare worker plan');
+            assert(retry && !retry.disabled && text(window).includes(IPC_ERROR_COPY.NOT_READY) && !text(window).includes('PRIVATE DETAIL'),
+              'a failed plan shows only shared safe copy and leaves the action retryable');
           },
         });
 
@@ -1219,17 +1556,64 @@ export default [
           },
         });
 
-        await scenario('stalled', {
-          // The engine's stalledSince is when the quiet BEGAN (here the serve), not when it crossed the 5 minute threshold.
-          status: view({ servedAt: clock - 9 * 60000, stalled: true, stalledSince: clock - 9 * 60000 }, { outstanding: { servedAt: clock - 9 * 60000, kind: 'application', stage: 'resume', stalled: true, stalledSince: clock - 9 * 60000, stallsLastHour: 1 }, lastCallAt: clock - 20000 }),
+        await scenario('an application token remains application lane progress', {
+          status: view({}, {}),
+          item: { jobId: JOB, stage: 'resume', bridgeClaimId: '22222222-2222-4222-8222-222222222222' },
+          async check({ window }) {
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé'), 'an application claim token must not replace its lane progress');
+            assert(window.document.querySelectorAll('ol[aria-label="Application steps"] li').length === 4, 'an application claim token retains the four application stages');
+          },
+        });
+
+        await scenario('an exact push claim shows bridge progress without borrowing an application lane', {
+          status: normalizeBridgeStatus({ ...status(1, { chat: working(), queue: { jobs: [] }, push: { claimed: ['22222222-2222-4222-8222-222222222222'] } }), at: clock }),
+          item: { bridgeClaimId: '22222222-2222-4222-8222-222222222222' },
+          isPush: true,
+          async check({ window }) {
+            assert(live(window).textContent.includes('ChatGPT is working on this handoff'), 'a claimed push request renders its own bridge progress wording');
+            assert(!window.document.querySelector('ol[aria-label="Application steps"]')
+              && !window.document.querySelector('ol[aria-label="Handoff status"]'),
+            'push progress omits the redundant one-step status pill while never borrowing application stages');
+          },
+        });
+
+        await scenario('an awaiting selected push offers Continue only after a reached chat, never while a chat is working', {
+          status: normalizeBridgeStatus({ ...status(1, { chat: working({ state: 'reached', calls: 0, outstanding: null }), queue: { jobs: [] } }), at: clock }),
+          item: { bridgeClaimId: '22222222-2222-4222-8222-222222222222' }, isPush: true, awaitingClaim: true,
           async check({ window, calls, act }) {
-            assert(live(window).textContent.includes('Needs attention') && live(window).textContent.includes('ChatGPT has been quiet for 9 min'), 'stalled is worded and toned in text, with the real quiet age (served 9 minutes ago)');
+            const continueButton = button(window, 'Copy Continue');
+            assert(continueButton && !button(window, 'Copy starter'), 'a reached-but-unclaimed chat may receive Continue');
+            await act(async () => { continueButton.click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(calls.join() === 'continue', 'the reached route uses the existing Continue action');
+          },
+        });
+
+        await scenario('an awaiting selected push is passive while another ChatGPT request is working', {
+          status: normalizeBridgeStatus({ ...status(1, { chat: working(), queue: { jobs: [] } }), at: clock }),
+          item: { bridgeClaimId: '22222222-2222-4222-8222-222222222222' }, isPush: true, awaitingClaim: true,
+          async check({ window }) {
+            assert(live(window).textContent.includes('Waiting for ChatGPT to ask for this handoff') && !window.document.querySelector('button'),
+              'a working chat may own another request, so the selected push stays passive');
+          },
+        });
+
+        await scenario('an awaiting selected push explains bridge delivery is unavailable without offering a dead action', {
+          status: normalizeBridgeStatus({ ...status(1, { enabled: false, serving: 'off', setup: { tunnelReachable: false, linked: false }, queue: { jobs: [] } }), at: clock }),
+          item: { bridgeClaimId: '22222222-2222-4222-8222-222222222222' }, isPush: true, awaitingClaim: true,
+          async check({ window }) {
+            assert(live(window).textContent.includes('ChatGPT handoff is not ready') && !window.document.querySelector('button'),
+              'a selected-but-unclaimed handoff does not promise a chat action when bridge delivery is unavailable');
+          },
+        });
+
+        await scenario('a legacy stalled marker remains a working slow answer', {
+          // Older snapshots can carry these fields; they are not a liveness
+          // signal and must never offer a replacement chat.
+          status: view({ servedAt: clock - 9 * 60000, stalled: true, stalledSince: clock - 9 * 60000 }, { outstanding: { servedAt: clock - 9 * 60000, kind: 'application', stage: 'resume', stalled: true, stalledSince: clock - 9 * 60000, stallsLastHour: 1 }, lastCallAt: clock - 20000 }),
+          async check({ window, calls }) {
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && !live(window).textContent.includes('Needs attention'), 'a slow answer stays working even with an old stalled marker');
             assert(/for 9 min/.test(text(window)), `and its timer line agrees: ${text(window)}`);
-            const start = button(window, 'Copy chat starter'); assert(start, 'stalled offers Copy chat starter');
-            await act(async () => { start.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(calls.join() === 'new', `Copy chat starter directly calls handoffBridgeNewChat for an active chat: ${calls}`);
-            assert(!text(window).includes('Copy a starter for a new chat?') && !text(window).includes('Keep chat 1'),
-              'an active chat never produces a renderer confirmation');
+            assert(!button(window, 'Prepare worker plan') && calls.length === 0, 'age-only markers never offer or invoke a replacement action');
           },
         });
 
@@ -1256,7 +1640,7 @@ export default [
         await scenario('a disabled bridge cannot start a chat', {
           status: view({ servedToChat: null }, { state: 'full' }, { serving: 'off' }),
           async check({ window, calls, act }) {
-            const start = button(window, 'Copy chat starter'); assert(start && start.disabled, 'the panel\'s gate (live, reachable, linked) also disables this button');
+            const start = button(window, 'Prepare worker plan'); assert(start && start.disabled, 'the panel\'s gate (live, reachable, linked) also disables this button');
             await act(async () => { start.click(); await Promise.resolve(); });
             assert(calls.length === 0, 'a disabled button must not call IPC');
           },
@@ -1273,7 +1657,7 @@ export default [
             // A held restart is the one stopped state that still offers a chat button, even while paused.
             status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }, top),
             async check({ window, calls, act }) {
-              const start = button(window, 'Copy chat starter'); assert(start && start.disabled, `the panel's whole gate applies: ${label}`);
+              const start = button(window, 'Prepare worker plan'); assert(start && start.disabled, `the panel's whole gate applies: ${label}`);
               await act(async () => { start.click(); await Promise.resolve(); });
               assert(calls.length === 0, `no IPC while ${label}`);
             },
@@ -1281,7 +1665,7 @@ export default [
         }
         await scenario('the same button is enabled when every gate passes', {
           status: view({ phase: 'held', reason: 'restart' }, { state: 'full' }),
-          async check({ window }) { const start = button(window, 'Copy chat starter'); assert(start && !start.disabled, 'the gate opens when the bridge is live, reachable, linked and not paused'); },
+          async check({ window }) { const start = button(window, 'Prepare worker plan'); assert(start && !start.disabled, 'the gate opens when the bridge is live, reachable, linked and not paused'); },
         });
         await scenario('a paused bridge is forwarded to the derivation', {
           status: view({}, {}, { paused: true }),
@@ -1299,8 +1683,8 @@ export default [
         await scenario('a full chat that holds the job keeps the working line and offers no new chat', {
           status: view({}, { state: 'full' }),
           async check({ window }) {
-            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('at its limit'), live(window).textContent);
-            assert(!window.document.querySelector('button'), 'no Copy chat starter while ChatGPT may be answering');
+            assert(live(window).textContent.includes('ChatGPT is working on: Résumé') && live(window).textContent.includes('safety budget'), live(window).textContent);
+            assert(!window.document.querySelector('button'), 'no worker-plan action while ChatGPT may be answering');
           },
         });
         await scenario('a host job does not claim ChatGPT answered everything', {
@@ -1361,12 +1745,12 @@ export default [
             assert(calls.length === 2, 'a later click goes through');
           },
         });
-        await scenario('a double click on Copy chat starter calls the IPC once', {
+        await scenario('a double click on Prepare worker plan calls the IPC once', {
           status: view({ phase: 'held', reason: 'restart' }, { state: 'full', lastCallAt: clock - 600000 }),
           async check({ window, calls, act }) {
-            const start = button(window, 'Copy chat starter');
+            const start = button(window, 'Prepare worker plan');
             await act(async () => { start.click(); start.click(); await Promise.resolve(); await Promise.resolve(); });
-            assert(calls.join() === 'new', `a fast double click must not mint two chats: ${calls}`);
+            assert(calls.join() === 'plan', `a fast double click must not prepare two worker plans: ${calls}`);
           },
         });
         await scenario('a failed call frees the button too', {
@@ -1456,10 +1840,32 @@ export default [
                 bundle.module.publishApplicationHandoffs([item]);
                 await Promise.resolve(); await Promise.resolve();
               });
-              // The dock starts collapsed to one "Pending AI handoffs" button.
-              const openButton = window.document.querySelector('button[aria-expanded="false"]');
-              assert(openButton && /Pending AI handoffs/.test(openButton.textContent), 'the collapsed dock offers its expand button');
-              await bundle.module.act(async () => { openButton.click(); await Promise.resolve(); });
+              assert(window.document.querySelector('#non-api-ai-handoff-panel'), 'a pending handoff opens the dock without an extra expand action');
+              assert(!window.document.querySelector('button[aria-expanded="false"]'), 'a newly populated dock is never left collapsed');
+              const minimizeButton = window.document.querySelector('button[aria-label="Minimize pending AI handoffs"]');
+              assert(minimizeButton, 'the person can still explicitly minimize the current queue');
+              await bundle.module.act(async () => { minimizeButton.click(); await Promise.resolve(); });
+              assert(window.document.querySelector('button[aria-expanded="false"]'), 'Minimize collapses only the current queue');
+              const secondItem = bundle.module.applicationDockRequest({
+                node: { id: 'node-2', data: { title: 'Designer', company: 'Globex', localApplication: { id: '22222222-2222-4222-8222-222222222222', mode: 'paste', status: 'queued', stage: 'resume' } } },
+                handoff: { jobId: '22222222-2222-4222-8222-222222222222', stage: 'resume', revision: 1, handoffCode: 'CODE-456', prompt: 'SECOND_SYNTHETIC_STAGE_PROMPT', draft: '' },
+              });
+              assert(secondItem, 'a second dock item builds');
+              await bundle.module.act(async () => {
+                bundle.module.publishApplicationHandoffs([item, secondItem]);
+                await Promise.resolve(); await Promise.resolve();
+              });
+              assert(window.document.querySelector('button[aria-expanded="false"]'), 'adding to a nonempty minimized queue preserves the person’s Minimize choice');
+              await bundle.module.act(async () => {
+                bundle.module.publishApplicationHandoffs([]);
+                await Promise.resolve(); await Promise.resolve();
+              });
+              await bundle.module.act(async () => {
+                bundle.module.publishApplicationHandoffs([item]);
+                await Promise.resolve(); await Promise.resolve();
+              });
+              assert(window.document.querySelector('#non-api-ai-handoff-panel'), 'an empty-to-nonempty queue transition reopens the dock');
+              assert(!window.document.querySelector('button[aria-expanded="false"]'), 'the new queue is not hidden behind an expand button');
               const text = window.document.body.textContent;
               seen[phase] = { working: text.includes('Handed to ChatGPT'), noPasteWording: !/No paste/i.test(text), chip: text.includes('CODE-123'), paste: text.includes('SYNTHETIC_STAGE_PROMPT') || Boolean(window.document.querySelector('textarea')) };
             } finally {
@@ -1477,6 +1883,184 @@ export default [
           assert(seen[phase].working && !seen[phase].paste, `a job ChatGPT holds (${phase}) shows the working state and no paste UI: ${JSON.stringify(seen[phase])}`);
           assert(!seen[phase].chip && seen[phase].noPasteWording, `a job ChatGPT holds (${phase}) hides the handoff-code chip and never says "No paste": ${JSON.stringify(seen[phase])}`);
         }
+
+      } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
+    },
+  },
+  {
+    name: 'handoff bridge: render: MCP push handoffs remain plugin-only across bridge availability and claim states',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-bridge-push-dock-'));
+      const entry = path.join(directory, 'PushDockProbe.jsx');
+      const dialog = path.resolve('src/components/NonApiAiDialog.jsx'); const bridgeStore = path.resolve('src/utils/handoffBridgeStore.js');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { NonApiAiDialog } from ${JSON.stringify(dialog)};\nexport { applyHandoffBridgeStatus, __resetHandoffBridgeStoreForTests } from ${JSON.stringify(bridgeStore)};\nexport function PushDockProbe() { return <NonApiAiDialog />; }\n`);
+      const controller = new AbortController(); let bundle;
+      const claim = '22222222-2222-4222-8222-222222222222';
+      const request = (overrides = {}) => ({
+        requestId: 'push-route-request', bridgeClaimId: claim, handoffCode: 'HANDOFF-ABCDEF', task: 'job-scoring', nodeId: 'push-node', runId: 'push-run',
+        prompt: 'MCP_PUSH_PROMPT', mcpEligible: true, attachments: [], batch: 1, batchTotal: 1, itemCount: 1, itemsDone: 0, itemsTotal: 1, ...overrides,
+      });
+      const unavailable = patch => status(1, {
+        enabled: false, serving: 'off', paused: false,
+        setup: { tunnelReachable: false, linked: false }, chat: { state: 'none' }, push: { available: [], claimed: [] }, ...patch,
+      });
+      const queued = patch => status(1, { chat: { state: 'none' }, push: { available: [], claimed: [] }, ...patch });
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 20000);
+        for (const [label, bridge, expected] of [
+          ['no ChatGPT chat', queued(), 'No worker chats yet'],
+          ['unselected/no published push lane', queued({ push: { available: [], claimed: [] } }), 'No worker chats yet'],
+          ['disabled and unlinked', unavailable(), 'ChatGPT handoff is not ready'],
+          ['paused', queued({ paused: true }), 'Paused'],
+          ['exactly claimed', queued({ chat: { state: 'working' }, push: { claimed: [claim] } }), 'Handed to ChatGPT'],
+        ]) {
+          await withDom(async window => withConsoleCollector(async entries => {
+            const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+            Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+            let onRequest;
+            window.electronAPI = {
+              handoffBridgeGetStatus: async () => ({ status: bridge }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+              onNonApiAiRequest(listener) { onRequest = listener; return () => { onRequest = null; }; }, onNonApiAiSettled: () => () => {}, onNonApiAiCancelled: () => () => {},
+            };
+            bundle.module.__resetHandoffBridgeStoreForTests();
+            const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+            try {
+              await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.PushDockProbe)); await Promise.resolve(); await Promise.resolve(); });
+              assert(typeof onRequest === 'function', `${label}: the live push request listener registered`);
+              await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(bridge); onRequest(request()); await Promise.resolve(); await Promise.resolve(); });
+              const text = window.document.body.textContent;
+              assert(text.includes(expected), `${label}: progress copy identifies the current bridge state (${text})`);
+              assert(!window.document.querySelector('#non-api-ai-prompt') && !window.document.querySelector('#non-api-ai-response') && !text.includes('Paste AI response') && !text.includes('Submit response'), `${label}: an MCP push handoff never exposes a manual prompt or paste-response path`);
+              assert(text.includes('Cancel task'), `${label}: plugin-only work retains a cancellation escape hatch`);
+            } finally {
+              await bundle.module.act(async () => rootNode.unmount());
+              if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+            }
+            assert(entries.length === 0, `${label}: the MCP-only dock render must not write console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+          }));
+        }
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          let onRequest;
+          const bridge = queued({
+            chat: {
+              state: 'working',
+              pool: {
+                active: true,
+                generation: 31,
+                workerCount: 10,
+                workers: [
+                  { ordinal: 1, state: 'working', completed: 0 },
+                  ...Array.from({ length: 9 }, (_unused, index) => ({ ordinal: index + 2, state: 'waiting', completed: 0 })),
+                ],
+                // The dock request has already observed one released handoff;
+                // this deliberately stale status snapshot has not caught up.
+                plan: { recommended: 10, queued: 117, materialized: 0, expandBy: 0, reason: 'maximum_parallelism' },
+              },
+            },
+            push: { claimed: [claim] },
+          });
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: bridge }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+            onNonApiAiRequest(listener) { onRequest = listener; return () => { onRequest = null; }; }, onNonApiAiSettled: () => () => {}, onNonApiAiCancelled: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.PushDockProbe)); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { bundle.module.applyHandoffBridgeStatus(bridge); onRequest(request({ requestId: 'prewarmed-wave' })); await Promise.resolve(); await Promise.resolve(); });
+            const text = window.document.body.textContent;
+            assert(text.includes('Automatic')
+              && text.includes('10 worker chats · 1 released now · 117 forecast')
+              && text.includes('Worker 2Ready for later work')
+              && !text.includes('0 handoffs completed')
+              && !text.includes('Copy replacement starter'),
+            'the dock keeps one worker-plan summary while rows expose healthy later-wave workers');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+          }
+          assert(entries.length === 0, `the prewarmed automatic queue header renders without console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
+        // This exercises the real dock event seam rather than asserting source
+        // text: a node may claim the exact request synchronously, but a failed
+        // durable pause transaction must keep the dock saving until it reports
+        // failure.  The old optimistic acknowledgement completed before this
+        // callback could run.
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          let onRequest;
+          let pauseDetail = null;
+          const bridge = queued({ chat: { state: 'working' }, push: { claimed: [claim] } });
+          const onPause = (event) => {
+            if (event?.detail?.nodeId !== 'pause-hub' || event?.detail?.runId !== 'pause-run') return;
+            event.detail.accept();
+            pauseDetail = event.detail;
+          };
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: bridge }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+            onNonApiAiRequest(listener) { onRequest = listener; return () => { onRequest = null; }; }, onNonApiAiSettled: () => () => {}, onNonApiAiCancelled: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          window.document.addEventListener('job-search-pause-and-save', onPause);
+          try {
+            await bundle.module.act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.PushDockProbe));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              bundle.module.applyHandoffBridgeStatus(bridge);
+              onRequest(request({ requestId: 'pause-rejected', task: 'job-scoring', nodeId: 'pause-hub', runId: 'pause-run' }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            const pauseButton = () => [...window.document.querySelectorAll('button')]
+              .find(item => item.textContent.trim() === 'Pause & save Job Search' || item.textContent.trim() === 'Saving Job Search…');
+            assert(pauseButton()?.textContent.trim() === 'Pause & save Job Search', 'an eligible Job Search handoff exposes its saved-stop control');
+            await bundle.module.act(async () => { pauseButton().click(); await Promise.resolve(); await Promise.resolve(); });
+            assert(pauseDetail && pauseButton()?.textContent.trim() === 'Saving Job Search…'
+              && !window.document.body.textContent.includes('Resume will appear when stopping finishes.'),
+            'claiming a pause does not optimistically acknowledge it before the durable transaction settles');
+            await bundle.module.act(async () => {
+              pauseDetail.acknowledge({ success: false, error: 'Durable pause transaction rejected.' });
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(window.document.body.textContent.includes('Durable pause transaction rejected.')
+              && pauseButton()?.textContent.trim() === 'Pause & save Job Search'
+              && !pauseButton()?.disabled,
+            'a rejected durable pause transaction returns a failure to the dock and leaves its saved-stop action retryable');
+          } finally {
+            window.document.removeEventListener('job-search-pause-and-save', onPause);
+            await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+          }
+          assert(entries.length === 0, `the rejected pause transaction renders without console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
+        // Attachments and legacy/manual routes still require a local response
+        // surface; a route-first UI must not strand that deliberately excluded work.
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          let onRequest;
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: queued() }), onHandoffBridgeStatus: () => () => {}, handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+            onNonApiAiRequest(listener) { onRequest = listener; return () => { onRequest = null; }; }, onNonApiAiSettled: () => () => {}, onNonApiAiCancelled: () => () => {},
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => { rootNode.render(bundle.module.React.createElement(bundle.module.PushDockProbe)); await Promise.resolve(); await Promise.resolve(); });
+            await bundle.module.act(async () => { onRequest(request({ requestId: 'manual-push-request', handoffCode: 'HANDOFF-BCDEFG', prompt: 'MANUAL_PUSH_PROMPT', mcpEligible: false, bridgeClaimId: null, initialResponse: '{"saved":true}' })); await Promise.resolve(); await Promise.resolve(); });
+            assert(window.document.querySelector('#non-api-ai-prompt') && window.document.querySelector('#non-api-ai-response'), 'an explicit manual/legacy push route retains its local prompt and response fields');
+            assert(window.document.body.textContent.includes('MANUAL_PUSH_PROMPT') && window.document.body.textContent.includes('HANDOFF-BCDEFG'), 'the manual/legacy route keeps the data needed to recover it locally');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+          }
+          assert(entries.length === 0, `the manual push exception must render without console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
       } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
     },
   },

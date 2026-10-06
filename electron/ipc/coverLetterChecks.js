@@ -196,6 +196,22 @@ function text(value) {
     .trim();
 }
 
+// Job boards often append an all-caps shorthand to the employer's display
+// name. It is useful metadata, but spelling it out in a salutation is an
+// unnecessary introduction to the team receiving the letter. This is strictly
+// a salutation display rule: body copy and all matching continue to receive
+// the unmodified job.company value.
+const TRAILING_PARENTHESIZED_ACRONYM_RE = /^(.*?)\s+\(\s*([A-Z0-9.&/+_-]+)\s*\)$/u;
+
+function salutationCompanyName(value = '') {
+  const company = text(value);
+  const match = TRAILING_PARENTHESIZED_ACRONYM_RE.exec(company);
+  if (!match) return company;
+  // Require an actual initialism rather than removing a one-letter or numeric qualifier.
+  const acronymCharacters = match[2].replace(/[^A-Z0-9]/g, '');
+  return acronymCharacters.length >= 2 && /[A-Z]/.test(acronymCharacters) ? text(match[1]) : company;
+}
+
 // Cover letters identify their preparation period without implying a
 // day-specific event. Keep the presentation format shared by API and Local AI
 // authoring paths so their envelopes satisfy the same document contract.
@@ -4540,7 +4556,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
 
 /** Authors the stable cover-letter fields without changing the document-builder contract. */
 export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '' } = {}) {
-  const company = text(job.company);
+  const company = salutationCompanyName(job.company);
   const identity = evidence?.identity || {};
   return {
     name: text(identity.name),

@@ -4,6 +4,12 @@ import { buildContinueMessage as buildContinueTemplate, buildStarterMessage as b
 const schema = (properties, required) => Object.freeze({ type: 'object', properties: Object.freeze(properties), required: Object.freeze(required), $schema: 'http://json-schema.org/draft-07/schema#' });
 const oauthMeta = Object.freeze({ securitySchemes: Object.freeze([Object.freeze({ type: 'oauth2', scopes: Object.freeze(['handoff']) })]) });
 
+// Compatibility: the installed plugin surface and hash intentionally retain
+// submit_handoff's older generic JSON parenthetical. A served push result is
+// more specific: responseFormat plus its returned instructions are explicitly
+// authoritative, and PUSH_TEXT_INSTRUCTIONS overrides this parenthetical for
+// the small, reviewed raw-research allowlist. Changing this metadata would
+// force every existing plugin link through a Refresh/warm-up migration.
 export const TOOLS_LIST = Object.freeze([
   Object.freeze({
     name: 'get_handoff', title: 'Get next Infinite Canvas handoff',

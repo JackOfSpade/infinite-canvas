@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useContext, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { buildItemQuery } from '../utils/bundlePricing';
 import { useToast } from '../components/ToastProvider';
 
@@ -16,6 +17,8 @@ import { useToast } from '../components/ToastProvider';
  */
 export function useListingActions(id, data) {
   const { updateNodeData } = useReactFlow();
+  const navigation = useContext(CanvasNavigationContext);
+  const canvasFilePath = navigation?.getCurrentFile?.() || navigation?.currentFile || null;
   const { addToast } = useToast();
   const product = useMemo(() => data.product || {}, [data.product]);
 
@@ -75,7 +78,7 @@ export function useListingActions(id, data) {
   // e.g. kayak + paddle). Each item carries its own { query, condition } and
   // gets a complete pricing pass server-side. With no argument, falls back to a
   // single item built from the primary product (the common single-item case).
-  const scrapePriceComps = useCallback(async (researchItems) => {
+  const scrapePriceComps = useCallback(async (researchItems, recovery = null, autoResume = false) => {
     if (!window.electronAPI?.scrapePriceComps) throw new Error('scrapePriceComps API unavailable');
     const items = (Array.isArray(researchItems) && researchItems.length > 0)
       ? researchItems
@@ -84,24 +87,36 @@ export function useListingActions(id, data) {
     // PriceCharting only runs for video-game/collectible categories — it fuzzily
     // "matches" any query otherwise). Blank/Unknown is fine; the backend treats
     // an unknown category as "don't suppress".
-    const result = await window.electronAPI.scrapePriceComps({ items, nodeId: id, category: product.category });
+    const result = await window.electronAPI.scrapePriceComps({
+      items,
+      nodeId: id,
+      category: product.category,
+      canvasFilePath,
+      manualAiRunId: recovery?.runId || undefined,
+      recovery: recovery || undefined,
+      autoResume,
+    });
     if (!result.success) {
       const err = new Error(result.error);
       if (result.isRateLimit) err.isRateLimit = true;
       throw err;
     }
     return result;
-  }, [buildSearchQuery, product.condition, product.category, id]);
+  }, [buildSearchQuery, product.condition, product.category, id, canvasFilePath]);
 
   // Rescrape a single comp source — used after captcha-resolve to refetch
   // just the unblocked source instead of re-running the whole pipeline. Pass
   // `researchItems` to refetch that source for every item of a bundle (returns
   // a per-item result); omit it for the single-item path.
-  const rescrapeSource = useCallback(async (sourceId, researchItems, noChallengeConfirmed = false) => {
+  const rescrapeSource = useCallback(async (sourceId, researchItems, noChallengeConfirmed = false, recovery = null, autoResume = false) => {
     if (!window.electronAPI?.rescrapeSource) throw new Error('rescrapeSource API unavailable');
     const payload = (Array.isArray(researchItems) && researchItems.length > 0)
       ? { sourceId, items: researchItems, nodeId: id, noChallengeConfirmed }
       : { sourceId, query: buildSearchQuery(), nodeId: id, noChallengeConfirmed };
+    payload.canvasFilePath = canvasFilePath;
+    payload.manualAiRunId = recovery?.runId || undefined;
+    payload.recovery = recovery || undefined;
+    payload.autoResume = autoResume;
     const result = await window.electronAPI.rescrapeSource(payload);
     if (!result.success) {
       const err = new Error(result.error);
@@ -109,7 +124,7 @@ export function useListingActions(id, data) {
       throw err;
     }
     return result;
-  }, [buildSearchQuery, id]);
+  }, [buildSearchQuery, canvasFilePath, id]);
 
   // `overrides` lets the caller price an extra bundle item with ITS OWN query /
   // condition / spec instead of the primary product's (defaults derive from the
@@ -148,11 +163,15 @@ export function useListingActions(id, data) {
   // Versioned item-keyed path for fresh pricing work. The main process packs
   // independent bundle components into bounded manual handoffs and returns the
   // result keyed to the caller's stable item key, not response position.
-  const synthesizePricesBatch = useCallback(async (items) => {
+  const synthesizePricesBatch = useCallback(async (items, manualAiRunId = null, recovery = null, autoResume = false) => {
     if (!window.electronAPI?.synthesizePricesBatch) throw new Error('synthesizePricesBatch API unavailable');
     const rows = Array.isArray(items) ? items : [];
     const result = await window.electronAPI.synthesizePricesBatch({
       nodeId: id,
+      manualAiRunId: manualAiRunId || undefined,
+      canvasFilePath,
+      recovery: recovery || undefined,
+      autoResume,
       items: rows.map((item) => ({
         itemKey: item.key || 'primary',
         itemLabel: item.label || item.query || 'Item',
@@ -171,22 +190,30 @@ export function useListingActions(id, data) {
       throw err;
     }
     return result;
-  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
+  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id, canvasFilePath]);
 
   // Multi-item bundle: ask the AI for attributable bundle/tier pricing factors
   // across independently-priced items. The backend deterministically derives
   // whole-listing quick/best/max prices and explanation from those factors.
   // Returns null when fewer than 2 items were priced.
-  const synthesizeBundlePrice = useCallback(async (items, sumOfPrices) => {
+  const synthesizeBundlePrice = useCallback(async (items, sumOfPrices, manualAiRunId = null, recovery = null, autoResume = false) => {
     if (!window.electronAPI?.synthesizeBundlePrice) throw new Error('synthesizeBundlePrice API unavailable');
-    const result = await window.electronAPI.synthesizeBundlePrice({ items, sumOfPrices, nodeId: id });
+    const result = await window.electronAPI.synthesizeBundlePrice({
+      items,
+      sumOfPrices,
+      nodeId: id,
+      manualAiRunId: manualAiRunId || undefined,
+      canvasFilePath,
+      recovery: recovery || undefined,
+      autoResume,
+    });
     if (!result.success) {
       const err = new Error(result.error);
       if (result.isRateLimit) err.isRateLimit = true;
       throw err;
     }
     return result.bundlePricing || null;
-  }, [id]);
+  }, [id, canvasFilePath]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 

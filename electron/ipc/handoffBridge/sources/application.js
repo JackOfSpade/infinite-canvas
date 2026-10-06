@@ -8,9 +8,9 @@ import {
 
 // The only bridge-side view of the app's bundle-removal chokepoint. The
 // composition uses the per-source method below; index.js uses this one when
-// no runtime exists yet (a discard while the bridge is off still has to free
-// its durable lane). Listeners receive { jobId, canvasFilePath, cause } where
-// cause is a closed enum.
+// no runtime exists yet (a discard or completed save while the bridge is off
+// still has to free its durable lane). Listeners receive { jobId,
+// canvasFilePath, cause } where cause is a closed enum.
 export function subscribeApplicationDiscards(listener) {
   return subscribeLocalApplicationDiscards(listener);
 }
@@ -249,7 +249,13 @@ export function mapApplicationStatus(status) {
     : { kind: 'awaiting', phase: 'awaiting', read: true };
   if (value?.status === 'completed' || value?.status === 'importing') return { kind: 'host', phase: 'host' };
   if (value?.status === 'revision-required' || value?.status === 'invalid') return { kind: 'host', phase: 'host', read: true };
-  if (value?.status === 'render-retry-required') return { kind: 'needs_user', phase: 'needs_user', reason: 'render_retry' };
+  if (value?.status === 'render-retry-required') {
+    return {
+      kind: 'needs_user',
+      phase: 'needs_user',
+      reason: value.retryReproducesFailure === true ? 'app_fix_required' : 'render_retry',
+    };
+  }
   return { kind: 'threw', code: 'internal_error', shape: true };
 }
 

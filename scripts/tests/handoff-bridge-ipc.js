@@ -40,19 +40,19 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
   const ipc = providedIpc || fakeIpc(); const sender = { id: 9, __isCanvasRenderer: true, sent: [], send(channel, value) { this.sent.push({ channel, value }); } };
   const window = { __canvasFilePath: PATH, webContents: sender, isDestroyed: () => false };
   const canvasWindows = getCanvasWindows || (() => windows === null ? [window] : windows);
-  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1, pairingCode: '23456-789AB' }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', idlePauseMinutes: 1440, items: [], long: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
+  const api = registerHandoffBridgeUi({ ipc, getCanvasWindows: canvasWindows, processStartedAt, validateHostname, now, timers, Notification, controller: { snapshot: () => ({ enabled: true, setup: { tunnelReachable: true }, config: { hostname: 'bridge.example.com', scope: { applications: true, scoring: false }, autoStart: false }, limits: { releaseTtlHours: 24, chatKeyMaxAgeHours: 24, idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true }, pauseCause: null, autoRelease: false }), subscribe: () => () => undefined, enable: async () => ({ success: true }), disable: async () => ({ success: true }), pause: async () => ({ success: true }), resume: async () => ({ success: true }), revokeAll: async () => ({ success: true }), forget: async () => ({ success: true }), release: async () => ({ success: true, released: 1 }), unrelease: async () => ({ success: true }), ackAlarm: async () => ({ success: true }), getActivity: async () => [], reloadConfig: async () => ({ success: true }), ...controller }, store: { writeConfig: async () => ({ ok: true }), ...store }, dialogs: { ask: async () => ({ ok: true }), choose: async () => ({ ok: true, filePath: '/tmp/file' }), ...dialogs }, application: { describeForConfirm: async () => ({ ok: true, canvasFilePath: PATH, items: [{ jobId: JOB, title: 'Ada Lovelace', company: 'Example' }] }), ...application }, engine: { hold: async () => ({ ok: true }), resume: async () => ({ ok: true }), ...engine }, push, clipboard, tunnel: { chooseBinary: async () => ({ ok: true }), getApprovalDetails: async () => ({ ok: true, version: '2026.9.3', sha256: 'a'.repeat(64) }), approveBinary: async () => ({ ok: true }), chooseCredentials: async () => ({ ok: true }), restart: async () => ({ ok: true }), reapOrphans: async () => ({ ok: true, reaped: 1 }), getLog: async () => [], ...tunnel }, oauth: { openPairing: async () => ({ ok: true, expiresAt: 1, pairingCode: '23456-789AB' }), cancelPairing: async () => ({ ok: true }), ...oauth }, enableConsent: { describe: async () => ({ hostname: 'bridge.example.com', consentFingerprint: 'test-consent-fingerprint', idlePauseMinutes: 1440, items: [], long: true }), verify: async () => ({ ok: true }), accept: async () => ({ ok: true }), ...enableConsent }, onSetupMutation });
   return { ipc, sender, window, api, event: { sender } };
 }
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
 
 export default [
-  { name: 'handoff bridge: ipc: contract exposes exactly 24 invokes, one publish send and three events', run: () => {
-    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 25 && new Set(channelValues).size === 25, 'IPC channel names must be closed and unique');
-    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 24, 'publish-jobs is sole send-only channel');
+  { name: 'handoff bridge: ipc: contract exposes exactly 27 invokes, one publish send and three events', run: () => {
+    const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 28 && new Set(channelValues).size === 28, 'IPC channel names must be closed and unique');
+    assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 27, 'publish-jobs is sole send-only channel');
     assert(Object.values(IPC_EVENTS).length === 3 && new Set(Object.values(IPC_EVENTS)).size === 3, 'main-to-renderer events must be closed'); assert(!JSON.stringify({ IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE }).includes('label'), 'IPC never carries renderer labels');
   } },
   { name: 'handoff bridge: ipc: registers exactly the frozen invokes and one publish listener', run: () => {
-    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 24 && h.api.registration.expectedInvokes === 24 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 24 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
+    const h = setup(); assert(h.api.registration.ok && h.api.registration.invokes === 27 && h.api.registration.expectedInvokes === 27 && h.api.registration.publish, 'registration exposes a closed complete-route fact'); assert(h.ipc.handlers.size === 27 && h.ipc.listeners.size === 1 && h.ipc.listeners.has(IPC_CHANNELS.PUBLISH_JOBS), 'all and only contract channels register');
     assert([...h.ipc.handlers.keys()].every(channel => Object.values(IPC_CHANNELS).includes(channel)), 'no unlisted invoke channel is permitted');
   } },
   { name: 'handoff bridge: ipc: partial or missing IPC registration is reported false and leaves no route behind', run: () => {
@@ -108,7 +108,7 @@ export default [
   { name: 'handoff bridge: ipc: a failed replacement clears old and new bridge routes', run: () => {
     const ipc = fakeIpc();
     const initial = setup({ ipc });
-    assert(initial.api.registration.ok && ipc.handlers.size === 24 && ipc.listeners.size === 1,
+    assert(initial.api.registration.ok && ipc.handlers.size === 27 && ipc.listeners.size === 1,
       'the regression begins with a complete prior bridge registry');
 
     const realHandle = ipc.handle;
@@ -246,6 +246,112 @@ export default [
     assert((await invoke(good, IPC_CHANNELS.NEW_CHAT)).success && JSON.stringify(calls.slice(0, 2)) === JSON.stringify([['write', 'synthetic'], ['commit', 't']]), 'clipboard write must happen before epoch commit');
     const badCalls = []; const bad = setup({ controller: { prepareChat: async () => ({ commitToken: 't', starter: 'synthetic' }), commitChat: async () => { badCalls.push('commit'); }, abandonChat: async () => { badCalls.push('abandon'); } }, clipboard: { writeText() { throw new Error('denied'); } } });
     assert((await invoke(bad, IPC_CHANNELS.NEW_CHAT)).code === 'CLIPBOARD_FAILED' && JSON.stringify(badCalls) === JSON.stringify(['abandon']), 'clipboard failure abandons prepared chat and never commits');
+  } },
+  { name: 'handoff bridge: ipc: worker-pool starters stay main-side while the renderer receives only bounded metadata', async run() {
+    const calls = []; let clipboardText = '';
+    const h = setup({
+      controller: {
+        startWorkerPool: async value => {
+          calls.push(['start', value]);
+          return { started: true, generation: 7, workerCount: 3, recommended: 3, queued: 42, materialized: 2 };
+        },
+        copyWorkerStarter: async value => {
+          calls.push(['copy', value]);
+          return { copied: true, generation: 7, workerOrdinal: 2, workerCount: 3, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' };
+        },
+      },
+      clipboard: { writeText: text => { clipboardText = text; }, readText: () => clipboardText, clear() {} },
+    });
+    const started = await invoke(h, IPC_CHANNELS.START_WORKER_POOL);
+    assert(started.success && started.generation === 7 && started.workerCount === 3 && started.recommended === 3 && started.queued === 42 && started.materialized === 2
+      && !Object.hasOwn(started, 'sessionCode') && !Object.hasOwn(started, 'starter'),
+    'a prepared worker pool returns only its non-secret generation and bounded worker plan');
+    const copied = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 7, workerOrdinal: 2 });
+    assert(copied.success && copied.generation === 7 && copied.workerOrdinal === 2 && copied.workerCount === 3 && copied.copied === true
+      && !Object.hasOwn(copied, 'sessionCode') && !Object.hasOwn(copied, 'starter')
+      && clipboardText.includes('2ABCDEFGHJKLMNPQRSTUVWXYZ2') && clipboardText.includes('You are worker 2 of 3'),
+    'the main process alone builds and copies the unique starter while the renderer receives no session capability');
+    assert(JSON.stringify(calls) === JSON.stringify([
+      ['start', {}],
+      ['copy', { generation: 7, workerOrdinal: 2 }],
+    ]), 'worker pool IPC sends the controller only closed, main-owned operation shapes');
+  } },
+  { name: 'handoff bridge: ipc: worker-pool expansion forwards only a bounded requested target', async run() {
+    const calls = [];
+    const h = setup({ controller: {
+      startWorkerPool: async value => {
+        calls.push(value);
+        return { started: true, generation: 8, workerCount: 10, recommended: 6, queued: 6 };
+      },
+    } });
+    const expanded = await invoke(h, IPC_CHANNELS.START_WORKER_POOL, { requestedWorkers: 10 });
+    const invalidLow = await invoke(h, IPC_CHANNELS.START_WORKER_POOL, { requestedWorkers: 0 });
+    const invalidExtra = await invoke(h, IPC_CHANNELS.START_WORKER_POOL, { requestedWorkers: 10, extra: true });
+    assert(expanded.success && expanded.workerCount === 10 && expanded.recommended === 6 && expanded.materialized === 6
+      && invalidLow.code === 'INVALID' && invalidExtra.code === 'INVALID'
+      && JSON.stringify(calls) === JSON.stringify([{ requestedWorkers: 10 }]),
+    'only the exact 1–10 requested target reaches the controller; invalid renderer payloads cannot alter pool capacity');
+  } },
+  { name: 'handoff bridge: ipc: worker-pool copy rejects forged shapes and reports an already-started worker without retrying it', async run() {
+    let copies = 0;
+    const h = setup({ controller: {
+      copyWorkerStarter: async () => { copies += 1; return { copied: false, status: 'session_started' }; },
+    } });
+    const malformed = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 1, extra: true });
+    const outOfRange = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 11 });
+    const started = await invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 3, workerOrdinal: 1 });
+    assert(malformed.code === 'INVALID' && outOfRange.code === 'INVALID' && started.code === 'SESSION_STARTED' && copies === 1,
+      'only an exact bounded generation/worker pair reaches the controller, and a live worker is not copied again');
+  } },
+  { name: 'handoff bridge: ipc: restarting a quiet worker copies its new starter only in main and abandons it on clipboard failure', async run() {
+    const calls = []; let clipboardText = '';
+    const h = setup({
+      controller: {
+        restartWorker: async value => {
+          calls.push(['restart', value]);
+          return { copied: true, generation: 7, workerOrdinal: 2, workerCount: 3, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' };
+        },
+        abandonWorkerStarter: async value => { calls.push(['abandon', value]); return true; },
+      },
+      clipboard: { writeText: text => { clipboardText = text; }, readText: () => clipboardText, clear() {} },
+    });
+    const restarted = await invoke(h, IPC_CHANNELS.RESTART_WORKER, { generation: 7, workerOrdinal: 2 });
+    assert(restarted.success && restarted.copied && restarted.workerOrdinal === 2
+      && !Object.hasOwn(restarted, 'sessionCode') && clipboardText.includes('2ABCDEFGHJKLMNPQRSTUVWXYZ2')
+      && clipboardText.includes('You are resuming as worker 2 of 3')
+      && JSON.stringify(calls) === JSON.stringify([['restart', { generation: 7, workerOrdinal: 2 }]]),
+    'restart creates and copies the replacement capability in main only; renderer gets bounded success metadata');
+
+    const abandoned = [];
+    const failed = setup({
+      controller: {
+        restartWorker: async () => ({ copied: true, generation: 8, workerOrdinal: 1, workerCount: 1, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' }),
+        abandonWorkerStarter: async value => { abandoned.push(value); return true; },
+      },
+      clipboard: { writeText() { throw new Error('denied'); } },
+    });
+    const failure = await invoke(failed, IPC_CHANNELS.RESTART_WORKER, { generation: 8, workerOrdinal: 1 });
+    assert(failure.code === 'CLIPBOARD_FAILED' && JSON.stringify(abandoned) === JSON.stringify([{ generation: 8, workerOrdinal: 1 }]),
+      'a failed restart copy leaves the fresh starter recoverably available instead of stranding the quiet worker');
+  } },
+  { name: 'handoff bridge: ipc: worker pool refuses to write a starter after its canvas closes', async run() {
+    const gate = deferred(); let windows = []; let writes = 0; const abandoned = [];
+    const h = setup({
+      getCanvasWindows: () => windows,
+      controller: {
+        copyWorkerStarter: async () => gate.promise,
+        abandonWorkerStarter: async value => { abandoned.push(value); return true; },
+      },
+      clipboard: { writeText() { writes += 1; }, readText: () => '', clear() {} },
+    });
+    windows = [h.window];
+    const pending = invoke(h, IPC_CHANNELS.COPY_WORKER_STARTER, { generation: 9, workerOrdinal: 1 });
+    await settle(); windows = [];
+    gate.resolve({ copied: true, generation: 9, workerOrdinal: 1, workerCount: 1, sessionCode: '2ABCDEFGHJKLMNPQRSTUVWXYZ2' });
+    const result = await pending;
+    assert(result.code === 'NO_WINDOW' && writes === 0
+      && JSON.stringify(abandoned) === JSON.stringify([{ generation: 9, workerOrdinal: 1 }]),
+    'a canvas that closed during pool preparation cannot write or strand a reserved starter');
   } },
   { name: 'handoff bridge: ipc: a re-copied starter is reported as recopied with its ordinal, and a rotated one is not', async run() {
     const calls = [];
@@ -833,12 +939,47 @@ export default [
       && (await invoke(generic, IPC_CHANNELS.SET_ENABLED, { enabled: true })).code === 'UNAVAILABLE',
     'only the fixed Cloudflare tunnel-not-serving diagnostic crosses the startup IPC boundary');
   } },
-  { name: 'handoff bridge: ipc: long enable consent persists after enable and fails closed on persistence error', async run() {
+  { name: 'handoff bridge: ipc: long enable consent persists before enable and rolls back only on a failed start', async run() {
     const calls = []; const good = setup({ controller: { enable: async value => { calls.push(value); return { success: true }; } }, enableConsent: { accept: async details => { calls.push(details.long ? 'accept-long' : 'accept-short'); return { ok: true }; } } });
-    assert((await invoke(good, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success && JSON.stringify(calls) === JSON.stringify([{ confirmed: true, restartConfirmed: true }, 'accept-long']), 'a successful long enable records internal consent after transport enablement and satisfies this launch restart acknowledgement');
-    const failed = []; const bad = setup({ controller: { enable: async () => ({ success: true }), disable: async () => { failed.push('disable'); return { success: true }; } }, enableConsent: { accept: async () => ({ ok: false }) } });
+    assert((await invoke(good, IPC_CHANNELS.SET_ENABLED, { enabled: true })).success
+      && calls[0] === 'accept-long' && calls[1]?.confirmed === true && calls[1]?.restartConfirmed === true && calls[1]?.consentConfirmed === true
+      && calls[1]?.consentFingerprint === 'test-consent-fingerprint',
+    'a successful long enable conditionally persists its bound main-owned consent before transport activation and satisfies this launch restart acknowledgement');
+    let enables = 0; const bad = setup({ controller: { enable: async () => { enables += 1; return { success: true }; } }, enableConsent: { accept: async () => ({ ok: false }) } });
     const result = await invoke(bad, IPC_CHANNELS.SET_ENABLED, { enabled: true });
-    assert(result.code === 'UNAVAILABLE' && JSON.stringify(failed) === JSON.stringify(['disable']), 'unpersisted long consent immediately disables the bridge and exposes no consent state');
+    assert(result.code === 'UNAVAILABLE' && enables === 0, 'unpersisted long consent must never start the bridge');
+    const rollback = []; const failedStart = setup({
+      controller: { enable: async () => ({ success: false, code: 'tunnel_failed' }) },
+      enableConsent: { accept: async () => ({ ok: true }), revoke: async details => { rollback.push(details.consentFingerprint); return { ok: true }; } },
+    });
+    assert((await invoke(failedStart, IPC_CHANNELS.SET_ENABLED, { enabled: true })).code === 'UNAVAILABLE'
+      && JSON.stringify(rollback) === JSON.stringify(['test-consent-fingerprint']),
+    'a failed startup clears only the exact receipt it persisted before activation');
+  } },
+  { name: 'handoff bridge: ipc: a concurrent canvas config save cannot reuse a long enable sheet for a changed hostname', async run() {
+    const sheet = deferred(); let fingerprint = 'first-config'; let enables = 0; let accepts = 0; let reloads = 0;
+    const first = { id: 9, __isCanvasRenderer: true, sent: [], send() {} };
+    const second = { id: 10, __isCanvasRenderer: true, sent: [], send() {} };
+    const firstWindow = { __canvasFilePath: PATH, webContents: first, isDestroyed: () => false };
+    const secondWindow = { __canvasFilePath: PATH, webContents: second, isDestroyed: () => false };
+    const h = setup({
+      getCanvasWindows: () => [firstWindow, secondWindow],
+      dialogs: { ask: async (_sender, kind) => kind === 'enable' ? sheet.promise : { ok: true } },
+      controller: { enable: async () => { enables += 1; return { success: true }; }, reloadConfig: async () => { reloads += 1; return { success: true }; } },
+      store: { writeConfig: async patch => { if (patch.hostname === 'second.example.com') fingerprint = 'second-config'; return { ok: true }; } },
+      enableConsent: {
+        describe: async () => ({ hostname: 'first.example.com', consentFingerprint: 'first-config', idlePauseMinutes: 1440, items: [], long: true }),
+        verify: async details => ({ ok: details.consentFingerprint === fingerprint }),
+        accept: async () => { accepts += 1; return { ok: true }; },
+      },
+    });
+    const enable = h.ipc.handlers.get(IPC_CHANNELS.SET_ENABLED)({ sender: first }, { enabled: true });
+    await settle();
+    const saved = await h.ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)({ sender: second }, { patch: { hostname: 'second.example.com' } });
+    sheet.resolve({ ok: true });
+    const result = await enable;
+    assert(saved.success && reloads === 1 && result.code === 'UNAVAILABLE' && enables === 0 && accepts === 0,
+      'a SAVE_CONFIG/reload from a second canvas while the first enable sheet is open invalidates that sheet before activation or consent persistence');
   } },
   { name: 'handoff bridge: ipc: unrelease-push accepts only a canonical hub key', async run() {
     let called = 0; const h = setup({ push: { unrelease: async () => { called++; return { ok: true }; } } });

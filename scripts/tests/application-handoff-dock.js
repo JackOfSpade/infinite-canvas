@@ -108,9 +108,11 @@ const dockTests = [
       // than naming none at all. This is the one place the dock points at an
       // affordance it does not own, so the two have to be checked together.
       assert(dialog.includes('press Retry layout check on its card')
+        && dialog.includes('Needs an app update — this layout check must not be retried')
         && card.includes('Retry layout check')
-        && card.includes("localApplication.status === 'render-retry-required' && ("),
-      'the dock names the card\u2019s Retry layout check button, and the card still renders it for exactly that status');
+        && card.includes("localApplication.status === 'render-retry-required' && !localApplication.retryReproducesFailure")
+        && card.includes('App update required before this layout check can continue.'),
+      'the dock distinguishes retryable layout checks from current deterministic failures, whose card has no retry button');
       return { checkedActions: 1 };
     },
   },
@@ -128,7 +130,7 @@ const dockTests = [
       // only current one.
       assert(hook.includes('const freshStatus = result.localJob?.status || local.status;')
         && hook.includes('const workingState = applicationDockItemState(freshStatus);')
-        && hook.includes('workingApplicationDockRequest({ node, canvasFilePath, status: freshStatus })')
+        && hook.includes('retryReproducesFailure: result.localJob?.retryReproducesFailure === true')
         && !hook.includes('applicationDockItemState(local.status)'),
       'the dock classifies a working bundle from the status the main process just read, never from the node copy a poll has not refreshed');
       // A completed paste whose status has not caught up even in the manifest
@@ -145,12 +147,12 @@ const dockTests = [
       // The dock caps application prompts exactly where it caps scoring
       // prompts, and the chip strip is laid out for that many. If either
       // number moves, the other must move with it.
-      const jobPreferences = readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8');
-      const declared = /export const MANUAL_HANDOFF_CONCURRENCY = (\d+);/.exec(jobPreferences);
-      assert(declared, 'MANUAL_HANDOFF_CONCURRENCY must remain a literal export in jobPreferences.js');
+      const scheduler = readFileSync(new URL('../../src/utils/handoffScheduler.js', import.meta.url), 'utf8');
+      const declared = /export const HANDOFF_CONCURRENCY = (\d+);/.exec(scheduler);
+      assert(declared, 'HANDOFF_CONCURRENCY must remain a literal export in the shared handoff scheduler');
       assert(
         Number(declared[1]) === APPLICATION_HANDOFF_LIMIT,
-        `APPLICATION_HANDOFF_LIMIT (${APPLICATION_HANDOFF_LIMIT}) must equal MANUAL_HANDOFF_CONCURRENCY (${declared[1]})`,
+        `APPLICATION_HANDOFF_LIMIT (${APPLICATION_HANDOFF_LIMIT}) must equal HANDOFF_CONCURRENCY (${declared[1]})`,
       );
       const dock = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
       assert(
@@ -666,8 +668,9 @@ const dockTests = [
       const blocked = workingApplicationDockRequest({
         node: jobCard('card-2', pasteJob('job-2', 'render-retry-required')),
         status: 'render-retry-required',
+        retryReproducesFailure: true,
       });
-      assert(blocked.workingState === 'blocked', 'render-retry-required must classify as blocked');
+      assert(blocked.workingState === 'blocked' && blocked.retryReproducesFailure === true, 'render-retry-required must retain its app-fix retry guard in the dock');
     },
   },
   {
@@ -1470,8 +1473,11 @@ const dockTests = [
       // and defensive there about a missing or malformed queue/jobs shape.
       assert(
         dock.includes('const isBridgeHeldApplication = isApplicationRequest && isBridgeHeldJob(bridgeStatus, activeRequest?.jobId);')
-        && dock.includes("from '../utils/bridgeHeldApplication'"),
-        'isBridgeHeldApplication must gate on isApplicationRequest first, then use the shared held rule',
+        && dock.includes("from '../utils/bridgeHeldApplication'")
+        && dock.includes("from '../utils/bridgeHeldPush'")
+        && dock.includes('const isBridgeHeldPushRequest = !isApplicationRequest && isBridgeHeldPush(bridgeStatus, activeRequest?.bridgeClaimId);')
+        && dock.includes('const isBridgeHeldRequest = isBridgeHeldApplication || isBridgeHeldPushRequest'),
+        'application lanes and ordinary handoffs must use their separate, exact shared held rules',
       );
       const heldRule = readFileSync(new URL('../../src/utils/bridgeHeldApplication.js', import.meta.url), 'utf8');
       assert(
@@ -1484,8 +1490,8 @@ const dockTests = [
       // Isolate the bridge-held branch's own markup from its two neighbors:
       // applicationWorkingState's branch before it, and the ordinary
       // copy/paste fragment after it.
-      const heldStart = dock.indexOf(') : isBridgeHeldApplication ? (');
-      assert(heldStart >= 0, 'the render ternary must add a isBridgeHeldApplication branch');
+      const heldStart = dock.indexOf(') : isBridgeHeldRequest ? (');
+      assert(heldStart >= 0, 'the render ternary must add the shared exact-held branch');
       const unheldMarker = ') : (\n            <>';
       const unheldStart = dock.indexOf(unheldMarker, heldStart);
       assert(unheldStart > heldStart, 'the bridge-held branch must sit before the ordinary copy/paste fragment, not replace it');
@@ -1494,20 +1500,27 @@ const dockTests = [
       assert(unheldEnd > unheldStart, 'the ordinary copy/paste fragment must still close the same form');
       const unheldBlock = dock.slice(unheldStart, unheldEnd);
 
-      // Held: a calm status line, and only the one control this dock still
-      // owns for such an item — Discard bundle. No prompt box, no paste box,
-      // no Submit response, no Copy prompt.
+      // Held: a calm status line. Application bundles retain their one dock
+      // control (Discard); ordinary push work has no equivalent discard.
+      // Neither kind may expose a second answer path while ChatGPT owns it.
       assert(heldBlock.includes('Handed to ChatGPT') && !heldBlock.includes('Working in ChatGPT'),
-        'a bridge-held application item must show the "Handed to ChatGPT" state, a headline true before any chat has started');
-      assert(!/paste/i.test(heldBlock.slice(heldBlock.indexOf('role="status"'), heldBlock.indexOf('Discard bundle'))),
-        'the held status box must not mention pasting: BridgeProgress beneath it owns any paste instruction');
-      assert(dock.includes('{activeRequest?.handoffCode && !isBridgeHeldApplication && ('),
-        'the header handoff-code chip belongs to the copy/paste flow and must be hidden for a bridge-held application');
-      assert(heldBlock.includes('Discard bundle') && heldBlock.includes('requestApplicationDiscardConfirm'),
-        'a bridge-held application item must still offer Discard bundle');
+        'a bridge-held item must show the "Handed to ChatGPT" state, a headline true before any chat has started');
+      assert(dock.includes('{activeRequest?.handoffCode && !isBridgeHeldRequest && !isMcpRoutedRequest && ('),
+        'the header handoff-code chip belongs to the copy/paste flow and must be hidden for either exact held request kind');
+      assert(heldBlock.includes('{isBridgeHeldApplication ? (')
+        && heldBlock.includes('onClick={requestApplicationDiscardConfirm}')
+        && heldBlock.includes("{isDiscarding ? 'Discarding…' : 'Discard bundle'}")
+        && heldBlock.includes('onClick={requestCancelConfirm}')
+        && heldBlock.includes("{isCancelling ? 'Cancelling…' : 'Cancel task'}"),
+      'the held branch keeps Discard only for an application and gives its claimed push sibling the normal destructive Cancel task action');
       // Live progress renders beside the calm status line, not inside its live
       // region: the elapsed timers tick every second and must not re-announce.
-      assert(heldBlock.includes('<BridgeProgress status={bridgeStatus} item={activeRequest} />')
+      assert(heldBlock.includes('<BridgeProgress')
+        && heldBlock.includes('status={bridgeStatus}')
+        && heldBlock.includes('item={activeRequest}')
+        && heldBlock.includes('isPush={!isApplicationRequest}')
+        && heldBlock.includes('canPauseAndSave={canPauseAndSaveJobSearch}')
+        && heldBlock.includes('onPauseAndSave={requestJobSearchPauseAndSave}')
         && dock.includes("import { BridgeProgress } from './BridgeProgress';")
         && heldBlock.indexOf('<BridgeProgress') > heldBlock.lastIndexOf('</div>') - 200
         && heldBlock.indexOf('<BridgeProgress') > heldBlock.indexOf('Discard bundle'),
@@ -1521,16 +1534,30 @@ const dockTests = [
         'a bridge-held application item must not render the prompt textarea, the paste textarea, Submit response, or Copy prompt',
       );
 
-      // Unheld (and every push item, which can never reach this ternary
-      // branch at all): today's exact copy/paste workflow, untouched.
+      // An unheld application retains its established local handoff workflow.
+      // Reviewed push work is the only MCP-routed unheld kind, and it must not
+      // regain copy/paste controls when status is stale, disabled, paused,
+      // unlinked, or waiting for an exact claim.
       assert(
-        unheldBlock.includes('id="non-api-ai-prompt"')
+        unheldBlock.includes('{!isMcpRoutedRequest && (')
+        && unheldBlock.includes('id="non-api-ai-prompt"')
         && unheldBlock.includes('id="non-api-ai-response"')
         && unheldBlock.includes('Paste AI response')
         && unheldBlock.includes('Submit response')
         && unheldBlock.includes('Copy prompt'),
-        'an application item the bridge does not hold, and every push item, must keep rendering the prompt box, the paste box, Submit response and Copy prompt',
+        'the manual fragment keeps the full prompt/response workflow available for unheld application work',
       );
+      assert(
+        dock.includes('const isMcpRoutedRequest = !isApplicationRequest && activeRequest?.mcpEligible !== false;')
+        && dock.includes('<BridgeProgress')
+        && !dock.includes('Queued for automatic ChatGPT delivery')
+        && !dock.includes('prepare the worker plan below. It creates one worker chat for each known work unit, up to 10; then copy each unique starter into its own ChatGPT chat')
+        && !dock.includes('Use manual prompt/response fallback')
+        && !dock.includes('isBridgeAvailablePush(bridgeStatus, activeRequest?.bridgeClaimId)'),
+        'a main-issued route, rather than momentary bridge availability, keeps eligible text on the automatic loop without duplicating its worker instructions',
+      );
+      assert(!dock.includes('manualFallbackRequestIds') && !dock.includes('setManualFallbackRequestIds'),
+        'the renderer holds no local manual-takeover state for MCP text work');
     },
   },
 ];
@@ -1585,42 +1612,41 @@ const bridgeJobProgressTests = [
     },
   },
   {
-    name: 'bridge progress: stalled reuses the BRIDGE stalled copy and offers a new chat',
+    name: 'bridge progress: an old stalled flag never replaces an unanswered chat',
     run: () => {
-      // stalledSince is when the quiet began, so a job stalled for 4 minutes past the threshold was served 4 minutes ago.
+      // An old renderer snapshot may still contain these fields, but elapsed
+      // time does not prove a live chat is dead.
       const stalledJob = progressJob({ servedAt: PROGRESS_NOW - 4 * 60000, stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 });
       const view = progress({ job: stalledJob });
-      assert(view.kind === 'stalled' && view.tone === 'attention' && view.action === 'start-chat', 'stalled is attention with a start-chat action');
-      assert(view.headline === 'ChatGPT has been quiet for 4 min', view.headline);
-      assert(view.detail.includes('was given résumé 4 min ago') && view.detail.includes('start a fresh chat'), 'stalled detail must be the shared BRIDGE copy');
-      assert(view.since === PROGRESS_NOW - 4 * 60000 && view.lastHeard === PROGRESS_NOW - 20000, 'stalled times from stalledSince and reports the last call');
-      // The stall is the JOB's, not the chat's: another lane's stall never becomes this job's.
+      assert(view.kind === 'writing' && view.tone === 'working' && view.action === null, 'a stale flag cannot turn a slow answer into a start-chat action');
+      assert(view.headline === 'ChatGPT is working on: Résumé' && view.since === PROGRESS_NOW - 4 * 60000, 'the handoff stays working from its own served time');
       const otherLaneStalled = { outstanding: { ...progressChat().outstanding, stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 } };
       assert(progress({ chat: progressChat(otherLaneStalled) }).kind === 'writing', 'the chat\'s outstanding lane being stalled says nothing about a job that is not');
       assert(progress({ job: progressJob({ servedToChat: null }), chat: progressChat(otherLaneStalled) }).kind === 'queued', 'a job this chat was never handed is not the stalled one');
       assert(progress({ job: answeredJob({ stalled: true, stalledSince: PROGRESS_NOW - 4 * 60000 }) }).kind === 'queued', 'a job whose answer was accepted is not stalled, whatever stale flag rode along');
-      for (const state of ['ended', 'idle', 'full', 'awaiting-first-call']) {
-        assert(progress({ job: stalledJob, chat: progressChat({ state }) }).kind === 'stalled', `an awaited, stalled job is stalled even when the chat is ${state}`);
-      }
-      assert(progress({ job: stalledJob, chat: { ordinal: 0, state: 'none' } }).kind === 'stalled', 'an awaited, stalled job is stalled even when there is no chat');
+      assert(progress({ job: stalledJob, chat: progressChat({ state: 'ended' }) }).kind === 'chat-ended', 'a real ended chat, not age, offers recovery');
+      assert(progress({ job: stalledJob, chat: progressChat({ state: 'idle' }) }).kind === 'chat-ended', 'an idle chat is explicitly stopped');
+      assert(progress({ job: stalledJob, chat: progressChat({ state: 'full' }) }).kind === 'writing', 'a full chat still accepts its outstanding answer');
+      assert(progress({ job: stalledJob, chat: progressChat({ state: 'awaiting-first-call' }) }).kind === 'first-call', 'a chat that never called has explicit recovery');
+      assert(progress({ job: stalledJob, chat: { ordinal: 0, state: 'none' } }).kind === 'no-chat', 'no chat has explicit recovery');
       assert(progress({ job: progressJob({ phase: 'unread', stalled: true }), chat: progressChat(otherLaneStalled) }).kind === 'unread', 'an unread job was never served, so another lane\'s stall is not its stall');
       const anchoredOnServe = progress({ job: progressJob({ stalled: true, stalledSince: null }) });
-      assert(anchoredOnServe.kind === 'stalled' && anchoredOnServe.since === PROGRESS_NOW - 120000, 'with no stalledSince the job\'s own servedAt anchors the stall');
+      assert(anchoredOnServe.kind === 'writing' && anchoredOnServe.since === PROGRESS_NOW - 120000, 'the job\'s own servedAt informs working progress, not a dead-chat inference');
     },
   },
   {
     name: 'bridge progress: no chat, awaiting-first-call, full and ended each tell the person what to press',
     run: () => {
       const none = progress({ job: progressJob({ servedToChat: null }), chat: { ordinal: 0, state: 'none' } });
-      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.actionLabel === 'Copy chat starter' && none.tone === 'attention', 'no chat -> start-chat');
+      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.actionLabel === 'Prepare worker plan' && none.tone === 'attention', 'no chat -> sized worker plan');
       const first = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null }) });
-      assert(first.kind === 'first-call' && first.headline === 'Waiting for chat 1' && first.action === 'start-chat' && first.actionLabel === 'Copy starter', 'awaiting-first-call uses the panel\'s Copy starter label');
+      assert(first.kind === 'first-call' && first.headline === 'Waiting for chat 1' && first.action === 'start-chat' && first.actionLabel === 'Prepare worker plan', 'awaiting-first-call uses the worker-plan label');
       assert(first.lastHeard === null, 'a chat that has never called has nothing to report as last heard');
       const full = progress({ job: progressJob({ servedToChat: null }), chat: progressChat({ state: 'full' }) });
-      assert(full.kind === 'chat-full' && full.action === 'start-chat' && full.headline === 'Start a new chat', 'a full chat that was never handed this job needs a new chat');
+      assert(full.kind === 'chat-full' && full.action === 'start-chat' && full.headline === 'Chat limit reached', 'a full chat that was never handed this job needs fresh workers');
       assert(full.lastHeard === PROGRESS_NOW - 20000, 'a full chat reports its last call');
       const ended = progress({ chat: progressChat({ state: 'ended' }) });
-      assert(ended.kind === 'chat-ended' && ended.action === 'continue-chat' && ended.actionLabel === 'Copy Continue' && ended.detail.includes('Copy Continue and paste it into it'), 'an ended chat is continued');
+      assert(ended.kind === 'chat-ended' && ended.action === 'continue-chat' && ended.actionLabel === 'Copy Continue' && ended.detail.includes('Send Continue there, or prepare fresh workers.'), 'an ended chat is continued');
       assert(ended.lastHeard === PROGRESS_NOW - 20000, 'an ended chat reports its last call');
       assert(progress({ chat: { ordinal: 0, state: 'working' }, job: progressJob({ servedToChat: null }) }).kind === 'no-chat', 'a chat with no ordinal is not a chat');
       assert(progress({ chat: progressChat({ state: 'idle' }) }).action === 'continue-chat', 'an idle chat with a waiting job is continued');
@@ -1632,7 +1658,7 @@ const bridgeJobProgressTests = [
     run: () => {
       const unread = progress({ job: progressJob({ phase: 'unread', servedToChat: null }), chat: progressChat({ state: 'idle' }) });
       assert(unread.kind === 'chat-ended' && unread.action === 'continue-chat' && unread.actionLabel === 'Copy Continue' && unread.tone === 'attention', `an unread job in an idle chat must offer Copy Continue, got ${unread.kind}/${unread.action}`);
-      assert(unread.headline === 'Waiting for ChatGPT' && unread.detail.includes('Copy Continue and paste it into it'), 'it says what to do');
+      assert(unread.headline === 'Waiting for ChatGPT' && unread.detail.includes('Send Continue there, or prepare fresh workers.'), 'it says what to do');
       assert(unread.lastHeard === PROGRESS_NOW - 20000, 'and when the chat was last heard');
       // A working chat still describes an unread job as not read yet, and app-side work is unchanged.
       assert(progress({ job: progressJob({ phase: 'unread', servedToChat: null }), chat: progressChat({ state: 'working' }) }).kind === 'unread', 'a chat that is still calling will read it');
@@ -1707,11 +1733,11 @@ const bridgeJobProgressTests = [
     run: () => {
       const unreadJob = progressJob({ phase: 'unread', servedToChat: null });
       const none = progress({ job: unreadJob, chat: { ordinal: 0, state: 'none' } });
-      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.headline === 'No ChatGPT chat yet', 'an unread job with no chat is resolved by starting one');
-      assert(none.detail === 'Press Copy chat starter, then paste it into a new ChatGPT chat with the Infinite Canvas plugin selected.',
-        'the no-chat line names the button that copies the starter, then the one paste it owes');
+      assert(none.kind === 'no-chat' && none.action === 'start-chat' && none.headline === 'No worker chats yet', 'an unread job with no chat is resolved by starting the worker plan');
+      assert(none.detail === 'Prepare the worker plan, then copy each starter into a separate ChatGPT chat with the Infinite Canvas plugin selected.',
+        'the no-chat line names the worker plan and plugin selection without duplicating plan telemetry');
       const first = progress({ job: unreadJob, chat: progressChat({ state: 'awaiting-first-call', calls: 0, lastCallAt: null }) });
-      assert(first.kind === 'first-call' && first.action === 'start-chat' && first.actionLabel === 'Copy starter', 'an unread job in a chat that has not called yet is waiting for that first call');
+      assert(first.kind === 'first-call' && first.action === 'start-chat' && first.actionLabel === 'Prepare worker plan', 'an unread job in a chat that has not called yet can prepare the worker plan');
       for (const state of ['working', 'full', 'ended']) {
         const view = progress({ job: unreadJob, chat: progressChat({ state }) });
         assert(view.kind === 'unread' && view.headline === 'Not read yet' && view.action === null, `an unread job with a ${state} chat says only that it is not read yet`);
@@ -1856,20 +1882,19 @@ const bridgeHeldCardTests = [
         assert(!/paste|Continue AI handoff|Local AI|Handed to ChatGPT|With ChatGPT/i.test(`${line.title} ${line.detail} ${line.openLabel} ${line.pendingLabel} ${line.pendingTitle}`), `${name}: no paste-era or handed-off claim`);
       }
       // The four states the review named, spelled out.
-      assert(lines['no chat (attention)'].title === 'No ChatGPT chat yet' && lines['no chat (attention)'].needsYou, 'no chat: attention, needs you');
+      assert(lines['no chat (attention)'].title === 'No worker chats yet' && lines['no chat (attention)'].needsYou, 'no chat: attention, needs you');
       assert(lines['awaiting with an active chat (working)'].title === 'ChatGPT is working on: Résumé' && !lines['awaiting with an active chat (working)'].needsYou, 'an active chat that was served: working, no call to action');
       assert(lines.paused.title === 'Paused' && lines.paused.needsYou, 'paused: attention');
       assert(lines['host (the app is saving)'].title === 'The app is saving this' && !lines['host (the app is saving)'].needsYou, 'host: the app is saving');
       assert(lines['queued behind the chat limit'].title === 'Queued for the next chat', 'queued behind the limit says so');
       assert(lines['chat ended'].needsYou && lines['first call not made yet'].needsYou && lines['chat full, job never handed over'].needsYou, 'ended, first-call and full chats need the person');
 
-      // Stalled: the dock's headline counts minutes; the card must not, since
-      // its snapshot cannot tick. Same words, no number.
+      // A legacy stale marker must not make a slow application look abandoned.
       const stalledStatus = build({ stalled: true, stalledSince: PROGRESS_NOW - 12 * 60000 }, progressChat());
       const stalledDock = dockView(stalledStatus);
       const stalledLine = bridgeHeldCardLine(bridgeHeldKey(stalledStatus, JOB), paste);
-      assert(stalledDock.headline === 'ChatGPT has been quiet for 12 min' && stalledLine.title === 'ChatGPT has been quiet' && stalledDock.headline.startsWith(stalledLine.title) && stalledLine.needsYou, `stalled: ${stalledLine.title}`);
-      assert(bridgeHeldKey(stalledStatus, JOB) === bridgeHeldKey(build({ stalled: true, stalledSince: PROGRESS_NOW - 30 * 60000 }, progressChat()), JOB), 'the stalled key does not depend on the clock or the quiet age');
+      assert(stalledDock.headline === 'ChatGPT is working on: Résumé' && stalledLine.title === stalledDock.headline && !stalledLine.needsYou, `slow answer: ${stalledLine.title}`);
+      assert(bridgeHeldKey(stalledStatus, JOB) === bridgeHeldKey(build({ stalled: true, stalledSince: PROGRESS_NOW - 30 * 60000 }, progressChat()), JOB), 'a legacy stale marker does not alter the working card key');
 
       // Not held, or not a paste application the dock lists: the card's own wording stays.
       assert(bridgeHeldCardLine(null, paste) === null, 'not held: paste wording stays');
@@ -1892,19 +1917,22 @@ const bridgeHeldCardTests = [
       const held = readFileSync(new URL('../../src/utils/bridgeHeldApplication.js', import.meta.url), 'utf8');
       assert(held.includes('deriveBridgeJobProgress({') && held.includes('now: null'), 'the card key uses the dock\'s derivation with no clock');
       const progressView = readFileSync(new URL('../../src/components/BridgeProgress.jsx', import.meta.url), 'utf8');
-      assert(progressView.includes('deriveBridgeJobProgress({ job, chat, item, now, bridge: { paused: status?.paused === true, pluginName } })'), 'the dock derives from the same function and the same paused field');
+      assert(progressView.includes('isPush === true')
+        && progressView.includes('const ownerWorker = isPush === true')
+        && progressView.includes('deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName } })'),
+      'the dock’s explicit request kind keeps a token-bearing application on the shared lane derivation while passing only its exact owner-worker projection');
       const dialog = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
       assert(dialog.includes('isBridgeHeldJob(bridgeStatus, activeRequest?.jobId)') && !dialog.includes('BRIDGE_WORKING_PHASES'), 'the dock uses the same shared rule rather than its own copy');
     },
   },
   {
-    name: 'bridge copy: the plugin name is a parameter with a neutral fallback, and Copy chat starter is the only starter button on a stalled health card',
+    name: 'bridge copy: the plugin name is a parameter with a neutral fallback, and an old stalled marker offers no recovery action',
     run: () => {
       const named = BRIDGE_PROGRESS_COPY.noChat('my_plugin');
-      assert(named[1] === 'Press Copy chat starter, then paste it into a new ChatGPT chat with my_plugin selected.', named[1]);
-      assert(BRIDGE_PROGRESS_COPY.copiedNew('my_plugin') === 'Copied. Now switch to ChatGPT, open a new chat, type @ and pick my_plugin, then paste and send.', 'copiedNew names the configured plugin');
-      assert(BRIDGE_PROGRESS_COPY.copiedAgain(3, 'my_plugin') === 'Copied again: the same starter for chat 3. Paste it into a new ChatGPT chat with my_plugin selected.', 'copiedAgain names the chat and the plugin');
-      assert(BRIDGE_PROGRESS_COPY.copiedAgain(2, null) === 'Copied again: the same starter for chat 2. Paste it into a new ChatGPT chat with the Infinite Canvas plugin selected.', 'copiedAgain falls back to the neutral plugin name');
+      assert(named[1] === 'Prepare the worker plan, then copy each starter into a separate ChatGPT chat with my_plugin selected.', named[1]);
+      assert(BRIDGE_PROGRESS_COPY.copiedNew('my_plugin') === 'Copied the one-time starter. Now switch to ChatGPT, open a new chat, type @ and pick my_plugin, then paste and send. The plugin handles the queued handoffs automatically after that.', 'copiedNew names the configured plugin and automatic behavior');
+      assert(BRIDGE_PROGRESS_COPY.copiedAgain(3, 'my_plugin') === 'Copied again: the same one-time starter for chat 3. Paste and send it in a new ChatGPT chat with my_plugin selected; the plugin then handles the queue automatically.', 'copiedAgain names the chat, plugin, and automatic behavior');
+      assert(BRIDGE_PROGRESS_COPY.copiedAgain(2, null) === 'Copied again: the same one-time starter for chat 2. Paste and send it in a new ChatGPT chat with the Infinite Canvas plugin selected; the plugin then handles the queue automatically.', 'copiedAgain falls back to the neutral plugin name');
       for (const missing of [undefined, null, '', '   ', 5, {}]) {
         assert(BRIDGE_PROGRESS_COPY.noChat(missing)[1].includes('with the Infinite Canvas plugin selected') && BRIDGE_PROGRESS_COPY.copiedNew(missing).includes('pick the Infinite Canvas plugin,'), `fallback for ${JSON.stringify(missing)}`);
         assert(bridgePluginRef(missing) === 'the Infinite Canvas plugin', 'fallback ref');
@@ -1923,7 +1951,7 @@ const bridgeHeldCardTests = [
       status.tunnel.state = 'up'; status.tunnel.probe.state = 'ok'; status.link.state = 'linked'; status.windows.canvasOpen = true;
       Object.assign(status.chat, { state: 'working', ordinal: 1, outstanding: { stalled: true, stalledSince: PROGRESS_NOW - 120000 } });
       const health = deriveBridgeHealth(status, PROGRESS_NOW);
-      assert(health.id === 'stalled' && health.actions.map(action => action.id).join() === 'new-chat,open-dock', `stalled offers one starter button: ${health.actions.map(action => action.id)}`);
+      assert(health.id === 'working' && health.actions.length === 0, `a legacy stale marker leaves an active handoff working: ${health.actions.map(action => action.id)}`);
     },
   },
 ];

@@ -1,16 +1,17 @@
-// Parity and safety gates for the bridge seam in electron/ipc/nonApiAi.js. An answer submitted through the seam must
-// leave exactly the state a dock paste leaves, so the core test runs each scenario twice (paste, bridge) and diffs everything observable.
+// Safety gates for the bridge seam in electron/ipc/nonApiAi.js. Reviewed text
+// is plugin-only; these tests pin the route boundary, bridge acceptance, and
+// the remaining structurally manual recovery paths.
 import fs, { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  _resetNonApiAiHandoffLifecycle, assert, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
+  _resetNonApiAiHandoffLifecycle, assert, callLLMText, electronPkg, getNonApiAiHandoffLifecycle, handleSafe, ipcMain,
   registerNonApiAiHandlers, requestNonApiAi,
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
 import {
-  __claimAcceptedResponseFingerprintForTests, BRIDGE_EXCLUSION_REASONS, listBridgeableNonApiAiHandoffs, readBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
+  __claimAcceptedResponseFingerprintForTests, BRIDGE_EXCLUSION_REASONS, BRIDGE_RAW_RESEARCH_TASKS, BRIDGE_RELEASE_ONE_TASKS, listBridgeableNonApiAiHandoffs, onNonApiAiEvent, readBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
 } from '../../electron/ipc/nonApiAi.js';
-import { getKnownTaskIds } from '../../electron/ipc/llm.js';
+import { callLLMRaw, getKnownTaskIds } from '../../electron/ipc/llm.js';
 
 const source = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
 const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
@@ -23,10 +24,10 @@ const answer = (request, text = 'ok') => JSON.stringify({ handoffCode: request.h
 const without = (object, keys) => Object.fromEntries(Object.entries(object).filter(([key]) => !keys.includes(key)));
 let senderSeq = 0;
 
-function freshHarness() {
+function freshHarness(handlerOptions) {
   ipcMain.__clearInvokeHandlers();
   _resetNonApiAiHandoffLifecycle();
-  registerNonApiAiHandlers();
+  registerNonApiAiHandlers(handlerOptions);
   senderSeq += 1;
   const sent = [];
   const sender = { id: 51000 + senderSeq, isDestroyed: () => false, once: () => {}, removeListener: () => {}, send: (channel, payload) => sent.push({ channel, payload }) };
@@ -63,8 +64,14 @@ async function durableSteps(runId) {
 
 // Everything a dock or a bug report can observe, with volatile ids masked.
 function observe({ sent, lifecycle, steps, logs, values, requestIds }) {
+  // The dock-only bridge claim token is freshly random for each request. It
+  // neither changes the prompt/response contract nor crosses the bridge
+  // seam, so exclude it from the transport-parity snapshot alongside ids.
+  const stableSent = sent.map(entry => entry?.channel === 'non-api-ai-request'
+    ? { ...entry, payload: without(entry.payload || {}, ['bridgeClaimId']) }
+    : entry);
   let text = JSON.stringify({
-    sent,
+    sent: stableSent,
     lifecycle: lifecycle.map(receipt => ({
       ...without(receipt, ['issuedAt', 'updatedAt', 'windowId', 'acceptedAt', 'settledAt', 'failures']),
       accepted: receipt.acceptedAt != null,
@@ -241,9 +248,8 @@ const MATRIX_EXPECTATIONS = Object.freeze({
 // eligibility check or makes one entry point bypass the shared accept body.
 const MATRIX_KINDS = Object.freeze([
   { id: 'K1', task: TASK, expectedExclusion: null },
-  // Raw-text preference research is deliberately never bridgeable.  Every
-  // response row executes this `free_text` refusal below; the dock path still
-  // proves that the refusal leaves the pending record untouched.
+  // Even a reviewed raw-research task stays default-denied without the exact
+  // grounding contract. Every response row executes this `free_text` refusal.
   { id: 'K2', task: 'job-preference-research-batch', requestKind: 'raw-text', expectedExclusion: 'free_text' },
   { id: 'K3', task: TASK, successor: true, expectedExclusion: null },
   { id: 'K4', task: TASK, attachmentPaths: ['/Users/synthetic/attachment.txt'], expectedExclusion: 'attachment' },
@@ -353,9 +359,15 @@ async function runMatrixCell({ kind, row, via }) {
       response: matrixResponse(requests[0], row), ...allow,
     });
     assert(refused.outcome === 'ineligible' && refused.exclusion === kind.expectedExclusion, `${kind.id}/${row}: structural exclusion executes before validation`);
-    const dock = await handler('submit-non-api-ai-response')({ sender }, { requestId: requests[0].requestId, response: matrixResponse(requests[0], 'valid') });
-    assertIpcTuple(dock, `${kind.id}/${row} dock untouched`);
-    assert(dock.accepted === true, `${kind.id}/${row}: an excluded bridge record remains live for the dock`);
+    if (kind.id === 'K7') {
+      const dock = await handler('submit-non-api-ai-response')({ sender }, { requestId: requests[0].requestId, response: matrixResponse(requests[0], 'valid') });
+      assert(dock.accepted === false && dock.validationErrors?.[0]?.includes('ChatGPT plugin'), `${kind.id}/${row}: a scope-excluded MCP record stays plugin-only`);
+      await handler('cancel-non-api-ai-request')({ sender }, { requestId: requests[0].requestId });
+    } else {
+      const dock = await handler('submit-non-api-ai-response')({ sender }, { requestId: requests[0].requestId, response: matrixResponse(requests[0], 'valid') });
+      assertIpcTuple(dock, `${kind.id}/${row} dock untouched`);
+      assert(dock.accepted === true, `${kind.id}/${row}: a structurally manual record remains live for the dock`);
+    }
     await settleRun();
   } else if (row === 'not_pending') {
     await handler('cancel-non-api-ai-request')({ sender }, { requestId: requests[0].requestId });
@@ -468,7 +480,7 @@ async function runMatrixCell({ kind, row, via }) {
   const events = sent.map(entry => entry.channel);
   assert(events.includes('non-api-ai-request'), `${kind.id}/${row}: ordered request event exists`);
   const durable = await durableSteps(runId).catch(() => []);
-  if (!runRejected && !['not_pending', 'cancelled_during_save'].includes(row)) {
+  if (!runRejected && kind.id !== 'K7' && !['not_pending', 'cancelled_during_save'].includes(row)) {
     assert(durable.some(step => step.status === 'accepted'), `${kind.id}/${row}: durable accepted status is observed before cleanup`);
   }
   const serializedEvents = JSON.stringify(sent)
@@ -478,8 +490,6 @@ async function runMatrixCell({ kind, row, via }) {
   await handler('complete-non-api-ai-run')({ sender }, { runId }).catch(() => {});
   return { events: serializedEvents, lifecycle: lifecycle.map(entry => entry.outcome), durable, values: resolvedValues, runRejected, logs: logLines };
 }
-
-const differing = (a, b) => Object.keys({ ...a, ...b }).filter(key => JSON.stringify(a[key]) !== JSON.stringify(b[key]));
 
 export default [
   {
@@ -492,22 +502,14 @@ export default [
       assert(MATRIX_EXPECTATIONS.K1[6] === 'duplicate' && MATRIX_EXPECTATIONS.K1[7] === 'not_pending'
         && MATRIX_EXPECTATIONS.K1[8] === 'busy' && MATRIX_EXPECTATIONS.K1[9] === 'cancelled_during_save'
         && MATRIX_EXPECTATIONS.K1[10] === 'commit_failed' && MATRIX_EXPECTATIONS.K1[11] === 'validation', 'R7-R12 stay in their frozen order');
-      // K1-K3 drive both public entry points against fresh records.  K4-K7
-      // execute each bridge exclusion and then prove the untouched record is
-      // still usable by the dock.  Keeping all 84 cells in one test preserves
+      // MCP-routed K1/K3/K6 drive the plugin entry point only: the renderer
+      // IPC is intentionally denied for those records. K4/K5 remain manual
+      // and K2/K7 are excluded. Keeping all 84 cells in one test preserves
       // the verified eight-test file contract while making each declaration a
       // real controlled behaviour.
       for (const kind of MATRIX_KINDS) {
         for (const row of MATRIX_RESPONSES) {
-          const bridge = await runMatrixCell({ kind, row, via: 'bridge' });
-          if (!kind.expectedExclusion) {
-            const ipc = await runMatrixCell({ kind, row, via: 'ipc' });
-            assert(bridge.events === ipc.events, `${kind.id}/${row}: bridge and dock preserve ordered event payloads`);
-            assert(bridge.lifecycle.join() === ipc.lifecycle.join(), `${kind.id}/${row}: bridge and dock preserve lifecycle outcomes`);
-            assert(JSON.stringify(bridge.durable) === JSON.stringify(ipc.durable), `${kind.id}/${row}: bridge and dock preserve durable status`);
-            assert(JSON.stringify(bridge.values) === JSON.stringify(ipc.values) && bridge.runRejected === ipc.runRejected, `${kind.id}/${row}: bridge and dock preserve resolved values and terminal state`);
-            assert(JSON.stringify(bridge.logs) === JSON.stringify(ipc.logs), `${kind.id}/${row}: bridge and dock preserve safe rejection logs`);
-          }
+          await runMatrixCell({ kind, row, via: 'bridge' });
         }
       }
       // These are intentionally internal and source-private.  The public
@@ -519,18 +521,16 @@ export default [
     },
   },
   {
-    name: 'non-API AI bridge seam: every scenario leaves identical dock events, durable steps, lifecycle receipts, logs and resolved values on the paste path and the bridge path',
+    name: 'non-API AI bridge seam: every reviewed scenario settles through the plugin path with durable receipts',
     run: async () => {
       let index = 0;
       for (const scenario of SCENARIOS) {
         index += 1;
         const nodeId = `bridge-seam-parity-node-${index}`;
         const runId = `bridge-seam-parity-run-${index}-${process.pid}-${Date.now()}`;
-        const paste = await runScenario({ via: 'ipc', scenario, nodeId, runId });
         const bridge = await runScenario({ via: 'bridge', scenario, nodeId, runId });
-        assert(JSON.stringify(paste.outcomes) === JSON.stringify(bridge.outcomes), `${scenario.name}: accept/reject sequence differs (${paste.outcomes} vs ${bridge.outcomes})`);
-        const diff = differing(paste.observables, bridge.observables);
-        assert(diff.length === 0, `${scenario.name}: observables differ in ${diff.join(', ')}`);
+        assert(bridge.outcomes.length > 0 && bridge.observables.lifecycle.length > 0,
+          `${scenario.name}: the plugin path records outcomes and a durable lifecycle receipt`);
       }
       return { scenarios: SCENARIOS.length };
     },
@@ -539,7 +539,7 @@ export default [
     name: 'non-API AI bridge seam: the IPC handler still returns exactly { accepted } or { accepted, validationErrors }',
     run: async () => {
       const { sender, waitFor } = freshHarness();
-      const run = startWorkflow({ sender, nodeId: 'bridge-seam-ipc-shape', runId: null, handoffs: [{ prompt: 'IPC SHAPE', batch: 1, batchTotal: 1, itemCount: 1 }] });
+      const run = startWorkflow({ sender, nodeId: 'bridge-seam-ipc-shape', runId: null, handoffs: [{ task: 'test-manual-ipc-shape', prompt: 'IPC SHAPE', batch: 1, batchTotal: 1, itemCount: 1 }] });
       const [request] = await waitFor(1);
       const submit = handler('submit-non-api-ai-response');
       const rejected = await submit({ sender }, { requestId: request.requestId, response: '{}' });
@@ -563,6 +563,7 @@ export default [
       const rejected = await submitNonApiAiResponseForBridge({ ...ids, response: answer(request), ...ALLOW });
       const dock = sent.filter(item => item.channel === 'non-api-ai-request').at(-1).payload;
       assert(rejected.outcome === 'rejected' && rejected.accepted === false && rejected.validationCode === 'VALIDATION_FAILED' && rejected.isCorrection === true
+        && request.mcpEligible === true && dock.mcpEligible === true
         && !JSON.stringify(rejected).includes(PRIVATE) && dock.validationError === PRIVATE, 'the dock keeps the precise message; the bridge outcome does not');
       assert(`${request.prompt}\n\n${rejected.correction}` === dock.prompt, 'base prompt plus the correction block is the dock retry prompt');
       const read = readBridgeableNonApiAiHandoff({ ...ids, ...ALLOW });
@@ -572,39 +573,254 @@ export default [
     },
   },
   {
-    name: 'non-API AI bridge seam: only text-only, structured, allowlisted, undrafted handoffs are listed, and the allowlist cannot unlock the structural exclusions',
+    name: 'non-API AI bridge seam: a queued-work forecast crosses only the main-process planning seam',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-queued-work-forecast';
+      const scopeId = 'db778d75-5dc2-4980-9d2e-95a917f8669b';
+      handleSafe('bridge-seam-queued-work-forecast-workflow', async (_event, _args, signal) => ({
+        values: await Promise.all([
+          callLLMText('QUEUED WORK FORECAST', {
+            signal,
+            task: TASK,
+            responseSchema: SCHEMA,
+            hints: {
+              itemCount: 10,
+              itemsDone: 145,
+              itemsTotal: 2058,
+              progressScopeId: scopeId,
+              progressUnitId: 'listing-evaluation-145',
+              progressUnits: 10,
+              queuedWorkForecast: { scopeId, remainingUnits: 192 },
+            },
+          }),
+          // Simulates a handoff already pending when this app update lands.
+          // It has the historic progress metadata but no new forecast field.
+          callLLMText('LEGACY QUEUED WORK FORECAST', {
+            signal,
+            task: 'job-preference-evaluation',
+            responseSchema: SCHEMA,
+            hints: {
+              itemCount: 10,
+              itemsDone: 145,
+              itemsTotal: 2058,
+              progressScopeId: scopeId,
+              progressUnitId: 'listing-evaluation-155',
+              progressUnits: 10,
+            },
+          }),
+          callLLMRaw('RAW RESEARCH QUEUED WORK FORECAST', {
+            signal,
+            task: 'job-preference-research-batch',
+            grounding: true,
+            hints: {
+              itemCount: 12,
+              batch: 71,
+              batchTotal: 209,
+              itemsDone: 840,
+              itemsTotal: 2508,
+              progressScopeId: scopeId,
+              progressUnitId: 'company-research-raw-71',
+              progressUnits: 12,
+              queuedWorkForecast: { scopeId, remainingUnits: 139 },
+            },
+            responseValidator: value => value,
+          }),
+        ]),
+      }));
+      const run = handler('bridge-seam-queued-work-forecast-workflow')({ sender }, { nodeId });
+      const requests = await waitFor(3);
+      const request = requests.find(item => item.prompt.includes('QUEUED WORK FORECAST') && !item.prompt.includes('LEGACY') && !item.prompt.includes('RAW RESEARCH'));
+      const legacy = requests.find(item => item.prompt.includes('LEGACY QUEUED WORK FORECAST'));
+      const rawResearch = requests.find(item => item.prompt.includes('RAW RESEARCH QUEUED WORK FORECAST'));
+      const listed = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([TASK, 'job-preference-evaluation', 'job-preference-research-batch']), allowNodeIds: new Set([nodeId]) }).handoffs;
+      const listedCurrent = listed.find(item => item.requestId === request?.requestId);
+      const listedLegacy = listed.find(item => item.requestId === legacy?.requestId);
+      const listedRawResearch = listed.find(item => item.requestId === rawResearch?.requestId);
+      assert(request && legacy && rawResearch
+        && !Object.hasOwn(request, 'queuedWorkForecast')
+        && !JSON.stringify(request).includes(scopeId)
+        && listedCurrent?.queuedWorkForecast?.scopeId === scopeId
+        && listedCurrent.queuedWorkForecast.remainingUnits === 192
+        && listedLegacy?.queuedWorkForecast?.scopeId === scopeId
+        && listedLegacy.queuedWorkForecast.remainingUnits === 192
+        && listedRawResearch?.queuedWorkForecast?.scopeId === scopeId
+        && listedRawResearch.queuedWorkForecast.remainingUnits === 139,
+      'the structured and raw LLM callers forward bounded forecasts to the private push seam, and an already-pending preference handoff derives the same aggregate without adding it to the renderer request');
+      await cancelAll(sender, requests);
+      await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: rolling preference research derives remaining work from accepted progress, not a straggler batch ordinal',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-rolling-research-forecast';
+      const scopeId = 'e64b5f45-98b8-467e-b1da-69631e5d17e8';
+      handleSafe('bridge-seam-rolling-research-forecast-workflow', async (_event, _args, signal) => ({
+        values: await Promise.all(Array.from({ length: 3 }, (_unused, index) => callLLMRaw(`ROLLING RESEARCH ${index + 1}`, {
+          signal,
+          task: 'job-preference-research-batch',
+          grounding: true,
+          hints: {
+            itemCount: 12,
+            batch: index + 1,
+            batchTotal: 3,
+            itemsDone: 0,
+            itemsTotal: 36,
+            progressScopeId: scopeId,
+            progressUnitId: `company-research-raw-${index + 1}`,
+            progressUnits: 12,
+            rootBatchSize: 12,
+            // This is the historical per-record ordinal forecast. Batch one
+            // remains open while batches two and three settle first.
+            queuedWorkForecast: { scopeId, remainingUnits: 3 - index },
+          },
+          responseValidator: value => value,
+        }))),
+      }));
+      const run = handler('bridge-seam-rolling-research-forecast-workflow')({ sender }, { nodeId });
+      const requests = await waitFor(3);
+      const byBatch = new Map(requests.map(request => [request.batch, request]));
+      const allow = {
+        allowTasks: new Set(['job-preference-research-batch']),
+        allowNodeIds: new Set([nodeId]),
+      };
+      for (const batch of [3, 2]) {
+        const request = byBatch.get(batch);
+        const accepted = await submitNonApiAiResponseForBridge({
+          requestId: request.requestId,
+          handoffCode: request.handoffCode,
+          response: `Handoff: ${request.handoffCode}\n\nresearch batch ${batch}`,
+          ...allow,
+        });
+        assert(accepted.accepted === true, `out-of-order batch ${batch} must settle`);
+      }
+      const oldest = byBatch.get(1);
+      const listed = listBridgeableNonApiAiHandoffs(allow).handoffs.find(item => item.requestId === oldest.requestId);
+      assert(listed?.queuedWorkForecast?.scopeId === scopeId
+        && listed.queuedWorkForecast.remainingUnits === 1,
+      `two later accepted 12-item batches leave exactly one root batch despite batch one's legacy ordinal forecast (${JSON.stringify(listed?.queuedWorkForecast)})`);
+      const acceptedOldest = await submitNonApiAiResponseForBridge({
+        requestId: oldest.requestId,
+        handoffCode: oldest.handoffCode,
+        response: `Handoff: ${oldest.handoffCode}\n\nresearch batch 1`,
+        ...allow,
+      });
+      assert(acceptedOldest.accepted === true, 'the oldest remaining batch still settles normally');
+      await run;
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: rolling listing evaluation derives remaining work from accepted progress, not a straggler forecast',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'bridge-seam-rolling-listing-forecast';
+      const scopeId = '3d4f2051-fd50-4e2b-b91e-b3e6fcf8ad57';
+      handleSafe('bridge-seam-rolling-listing-forecast-workflow', async (_event, _args, signal) => ({
+        values: await Promise.all(Array.from({ length: 3 }, (_unused, index) => callLLMText(`ROLLING LISTING ${index + 1}`, {
+          signal,
+          task: 'job-preference-evaluation',
+          responseSchema: SCHEMA,
+          hints: {
+            itemCount: 12,
+            batch: index + 1,
+            itemsDone: 0,
+            itemsTotal: 36,
+            progressScopeId: scopeId,
+            progressUnitId: `listing-evaluation-${index + 1}`,
+            progressUnits: 12,
+            // These issue-time estimates become stale while batch one waits.
+            // Omit rootBatchSize to cover the item's established fallback.
+            queuedWorkForecast: { scopeId, remainingUnits: 3 - index },
+          },
+        }))),
+      }));
+      const run = handler('bridge-seam-rolling-listing-forecast-workflow')({ sender }, { nodeId });
+      const requests = await waitFor(3);
+      const byBatch = new Map(requests.map(request => [request.batch, request]));
+      const allow = {
+        allowTasks: new Set(['job-preference-evaluation']),
+        allowNodeIds: new Set([nodeId]),
+      };
+      for (const batch of [3, 2]) {
+        const request = byBatch.get(batch);
+        const accepted = await submitNonApiAiResponseForBridge({
+          requestId: request.requestId,
+          handoffCode: request.handoffCode,
+          response: answer(request, `listing batch ${batch}`),
+          ...allow,
+        });
+        assert(accepted.accepted === true, `out-of-order listing batch ${batch} must settle`);
+      }
+      const oldest = byBatch.get(1);
+      const listed = listBridgeableNonApiAiHandoffs(allow).handoffs.find(item => item.requestId === oldest.requestId);
+      assert(listed?.queuedWorkForecast?.scopeId === scopeId
+        && listed.queuedWorkForecast.remainingUnits === 1,
+      `two later accepted 12-item listing batches leave one root batch despite batch one's static forecast (${JSON.stringify(listed?.queuedWorkForecast)})`);
+      const acceptedOldest = await submitNonApiAiResponseForBridge({
+        requestId: oldest.requestId,
+        handoffCode: oldest.handoffCode,
+        response: answer(oldest, 'listing batch 1'),
+        ...allow,
+      });
+      assert(acceptedOldest.accepted === true, 'the oldest remaining listing batch still settles normally');
+      await run;
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: only structured or reviewed validated research text is listed, and the allowlist cannot unlock structural exclusions',
     run: async () => {
       const { sender, waitFor } = freshHarness();
       const nodeId = 'bridge-seam-eligibility';
       handleSafe('bridge-seam-eligibility-workflow', async (_event, _args, signal) => ({
         values: await Promise.all([
-          requestNonApiAi({ prompt: 'OK', task: TASK, responseSchema: SCHEMA, batch: 1, batchTotal: 6, signal }),
+          requestNonApiAi({ prompt: 'OK', task: TASK, responseSchema: SCHEMA, batch: 1, batchTotal: 7, signal }),
           requestNonApiAi({ prompt: 'WITH FILE', task: 'vision-product-analysis', responseSchema: SCHEMA, attachmentPaths: ['/Users/private/photo.png'], signal }),
           requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research', responseSchema: SCHEMA, grounding: true, signal }),
           requestNonApiAi({ prompt: 'OTHER TASK', task: 'price-synthesis', responseSchema: SCHEMA, signal }),
-          requestNonApiAi({ prompt: 'DRAFTED', task: TASK, responseSchema: SCHEMA, batch: 5, batchTotal: 6, signal }),
+          requestNonApiAi({ prompt: 'DRAFTED', task: TASK, responseSchema: SCHEMA, initialResponse: 'PRIVATE_DRAFT_TEXT typed by the person', batch: 5, batchTotal: 7, signal }),
           requestNonApiAi({ prompt: 'SCHEMALESS', task: TASK, requestKind: 'raw-text', signal }),
+          requestNonApiAi({
+            prompt: 'VALIDATED RAW', task: 'job-preference-research', requestKind: 'raw-text', grounding: true, signal,
+            responseValidator: value => { if (!value.includes('research evidence')) throw new Error(PRIVATE); },
+          }),
         ]),
       }));
       const run = handler('bridge-seam-eligibility-workflow')({ sender }, { nodeId });
-      const requests = await waitFor(6);
+      const requests = await waitFor(7);
       const by = (text) => requests.find(request => request.prompt.includes(text));
-      await handler('update-non-api-ai-draft')({ sender }, { requestId: by('DRAFTED').requestId, response: 'PRIVATE_DRAFT_TEXT typed by the person' });
-      const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research', 'price-synthesis']), allowNodeIds: new Set([nodeId]) };
+      const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research', 'job-preference-research', 'price-synthesis']), allowNodeIds: new Set([nodeId]) };
       const listed = listBridgeableNonApiAiHandoffs(everything);
-      assert(listed.handoffs.length === 3 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.task === 'job-compensation-research') && listed.handoffs.some(item => item.batch === 1), 'the plain structured handoffs remain, and a structured grounded one now joins them');
+      const rawEntry = listed.handoffs.find(item => item.task === 'job-preference-research');
+      assert(by('OK').mcpEligible === true && by('WEB').mcpEligible === true && by('OTHER TASK').mcpEligible === true
+        && by('VALIDATED RAW').mcpEligible === true && by('WITH FILE').mcpEligible === false
+        && by('SCHEMALESS').mcpEligible === false && by('DRAFTED').mcpEligible === false,
+      'public requests carry a fixed main-owned MCP route for reviewed structured/raw text and an explicit manual route for attachments, unsafe raw text, and legacy drafts');
+      assert(listed.handoffs.length === 4 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.task === 'job-compensation-research') && listed.handoffs.some(item => item.batch === 1) && rawEntry?.responseFormat === 'text', 'structured handoffs and the exact reviewed validated raw-research contract are bridgeable');
+      assert(listed.handoffs.filter(item => item.task !== 'job-preference-research').every(item => item.responseFormat === 'json'), 'structured seam entries use only the closed json response format');
       assert(listed.excluded.attachment === 1 && listed.excluded.free_text === 1 && listed.excluded.person_editing === 1 && !('grounded' in listed.excluded), 'each exclusion counted once under its own reason, and grounding is no longer one of them');
       assert(listBridgeableNonApiAiHandoffs().handoffs.length === 0 && listBridgeableNonApiAiHandoffs().excluded.task_not_allowed === 4, 'no allowlist offers nothing');
       const otherHub = listBridgeableNonApiAiHandoffs({ ...ALLOW, allowNodeIds: new Set(['another-hub']) });
-      assert(otherHub.handoffs.length === 0 && otherHub.excluded.node_not_allowed === 2, 'an unselected hub offers nothing');
+      assert(otherHub.handoffs.length === 0 && otherHub.excluded.node_not_allowed === 1, 'an unselected hub offers nothing');
       const serialized = JSON.stringify(listed);
       assert(!serialized.includes('PRIVATE_DRAFT_TEXT') && !serialized.includes('/Users/private') && !serialized.includes('"prompt"'), 'the list carries no prompt, draft or path');
       const drafted = readBridgeableNonApiAiHandoff({ requestId: by('DRAFTED').requestId, handoffCode: by('DRAFTED').handoffCode, ...ALLOW });
       const attachment = readBridgeableNonApiAiHandoff({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, ...everything });
-      assert(drafted.reason === 'person_editing' && attachment.reason === 'attachment', 'reading re-applies the rules');
+      const rawRead = readBridgeableNonApiAiHandoff({ requestId: by('VALIDATED RAW').requestId, handoffCode: by('VALIDATED RAW').handoffCode, ...everything });
+      assert(drafted.reason === 'person_editing' && attachment.reason === 'attachment', 'reading re-applies the immutable route and structural rules');
+      assert(rawRead.ok && rawRead.responseFormat === 'text' && rawRead.prompt.includes('Expected response format: free text'), 'raw research read carries its closed format with the unchanged dock prompt');
+      const rawAccepted = await submitNonApiAiResponseForBridge({
+        requestId: by('VALIDATED RAW').requestId,
+        handoffCode: by('VALIDATED RAW').handoffCode,
+        response: `Handoff: ${by('VALIDATED RAW').handoffCode}\n\nvalidated research evidence`,
+        ...everything,
+      });
+      assert(rawAccepted.accepted === true, 'validated grounded research uses the same shared acceptance path');
       const refused = await submitNonApiAiResponseForBridge({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, response: answer(by('WITH FILE')), ...everything });
       assert(refused.outcome === 'ineligible' && refused.exclusion === 'attachment', 'submitting to an attachment handoff is refused untouched');
       assert(BRIDGE_EXCLUSION_REASONS.every(reason => reason in listed.excluded), 'every reason is reported');
+      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch', 'raw bridge eligibility remains an exact reviewed task set');
       await cancelAll(sender, requests);
       await run.catch(() => {});
     },
@@ -626,9 +842,41 @@ export default [
       assert(selected.handoffs.length === 1 && selected.handoffs[0].task === TASK, 'only the explicitly allowlisted task is bridgeable');
       assert(selected.excluded.task_not_allowed === tasks.length - 1, 'every other known task is default-denied');
       const allAllowed = listBridgeableNonApiAiHandoffs({ allowTasks: new Set(tasks), allowNodeIds: new Set([nodeId]) });
-      assert(allAllowed.handoffs.map(entry => entry.task).sort().join('\n') === tasks.join('\n'), 'the sweep covers every task id the router currently recognizes');
+      const reviewed = tasks.filter(task => BRIDGE_RELEASE_ONE_TASKS.includes(task));
+      assert(allAllowed.handoffs.map(entry => entry.task).sort().join('\n') === reviewed.join('\n')
+        && allAllowed.excluded.task_not_allowed === tasks.length - reviewed.length,
+      'the immutable route keeps never and unreviewed tasks out even when a caller passes an overly broad allowlist');
       await cancelAll(sender, requests);
       await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: exact sender-window and node consent prevents same-node cross-window borrowing',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const otherSent = [];
+      const otherSender = { id: sender.id + 1, isDestroyed: () => false, once: () => {}, removeListener: () => {}, send: (channel, payload) => otherSent.push({ channel, payload }) };
+      const nodeId = 'bridge-seam-window-collision';
+      handleSafe('bridge-seam-window-one', async (_event, _args, signal) => ({ value: await requestNonApiAi({ prompt: 'WINDOW ONE', task: TASK, responseSchema: SCHEMA, signal }) }));
+      handleSafe('bridge-seam-window-two', async (_event, _args, signal) => ({ value: await requestNonApiAi({ prompt: 'WINDOW TWO', task: TASK, responseSchema: SCHEMA, signal }) }));
+      const oneRun = handler('bridge-seam-window-one')({ sender }, { nodeId });
+      const twoRun = handler('bridge-seam-window-two')({ sender: otherSender }, { nodeId });
+      const [one] = await waitFor(1);
+      let two;
+      for (let attempt = 0; attempt < 100 && !two; attempt += 1) {
+        two = otherSent.find(item => item.channel === 'non-api-ai-request')?.payload;
+        if (!two) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(two, 'the second same-node window has its own pending handoff');
+      const allow = { ...ALLOW, allowNodeIds: new Set([nodeId]), allowWindowNodePairs: new Set([`${sender.id}\u0000${nodeId}`]) };
+      const listed = listBridgeableNonApiAiHandoffs(allow);
+      assert(listed.handoffs.length === 1 && listed.handoffs[0].requestId === one.requestId, 'list offers only the selected sender/window despite a matching node id');
+      assert((await readBridgeableNonApiAiHandoff({ requestId: two.requestId, handoffCode: two.handoffCode, ...allow })).reason === 'node_not_allowed', 'read applies the same exact-window gate');
+      assert((await submitNonApiAiResponseForBridge({ requestId: two.requestId, handoffCode: two.handoffCode, response: answer(two), ...allow })).outcome === 'ineligible', 'submit atomically rejects the other window before it can settle');
+      assert((await submitNonApiAiResponseForBridge({ requestId: one.requestId, handoffCode: one.handoffCode, response: answer(one), ...allow })).accepted, 'the authorized sender/window still accepts normally');
+      await oneRun;
+      await handler('cancel-non-api-ai-request')({ sender: otherSender }, { requestId: two.requestId });
+      await twoRun.catch(() => {});
     },
   },
   {
@@ -691,6 +939,82 @@ export default [
     },
   },
   {
+    name: 'non-API AI bridge seam: pending-registry wake-ups fire after delivery and settlement without exposing a record',
+    async run() {
+      const { sender, waitFor } = freshHarness();
+      let notifications = 0;
+      const stop = onNonApiAiEvent(() => { notifications += 1; });
+      try {
+        const run = startWorkflow({ sender, nodeId: 'bridge-seam-wakeup', runId: `bridge-seam-wakeup-${process.pid}`, handoffs: [{ prompt: 'WAKE', batch: 1, batchTotal: 1, itemCount: 1 }] });
+        const [request] = await waitFor(1);
+        assert(notifications === 1, 'the delivered pending request wakes observers exactly once');
+        const result = await submitNonApiAiResponseForBridge({ requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request), ...ALLOW, allowNodeIds: new Set(['bridge-seam-wakeup']) });
+        assert(result.accepted === true && notifications === 2, 'settlement wakes observers after the request has left the pending registry');
+        await run;
+      } finally { stop(); }
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: MCP-routed work rejects renderer manual takeover',
+    async run() {
+      const copied = [];
+      const { sender, waitFor } = freshHarness({ clipboard: { writeText: value => copied.push(value) } });
+      const nodeId = 'bridge-seam-manual-takeover';
+      const run = startWorkflow({ sender, nodeId, runId: `bridge-seam-manual-takeover-${process.pid}`, handoffs: [{ prompt: 'MANUAL TAKEOVER', batch: 1, batchTotal: 1, itemCount: 1 }] });
+      const [request] = await waitFor(1);
+      let notifications = 0;
+      const stop = onNonApiAiEvent(() => { notifications += 1; });
+      try {
+        const first = await handler('claim-non-api-ai-manual')({ sender }, { requestId: request.requestId });
+        const second = await handler('claim-non-api-ai-manual')({ sender }, { requestId: request.requestId });
+        const draft = await handler('update-non-api-ai-draft')({ sender }, { requestId: request.requestId, response: '{"answer":"bypass"}' });
+        const localSubmit = await handler('submit-non-api-ai-response')({ sender }, { requestId: request.requestId, response: answer(request) });
+        const allow = { ...ALLOW, allowNodeIds: new Set([nodeId]) };
+        const listed = listBridgeableNonApiAiHandoffs(allow);
+        const bridge = await submitNonApiAiResponseForBridge({ requestId: request.requestId, handoffCode: request.handoffCode, response: answer(request), ...allow });
+        assert(first.claimed === false && second.claimed === false && draft.saved === false
+          && localSubmit.accepted === false && localSubmit.validationErrors?.[0]?.includes('ChatGPT plugin')
+          && notifications === 1 && copied.length === 0,
+        'renderer IPC cannot claim, draft, or submit a reviewed MCP handoff');
+        assert(listed.handoffs.some(item => item.requestId === request.requestId) && listed.excluded.person_editing === 0
+          && bridge.accepted === true,
+        'the plugin remains the sole answer path and can settle the same request');
+      } finally {
+        stop();
+        await cancelAll(sender, [request]);
+        await run.catch(() => {});
+      }
+    },
+  },
+  {
+    name: 'non-API AI bridge seam: manual-only tasks retain clipboard failure recovery',
+    async run() {
+      for (const [label, clipboard] of [
+        ['unavailable', null],
+        ['rejected', { writeText() { throw new Error('synthetic clipboard refusal'); } }],
+      ]) {
+        const { sender, waitFor } = freshHarness({ clipboard });
+        const nodeId = `bridge-seam-clipboard-${label}`;
+        const run = startWorkflow({ sender, nodeId, runId: `${nodeId}-${process.pid}`, handoffs: [{ task: 'test-manual-clipboard', prompt: `CLIPBOARD ${label}`, batch: 1, batchTotal: 1, itemCount: 1 }] });
+        const [request] = await waitFor(1);
+        let notifications = 0;
+        const stop = onNonApiAiEvent(() => { notifications += 1; });
+        try {
+          const result = await handler('claim-non-api-ai-manual')({ sender }, { requestId: request.requestId });
+          const listed = listBridgeableNonApiAiHandoffs({ allowTasks: new Set(['test-manual-clipboard']), allowNodeIds: new Set([nodeId]) });
+          assert(result.claimed === false && result.copied === false && result.code === 'CLIPBOARD_FAILED'
+            && notifications === 0 && !listed.handoffs.some(item => item.requestId === request.requestId)
+            && listed.excluded.task_not_allowed === 1,
+          `${label} clipboard failure keeps an explicitly manual task local without mutating its state`);
+        } finally {
+          stop();
+          await cancelAll(sender, [request]);
+          await run.catch(() => {});
+        }
+      }
+    },
+  },
+  {
     name: 'non-API AI bridge seam: the accept body exists once, both entry points only call it, and the pinned log lines are untouched',
     run: () => {
       const between = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
@@ -698,11 +1022,14 @@ export default [
       const bridgeSubmit = between('export async function submitNonApiAiResponseForBridge(', '\n}\n');
       const forbidden = ['validateNonApiAiSubmission(', 'updateDurableStep(', 'settle(', 'record.resolve(', 'claimAcceptedResponseFingerprint(', 'updateHandoffLifecycle('];
       assert(forbidden.every(text => !ipcHandler.includes(text) && !bridgeSubmit.includes(text)), 'neither entry point re-implements validation, commit or settlement');
-      assert(ipcHandler.includes('await acceptNonApiAiResponse(record, args)') && bridgeSubmit.includes('await acceptNonApiAiResponse(record, { response })'), 'both call the one accept body');
+      assert(ipcHandler.includes('await acceptNonApiAiResponse(record, args)')
+        && bridgeSubmit.includes("await acceptNonApiAiResponse(record, { response }, { transport: 'bridge' })")
+        && !source.includes('args.transport'),
+      'the renderer uses the default accept body while only the internal bridge supplies its trusted transport marker');
       assert((source.match(/updateDurableStep\(record, \{ status: 'accepted'/g) || []).length === 1, 'exactly one accepted-commit site');
       const beforeCall = bridgeSubmit.slice(0, bridgeSubmit.indexOf('await acceptNonApiAiResponse')).split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
       assert(!beforeCall.includes('await '), 'no await between the eligibility checks and the accept body');
-      const seam = between('// ── In-process bridge seam', 'export function registerNonApiAiHandlers()');
+      const seam = between('// ── In-process bridge seam', 'export function registerNonApiAiHandlers(');
       assert(!/\.message|\.stack|validationErrors|validationError\b/.test(seam.replace(/record\.validationError\b/g, '')), 'the seam never reads an error message');
       assert(source.split('\n').filter(line => /Rejected response for task|Ignoring invalid (legacy )?saved response/.test(line)).length === 3, 'the exactly-three log-line pin holds');
     },

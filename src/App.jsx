@@ -1,7 +1,6 @@
 import React from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Canvas } from './Canvas';
 import { ToastProvider } from './components/ToastProvider';
 import { SessionStatusProvider } from './contexts/SessionStatusContext';
 import { ModuleRunQueueProvider } from './contexts/ModuleRunQueueContext';
@@ -14,6 +13,11 @@ import { HandoffBridgeGuard } from './components/HandoffBridgeBoundary';
 import { HandoffBridgePanel } from './components/HandoffBridgePanel';
 import { HandoffBridgeSetupDialog } from './components/HandoffBridgeSetupDialog';
 
+// The canvas owns the node implementations and most of the interaction
+// surface. Keep it out of the tiny application shell so Electron can paint
+// the providers and handoff recovery UI while the canvas chunk is loading.
+const Canvas = React.lazy(() => import('./Canvas').then(module => ({ default: module.Canvas })));
+
 export default function App() {
   return (
     <>
@@ -23,7 +27,9 @@ export default function App() {
             <ModuleRunQueueProvider>
               <JobSearchCoordinatorProvider>
                 <ReactFlowProvider>
-                  <Canvas />
+                  <React.Suspense fallback={null}>
+                    <Canvas />
+                  </React.Suspense>
                 </ReactFlowProvider>
               </JobSearchCoordinatorProvider>
             </ModuleRunQueueProvider>

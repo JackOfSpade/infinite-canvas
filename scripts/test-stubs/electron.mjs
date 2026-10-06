@@ -125,6 +125,12 @@ export const ipcRenderer = {
   removeListener: () => {},
 };
 
+let clipboardText = '';
+export const clipboard = {
+  writeText: (value) => { clipboardText = String(value); },
+  readText: () => clipboardText,
+};
+
 // Not real encryption (this is a plain-Node test stub — no OS keychain to
 // hook into) — a functional round-trip so callers exercising the real
 // safeStorage.isEncryptionAvailable()===true code path get meaningful
@@ -137,7 +143,7 @@ export const safeStorage = {
 
 const electron = {
   app, ipcMain, dialog, shell, BrowserWindow, BrowserView, protocol, Menu,
-  nativeImage, contextBridge, ipcRenderer, safeStorage,
+  nativeImage, contextBridge, ipcRenderer, clipboard, safeStorage,
 };
 
 export default electron;

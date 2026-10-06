@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
+import { onNonApiAiEvent } from '../nonApiAi.js';
 import { CONSTANTS } from './constants.js';
 import { IPC_EVENTS, STATUS_SNAPSHOT_EXAMPLE } from './contracts.js';
 import { fixedError } from './errors.js';
@@ -31,7 +32,7 @@ import { createHandoffBridgeDialogs } from './uiDialogs.js';
 import { registerHandoffBridgeUi } from './ui.js';
 import { createHandoffBridgeTray } from './tray.js';
 import { createHandoffBridgePower } from './power.js';
-import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
+import { clearBridgeChatCopyDiagnostic, clearBridgeQueueDiagnostic, clearClientAuthDiagnostic, clearFailedStartDiagnostic, clearMcpRateLimitDiagnostic, clearOAuthRejectionDiagnostic, clearSourceRejectionDiagnostic, getFailedStartDiagnosticLines, recordClientAuthDiagnostic, recordFailedStartDiagnostic, recordMcpRateLimitDiagnostic, recordOAuthRejectionDiagnostic, recordSourceRejectionDiagnostic, retireBridgeQueueDiagnosticProvider, setBridgeQueueDiagnosticProvider } from './telemetry.js';
 
 let registered = false;
 let startPromise = null;
@@ -49,8 +50,13 @@ const runtimeDisposals = new WeakMap();
 const runtimeDisposalModes = new WeakMap();
 const completedRuntimeDisposals = new WeakMap();
 const runtimeEnableOperations = new WeakMap();
+const runtimeConsentVersions = new WeakMap();
 const detachedPlatformOwners = new WeakSet();
-const ENABLE_CONSENT_VERSION = 1;
+// Version 2 covers the reviewed scoring, grounded-research, resume parsing,
+// and marketplace text families plus automatic push-hub selection. A v1
+// receipt authorized the earlier applications-only defaults and must never
+// silently start this wider surface.
+export const ENABLE_CONSENT_VERSION = 2;
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function safelyUnderTmp(candidate, tmpdir, realpath) {
@@ -117,7 +123,18 @@ function startEnableArgs(reason, deps = {}) {
   if (deps && typeof deps === 'object' && Object.hasOwn(deps, 'restartConfirmed')) {
     args.restartConfirmed = deps.restartConfirmed === true;
   }
+  if (deps?.consentConfirmed === true) args.consentConfirmed = true;
+  if (typeof deps?.consentFingerprint === 'string' && deps.consentFingerprint.length > 0 && deps.consentFingerprint.length <= 2048) {
+    args.consentFingerprint = deps.consentFingerprint;
+  }
   return args;
+}
+
+function hasCurrentLongConsentCapability(args) {
+  return args?.consentConfirmed === true
+    && typeof args?.consentFingerprint === 'string'
+    && args.consentFingerprint.length > 0
+    && args.consentFingerprint.length <= 2048;
 }
 
 function syncReportRedactedHosts(loaded) {
@@ -301,11 +318,11 @@ function safeBootstrapConfig(value) {
     pluginName: isValidPluginName(value?.pluginName) ? value.pluginName : 'infinite_canvas',
     scope: {
       applications: value?.scope?.applications !== false,
-      scoring: value?.scope?.scoring === true,
-      marketplace: value?.scope?.marketplace === true,
+      scoring: value?.scope?.scoring !== false,
+      marketplace: value?.scope?.marketplace !== false,
     },
-    autoStart: value?.autoStart === true,
-    autoRelease: value?.autoRelease === true,
+    autoStart: value?.autoStart !== false,
+    autoRelease: value?.autoRelease !== false,
     limits: Object.fromEntries(Object.entries(fallback.limits).map(([key, fallbackValue]) => [
       key,
       Number.isSafeInteger(limits[key]) && limits[key] >= 0 ? limits[key] : fallbackValue,
@@ -342,7 +359,15 @@ function readBootstrapState(context) {
       if (setup && typeof setup.then === 'function') setup = null;
     } catch { setup = null; }
   }
-  return { config: configUnreadable || bootstrapCleared ? null : (loaded.config || loaded), configUnreadable, setup };
+  return {
+    config: configUnreadable || bootstrapCleared ? null : (loaded.config || loaded),
+    configUnreadable,
+    // The store returns a normalized empty config for a missing file so the
+    // Settings UI has defaults. Diagnostics must retain the distinct durable
+    // fact that no configuration was actually saved.
+    configMissing: loaded?.state === 'missing',
+    setup,
+  };
 }
 
 function bootstrapSnapshot(context = bootstrapContext) {
@@ -373,6 +398,7 @@ function bootstrapSnapshot(context = bootstrapContext) {
   snapshot.limits = configured.limits;
   snapshot.prefs = configured.prefs;
   snapshot.setup.hostnameOk = Boolean(configured.hostname);
+  snapshot.setup.consentCurrent = storedConfig?.consentVersion === ENABLE_CONSENT_VERSION;
   const binarySelected = !configUnreadable
     && typeof setup?.binaryPath === 'string'
     && /^[a-f0-9]{64}$/.test(setup?.pin || '');
@@ -391,6 +417,84 @@ function bootstrapSnapshot(context = bootstrapContext) {
   snapshot.setup.firstCallSeen = false;
   if (configUnreadable) snapshot.fault = { code: 'state_unreadable' };
   return snapshot;
+}
+
+// A saved report needs enough bootstrap evidence to distinguish "the bridge
+// did not try to start" from "the tunnel tried and failed."  Keep this
+// projection narrower than the public status object: it deliberately has no
+// hostname, receipt version, path, tunnel id, binary metadata, or error text.
+// The closed values below are safe to retain even before a runtime has emitted
+// an opted-in telemetry event.
+const DIAGNOSTIC_TUNNEL_STATES = new Set([
+  'off', 'blocked', 'needs-setup', 'needs-trust', 'starting', 'connecting',
+  'checking-public', 'up', 'degraded', 'backoff', 'paused', 'stopping',
+  'failed', 'unknown',
+]);
+
+function bootstrapConsentState(config, configState) {
+  if (configState !== 'present' || !Object.hasOwn(config || {}, 'consentVersion')) return 'missing';
+  return config.consentVersion === ENABLE_CONSENT_VERSION ? 'current' : 'stale';
+}
+
+function bootstrapStartupDecision({ configState, config, consent, live }) {
+  if (configState === 'unreadable') return 'state-unreadable';
+  if (configState !== 'present') return 'config-missing';
+  if (config?.autoStart !== true) return 'auto-start-off';
+  if (consent === 'missing') return 'missing-consent';
+  if (consent === 'stale') return 'stale-consent';
+  if (live === 'active') return 'runtime-active';
+  if (live === 'starting') return 'starting';
+  return 'eligible-not-observed';
+}
+
+/**
+ * Return the privacy-safe bootstrap facts that bug reports need even when the
+ * bridge never emitted a runtime event.  This is intentionally not a status
+ * API: callers get only closed state names and booleans, never a user-provided
+ * hostname, local path, consent receipt/version, or tunnel diagnostic text.
+ */
+export function getHandoffBridgeBootstrapDiagnostic(context = bootstrapContext) {
+  try {
+    const { config, configUnreadable, configMissing } = readBootstrapState(context);
+    const configState = configUnreadable ? 'unreadable' : (configMissing || !config) ? 'missing' : 'present';
+    const consent = bootstrapConsentState(config, configState);
+    const useLiveStatus = context === bootstrapContext;
+    const status = useLiveStatus ? getHandoffBridgeStatus() : bootstrapSnapshot(context);
+    // An injected context is used by deterministic diagnostics/tests and must
+    // never inherit a different profile's in-process runtime state.
+    const live = useLiveStatus ? (runtime ? 'active' : startPromise ? 'starting' : 'inactive') : 'inactive';
+    const decision = bootstrapStartupDecision({ configState, config, consent, live });
+    const tunnelState = DIAGNOSTIC_TUNNEL_STATES.has(status?.tunnel?.state)
+      ? status.tunnel.state : 'unknown';
+    return {
+      config: configState,
+      consent,
+      autoStart: configState === 'present' ? (config?.autoStart === true ? 'on' : 'off') : 'unknown',
+      enabled: status?.enabled === true ? 'on' : 'off',
+      runtime: live,
+      tunnel: tunnelState,
+      setup: {
+        hostname: status?.setup?.hostnameOk === true ? 'ready' : 'missing',
+        binary: status?.setup?.binaryApproved === true ? 'ready' : 'missing',
+        credentials: status?.setup?.credentialsOk === true ? 'ready' : 'missing',
+        tunnelReachable: status?.setup?.tunnelReachable === true ? 'reachable' : 'not-reachable',
+      },
+      startup: {
+        decision,
+        refusal: ['state-unreadable', 'config-missing', 'auto-start-off', 'missing-consent', 'stale-consent'].includes(decision)
+          ? decision : 'none',
+      },
+    };
+  } catch {
+    // A corrupt store must still leave a bounded receipt in FULL/BRIDGE,
+    // rather than making the crucial "no runtime events" state invisible.
+    return {
+      config: 'unreadable', consent: 'missing', autoStart: 'unknown', enabled: 'off',
+      runtime: 'inactive', tunnel: 'unknown',
+      setup: { hostname: 'missing', binary: 'missing', credentials: 'missing', tunnelReachable: 'not-reachable' },
+      startup: { decision: 'state-unreadable', refusal: 'state-unreadable' },
+    };
+  }
 }
 
 function activeController(current) {
@@ -583,6 +687,10 @@ function createControllerBridge() {
       if (args && typeof args === 'object' && Object.hasOwn(args, 'restartConfirmed')) {
         startDeps.restartConfirmed = args.restartConfirmed === true;
       }
+      if (args?.consentConfirmed === true) startDeps.consentConfirmed = true;
+      if (typeof args?.consentFingerprint === 'string' && args.consentFingerprint.length <= 2048) {
+        startDeps.consentFingerprint = args.consentFingerprint;
+      }
       return startHandoffBridge({ reason: 'manual', deps: startDeps });
     },
     disable: async () => disposeCurrentRuntime(),
@@ -590,7 +698,7 @@ function createControllerBridge() {
     forget: async () => forgetActiveRuntime(activeRuntimeForController(current), status),
     pause: call('pause'), resume: call('resume'), release: call('release'), unrelease: call('unrelease'),
     releasePushHubs: call('releasePushHubs'), unreleasePushHub: call('unreleasePushHub'),
-    newChat: call('newChat'), continueChat: call('continueChat'), prepareChat: call('prepareChat'), commitChat: call('commitChat'), abandonChat: call('abandonChat'),
+    newChat: call('newChat'), continueChat: call('continueChat'), startWorkerPool: call('startWorkerPool'), copyWorkerStarter: call('copyWorkerStarter'), restartWorker: call('restartWorker'), prepareChat: call('prepareChat'), commitChat: call('commitChat'), abandonChat: call('abandonChat'),
     getActivity: call('getActivity'),
     reloadConfig: async () => {
       const active = activeController(current);
@@ -641,6 +749,44 @@ function tunnelUiPort(setup = null) {
   });
 }
 
+// Keep this value deliberately structural and closed: it is a main-process
+// comparison token, not a renderer-visible authorization capability. Every
+// setting which can change what is disclosed or how long it stays reachable
+// participates, so a sheet cannot authorize a config saved by another window
+// while that sheet was open.
+function consentConfigFingerprint(config) {
+  if (!config || !isValidHostname(config.hostname)) return null;
+  const scope = config.scope || {};
+  const limits = config.limits || {};
+  const prefs = config.prefs || {};
+  if (![scope.applications, scope.scoring, scope.marketplace, config.autoStart, config.autoRelease,
+    prefs.pairingNetworkCheck].every(value => typeof value === 'boolean')
+    || !['enforce', 'alert', 'off'].includes(prefs.sourcePolicy)
+    || typeof config.pluginName !== 'string'
+    || !['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']
+      .every(key => Number.isSafeInteger(limits[key]) && limits[key] >= 0)) return null;
+  return JSON.stringify({
+    hostname: config.hostname,
+    pluginName: config.pluginName,
+    scope: { applications: scope.applications, scoring: scope.scoring, marketplace: scope.marketplace },
+    autoStart: config.autoStart,
+    autoRelease: config.autoRelease,
+    limits: {
+      releaseTtlHours: limits.releaseTtlHours,
+      chatKeyMaxAgeHours: limits.chatKeyMaxAgeHours,
+      idlePauseMinutes: limits.idlePauseMinutes,
+      jobsPerChat: limits.jobsPerChat,
+      epochSoftBytes: limits.epochSoftBytes,
+      epochHardBytes: limits.epochHardBytes,
+    },
+    prefs: { sourcePolicy: prefs.sourcePolicy, pairingNetworkCheck: prefs.pairingNetworkCheck },
+  });
+}
+
+function consentConfigChanged(before, after) {
+  return consentConfigFingerprint(before) !== consentConfigFingerprint(after);
+}
+
 function enableConsentPort({ userData, deps = {} } = {}) {
   const load = () => {
     try { return syncReportRedactedHosts((deps.readConfig || readConfig)(userData, deps))?.config || null; } catch { return null; }
@@ -648,6 +794,7 @@ function enableConsentPort({ userData, deps = {} } = {}) {
   const describe = async () => {
     const config = load();
     const hostname = isValidHostname(config?.hostname) ? config.hostname : null;
+    const consentFingerprint = consentConfigFingerprint(config);
     const groups = new Map();
     try {
       // This is intentionally the raw durable list: restart rehydration is
@@ -681,23 +828,54 @@ function enableConsentPort({ userData, deps = {} } = {}) {
       } catch { /* an unavailable canvas never makes untrusted text */ }
     }
     return {
-      // Hostname changes atomically reset this field in the write adapter,
-      // therefore a matching current version is also a matching address.
+      // Every disclosure-relevant config change atomically resets this field
+      // in the write adapter, so v2 always describes this exact fingerprint.
       long: config?.consentVersion !== ENABLE_CONSENT_VERSION,
       hostname,
+      consentFingerprint,
       idlePauseMinutes: config?.limits?.idlePauseMinutes,
       items,
     };
   };
-  const accept = async () => {
-    const config = load();
-    if (!config || config.consentVersion === ENABLE_CONSENT_VERSION) return true;
-    try {
-      const result = await (deps.writeConfig || writeConfig)(userData, { consentVersion: ENABLE_CONSENT_VERSION }, { linked: false });
-      return result?.ok === true;
-    } catch { return false; }
+  const verify = async details => {
+    const expected = typeof details?.consentFingerprint === 'string' ? details.consentFingerprint : null;
+    return !!expected && consentConfigFingerprint(load()) === expected;
   };
-  return Object.freeze({ describe, accept });
+  const accept = async details => {
+    const config = load();
+    const expected = typeof details?.consentFingerprint === 'string' ? details.consentFingerprint : null;
+    if (!config || !expected || consentConfigFingerprint(config) !== expected) return { ok: false, code: 'CONSENT_STALE' };
+    if (config.consentVersion === ENABLE_CONSENT_VERSION) return { ok: true };
+    try {
+      const result = await (deps.writeConfig || writeConfig)(userData, { consentVersion: ENABLE_CONSENT_VERSION }, {
+        linked: false,
+        isCurrentConfig: candidate => consentConfigFingerprint(candidate) === expected,
+        isConsentConfigChanged: consentConfigChanged,
+      });
+      if (result?.ok === true) {
+        if (runtime?.userData === userData) runtimeConsentVersions.set(runtime, ENABLE_CONSENT_VERSION);
+        return { ok: true };
+      }
+      return { ok: false, code: result?.code || 'CONSENT_STALE' };
+    } catch { return { ok: false, code: 'CONSENT_STALE' }; }
+  };
+  const revoke = async details => {
+    const expected = typeof details?.consentFingerprint === 'string' ? details.consentFingerprint : null;
+    if (!expected) return { ok: false, code: 'CONSENT_STALE' };
+    try {
+      const result = await (deps.writeConfig || writeConfig)(userData, { consentVersion: 0 }, {
+        linked: false,
+        isCurrentConfig: candidate => consentConfigFingerprint(candidate) === expected,
+        isConsentConfigChanged: consentConfigChanged,
+      });
+      if (result?.ok === true) {
+        if (runtime?.userData === userData) runtimeConsentVersions.set(runtime, 0);
+        return { ok: true };
+      }
+      return { ok: false, code: result?.code || 'CONSENT_STALE' };
+    } catch { return { ok: false, code: 'CONSENT_STALE' }; }
+  };
+  return Object.freeze({ describe, verify, accept, revoke });
 }
 
 
@@ -729,7 +907,7 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   const codeGuard = deps.codeGuard || createHandoffCodeGuard();
   const application = deps.application || createApplicationSource({ api: deps.applicationApi, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout, codeGuard });
   const hubKey = (canvasFilePath, nodeId) => crypto.createHash('sha256').update(`${canvasFilePath}\n${nodeId}`, 'utf8').digest('hex');
-  const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey, codeGuard });
+  const push = deps.push || createPushSource({ seam: deps.pushSeam, now, timers, windows, hubKey, codeGuard, autoSelectHubs: true });
   let pairing;
   let controller;
   const oauthStore = deps.oauthStore || createOAuthStore({ filePath: path.join(userData, 'handoff-bridge', 'oauth-state.json'), fsImpl: deps.fsImpl });
@@ -832,6 +1010,11 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       // reduced the caller's network to a class before it reaches here.
       if (!bridgeDiagnosticsEnabled()) return;
       recordSourceRejectionDiagnostic({ telemetry: true, ...event, at: now() });
+    }, recordMcpRateLimit: event => {
+      // HTTP passes only its bounded Retry-After delay. Never retain the
+      // link/grant that selected the bucket, an address, or request content.
+      if (!bridgeDiagnosticsEnabled()) return;
+      recordMcpRateLimitDiagnostic({ telemetry: true, retryAfterSeconds: event?.retryAfterSeconds, at: now() });
     } },
     audit: { write: entry => {
       const event = entry?.ev;
@@ -969,6 +1152,14 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
     showFixedNotification(kind);
   };
   controller = deps.controller || createHandoffBridgeController({ now, timers, config, enabled: false, audit, log: bridgeLog, windows, tunnel, engine, listener,
+    enableConsentVersion: ENABLE_CONSENT_VERSION,
+    matchesEnableConsent: (candidate, expected) => consentConfigFingerprint(candidate) === expected,
+    currentEnableConsentMatches: expected => {
+      try {
+        const loaded = syncReportRedactedHosts((deps.readConfig || readConfig)(userData, deps));
+        return consentConfigFingerprint(loaded?.config) === expected;
+      } catch { return false; }
+    },
     waitForTunnelOnline: waitForOwnedTunnelOnline,
     ui: { confirmEnable: dialogConfirm('enable'), confirmRestart: dialogConfirm('restart'), notify: controllerNotification },
     oauth: {
@@ -1049,13 +1240,20 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       enabled: status.enabled === true,
       serving: status.serving,
       autoRelease: status.autoRelease === true,
+      setup: status.setup,
       paused: inner.paused === true ? (inner.pauseCause || 'user') : null,
       fault: inner.fault ?? status.fault ?? null,
+      scope: status.config?.scope,
+      limits: status.limits,
       queue: inner.queue?.applications,
       chat: inner.chat,
       keys: inner.keys,
       lanes: inner.queue?.jobs,
       counts: inner.counts,
+      push: inner.queue?.push,
+      // Closed, content-free activity items only. telemetry.js revalidates and
+      // caps this again before a FULL report can render it.
+      activity: bridgeLog.getRecent?.() || [],
     };
   };
   setBridgeQueueDiagnosticProvider(bridgeQueueProvider);
@@ -1073,7 +1271,12 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
       });
     } catch { /* power policy is best effort */ }
   }) || noOp;
-  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, readPairingCode: () => pairingCode });
+  // A request is in nonApiAi's pending registry before its dock notification
+  // is sent. Refresh discovery from its content-free wake-up so the panel can
+  // show a hub to release; without this, discovery only ran after clicking a
+  // hub that an empty panel could never render.
+  const unsubscribePushHandoffs = onNonApiAiEvent(() => { void controller.refreshPushDiscovery?.({ dirty: true }); });
+  return Object.freeze({ bridgeQueueProvider, userData, config, socketPath, testMode, audit, log: bridgeLog, laneStore, application, push, oauth, openPairing, get engine() { return engine; }, mcp, requestHandler, listener, tunnel, pairing, controller, dialogs, power, tray, unsubscribeUi, unsubscribePushHandoffs, readPairingCode: () => pairingCode });
 }
 
 function removePairingTestHook(current = null) {
@@ -1132,6 +1335,7 @@ function detachPlatformOwners(current) {
   if (!current || detachedPlatformOwners.has(current)) return;
   detachedPlatformOwners.add(current);
   try { current?.unsubscribeUi?.(); } catch { /* the controller is already detached */ }
+  try { current?.unsubscribePushHandoffs?.(); } catch { /* handoff wake-ups are optional after teardown */ }
   // Keep the LAST lane view for the report (a disabled bridge's final queue is
   // still evidence) but stop reading a torn-down engine.
   try { retireBridgeQueueDiagnosticProvider(current?.bridgeQueueProvider); } catch { /* diagnostics are optional */ }
@@ -1266,6 +1470,10 @@ function failedStartTelemetryEnabled(result, controller) {
 
 function enableAttachedRuntime(current, args, lifecycleTicket = lifecycle) {
   if (!current?.controller?.enable) return Promise.resolve({ success: false, code: 'UNAVAILABLE', status: bootstrapSnapshot() });
+  const consentVersion = runtimeConsentVersions.get(current) ?? current.config?.consentVersion;
+  if (consentVersion !== ENABLE_CONSENT_VERSION && !hasCurrentLongConsentCapability(args)) {
+    return Promise.resolve({ success: false, code: 'UNAVAILABLE', status: bootstrapSnapshot() });
+  }
   const prior = runtimeEnableOperations.get(current);
   if (prior) return prior;
   // A new explicit Enable attempt supersedes a prior failed-start receipt.
@@ -1345,7 +1553,7 @@ async function forgetActiveRuntime(current, status) {
   // memory after Forget would let a later FULL report disclose an old attempt
   // despite the user explicitly clearing this bridge's settings.
   clearFailedStartDiagnostic();
-  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+  clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
   setReportRedactedHosts([]);
   try {
     if (!current) {
@@ -1384,7 +1592,7 @@ async function forgetActiveRuntime(current, status) {
 
 async function invalidateRuntimeForMutation({ clearOAuthDiagnostics = false } = {}) {
   clearFailedStartDiagnostic();
-  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic(); }
+  if (clearOAuthDiagnostics) { clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic(); }
   bootstrapCleared = false;
   const disposed = await disposeCurrentRuntime();
   const status = bootstrapSnapshot();
@@ -1452,7 +1660,7 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     // carry even its closed fields into another profile/context that has not
     // opted in to diagnostics.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   controllerBridge ||= createControllerBridge();
@@ -1490,12 +1698,13 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
     let persisted = null;
     try { persisted = syncReportRedactedHosts((deps.readConfig || readConfig)(targetUserData, { fsImpl: deps.fsImpl })); } catch { persisted = null; }
     const oldHostname = persisted?.config?.hostname ?? null;
+    const previousConsentFingerprint = consentConfigFingerprint(persisted?.config);
     const changedHostname = Object.hasOwn(patch, 'hostname') && patch.hostname !== oldHostname;
-    const safePatch = changedHostname ? { ...patch, consentVersion: 0 } : patch;
+    const safePatch = patch;
     let result;
     try {
       result = await Promise.resolve((deps.writeConfig || writeConfig)(targetUserData, safePatch, {
-        ...options, isLinked, confirmHostnameChange: async () => true, fsImpl: deps.fsImpl,
+        ...options, isLinked, isConsentConfigChanged: consentConfigChanged, confirmHostnameChange: async () => true, fsImpl: deps.fsImpl,
       }));
     } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
     if (result?.ok === true) {
@@ -1504,15 +1713,18 @@ export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, d
       // in-memory failed-start receipt before any later FULL report is built.
       if (Object.hasOwn(safePatch, 'telemetryInBugReports') && safePatch.telemetryInBugReports !== true) {
         clearFailedStartDiagnostic();
-        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+        clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
       }
       if (result.config) syncReportRedactedHosts({ config: result.config, state: 'ok' });
       else if (Object.hasOwn(safePatch, 'hostname')) syncReportRedactedHosts({ config: { hostname: safePatch.hostname }, state: 'ok' });
-      // UI calls reloadConfig once after this adapter returns. Hostname is a
-      // captured graph value, so detach first and let that one reload publish
-      // the newly persisted bootstrap projection rather than reloading twice.
-      if (changedHostname) {
-        const invalidated = await invalidateRuntimeForMutation({ clearOAuthDiagnostics: true });
+      const consentChanged = result.consentConfigChanged === true
+        || (result.config && consentConfigFingerprint(result.config) !== previousConsentFingerprint)
+        || changedHostname;
+      // UI calls reloadConfig once after this adapter returns. Any config
+      // change that retires v2 may no longer be served by a graph captured
+      // under the old fingerprint, so detach before that reload publishes it.
+      if (consentChanged) {
+        const invalidated = await invalidateRuntimeForMutation({ clearOAuthDiagnostics: changedHostname });
         if (invalidated?.success === false) return { ok: false, code: 'STATE_UNREADABLE' };
       }
     }
@@ -1590,7 +1802,7 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     // controlled in-process test or host switch).  Keep the receipt scoped to
     // its originating root just like hostname report redaction.
     clearFailedStartDiagnostic();
-    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
+    clearOAuthRejectionDiagnostic(); clearSourceRejectionDiagnostic(); clearClientAuthDiagnostic(); clearMcpRateLimitDiagnostic(); clearBridgeChatCopyDiagnostic(); clearBridgeQueueDiagnostic();
     setReportRedactedHosts([]);
   }
   const composedDeps = mergeDefinedDeps(inherited, deps);
@@ -1614,12 +1826,22 @@ export function startHandoffBridge({ reason = 'manual', deps = {} } = {}) {
     let loaded;
     try { loaded = syncReportRedactedHosts(composedDeps.loadedConfig || (composedDeps.readConfig || readConfig)(userData, { fsImpl: composedDeps.fsImpl })); } catch { return refusalResult('state_unreadable', reason); }
     if (!loaded || loaded.state === 'unreadable') return refusalResult('state_unreadable', reason);
+    const consentCurrent = loaded.config?.consentVersion === ENABLE_CONSENT_VERSION;
+    if (reason === 'auto-start' && !consentCurrent) {
+      return refusalResult('not_enabled', reason);
+    }
+    if (deps.activate === true && !consentCurrent && !hasCurrentLongConsentCapability(composedDeps)) {
+      return refusalResult('not_enabled', reason);
+    }
     const refusal = refusalForStart({ env, isPackaged, paths: { binaryPath: setup.binaryPath, credentialsPath: setup.credentialsPath, userData }, tmpdir: composedDeps.tmpdir || os.tmpdir(), enabled: true, config: loaded.config, setup: { binaryPath: setup.binaryPath, binaryTrusted: setup.binaryTrusted, credentialsPath: setup.credentialsPath, configValid: loaded.state === 'ok' || loaded.state === 'missing', socketUnavailable: setup.socketUnavailable, tunnelFailed: setup.tunnelFailed } });
     if (refusal) return refusalResult(refusal, reason);
     if (lifecycleTicket !== lifecycle) return refusalResult('not_enabled', reason);
     let candidate;
     try { candidate = (composedDeps.compose || composeHandoffBridge)({ userData, config: loaded.config, tunnelState: setup, testMode, deps: composedDeps }); }
     catch (error) { return refusalResult(error?.code === 'path_too_long' ? 'socket_unavailable' : 'tunnel_failed', reason); }
+    if (candidate && (typeof candidate === 'object' || typeof candidate === 'function')) {
+      runtimeConsentVersions.set(candidate, loaded.config?.consentVersion);
+    }
     if (lifecycleTicket !== lifecycle || runtime) {
       await disposeDetachedRuntime(candidate);
       return refusalResult('not_enabled', reason);
@@ -1656,9 +1878,9 @@ export function scheduleHandoffBridgeLaunch({ userData = '', setTimeoutImpl = se
     try { await stat(pidfile); exists = true; } catch { /* no pidfile means no process inspection */ }
     let loaded; try { loaded = syncReportRedactedHosts(loadConfig(userData)); } catch { return; }
     if (exists) try { await reapOrphans({ reason: 'launch', pidfile }); } catch { return; }
-  if (loaded?.config?.autoStart) {
+  if (loaded?.config?.autoStart && loaded.config.consentVersion === ENABLE_CONSENT_VERSION) {
     // Keep the loaded value both as the launch contract and in the default
-    // starter's dependency bag.  Main consumes the former; startHandoffBridge
+    // starter's dependency bag. Main consumes the former; startHandoffBridge
     // consumes the latter, so neither path re-reads the config file.
     try { void Promise.resolve(start({ reason: 'auto-start', loadedConfig: loaded, deps: { loadedConfig: loaded, enabled: true, activate: true } })).catch(noOp); } catch { /* fire-and-forget */ }
   }

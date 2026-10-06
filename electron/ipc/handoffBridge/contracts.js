@@ -18,6 +18,9 @@ export const IPC_CHANNELS = Object.freeze({
   CANCEL_PAIRING: 'handoff-bridge:cancel-pairing',
   NEW_CHAT: 'handoff-bridge:new-chat',
   CONTINUE_CHAT: 'handoff-bridge:continue-chat',
+  START_WORKER_POOL: 'handoff-bridge:start-worker-pool',
+  COPY_WORKER_STARTER: 'handoff-bridge:copy-worker-starter',
+  RESTART_WORKER: 'handoff-bridge:restart-worker',
   PAUSE: 'handoff-bridge:pause',
   RESUME: 'handoff-bridge:resume',
   REVOKE_ALL: 'handoff-bridge:revoke-all',
@@ -45,17 +48,24 @@ export const TUNNEL_PORT_SHAPE = Object.freeze(['start', 'stop', 'status', 'reap
 export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   v: 1, seq: 0, at: 0,
   availability: { ok: false, reason: null },
-  enabled: false, autoStart: false, autoRelease: false, serving: 'off', paused: false,
+  enabled: false, autoStart: true, autoRelease: true, serving: 'off', paused: false,
   pauseCause: null, hold: null, fault: null,
-  config: { hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: { applications: true, scoring: false, marketplace: false }, telemetryInBugReports: false },
-  limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, jobsPerChat: 2, epochSoftBytes: 500000, epochHardBytes: 900000 },
+  config: { hostname: null, pluginName: 'infinite_canvas', mcpUrl: null, scope: { applications: true, scoring: true, marketplace: true }, telemetryInBugReports: false },
+  limits: { releaseTtlHours: 0, chatKeyMaxAgeHours: 0, idlePauseMinutes: 1440, jobsPerChat: 2, epochSoftBytes: 0, epochHardBytes: 0 },
   prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
-  setup: { hostnameOk: false, binaryApproved: false, credentialsOk: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
+  // consentCurrent is deliberately only a boolean. It tells Settings why a
+  // fully configured auto-start did not run without exposing a receipt,
+  // version history, or any configuration detail.
+  setup: { hostnameOk: false, binaryApproved: false, credentialsOk: false, consentCurrent: false, tunnelReachable: false, linked: false, toolsListed: false, firstCallSeen: false },
   tunnel: { state: 'off', binary: null, tunnelId: null, credentialsMode: null, certPemPresent: false, restarts: 0, lastExit: null, nextRetryAt: null, probe: { state: 'off', okAt: null, failingSince: null, consecutiveFailures: 0, reason: null } },
   link: { state: 'unlinked', pairing: { open: false, expiresAt: null }, progress: { discoveryFetched: false, authorizeRequested: false, approved: false, tokenIssued: false, toolsListed: false }, linkedAt: null, lastUsedAt: null, expiresAt: null, clientAuth: null, expiresSoon: false, renewalCause: null, unarmedRequests: { count: 0, lastAt: null }, toolsStale: false, sources: [] },
-  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, jobsCap: 2, expiresInMs: null, outstanding: null, servedTwice: false, previous: [] },
+  // A pool identity and its bounded worker lifecycle are process-local UI
+  // correlation values. They deliberately contain no worker/session code,
+  // prompt, or clipboard contents, but let a persistent renderer keep an
+  // already-started worker out of its copy controls after a remount.
+  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, jobsCap: 2, expiresInMs: null, pool: { active: false, generation: null, workerCount: 0, workers: [], plan: { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' } }, outstanding: null, servedTwice: false, previous: [] },
   queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, scoring: { pending: 0, withChat: 0, tasks: [] }, jobs: [] },
-  push: { selectedHubs: [], discovered: [] }, alarms: [],
+  push: { selectedHubs: [], optedOutHubs: 0, discovered: [], claimed: [], claimWorkers: [], available: [] }, alarms: [],
   counts: {
     anonymousRequests: 0, sourceRejected: 0, assertionRejected: 0, permitLeaks: 0,
     getServed: 0, getWaiting: 0, getEmpty: 0, getPaused: 0, getUnauthorized: 0,

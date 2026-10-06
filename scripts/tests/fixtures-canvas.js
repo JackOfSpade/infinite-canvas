@@ -1,5 +1,6 @@
 import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
+import { selectIndeedResumePlan } from '../test-dependencies.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
 import { mergeResolvedDescriptionRecoveryCandidate, nextDescriptionRecoveryGuidance, partitionResolvedDescriptionRecoveryCandidates, reconcileResolvedDescriptionRecovery } from '../test-dependencies.js';
@@ -57,14 +58,57 @@ export default [
       assert(indeedSource.includes('value >= 0 && value <= 1_000')
         && indeedSource.includes('filter(entry => entry.startPage < entry.maxPages)')
         && indeedSource.indexOf('const queryList = Array.isArray(queries)') < indeedSource.indexOf('const reservation = getSharedProfileReservationInfo()')
-        && indeedSource.includes('resumeState: { remainingQueries: queryList, startPage, pageBudgets }'),
-      'Indeed Continue must preserve zero allocations and serialize the resolved policy vector before retryable profile-reservation returns');
+        && indeedSource.includes('resumeState: { remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes }'),
+      'Indeed Continue must preserve zero allocations and serialize the per-query cursor and resolved policy vector before retryable profile-reservation returns');
       const zeroBudgetGuard = manualSource.indexOf('const taskPageBudget = task.options?.maxPages ?? resolvePageCeiling(null);');
       const manualPacing = manualSource.indexOf('if (qi > 0)', zeroBudgetGuard);
       assert(zeroBudgetGuard >= 0 && manualPacing > zeroBudgetGuard
         && manualSource.includes("phase: 'query-skipped-page-budget'"),
       'manual zero-budget query tasks must be skipped before pacing or navigation while retaining bounded cap telemetry');
       return { fresh: 4, resumedEnd: 4, suffixTotal: resumed.reduce((sum, value) => sum + value, 0), zeroBudgetSuffix: wideResumed.length };
+    },
+  },
+{
+    name: 'Indeed terminal resume slots are omitted without shifting durable query indexes',
+    run: () => {
+      const plan = selectIndeedResumePlan(['q1', 'q2', 'q3'], [
+        { startPage: 2, durable: true, terminal: true },
+        { startPage: 4, durable: true, terminal: false },
+        { startPage: 1, durable: false, terminal: false },
+      ], { pagesPerPlatform: 5 });
+      assert(plan.indexes.join(',') === '1,2'
+        && plan.queries.join(',') === 'q2,q3'
+        && plan.startPages.join(',') === '3,0'
+        && plan.pageBudgets.join(',') === '5,5',
+      'terminal Indeed q1 is omitted while q2/q3 retain their original staging indices and budgets');
+      const allTerminal = selectIndeedResumePlan(['q1', 'q2'], [
+        { startPage: 2, durable: true, terminal: true }, { startPage: 2, durable: true, terminal: true },
+      ]);
+      assert(allTerminal.indexes.length === 0 && allTerminal.queries.length === 0,
+        'all terminal Indeed slots yield an empty plan, so the caller can avoid a browser launch');
+      const zeroBudgetSuffix = selectIndeedResumePlan(
+        Array.from({ length: 53 }, (_value, index) => `q${index + 1}`),
+        null,
+      );
+      assert(zeroBudgetSuffix.indexes.length === 40
+        && zeroBudgetSuffix.indexes.at(-1) === 39
+        && zeroBudgetSuffix.pageBudgets.every(value => value > 0),
+      'Indeed Auto resume omits its original zero-budget suffix instead of widening it into fresh work');
+    },
+  },
+{
+    name: 'Indeed native continuation keeps validated original query indexes',
+    run: async () => {
+      const [driver, handler] = await Promise.all([
+        fs.promises.readFile(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8'),
+        fs.promises.readFile(path.resolve('electron/ipc/jobs.js'), 'utf8'),
+      ]);
+      assert(driver.includes('queryIndexes: queryIndexes.slice(manualChallenge.qi)')
+        && driver.includes('queryIndexes: queryIndexes.slice(challengedQi)')
+        && handler.includes('effectiveResumeState.queryIndexes.length === remainingQueries.length')
+        && handler.includes('Number.isSafeInteger(index) && index >= 0')
+        && handler.includes('true, resumeQueryIndexes,'),
+      'Indeed challenge/login continuation must retain validated original query indexes when it resumes filtered work');
     },
   },
 {
@@ -6661,6 +6705,39 @@ export default [
       })[0];
       assert(resumedAuto?.options?.startPageNum === 7 && resumedAuto.options.maxPages === JOB_COLLECTION_PAGE_CEILING,
         'Auto resume may consume only pages remaining under its original ten-page allocation, never a new ten-page continuation');
+      const perQueryResume = buildJobTasks(['Architect', 'Engineer'], 21, {
+        onlySources: new Set(['ziprecruiter']),
+        startPageBySourceQuery: { ziprecruiter: [{ startPage: 7, durable: true }, { startPage: 3, durable: true }] },
+      });
+      assert(perQueryResume[0]?.options?.startPageNum === 7
+        && perQueryResume[1]?.options?.startPageNum === 3
+        && new URL(perQueryResume[0].url).pathname.includes('/7')
+        && new URL(perQueryResume[1].url).pathname.includes('/3'),
+      'a URL-paginated source resumes every query from its own durable page cursor');
+      const resumedGoogle = buildJobTasks(['Architect', 'Engineer'], 21, {
+        onlySources: new Set(['google']),
+        startPageBySourceQuery: { google: [{ startPage: 2, durable: true }, { startPage: 1, durable: false }] },
+      });
+      assert(resumedGoogle.length === 1 && resumedGoogle[0]?.query === 'Engineer',
+      'a single-view Google query with a durable cursor is not fetched again, while an unrecorded sibling starts normally');
+      const missingGoogleCursor = buildJobTasks(['Architect', 'Engineer'], 21, {
+        onlySources: new Set(['google']),
+        startPageBySourceQuery: { google: [{ startPage: 1, durable: false }, { startPage: 1, durable: false }] },
+      });
+      assert(missingGoogleCursor.length === 2,
+        'a page-1 fallback without a durable Google view must run; it is not a completed query');
+      const resumedGlassdoor = buildJobTasks(['Architect', 'Engineer'], 21, {
+        onlySources: new Set(['glassdoor']),
+        startPageBySourceQuery: { glassdoor: [{ startPage: 6, durable: true, terminal: true }, { startPage: 1, durable: false, terminal: false }] },
+      });
+      assert(resumedGlassdoor.length === 1 && resumedGlassdoor[0]?.query === 'Engineer' && resumedGlassdoor[0].options?.startPageNum === 1,
+        'Glassdoor omits durable terminal siblings, but replays only its interrupted load-more query from page 1');
+      const exhaustedZip = buildJobTasks(['Architect'], 21, {
+        onlySources: new Set(['ziprecruiter']),
+        startPageBySourceQuery: { ziprecruiter: [{ startPage: 4, durable: true }] },
+      }, '', { pagesPerPlatform: 3 });
+      assert(exhaustedZip.length === 0,
+        'a cursor past its original URL-paginated page budget must create no task/navigation');
       return { browserTasks: tasks.length, pages: requested.pagesPerPlatform, jobs: requested.jobsPerPlatform };
     },
   },

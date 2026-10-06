@@ -247,85 +247,123 @@ export default [
         && new Set(sequentialHints.map(hint => hint.progressScopeId)).size === 1,
       'v2 taxonomy fills the 15,360-token ceiling with 448 compact rows per handoff, dispatches independent chunks together with stable identities, and reports only accepted scoped progress');
 
-      // A manual handoff dock must remain a stable ten-prompt work set. This
-      // deliberately holds nine first-wave answers open after accepting the
-      // first: a draining worker pool would already have replaced it with
-      // batch 11, while the fixed-wave contract must wait for all ten.
-      const fixedWaveJobs = Array.from({ length: 5_000 }, (_, index) => ({
-        title: `Fixed Wave Role ${index}`,
-        careerDirection: `Fixed Wave Direction ${index}`,
+      // Classification is automatic work: one slow batch must not strand the
+      // other nine worker slots. Keep every prompt deferred so this verifies
+      // the cap, immediate refill, and durable batch identity without a fast
+      // successor cascading through the rest of the test data.
+      const rollingJobs = Array.from({ length: 5_000 }, (_, index) => ({
+        title: `Rolling Roster Role ${index}`,
+        careerDirection: `Rolling Roster Direction ${index}`,
         salary: '$100k/yr',
       }));
-      const fixedWavePlan = {
+      const rollingPlan = {
         ...diversePlan,
-        directionRoleIndexes: buildJobTaxonomyPlanSummary(fixedWaveJobs).commonSuggestedDirections
+        directionRoleIndexes: buildJobTaxonomyPlanSummary(rollingJobs).commonSuggestedDirections
           .map(({ direction }) => ({ direction, roleIndex: 0 })),
       };
-      const fixedWaveStarts = [];
-      const releaseFirstWave = new Map();
-      let notifyFirstWaveReady;
-      const firstWaveReady = new Promise(resolve => { notifyFirstWaveReady = resolve; });
-      const fixedWaveRun = runBoundedJobTaxonomy(fixedWaveJobs, {
+      const rollingCalls = [];
+      let rollingActive = 0;
+      let rollingPeak = 0;
+      let notifyInitialRollingRoster;
+      const initialRollingRoster = new Promise(resolve => { notifyInitialRollingRoster = resolve; });
+      const rollingRun = runBoundedJobTaxonomy(rollingJobs, {
         callText: async (_prompt, options) => {
-          if (options.task === 'job-taxonomy-plan') return fixedWavePlan;
+          if (options.task === 'job-taxonomy-plan') return rollingPlan;
           const { batch, itemCount } = options.hints;
-          fixedWaveStarts.push(batch);
           const result = { roleByIndex: Array.from({ length: itemCount }, () => 1) };
-          if (batch > 10) return result;
           return new Promise(resolve => {
-            releaseFirstWave.set(batch, () => resolve(result));
-            if (releaseFirstWave.size === 10) notifyFirstWaveReady();
+            rollingActive += 1;
+            rollingPeak = Math.max(rollingPeak, rollingActive);
+            const call = {
+              batch,
+              hints: options.hints,
+              released: false,
+              release() {
+                if (call.released) return;
+                call.released = true;
+                rollingActive -= 1;
+                resolve(result);
+              },
+            };
+            rollingCalls.push(call);
+            if (rollingCalls.length === 10) notifyInitialRollingRoster();
           });
         },
       });
-      await firstWaveReady;
-      assert(JSON.stringify(fixedWaveStarts) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
-        `taxonomy must issue its full first fixed wave before awaiting it, got ${JSON.stringify(fixedWaveStarts)}`);
-      releaseFirstWave.get(1)();
-      await new Promise(resolve => setTimeout(resolve, 0));
-      assert(fixedWaveStarts.length === 10,
-        `taxonomy must not replace a solved handoff before the other first-wave prompts settle, got ${JSON.stringify(fixedWaveStarts)}`);
-      for (let batch = 2; batch <= 10; batch += 1) releaseFirstWave.get(batch)();
-      await fixedWaveRun;
-      assert(fixedWaveStarts.length > 10 && fixedWaveStarts[10] === 11,
-        'taxonomy releases the next independent work set only after the whole first ten-prompt wave settles');
+      await initialRollingRoster;
+      assert(JSON.stringify(rollingCalls.map(call => call.batch)) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        && rollingActive === 10 && rollingPeak === 10,
+      `taxonomy must fill exactly ten automatic slots before waiting, got ${JSON.stringify({ batches: rollingCalls.map(call => call.batch), rollingActive, rollingPeak })}`);
+      rollingCalls[0].release();
+      for (let attempt = 0; attempt < 100 && rollingCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(rollingCalls.length === 11 && rollingCalls[10].batch === 11
+        && rollingCalls.slice(1, 10).every(call => !call.released)
+        && rollingActive === 10 && rollingPeak === 10
+        && rollingCalls[10].hints.batchTotal === rollingCalls[1].hints.batchTotal,
+      `a completed taxonomy slot must immediately refill with the next durable batch while siblings remain open, got ${JSON.stringify({ batches: rollingCalls.map(call => call.batch), rollingActive, rollingPeak })}`);
+      for (let attempt = 0; attempt < 100 && rollingActive > 0; attempt += 1) {
+        rollingCalls.filter(call => !call.released).forEach(call => call.release());
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const rolling = await rollingRun;
+      assert(rolling.roleByIndex.length === rollingJobs.length
+        && rolling.roleByIndex.every(Boolean),
+      'rolling taxonomy completion preserves the original output shape and every classified assignment');
 
-      // The same rule applies across a restart boundary: one exact v1
-      // classifier prompt and untouched v2 chunks classify disjoint rows, so
-      // the latter must not wait for the restored prompt to be answered.
+      // Restored v1 and fresh v2 chunks retain their independent durable task
+      // identities, but they share the same work-conserving automatic roster.
       let hybridWaveProbeCount = 0;
-      const hybridWaveStarts = [];
-      const releaseHybridWave = new Map();
-      let notifyHybridWaveReady;
-      const hybridWaveReady = new Promise(resolve => { notifyHybridWaveReady = resolve; });
-      const hybridWaveRun = runBoundedJobTaxonomy(fixedWaveJobs, {
+      const hybridRollingCalls = [];
+      let hybridActive = 0;
+      let hybridPeak = 0;
+      let notifyInitialHybridRoster;
+      const initialHybridRoster = new Promise(resolve => { notifyInitialHybridRoster = resolve; });
+      const hybridWaveRun = runBoundedJobTaxonomy(rollingJobs, {
         legacyClassifierStepProbe: async () => (++hybridWaveProbeCount === 1),
         callText: async (_prompt, options) => {
-          if (options.task === 'job-taxonomy-plan') return fixedWavePlan;
+          if (options.task === 'job-taxonomy-plan') return rollingPlan;
           const { itemCount } = options.hints;
-          const { task } = options;
-          hybridWaveStarts.push(task);
           const result = { roleByIndex: Array.from({ length: itemCount }, () => 1) };
-          if (hybridWaveStarts.length > 10) return result;
           return new Promise(resolve => {
-            releaseHybridWave.set(hybridWaveStarts.length, () => resolve(result));
-            if (releaseHybridWave.size === 10) notifyHybridWaveReady();
+            hybridActive += 1;
+            hybridPeak = Math.max(hybridPeak, hybridActive);
+            const call = {
+              task: options.task,
+              hints: options.hints,
+              released: false,
+              release() {
+                if (call.released) return;
+                call.released = true;
+                hybridActive -= 1;
+                resolve(result);
+              },
+            };
+            hybridRollingCalls.push(call);
+            if (hybridRollingCalls.length === 10) notifyInitialHybridRoster();
           });
         },
       });
-      await hybridWaveReady;
-      assert(hybridWaveStarts.length === 10
-        && hybridWaveStarts[0] === 'job-taxonomy-classify'
-        && hybridWaveStarts.slice(1).every(task => task === 'job-taxonomy-classify-batch'),
-      `one restored taxonomy classifier plus nine fresh chunks must fill the first wave, got ${JSON.stringify(hybridWaveStarts)}`);
-      releaseHybridWave.get(1)();
-      await new Promise(resolve => setTimeout(resolve, 0));
-      assert(hybridWaveStarts.length === 10,
-        'a solved restored taxonomy prompt must not churn a replacement into the current fixed wave');
-      for (let index = 2; index <= 10; index += 1) releaseHybridWave.get(index)();
-      await hybridWaveRun;
-      assert(hybridWaveStarts.length > 10 && hybridWaveStarts[10] === 'job-taxonomy-classify-batch',
-        'fresh taxonomy chunks continue in a later fixed wave after the restored/fresh work set settles');
+      await initialHybridRoster;
+      assert(hybridRollingCalls.length === 10
+        && hybridRollingCalls[0].task === 'job-taxonomy-classify'
+        && hybridRollingCalls.slice(1).every(call => call.task === 'job-taxonomy-classify-batch')
+        && hybridActive === 10 && hybridPeak === 10,
+      `one restored taxonomy classifier plus nine fresh chunks must fill the first automatic roster, got ${JSON.stringify(hybridRollingCalls.map(call => call.task))}`);
+      hybridRollingCalls[0].release();
+      for (let attempt = 0; attempt < 100 && hybridRollingCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(hybridRollingCalls.length === 11
+        && hybridRollingCalls[10].task === 'job-taxonomy-classify-batch'
+        && hybridRollingCalls.slice(1, 10).every(call => !call.released)
+        && hybridActive === 10 && hybridPeak === 10,
+      'a settled restored classifier must immediately refill its slot with fresh work without changing its legacy identity');
+      for (let attempt = 0; attempt < 100 && hybridActive > 0; attempt += 1) {
+        hybridRollingCalls.filter(call => !call.released).forEach(call => call.release());
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const hybridRolling = await hybridWaveRun;
+      assert(hybridRolling.roleByIndex.length === rollingJobs.length
+        && hybridRolling.roleByIndex.every(Boolean),
+      'mixed restored/fresh rolling taxonomy preserves every classified assignment');
 
       const legacyJobs = sequentialJobs.slice(0, 50);
       const legacyPlan = {
@@ -351,7 +389,7 @@ export default [
       assert(peakLegacyClassifiers === 2
         && JSON.stringify(legacyHints.map(hint => [hint.task, hint.batch, hint.batchTotal, hint.itemCount]))
           === JSON.stringify([['job-taxonomy-classify', 1, 2, 24], ['job-taxonomy-classify', 2, 2, 2]]),
-      'a durable legacy taxonomy run retains its exact 24-row task contract while independent prompts share one fixed wave');
+      'a durable legacy taxonomy run retains its exact 24-row task contract while independent prompts share one bounded automatic roster');
 
       const hybridProbes = [];
       const hybridCalls = [];

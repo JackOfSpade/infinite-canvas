@@ -15,6 +15,7 @@ import { clearFailedStartDiagnostic, clearOAuthRejectionDiagnostic, getFailedSta
 import {
   appendClosedHandoffAudit,
   composeHandoffBridge,
+  ENABLE_CONSENT_VERSION,
   getHandoffBridgeStatus,
   holdHandoffBridgeForQuit,
   refusalForStart,
@@ -33,7 +34,7 @@ const SAFE_PATHS = Object.freeze({
   credentialsPath: `${TMP}/credentials/tunnel.json`,
   userData: `${TMP}/user-data`,
 });
-const READY_CONFIG = Object.freeze({ hostname: 'b-0123456789abcdef0123.lullascape.com' });
+const READY_CONFIG = Object.freeze({ hostname: 'b-0123456789abcdef0123.lullascape.com', consentVersion: ENABLE_CONSENT_VERSION });
 const READY_SETUP = Object.freeze({
   binaryPath: SAFE_PATHS.binaryPath,
   binaryTrusted: true,
@@ -542,7 +543,7 @@ export default [
       const base = {
         userData: SAFE_PATHS.userData,
         getCanvasWindows: () => [canvas],
-        readConfig: () => ({ state: 'ok', config: { ...READY_CONFIG, consentVersion: 1 } }),
+        readConfig: () => ({ state: 'ok', config: READY_CONFIG }),
         readTunnelState: () => READY_SETUP,
         dialogs: { ask: async () => ({ ok: true }) },
       };
@@ -584,7 +585,7 @@ export default [
       const ipc = bridgeIpc(); const canvas = liveCanvas(89); const enableArgs = [];
       const repeatConfig = {
         ...READY_CONFIG,
-        consentVersion: 1,
+        consentVersion: ENABLE_CONSENT_VERSION,
         scope: { applications: true, scoring: false },
         limits: { idlePauseMinutes: 1440 },
         prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
@@ -688,6 +689,53 @@ export default [
     },
   },
   {
+    name: 'handoff bridge: inert: stale consent cannot auto-start or use the exported manual activation boundary',
+    async run() {
+      let scheduledStarts = 0;
+      const launch = async consentVersion => {
+        let callback;
+        scheduleHandoffBridgeLaunch({
+          userData: SAFE_PATHS.userData,
+          setTimeoutImpl: fn => { callback = fn; return { unref() {} }; },
+          stat: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+          readConfig: () => ({ state: 'ok', config: { ...READY_CONFIG, autoStart: true, consentVersion } }),
+          start: async () => { scheduledStarts += 1; },
+        });
+        await callback();
+      };
+      await launch(1);
+      assert(scheduledStarts === 0, 'a v1 receipt must not schedule the widened bridge');
+      await launch(ENABLE_CONSENT_VERSION);
+      assert(scheduledStarts === 1, 'the current receipt permits the configured scheduled start');
+
+      await stopHandoffBridge();
+      let compositions = 0; let enables = 0;
+      const graph = {
+        controller: {
+          enable: async () => { enables += 1; return { success: true }; },
+          disable: async () => ({ success: true }),
+          snapshot: () => ({ enabled: false, serving: 'off' }),
+        },
+        listener: {}, tunnel: {}, power: { dispose() {} }, tray: { destroy() {} },
+      };
+      const stale = completeStartDeps({
+        readConfig: () => ({ state: 'ok', config: { ...READY_CONFIG, consentVersion: 1 } }),
+        compose: () => { compositions += 1; return graph; },
+        activate: true,
+        confirmed: true,
+      });
+      const refused = await startHandoffBridge({ reason: 'manual', deps: stale });
+      assert(refused.success === false && compositions === 0 && enables === 0, 'generic confirmation cannot activate stale consent through the exported start seam');
+      const missingCapability = await startHandoffBridge({ reason: 'manual', deps: { ...stale, consentConfirmed: true } });
+      assert(missingCapability.success === false && compositions === 0 && enables === 0, 'a stale receipt needs the bound fingerprint as well as the main-owned confirmation bit');
+      const allowed = await startHandoffBridge({ reason: 'manual', deps: { ...stale, consentConfirmed: true, consentFingerprint: 'test-long-consent-fingerprint' } });
+      assert(allowed.success && compositions === 1 && enables === 1, 'only the main-owned post-sheet capability may activate stale consent before v2 is persisted');
+      const attachedMissingCapability = await startHandoffBridge({ reason: 'manual', deps: { ...stale, consentConfirmed: true } });
+      assert(attachedMissingCapability.success === false && compositions === 1 && enables === 1, 'an attached v1 runtime must reject a confirmation bit without its bound fingerprint');
+      await stopHandoffBridge();
+    },
+  },
+  {
     name: 'handoff bridge: inert: I-16 test mode only lifts E2E and unpackaged for safe temporary paths',
     run: () => {
       const testEnv = { INFINITE_CANVAS_HANDOFF_BRIDGE_TEST: '1' };
@@ -747,7 +795,7 @@ export default [
       const result = await startHandoffBridge({ deps: { env: {}, isPackaged: true, enabled: false, app: { getPath: () => { binds++; return '/not/read'; } }, readConfig: () => { writes++; return null; } } });
       assert(registerHandoffBridgeHandlers({ ipcMain: ipc, deps: { getCanvasWindows: () => [] } }), 'a complete inert fake IPC registry must register every bridge route');
       assert(result.code === 'not_enabled' && binds === 0 && writes === 0, 'off bridge must not bind, write or spawn');
-      assert(ipc.handlers.length === 25, 'off equivalence permits exactly 24 invokes and publish-jobs');
+      assert(ipc.handlers.length === 28, 'off equivalence permits exactly 27 invokes and publish-jobs');
       await stopHandoffBridge();
     },
   },
@@ -1289,15 +1337,15 @@ export default [
         const get = ipc.handlers.get(IPC_CHANNELS.GET_STATUS);
         const save = ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG);
         const first = await get({ sender: canvas.webContents });
-        assert(first.success && Number.isSafeInteger(first.status.seq) && first.status.autoStart === false,
+        assert(first.success && Number.isSafeInteger(first.status.seq) && first.status.autoStart === true,
           'a fresh registration reads its own default bootstrap state instead of reusing the prior cached user-data projection');
         const unchanged = await get({ sender: canvas.webContents });
         assert(unchanged.status.seq === first.status.seq, 'repeated unchanged off status reads retain their public sequence');
-        assert((await save({ sender: canvas.webContents }, { patch: { autoStart: true } })).success,
-          'an off-bridge auto-start preference persists after fixed consent');
+        assert((await save({ sender: canvas.webContents }, { patch: { autoStart: false } })).success,
+          'an off-bridge auto-start opt-out persists');
         const published = canvas.sent.filter(entry => entry.channel === IPC_EVENTS.STATUS).at(-1)?.value;
         const afterAutoStart = await get({ sender: canvas.webContents });
-        assert(published?.seq > first.status.seq && afterAutoStart.status.seq >= published.seq && afterAutoStart.status.autoStart,
+        assert(published?.seq > first.status.seq && afterAutoStart.status.seq >= published.seq && !afterAutoStart.status.autoStart,
           'an off config save publishes a strictly newer status that carries the saved value');
         assert((await save({ sender: canvas.webContents }, { patch: { scope: { applications: false } } })).success,
           'the first partial scope patch saves');
@@ -1709,19 +1757,19 @@ export default [
       const event = { sender: canvas.webContents };
       const saved = await ipc.handlers.get(IPC_CHANNELS.SAVE_CONFIG)(event, { patch: { hostname: nextHostname } });
       assert(saved.success && disabled === 1 && reloads === 0 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().config.hostname === nextHostname && getOAuthRejectionDiagnostic() === null, 'hostname save detaches first, clears the old-host OAuth receipt, and reloads only the fresh bootstrap state');
-      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success, 'a later explicit enable creates the post-hostname graph');
+      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true, consentConfirmed: true, consentFingerprint: 'test-long-consent-fingerprint' }) })).success, 'a later explicitly consented enable creates the post-hostname graph');
       assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_BINARY)(event)).success
         && setup.pin === replacementPin && setup.approvedAt === null && setup.binaryTrusted === false
         && disabled === 2 && getHandoffBridgeStatus().enabled === false && !getHandoffBridgeStatus().setup.binaryApproved,
       'a replacement binary selection persists an unapproved setup and detaches the graph that captured the former executable');
-      const blockedRestart = await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) });
+      const blockedRestart = await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true, consentConfirmed: true, consentFingerprint: 'test-long-consent-fingerprint' }) });
       assert(blockedRestart.success === false && blockedRestart.code === 'binary_untrusted' && disabled === 2 && composed === 2,
         'the unapproved replacement blocks restart without composing or disposing another graph');
       assert((await ipc.handlers.get(IPC_CHANNELS.APPROVE_BINARY)(event)).success
         && setup.pin === replacementPin && setup.approvedAt === 2 && setup.binaryTrusted === true
         && disabled === 2 && getHandoffBridgeStatus().enabled === false && getHandoffBridgeStatus().setup.binaryApproved,
       'approval restores trust for that exact replacement without reviving the detached graph');
-      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true }) })).success
+      assert((await startHandoffBridge({ deps: completeStartDeps({ compose, tunnelState: setup, readConfig: undefined, activate: true, confirmed: true, consentConfirmed: true, consentFingerprint: 'test-long-consent-fingerprint' }) })).success
         && composed === 3 && disabled === 2,
       'only approval permits the replacement binary to compose a fresh runtime');
       assert((await ipc.handlers.get(IPC_CHANNELS.CHOOSE_CREDENTIALS)(event)).success

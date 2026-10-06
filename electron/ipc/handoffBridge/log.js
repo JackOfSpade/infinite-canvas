@@ -4,6 +4,7 @@ export const CREDENTIAL_LOG_CODES = Object.freeze([
   'pairing_closed', 'consent_requested', 'refresh_rotated', 'persist_failed', 'state_version',
   'tool_call', 'tool_deadline', 'port_error', 'probe', 'permit_leak', 'restart_confirmed', 'epoch_closed',
   'release', 'unrelease', 'new_chat', 'starter_recopied', 'continue', 'source_mismatch',
+  'worker_pool_started', 'worker_pool_expanded',
 ]);
 
 const FIELD_VALUE = /^[a-z0-9_.:-]{1,40}$/;
@@ -66,6 +67,11 @@ export const LOG_FIELDS_BY_CODE = Object.freeze({
   starter_recopied: Object.freeze(['chatOrdinal']),
   continue: Object.freeze(['chatOrdinal']),
   source_mismatch: Object.freeze(['clientKind', 'source']),
+  // Aggregate pool facts only. These appear in the bounded main-process log
+  // included by FULL reports, so task IDs, session keys, and worker state
+  // details remain out of this event.
+  worker_pool_started: Object.freeze(['workers', 'recommended', 'queued']),
+  worker_pool_expanded: Object.freeze(['workers', 'recommended', 'queued', 'added']),
 });
 
 export function isSafeLogField(value) {

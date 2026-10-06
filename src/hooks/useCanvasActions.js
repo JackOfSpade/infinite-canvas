@@ -5,7 +5,7 @@ import { EDGE_STYLE, getNodesBounds } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
-import { cancelNodeTasksRecursively, collectDeletedManualAiWorkflowNodes, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns, restoreJobWorkflowSnapshots, retireDeletedManualAiRuns } from '../utils/canvasInteractions';
+import { cancelNodeTasksRecursively, collectDeletedManualAiWorkflowNodes, collectMarketplaceRecoveryOwners, discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns, restoreJobWorkflowSnapshots, retireDeletedManualAiRuns } from '../utils/canvasInteractions';
 import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 import { strokePoints } from '../utils/geometry';
 import { collectOrphanTextDocumentPaths, collectRemainingTextDocumentPaths } from '../utils/osDeletionPaths';
@@ -401,6 +401,26 @@ export function useCanvasActions({
         commitRetainedNodes = liveNodesBeforeCommit.filter(node => !commitRemovedIds.has(node.id));
         commitRetainedIds = new Set(commitRetainedNodes.map(node => node.id));
         EventLogger.log('[JobSearch] Clear Canvas preserved nodes added or rewired during acknowledged cleanup.');
+      }
+
+      // Tombstone Marketplace work only after all unrelated Job/manual-AI
+      // cleanup and the live-graph revalidation have succeeded. A mixed Clear
+      // that is rejected above therefore cannot silently abandon a retained
+      // SellHub/Status node's restart marker. No awaited cleanup remains after
+      // this durable boundary; the canvas commit follows immediately.
+      const marketplaceOwners = collectMarketplaceRecoveryOwners(commitRemovedNodes);
+      if (marketplaceOwners.length > 0 && canvasFilePath) {
+        if (!window.electronAPI?.abandonMarketplaceRecoveryBatch) {
+          throw new Error('Atomic Marketplace Clear cleanup is unavailable.');
+        }
+        const fenced = await window.electronAPI.abandonMarketplaceRecoveryBatch({
+          canvasFilePath,
+          owners: marketplaceOwners,
+          reason: 'canvas-cleared',
+        });
+        if (!fenced?.success || !fenced?.fenced) {
+          throw new Error(`Could not atomically retire Marketplace recovery before clearing the canvas (${fenced?.reason || fenced?.error || 'unknown'}).`);
+        }
       }
     } catch (error) {
       if (Array.isArray(error?.manualAiRetirementReceipts)) {

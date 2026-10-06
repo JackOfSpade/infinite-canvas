@@ -23,6 +23,7 @@ import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
 import { normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
+import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -3800,8 +3801,10 @@ export function extractDiceSalaryBadge(html) {
  * scrapers read. Runs after all queries are merged and deduped so we only fetch
  * for unique jobs, not per-query duplicates.
  *
- * Batched at 10 concurrent requests. Fails gracefully per job — keeps the list
- * summary as fallback if the detail fetch or JSON-LD harvest fails.
+ * Keeps up to 10 detail requests in flight. When one finishes, the next job
+ * starts immediately, so a slow detail page cannot idle the other slots. Fails
+ * gracefully per job — keeps the list summary as fallback if the detail fetch
+ * or JSON-LD harvest fails.
  *
  * @param {Array}       jobs   — deduped job objects (each has `url` / `_diceId`)
  * @param {AbortSignal} signal — propagated abort signal
@@ -3811,7 +3814,9 @@ export async function enrichDiceDescriptions(jobs, signal) {
   if (!jobs?.length) return jobs;
 
   const BATCH = 10;
-  const enriched = [];
+  // Keep result positions separate from completion order. That lets the bounded
+  // worker pool refill immediately while callers still receive source order.
+  const enriched = new Array(jobs.length);
   // Telemetry: did the detail endpoint actually return a FULLER description than
   // the list `summary`, or are we silently falling back to Dice's ~500-char
   // summary? The old "N/N have descriptions" (>300 chars) log hid this — the
@@ -3830,75 +3835,87 @@ export async function enrichDiceDescriptions(jobs, signal) {
     if (!sampleFail) sampleFail = `${reason} @ ${ref || '?'}`;
   };
 
-  for (let i = 0; i < jobs.length; i += BATCH) {
-    if (signal?.aborted) break;
-    const batch = jobs.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(async (job) => {
-      const summaryLen = (job.snippet || '').length;
-      // Fetch the public job-detail PAGE and harvest JSON-LD JobPosting.description
-      // (the API has no per-job detail route — see function doc). `job.url` is the
-      // detailsPageUrl; fall back to constructing it from the guid.
-      const url = job.url || (job._diceId ? `https://www.dice.com/job-detail/${job._diceId}` : '');
-      if (!url) { note('no-url', job.url); return job; }
-      try {
-        const r = await safeApiFetch(url, {
-          headers: {
-            'User-Agent': getRandomUA(),
-            'Accept': 'text/html,application/xhtml+xml',
-          },
-          signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-        }, 'dice-detail');
-        if (!r.ok) { note(`http-${r.status}`, url); return job; }
-        const html = r.text || '';
-        // Salary cadence recovery: Dice's free-text `salary` field sometimes
-        // loses its cadence in cleanup ("25", "$20 - $24") and annualizes to
-        // 0/Unspecified even though the job has real pay. Reuse the SAME
-        // page HTML already fetched above (no extra request) and try two
-        // structured sources, in order: the JSON-LD baseSalary's unitText
-        // (schema.org-correct; kept in case Dice ever populates it — see
-        // formatDiceBaseSalary), then the page's own salary badge next to
-        // the job title, which is what Dice's real markup actually carries
-        // the cadence in (see extractDiceSalaryBadge). Either way this only
-        // UPGRADES a salary the shared annualizer can't already read; Dice's
-        // own text stays authoritative whenever it already parses to a real
-        // number.
-        let salaryPatch = null;
-        if (parseSalaryToNumeric(job.salary) === 0) {
-          const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html)) || extractDiceSalaryBadge(html);
-          if (formatted) { salaryPatch = formatted; salaryUpgraded += 1; }
+  let nextIndex = 0;
+  await runRollingWorkers({
+    workerCount: BATCH,
+    // Do not pass the caller's signal to the scheduler: cancellation is a
+    // normal, graceful partial-result outcome here, not a scheduler failure.
+    // Stopping claims preserves the old "finish the started work, then stop"
+    // behavior without beginning any later detail request.
+    claim: () => {
+      if (signal?.aborted || nextIndex >= jobs.length) return null;
+      const index = nextIndex;
+      nextIndex += 1;
+      return { job: jobs[index], index };
+    },
+    work: async ({ job, index }) => {
+      const enrichOne = async () => {
+        const summaryLen = (job.snippet || '').length;
+        // Fetch the public job-detail PAGE and harvest JSON-LD JobPosting.description
+        // (the API has no per-job detail route — see function doc). `job.url` is the
+        // detailsPageUrl; fall back to constructing it from the guid.
+        const url = job.url || (job._diceId ? `https://www.dice.com/job-detail/${job._diceId}` : '');
+        if (!url) { note('no-url', job.url); return job; }
+        try {
+          const r = await safeApiFetch(url, {
+            headers: {
+              'User-Agent': getRandomUA(),
+              'Accept': 'text/html,application/xhtml+xml',
+            },
+            signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
+          }, 'dice-detail');
+          if (!r.ok) { note(`http-${r.status}`, url); return job; }
+          const html = r.text || '';
+          // Salary cadence recovery: Dice's free-text `salary` field sometimes
+          // loses its cadence in cleanup ("25", "$20 - $24") and annualizes to
+          // 0/Unspecified even though the job has real pay. Reuse the SAME
+          // page HTML already fetched above (no extra request) and try two
+          // structured sources, in order: the JSON-LD baseSalary's unitText
+          // (schema.org-correct; kept in case Dice ever populates it — see
+          // formatDiceBaseSalary), then the page's own salary badge next to
+          // the job title, which is what Dice's real markup actually carries
+          // the cadence in (see extractDiceSalaryBadge). Either way this only
+          // UPGRADES a salary the shared annualizer can't already read; Dice's
+          // own text stays authoritative whenever it already parses to a real
+          // number.
+          let salaryPatch = null;
+          if (parseSalaryToNumeric(job.salary) === 0) {
+            const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html)) || extractDiceSalaryBadge(html);
+            if (formatted) { salaryPatch = formatted; salaryUpgraded += 1; }
+          }
+          const descHtml = extractJobPostingDescription(html);
+          if (!descHtml) {
+            note('no-jsonld-desc', url);
+            return salaryPatch ? { ...job, salary: salaryPatch } : job;
+          }
+          const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (!descText) {
+            note('empty-after-strip', url);
+            return salaryPatch ? { ...job, salary: salaryPatch } : job;
+          }
+          const rest = { ...job };
+          delete rest._diceId;
+          if (salaryPatch) rest.salary = salaryPatch;
+          // Keep whichever is longer — guards against a stub JSON-LD shorter than
+          // the list summary we already had.
+          if (descText.length > summaryLen) {
+            lengthened += 1;
+            return { ...rest, description: descText, snippet: descText };
+          }
+          note('not-longer-than-summary', url);
+          const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
+          return { ...rest, description: best, snippet: best };
+        } catch {
+          note('fetch-error', url);
+          return job; // keep summary on error
         }
-        const descHtml = extractJobPostingDescription(html);
-        if (!descHtml) {
-          note('no-jsonld-desc', url);
-          return salaryPatch ? { ...job, salary: salaryPatch } : job;
-        }
-        const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        if (!descText) {
-          note('empty-after-strip', url);
-          return salaryPatch ? { ...job, salary: salaryPatch } : job;
-        }
-        const rest = { ...job };
-        delete rest._diceId;
-        if (salaryPatch) rest.salary = salaryPatch;
-        // Keep whichever is longer — guards against a stub JSON-LD shorter than
-        // the list summary we already had.
-        if (descText.length > summaryLen) {
-          lengthened += 1;
-          return { ...rest, description: descText, snippet: descText };
-        }
-        note('not-longer-than-summary', url);
-        const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
-        return { ...rest, description: best, snippet: best };
-      } catch {
-        note('fetch-error', url);
-        return job; // keep summary on error
-      }
-    }));
-    enriched.push(...results);
-  }
+      };
+      enriched[index] = await enrichOne();
+    },
+  });
 
   // Strip _diceId from any jobs not enriched above (e.g. aborted mid-run)
-  const cleaned = enriched.map((job) => {
+  const cleaned = enriched.filter(job => job !== undefined).map((job) => {
     const rest = { ...job };
     delete rest._diceId;
     return rest;

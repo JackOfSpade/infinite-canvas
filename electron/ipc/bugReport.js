@@ -19,6 +19,7 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
+import { CONSTANTS as HANDOFF_BRIDGE_CONSTANTS } from './handoffBridge/constants.js';
 import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
@@ -45,7 +46,8 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
+import { getHandoffBridgeBootstrapDiagnostic } from './handoffBridge/index.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
@@ -652,13 +654,12 @@ function getNewestRendererMtimes() {
 }
 
 /**
- * Captures how AI tasks route now that every call is a human copy/paste
- * handoff (nonApiAi.js `requestNonApiAi`). There is exactly one transport —
- * no provider, key, model, or endpoint selection exists anymore — so this is
- * a routing FACT (which task ids the app knows about and that they all share
- * the one transport), not a claim about whether any specific handoff in this
- * run succeeded. The actual pass/fail evidence for a specific handoff lives
- * in the Non-API AI Handoff Lifecycle section below.
+ * Captures the local non-api-ai registry that owns every task lifecycle.
+ * Requests normally surface in the copy/paste dock; an eligible task can also
+ * be released from a selected hub to the locally hosted MCP bridge. That is a
+ * delivery route into the same registry, not a provider/API/model selection.
+ * The actual pass/fail evidence for a specific handoff lives in the lifecycle
+ * and bridge sections below.
  */
 function buildAIConfigSnapshot() {
   let knownTaskIds = [];
@@ -1721,7 +1722,7 @@ function buildActiveTasksMarkdown(reportWindowId) {
           const handoffAge = newestHandoffIssuedAt ? fmtAge(Math.max(0, Date.now() - newestHandoffIssuedAt)) : 'unknown age';
           const activity = last == null ? 'no node activity recorded' : `${fmtAge(last.ms)} ago (${last.label})`;
           const lastCell = manualWait
-            ? `${activity} · ⏳ awaiting manual response: ${handoffTasks} (${handoffAge})`
+            ? `${activity} · ⏳ awaiting handoff response: ${handoffTasks} (${handoffAge})`
             : activity;
           const flag = scrapePaused ? ' ⏸️ paused by user' : suspect ? ' ⚠️ possibly hung' : '';
           const chans = t.channels?.length ? t.channels.join(', ') : '—';
@@ -1738,7 +1739,7 @@ function buildActiveTasksMarkdown(reportWindowId) {
 > parentheses (a main-process log line, or the run's own progress heartbeat —
 > most scraper log lines carry no nodeId, so logs alone understate activity).
 > A matching pending Non-API AI handoff on the same node and IPC channel is
-> reported as **awaiting manual response**, not hung; see its redacted receipt
+> reported as **awaiting a handoff response**, not hung; see its redacted receipt
 > below for delivery and Board-progress context.
 > A large age + stale activity (⚠️ possibly hung, >3m of silence) is the
 > signature of a stuck task — e.g. a request hanging on a network call that
@@ -2118,7 +2119,7 @@ function buildRecentMainProcessLogLines({ filter } = {}) {
         // Cloudflare, or tracking tokens. The path is useful diagnostic
         // evidence; query and fragment values are not safe to export.
         const raw = redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(l.message || '')).replace(/\r?\n/g, ' ⏎ ')));
-        const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
+        const cap = /SITE_CHANGED|\[diag |\[timeout-state | failed: .* stack: at /i.test(raw) ? 1400 : 500;
         const msg = truncateDiagnosticText(raw, cap);
         return `[${t}] ${lvl} ${msg}`;
       });
@@ -2130,32 +2131,188 @@ function buildAIConfigurationMarkdown() {
   const aiConfig = buildAIConfigSnapshot();
   const aiConfigMarkdown = `
 ## AI Configuration
-- Every AI task in this app is a human copy/paste handoff — transport \`${aiConfig.transport}\`. There is no live API call, key, provider, or model selection to report; the actual pass/fail evidence for a specific handoff is in the Non-API AI Handoff Lifecycle section below.
+- The local \`${aiConfig.transport}\` registry owns every AI handoff and normally presents it in the human copy/paste dock. An eligible task from a released, selected hub may instead be served to a linked ChatGPT session through the local MCP bridge, then submitted back to that same registry.
+- Neither route selects a live API provider, API key, or model. Use Handoff Bridge Diagnostics for bridge scope/discovery/selection evidence and Non-API AI Handoff Lifecycle for the individual handoff outcome.
 - Known task ids (${aiConfig.knownTaskCount}): ${aiConfig.knownTaskIds.length ? aiConfig.knownTaskIds.map(id => `\`${id}\``).join(', ') : '(unresolved)'}
 `;
   return aiConfigMarkdown;
 }
 
 function buildHandoffBridgeDiagnosticsMarkdown() {
+  const bootstrap = getHandoffBridgeBootstrapDiagnostic();
   const diagnostic = getFailedStartDiagnostic();
   const oauthRejection = getOAuthRejectionDiagnostic();
   const sourceRejection = getSourceRejectionDiagnostic();
   const clientAuth = getClientAuthDiagnostic();
+  const mcpRateLimit = getMcpRateLimitDiagnostic();
   const failedStart = diagnostic?.telemetry === true;
   const rejectedOrigin = oauthRejection?.telemetry === true;
   const rejectedSource = sourceRejection?.telemetry === true;
   const observedClientAuth = clientAuth?.telemetry === true;
+  const observedMcpRateLimit = mcpRateLimit?.telemetry === true;
   const queue = getBridgeQueueDiagnostic();
   const chatCopies = getBridgeChatCopyDiagnostic();
-  if (!failedStart && !rejectedOrigin && !rejectedSource && !observedClientAuth && !queue && chatCopies.length === 0) return '';
+  const bootstrapMarkdown = `
+- Bridge bootstrap: config \`${bootstrap.config}\` · consent \`${bootstrap.consent}\` · configured auto-start \`${bootstrap.autoStart}\` · enabled \`${bootstrap.enabled}\` · runtime \`${bootstrap.runtime}\` · tunnel \`${bootstrap.tunnel}\`
+- Setup readiness: hostname \`${bootstrap.setup.hostname}\` · binary \`${bootstrap.setup.binary}\` · credentials \`${bootstrap.setup.credentials}\` · public tunnel \`${bootstrap.setup.tunnelReachable}\`
+- Startup policy: decision \`${bootstrap.startup.decision}\` · refusal \`${bootstrap.startup.refusal}\``;
   let queueMarkdown = '';
   if (queue) {
     const laneAge = seconds => seconds === null ? 'unknown' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
     const liveLanes = queue.liveLanes;
     const laneRows = queue.lanes.map(lane => `  - job \`${lane.job}\` · phase \`${lane.phase}\` · stage \`${lane.stage || 'none'}\` · reason \`${lane.reason || 'none'}\` · served to current chat \`${lane.servedToChat ? 'yes' : 'no'}\` · in this phase ${laneAge(lane.ageSeconds)}`).join('\n');
+    const exactTime = value => Number.isFinite(value) ? new Date(value).toISOString() : 'not recorded';
+    const pushObservation = (outcome, at, seconds) => outcome === 'none'
+      ? 'no result recorded'
+      : `latest \`${outcome}\` at ${exactTime(at)} (${laneAge(seconds)} ago)`;
+    const pushTasks = queue.push.tasks.length
+      ? queue.push.tasks.map(item => `\`${item.task}\` ${item.pending}`).join(' · ')
+      : '(none observed)';
+    const exclusions = Object.entries(queue.push.exclusions).filter(([, count]) => count > 0)
+      .map(([reason, count]) => `\`${reason}\` ${count}`).join(' · ') || '(none observed)';
+    const pushOwnership = queue.push.served === 0
+      ? 'no outstanding MCP handoffs'
+      : `${queue.push.served} outstanding MCP handoff${queue.push.served === 1 ? '' : 's'}`;
+    const dockReason = queue.push.selectedPending === 0
+      ? 'no_selected_push'
+      : queue.chat.state === 'none'
+        ? 'no_chat'
+        : queue.push.selectedPolls === 0
+          ? 'no_mcp_poll'
+          : queue.push.claimed > 0
+            ? 'claimed'
+            : queue.push.available > 0
+              ? 'awaiting_claim'
+              : 'not_available';
+    const activityRows = (Array.isArray(queue.activity) ? queue.activity : []).map(item => {
+      const outcome = item.outcome ? ` · outcome \`${item.outcome}\`` : '';
+      return `  - ${exactTime(item.at)} · \`${item.kind}\`${outcome}`;
+    }).join('\n');
+    // `workers` is the planned pool size, not evidence that every worker is
+    // connected or currently processing. Keep those states separate so a
+    // report can explain a stale-looking copy control without implying that a
+    // worker stopped when the dock moved to a later batch.
+    const rawWorkerPool = queue.chat.pool && typeof queue.chat.pool === 'object' ? queue.chat.pool : {};
+    const boundedCount = value => Number.isSafeInteger(value) && value >= 0 ? Math.min(999999, value) : 0;
+    const workerStates = {
+      available: 'awaiting starter copy',
+      ready: 'starter copied; awaiting first call',
+      working: 'processing',
+      quiet: 'needs recovery',
+      waiting: 'connected; awaiting work',
+      idle: 'connected; idle',
+    };
+    const plannedWorkers = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawWorkerPool.workers));
+    const workerRoster = (Array.isArray(rawWorkerPool.roster) ? rawWorkerPool.roster : []).flatMap(worker => {
+      if (!worker || typeof worker !== 'object' || !Number.isSafeInteger(worker.ordinal)
+        || worker.ordinal < 1 || worker.ordinal > plannedWorkers || !Object.hasOwn(workerStates, worker.state)
+        || !Number.isSafeInteger(worker.completed) || worker.completed < 0) return [];
+      return [{
+        ordinal: worker.ordinal, state: worker.state, completed: Math.min(999999, worker.completed),
+        firstCallAt: Number.isFinite(worker.firstCallAt) ? worker.firstCallAt : null,
+        lastCallAt: Number.isFinite(worker.lastCallAt) ? worker.lastCallAt : null,
+        lastCallKind: ['get', 'submit'].includes(worker.lastCallKind) ? worker.lastCallKind : null,
+        lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
+        lastOutcomeAt: Number.isFinite(worker.lastOutcomeAt) ? worker.lastOutcomeAt : null,
+        quietReason: ['polling_stopped', 'answer_silent'].includes(worker.quietReason) ? worker.quietReason : null,
+        restarts: boundedCount(worker.restarts),
+      }];
+    }).sort((left, right) => left.ordinal - right.ordinal).slice(0, HANDOFF_BRIDGE_CONSTANTS.MAX_LANES);
+    const closedPoolHistory = (Array.isArray(rawWorkerPool.history) ? rawWorkerPool.history : []).slice(-3).flatMap(pool => {
+      if (!pool || !['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled', 'other'].includes(pool.reason)
+        || !Number.isFinite(pool.endedAt) || !Number.isSafeInteger(pool.workerCount) || pool.workerCount < 1 || pool.workerCount > HANDOFF_BRIDGE_CONSTANTS.MAX_LANES) return [];
+      const workers = (Array.isArray(pool.workers) ? pool.workers : []).flatMap(worker => {
+        if (!worker || !Number.isSafeInteger(worker.ordinal) || worker.ordinal < 1 || worker.ordinal > pool.workerCount
+          || !Object.hasOwn(workerStates, worker.state) || !Number.isSafeInteger(worker.completed) || worker.completed < 0) return [];
+        return [{ ordinal: worker.ordinal, state: worker.state, completed: Math.min(999999, worker.completed),
+          lastCallAt: Number.isFinite(worker.lastCallAt) ? worker.lastCallAt : null,
+          lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
+          quietReason: ['polling_stopped', 'answer_silent'].includes(worker.quietReason) ? worker.quietReason : null,
+          restarts: boundedCount(worker.restarts) }];
+      }).sort((left, right) => left.ordinal - right.ordinal).slice(0, HANDOFF_BRIDGE_CONSTANTS.MAX_LANES);
+      return [{ endedAt: pool.endedAt, reason: pool.reason, workerCount: pool.workerCount, workers }];
+    });
+    const observedWorkers = workerRoster.length;
+    const workerStatusCount = value => Math.min(plannedWorkers, boundedCount(value));
+    const workerCounts = {
+      readyToCopy: workerStatusCount(rawWorkerPool.readyToCopy),
+      starterCopied: workerStatusCount(rawWorkerPool.starterCopied),
+      connected: workerStatusCount(rawWorkerPool.connected),
+      working: workerStatusCount(rawWorkerPool.working),
+      quiet: workerStatusCount(rawWorkerPool.quiet),
+      waiting: workerStatusCount(rawWorkerPool.waiting),
+      idle: workerStatusCount(rawWorkerPool.idle),
+      completed: boundedCount(rawWorkerPool.completed),
+      unreported: workerStatusCount(rawWorkerPool.unreported),
+    };
+    const rawPoolPlan = rawWorkerPool.plan && typeof rawWorkerPool.plan === 'object' ? rawWorkerPool.plan : {};
+    const poolPlanRecommended = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.recommended));
+    const poolPlanQueued = boundedCount(rawPoolPlan.queued);
+    const poolPlanMaterialized = Math.min(poolPlanQueued, boundedCount(rawPoolPlan.materialized));
+    const poolPlanExpandBy = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.expandBy));
+    const poolPlanReason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(rawPoolPlan.reason)
+      ? rawPoolPlan.reason
+      : 'empty';
+    const poolExpansionCount = Math.min(999, boundedCount(rawPoolPlan.expansionCount));
+    const poolLastExpansionAt = Number.isFinite(rawPoolPlan.lastExpansionAt) ? rawPoolPlan.lastExpansionAt : null;
+    const poolLastExpansionAdded = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.lastExpansionAdded));
+    const workerPoolPlan = rawWorkerPool.active !== true
+      ? 'no active worker pool'
+      : `current ${plannedWorkers} · recommended ${poolPlanRecommended} · materialized now ${poolPlanMaterialized} · total forecast ${poolPlanQueued} · expandable ${poolPlanExpandBy} · reason \`${poolPlanReason}\`${poolExpansionCount ? ` · automatic expansion ${poolExpansionCount} at ${exactTime(poolLastExpansionAt)} (+${poolLastExpansionAdded})` : ''}`;
+    const workerLifecycle = rawWorkerPool.active !== true
+      ? closedPoolHistory.length
+        ? `no active pool · ${closedPoolHistory.length} recent worker pool${closedPoolHistory.length === 1 ? '' : 's'} retained below`
+        : 'legacy single chat'
+      : plannedWorkers === 0
+        ? 'worker pool active; worker plan unavailable'
+        : observedWorkers === 0
+          ? `${plannedWorkers} worker chat${plannedWorkers === 1 ? '' : 's'} planned · per-worker lifecycle not yet reported`
+          : [
+            `${plannedWorkers} worker chat${plannedWorkers === 1 ? '' : 's'} planned`,
+            `${workerCounts.connected} connected`,
+            `${workerCounts.working} processing`,
+            workerCounts.quiet > 0 ? `${workerCounts.quiet} ${workerCounts.quiet === 1 ? 'worker needs recovery' : 'workers need recovery'}` : null,
+            `${workerCounts.completed} completed`,
+            workerCounts.readyToCopy > 0 ? `${workerCounts.readyToCopy} awaiting starter copy` : null,
+            workerCounts.starterCopied > 0 ? `${workerCounts.starterCopied} starter copied; awaiting first call` : null,
+            workerCounts.waiting > 0 ? `${workerCounts.waiting} connected; awaiting work` : null,
+            workerCounts.idle > 0 ? `${workerCounts.idle} connected; idle` : null,
+            workerCounts.unreported > 0 ? `${workerCounts.unreported} worker status${workerCounts.unreported === 1 ? '' : 'es'} not reported` : null,
+          ].filter(Boolean).join(' · ');
+    const workerDetail = worker => [
+      worker.lastCallAt === null ? null : `last call ${exactTime(worker.lastCallAt)}`,
+      worker.lastCallKind ? worker.lastCallKind : null,
+      worker.lastOutcome ? `result ${worker.lastOutcome}` : null,
+      worker.quietReason === 'polling_stopped'
+        ? 'stopped polling after a requested wait'
+        : worker.quietReason === 'answer_silent'
+          ? 'no MCP response since this handoff was served for at least 5 min; response may still be generating or this worker may have stopped'
+          : null,
+      worker.restarts > 0 ? `${worker.restarts} replacement${worker.restarts === 1 ? '' : 's'}` : null,
+    ].filter(Boolean).join(' · ');
+    const workerRosterRows = workerRoster.length === 0 ? '' : `\n${workerRoster.map(worker =>
+      `  - worker ${worker.ordinal}: ${workerStates[worker.state]} · ${worker.completed} completed${workerDetail(worker) ? ` · ${workerDetail(worker)}` : ''}`).join('\n')}`;
+    const closedPoolRows = closedPoolHistory.length === 0 ? '' : `\n- Recent closed worker pools (bounded to 3):\n${closedPoolHistory.map(pool =>
+      `  - ${exactTime(pool.endedAt)} · close \`${pool.reason}\` · ${pool.workerCount} worker${pool.workerCount === 1 ? '' : 's'}${pool.workers.length ? ` · ${pool.workers.map(worker => `#${worker.ordinal} ${worker.state}/${worker.completed}${worker.lastOutcome ? `/${worker.lastOutcome}` : ''}${worker.quietReason ? `/${worker.quietReason}` : ''}${worker.restarts ? `/restarted-${worker.restarts}` : ''}`).join(', ')}` : ''}`).join('\n')}`;
+    const byteBudget = queue.chat.byteBudget > 0
+      ? `${queue.chat.bytes}/${queue.chat.byteBudget} bytes (configured rollover)`
+      : `${queue.chat.bytes} bytes (no bridge rollover)`;
     queueMarkdown = `
 - Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
-- Queue: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/10 · this chat holds ${queue.chat.jobsAssigned}/${queue.chat.jobsCap} (chat \`${queue.chat.state}\`)
+- Delivery readiness: tunnel \`${queue.readiness.tunnelReachable ? 'reachable' : 'not-reachable'}\` · ChatGPT link \`${queue.readiness.linked ? 'linked' : 'not-linked'}\` · chat \`${queue.chat.state}\` · selected-text route \`${dockReason}\` · auto-release applies to application bundles only; selecting text work does not itself start a ChatGPT MCP client.
+- MCP chat calls: ${queue.chat.calls} · started ${exactTime(queue.chat.startedAt)} · first tool call ${exactTime(queue.chat.firstCallAt)} · latest ${queue.chat.lastCallKind ? `\`${queue.chat.lastCallKind}\` at ${exactTime(queue.chat.lastCallAt)}` : 'none recorded'}
+- Application lanes: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/${HANDOFF_BRIDGE_CONSTANTS.MAX_LANES}
+- Chat delivery: \`${queue.chat.state}\` · traffic ${byteBudget} · application bundles assigned ${queue.chat.jobsAssigned}/${queue.chat.jobsCap}
+- Worker lifecycle: ${workerLifecycle}${workerRosterRows}${closedPoolRows}
+- Worker pool planner: ${workerPoolPlan}
+- Push/MCP consent: scoring \`${queue.scope.scoring ? 'on' : 'off'}\` · marketplace \`${queue.scope.marketplace ? 'on' : 'off'}\` · application lanes \`${queue.scope.applications ? 'on' : 'off'}\`
+- Push discovery: ${queue.push.discoveredHubs} hub${queue.push.discoveredHubs === 1 ? '' : 's'} discovered · ${queue.push.selectedHubs} selected (${queue.push.selectedDiscoveredHubs} still in the latest inventory) · ${queue.push.optedOutHubs} explicitly unselected · pending ${queue.push.discoveredPending} total / ${queue.push.selectedPending} selected / ${queue.push.unselectedPending} left in unselected hubs
+- Push delivery routes: local registry has ${queue.push.selectedPending} selected pending · MCP-delivered and awaiting an answer ${pushOwnership} · active MCP claim${queue.push.claimed === 1 ? '' : 's'} ${queue.push.claimed} · selected and available for the next MCP get ${queue.push.available} · returned to local manual dock ${queue.push.held}
+- Bridge submit outcomes: accepted ${queue.counts.submitAccepted} · rejected ${queue.counts.submitRejected} · duplicate ${queue.counts.submitDuplicate} · invalid ${queue.counts.submitJunk + queue.counts.submitTooLarge} · superseded/misrouted ${queue.counts.submitSuperseded + queue.counts.submitMisrouted} · held ${queue.counts.submitHeld}
+- Pending push tasks: ${pushTasks}
+- Push exclusions from the latest \`${queue.push.exclusionScope}\` inventory: ${exclusions}
+- Push refresh evidence: all-hub discovery ${queue.push.refreshAttempts} call(s), ${queue.push.refreshFailures} failure(s), ${pushObservation(queue.push.lastRefresh, queue.push.lastRefreshAt, queue.push.lastRefreshAgeSeconds)} · selected-hub MCP polls ${queue.push.selectedPolls}, ${queue.push.selectedPollFailures} failure(s), ${pushObservation(queue.push.lastSelectedPoll, queue.push.lastSelectedPollAt, queue.push.lastSelectedPollAgeSeconds)}
+- Recent bridge activity: ${activityRows ? `${queue.activity.length} event(s), oldest first (bounded to 20)\n${activityRows}` : 'none recorded'}
 - Unrecognised chat keys: ${queue.keys.unrecognisedRecent} in the last ${queue.keys.unrecognisedWindowMinutes} min (last at ${queue.keys.lastUnrecognisedAt === null ? 'none recorded' : new Date(queue.keys.lastUnrecognisedAt).toISOString()})
 - Ended-chat keys: ${queue.keys.ended}
 - Lane lifecycle counters: release calls ${queue.counts.releaseCalls} (added nothing: ${queue.counts.releaseNoops}) · Unrelease ${queue.counts.unreleaseCalls} · lanes dropped by the app ${queue.counts.lanesDropped} (discard event ${queue.counts.droppedDiscarded} · prune event ${queue.counts.droppedPruned} · status probe found the bundle gone ${queue.counts.droppedMissing} · status probe reported it saved ${queue.counts.droppedSaved})${laneRows ? `\n${laneRows}` : '\n  - (no lanes)'}`;
@@ -2210,6 +2367,17 @@ function buildHandoffBridgeDiagnosticsMarkdown() {
 - Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · recorded ${at}
   - ${verdict}.`;
   }
+  let mcpRateLimitMarkdown = '';
+  if (observedMcpRateLimit) {
+    const count = Number.isFinite(mcpRateLimit.count) ? Math.max(1, Math.min(999999, Math.floor(mcpRateLimit.count))) : 1;
+    const at = Number.isFinite(mcpRateLimit.at) ? new Date(mcpRateLimit.at).toISOString() : 'not recorded';
+    const retryAfterSeconds = Number.isSafeInteger(mcpRateLimit.retryAfterSeconds) && mcpRateLimit.retryAfterSeconds >= 1
+      ? Math.min(3600, mcpRateLimit.retryAfterSeconds)
+      : null;
+    mcpRateLimitMarkdown = `
+- Authenticated MCP rate limits: ${count} · latest Retry-After ${retryAfterSeconds === null ? 'not recorded' : `${retryAfterSeconds}s`} · recorded ${at}
+  - Aggregate-only telemetry: no grant, session, token, caller address, request, or handoff content is retained. This receipt is retained separately from the ordinary bridge activity ring, so repeated waiting polls cannot erase it.`;
+  }
   const chatCopyMarkdown = chatCopies.length === 0 ? '' : `
 - Starter/Continue interactions retained: ${chatCopies.length} (newest last; closed metadata only)
 ${chatCopies.map(entry => {
@@ -2222,7 +2390,7 @@ ${chatCopies.map(entry => {
   }).join('\n')}`;
   return `
 ## Handoff Bridge Diagnostics
-${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${chatCopyMarkdown}
+${bootstrapMarkdown}${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${mcpRateLimitMarkdown}${chatCopyMarkdown}
 `;
 }
 
@@ -2330,7 +2498,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   catch { /* never break the report on diagnostic failure */ }
 
   let handoffBridgeDiagnosticsMarkdown = '';
-  if (isFullReport || reportCodes.has('BRIDGE')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
+  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
   catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
@@ -2500,11 +2668,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
   // global even when combined with either code.
-  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE'))
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS'))
     ? entry => {
       const message = String(entry?.message || '');
       return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
-        || (reportCodes.has('BRIDGE') && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
+        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
     }
     : null;
   let mainProcessLogLines = [];
@@ -2513,8 +2681,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
 
   // ── AI configuration snapshot ─────────────────────────────────────────────
-  // Every AI task is a manual copy/paste handoff now (nonApiAi.js) — this
-  // section states that routing fact. It is rendered unconditionally on every
+  // The local non-api-ai registry owns every task; its normal dock route and
+  // the optional MCP bridge route are both described here. It is rendered unconditionally on every
   // report — unlike almost every other section here, it was never guarded, so
   // a throw anywhere in that chain took down the entire report instead of
   // just this section.
@@ -2662,7 +2830,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // This remains useful even when the live pipeline section self-gates to ''.
   let jobRecoveryOfferMarkdown = '';
   let jobRecoveryMarkdown = '';
-  if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE')) {
+  if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE') || reportCodes.has('JOBRECOVERY')) {
     try { jobRecoveryOfferMarkdown = buildJobRecoveryOfferSnapshot(payload.jobRecoveryOfferStates); }
     catch { jobRecoveryOfferMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Offer Diagnostics', new Error('could not inspect renderer recovery admission state')); }
     try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds, currentJobHubIds, reportWindowId); }

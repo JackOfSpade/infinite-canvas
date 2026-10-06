@@ -81,6 +81,13 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
   const unavailable = !checking && !status.availability.ok;
   const controlsDisabled = checking || unavailable;
   const canToggleServing = status.enabled && (status.paused || status.serving === 'live');
+  const autoStartNeedsConsent = status.autoStart
+    && !status.enabled
+    && !unavailable
+    && !status.setup.consentCurrent
+    && status.setup.hostnameOk
+    && status.setup.binaryApproved
+    && status.setup.credentialsOk;
 
   if (!apiPresent) return null;
 
@@ -150,6 +157,9 @@ export function HandoffBridgeSetup({ onOpenPanel }) {
           )}
           {!checking && <>
             <p className="break-words text-[11px] text-white/50">{health.headline}: {health.detail}</p>
+            {autoStartNeedsConsent && (
+              <p role="status" className="break-words text-[11px] text-amber-200">{BRIDGE_UI_COPY.renewConsentToStart}</p>
+            )}
             <p className="break-words text-[11px] text-white/45">
               {status.power.keepAwake ? BRIDGE_COPY.keepAwakeOn : BRIDGE_COPY.keepAwakeOff}
             </p>

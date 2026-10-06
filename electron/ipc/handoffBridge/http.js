@@ -236,7 +236,7 @@ const mcpFailure = (res, status, message, headers = undefined) => sendJson(res, 
 }, headers);
 const mcpBodyFailure = (res, status) => mcpFailure(res, status, status === 413 ? 'Request body too large' : 'Request body timed out');
 
-export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, connectorOriginList = CONSTANTS.OPENAI_CONNECTOR_ORIGINS, sourcePolicy = CONSTANTS.SOURCE_POLICY, connectorRanges = CONSTANTS.OPENAI_CONNECTOR_RANGES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, diagnostics = { recordOAuthRejection() {}, recordSourceRejection() {} }, accepting = () => true } = {}) {
+export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate = oauth.authenticate, counters = { increment() {} }, now = Date.now, originServerRoutes = CONSTANTS.ORIGIN_SERVER_ROUTES, connectorOriginList = CONSTANTS.OPENAI_CONNECTOR_ORIGINS, sourcePolicy = CONSTANTS.SOURCE_POLICY, connectorRanges = CONSTANTS.OPENAI_CONNECTOR_RANGES, setTimeoutImpl, clearTimeoutImpl, timers = { setTimeout: setTimeoutImpl || globalThis.setTimeout, clearTimeout: clearTimeoutImpl || globalThis.clearTimeout }, audit = { write() {} }, diagnostics = { recordOAuthRejection() {}, recordSourceRejection() {}, recordMcpRateLimit() {} }, accepting = () => true } = {}) {
   if (typeof hostname !== 'string' || !hostname) throw new TypeError('public hostname is required');
   if (typeof mcp !== 'function') throw new TypeError('MCP handler is required');
   const connectorOrigins = new Set(Array.isArray(connectorOriginList) ? connectorOriginList : []);
@@ -445,7 +445,12 @@ export function createRequestHandler({ hostname, oauth = {}, mcp, authenticate =
       // and which Origin the connector actually sends is the open MG5 question.
       // Silence is itself the finding. The ledger rotates, so this is bounded.
       if (origin || fetchSite) writeAudit({ ev: 'origin_seen', origin: origin ? originHost(origin) : undefined, secFetchSite: fetchSite || undefined, route: 'mcp' });
-      const wait = grantBuckets.take(grant.linkId); if (wait) { closeEarly(req, res); mcpFailure(res, 429, 'Request rate is limited', { 'Retry-After': String(wait) }); return null; }
+      const wait = grantBuckets.take(grant.linkId); if (wait) {
+        // The diagnostic boundary receives only the rounded retry delay. The
+        // grant/link identity used for bucket accounting never leaves HTTP.
+        try { diagnostics.recordMcpRateLimit?.({ retryAfterSeconds: wait }); } catch { /* diagnostics never affect admission */ }
+        closeEarly(req, res); mcpFailure(res, 429, 'Request rate is limited', { 'Retry-After': String(wait) }); return null;
+      }
       if (!allowed.includes(req.method)) { closeEarly(req, res); methodNotAllowed(res, 'POST'); return null; }
       if (mimeOf(req) !== 'application/json') { closeEarly(req, res); mcpFailure(res, 415, 'application/json is required'); return null; }
       if (declaredTooLarge(req, CONSTANTS.MCP_BODY_CAP_BYTES)) { closeEarly(req, res); mcpBodyFailure(res, 413); return null; }

@@ -109,7 +109,13 @@ export default [
   { name: 'handoff bridge: application: queued status requests a fresh read', run: () => assert(mapApplicationStatus({ status: 'queued' }).read === true, 'queued status must kick a read') },
   { name: 'handoff bridge: application: completed and importing status are host', run: () => { for (const status of ['completed', 'importing']) assert(mapApplicationStatus({ status }).phase === 'host', `${status} must be host`); } },
   { name: 'handoff bridge: application: recoverable host statuses request a bounded read', run: () => { for (const status of ['revision-required', 'invalid']) assert(mapApplicationStatus({ status }).read === true, `${status} must be read-recovered`); } },
-  { name: 'handoff bridge: application: render retry requires a person', run: () => assert(mapApplicationStatus({ status: 'render-retry-required' }).reason === 'render_retry', 'render retry must not be auto-driven') },
+  {
+    name: 'handoff bridge: application: render retry distinguishes an app-fix block',
+    run: () => {
+      assert(mapApplicationStatus({ status: 'render-retry-required' }).reason === 'render_retry', 'an ordinary render retry must remain person-driven');
+      assert(mapApplicationStatus({ status: 'render-retry-required', retryReproducesFailure: true }).reason === 'app_fix_required', 'a current deterministic comparator failure must never be presented as retryable');
+    },
+  },
   { name: 'handoff bridge: application: unknown status is a shape failure', run: () => assert(mapApplicationStatus({ status: 'unknown' }).shape === true, 'unknown app status must fail closed') },
   {
     name: 'handoff bridge: application: status watchdog shares a call and returns busy',

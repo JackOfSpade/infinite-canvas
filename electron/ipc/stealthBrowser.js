@@ -25,6 +25,7 @@ import { createBackgroundScrapePage, prepareBackgroundScrapeLaunchOptions } from
 import { saveDiceApiKey } from './settings.js';
 import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
+import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
 
 // Apply stealth evasions
 puppeteer.use(StealthPlugin());
@@ -1375,27 +1376,46 @@ async function _fetchDiceKeyFromBundle() {
 
   logger.info(`[Dice API] Searching ${bundleUrls.length} JS bundles for API key (parallel)`);
 
-  // Fetch in parallel batches of 5 to avoid the 20×10s=200s sequential worst case
-  for (let i = 0; i < bundleUrls.length; i += 5) {
-    const batch = bundleUrls.slice(i, i + 5);
-    const keys = await Promise.all(batch.map(async bundleUrl => {
+  // Keep five probes in flight. A slow or timed-out bundle no longer leaves
+  // completed slots idle while later bundles are still waiting to be checked.
+  // The separate controller is only for the successful early-stop case: the
+  // scheduler's controller treats aborting as a failure and must remain live.
+  const fetchStop = new AbortController();
+  let foundKey = null;
+  let nextBundleIndex = 0;
+  await runRollingWorkers({
+    workerCount: 5,
+    claim: () => {
+      if (foundKey || nextBundleIndex >= bundleUrls.length) return null;
+      const bundleUrl = bundleUrls[nextBundleIndex];
+      nextBundleIndex += 1;
+      return bundleUrl;
+    },
+    work: async (bundleUrl, { signal }) => {
       try {
         const r = await fetch(bundleUrl, {
           headers: { ...baseHeaders, 'Accept': '*/*', 'Referer': 'https://www.dice.com/' },
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.any([signal, fetchStop.signal, AbortSignal.timeout(8000)].filter(Boolean)),
         });
-        if (!r.ok) return null;
+        if (!r.ok || foundKey) return;
         const code = await r.text();
         const m = code.match(DICE_API_KEY_RE);
-        return m ? m[1] : null;
-      } catch { return null; }
-    }));
-    const found = keys.find(k => k);
-    if (found) {
-      saveDiceApiKey(found);
-      logger.info('[Dice API] API key extracted from JS bundle');
-      return found;
-    }
+        if (m?.[1] && !foundKey) {
+          foundKey = m[1];
+          // Interrupt sibling fetches and have `claim` refuse later bundles.
+          // `runRollingWorkers` still drains them, avoiding orphaned promises.
+          fetchStop.abort();
+        }
+      } catch {
+        // A timeout, a failed bundle, or the successful early-stop signal is
+        // simply a miss; another worker may already have found the key.
+      }
+    },
+  });
+  if (foundKey) {
+    saveDiceApiKey(foundKey);
+    logger.info('[Dice API] API key extracted from JS bundle');
+    return foundKey;
   }
 
   logger.warn('[Dice API] API key not found in JS bundles — falling back to browser');

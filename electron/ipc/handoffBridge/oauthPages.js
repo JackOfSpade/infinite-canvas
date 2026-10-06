@@ -15,7 +15,7 @@ export function pageShell(title, inner) {
 export const errorHtml = message => pageShell('Cannot continue', `<h1>Cannot continue</h1>\n<p>${esc(message)}</p>`);
 
 export function consentSentence(txn) {
-  const what = 'to read and answer job-application handoffs on this Mac';
+  const what = 'to read and answer your released Infinite Canvas handoffs on this Mac';
   if (txn.clientKind === 'cimd') return `${txn.clientHost} is asking ${what}`;
   return 'ChatGPT is asking ' + what;
 }

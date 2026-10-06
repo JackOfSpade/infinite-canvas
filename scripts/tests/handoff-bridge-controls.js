@@ -17,7 +17,7 @@ import { createHandoffBridgeDialogs } from '../../electron/ipc/handoffBridge/uiD
 import { createHandoffBridgeLog } from '../../electron/ipc/handoffBridge/log.js';
 import { discardLocalApplicationJob, queueLocalApplicationJob } from '../test-dependencies.js';
 import { createLaneStore } from '../../electron/ipc/handoffBridge/laneStore.js';
-import { composeHandoffBridge, handleApplicationBundleRemoved, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
+import { composeHandoffBridge, ENABLE_CONSENT_VERSION, handleApplicationBundleRemoved, registerHandoffBridgeHandlers, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from '../../electron/ipc/handoffBridge/index.js';
 import { createTunnelSupervisor } from '../../electron/ipc/handoffBridge/tunnel/supervisor.js';
 import { createFakeClock } from './fixtures/handoff-bridge/fakeClock.js';
 import { createFakeProcessTable } from './fixtures/handoff-bridge/fakeProcessTable.js';
@@ -251,6 +251,125 @@ export default [
       && custom.controller.snapshot(false).config.pluginName === 'My Bridge 2',
     'controller snapshots must repair only blank legacy plugin names');
   } },
+  { name: 'handoff bridge: controls: selected unclaimed push tokens reach the renderer through the closed status projection', run() {
+    const available = Array.from({ length: 101 }, (_value, index) => `550e8400-e29b-41d4-a716-${String(index).padStart(12, '0')}`);
+    const engine = enginePort({ status: () => ({
+      queue: {
+        applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 },
+        jobs: [],
+        push: { available: [...available, 'not-a-claim-id'], claimed: ['not-a-claim-id'] },
+      },
+      chat: { state: 'none', jobsCap: 2 }, counts: {},
+    }) });
+    const status = controllerHarness({ engine }).controller.snapshot(false);
+    assert(status.push.available.length === 100 && status.push.available[0] === available[0]
+      && status.push.available.every(value => /^[0-9a-f-]{36}$/i.test(value)) && status.push.claimed.length === 0,
+    'only bounded UUID-shaped available tokens cross the controller boundary');
+  } },
+  { name: 'handoff bridge: controls: a worker-pool lifecycle marker is bounded and contains no session capability', run() {
+    const secret = 'PRIVATE-WORKER-SESSION-CODE';
+    const engine = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+      chat: { state: 'working', jobsCap: 2, pool: { active: true, generation: 7, workerCount: 3, sessionCode: secret } },
+      counts: {},
+    }) });
+    const projected = controllerHarness({ engine }).controller.snapshot(false).chat.pool;
+    assert(projected.active === true && projected.generation === 7 && projected.workerCount === 3
+      && !JSON.stringify(projected).includes(secret),
+    'the renderer receives a pool identity but never a worker starter/session capability');
+    const malformed = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+      chat: { state: 'working', jobsCap: 2, pool: { active: true, generation: 0, workerCount: 999 } }, counts: {},
+    }) });
+    const rejected = controllerHarness({ engine: malformed }).controller.snapshot(false).chat.pool;
+    assert(rejected.active === false && rejected.generation === null && rejected.workerCount === 0,
+      'a malformed engine pool marker fails closed instead of keeping stale renderer controls alive');
+  } },
+  { name: 'handoff bridge: controls: closed worker-pool history crosses the controller only as bounded lifecycle evidence', run() {
+    const secret = 'PRIVATE-CLOSED-WORKER-STARTER';
+    const engine = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+      chat: { state: 'none', jobsCap: 2, pool: {
+        active: false, generation: null, workerCount: 0, workers: [],
+        history: [{ endedAt: 1000, reason: 'drained', workerCount: 1,
+          workers: [{ ordinal: 1, state: 'quiet', completed: 2, firstCallAt: 100, lastCallAt: 900, lastCallKind: 'get', lastOutcome: 'waiting', lastOutcomeAt: 900, quietReason: 'polling_stopped', restarts: 1, sessionCode: secret }],
+          plan: { recommended: 1, queued: 3, expandBy: 0, reason: 'one_work_item', sessionCode: secret } }],
+      } }, counts: {},
+    }) });
+    const pool = controllerHarness({ engine }).controller.snapshot(false).chat.pool;
+    assert(pool.active === false && pool.history.length === 1 && pool.history[0].reason === 'drained'
+      && pool.history[0].workers[0]?.quietReason === 'polling_stopped' && pool.history[0].workers[0]?.lastOutcome === 'waiting'
+      && !JSON.stringify(pool).includes(secret),
+    'a closed pool keeps the safe close/worker lifecycle while stripping any capability');
+    const answerSilent = enginePort({ status: () => ({
+      queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+      chat: { state: 'working', jobsCap: 2, pool: { active: true, generation: 8, workerCount: 1,
+        workers: [{ ordinal: 1, state: 'quiet', completed: 0, quietReason: 'answer_silent' }] } }, counts: {},
+    }) });
+    assert(controllerHarness({ engine: answerSilent }).controller.snapshot(false).chat.pool.workers[0]?.quietReason === 'answer_silent',
+      'an answer_silent marker is a current bounded quiet diagnosis, not a legacy value to discard');
+  } },
+  { name: 'handoff bridge: controls: a tick republishes a newly answer-silent worker without another MCP request', async run() {
+    let nextTimer = 0; let quiet = false;
+    const scheduled = new Map();
+    const timers = {
+      setTimeout(fn, delay = 0) { const id = ++nextTimer; scheduled.set(id, { fn, delay, interval: false }); return { id, unref: NOOP }; },
+      setInterval(fn, delay = 0) { const id = ++nextTimer; scheduled.set(id, { fn, delay, interval: true }); return { id, unref: NOOP }; },
+      clearTimeout(timer) { scheduled.delete(timer?.id ?? timer); },
+      clearInterval(timer) { scheduled.delete(timer?.id ?? timer); },
+      flushPublications() {
+        for (const [id, task] of [...scheduled]) {
+          if (task.interval || task.delay !== 0) continue;
+          scheduled.delete(id); task.fn();
+        }
+      },
+    };
+    const secret = 'PRIVATE-QUIET-WORKER-SESSION';
+    const engine = enginePort({
+      status: () => ({
+        queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, jobs: [] },
+        chat: {
+          state: 'working', jobsCap: 2,
+          pool: {
+            active: true, generation: 17, workerCount: 1,
+            workers: [{ ordinal: 1, state: quiet ? 'quiet' : 'working', completed: 3, quietReason: quiet ? 'answer_silent' : null, sessionCode: secret, prompt: 'PRIVATE-PROMPT' }],
+          },
+        },
+        counts: {},
+      }),
+      async tick() { quiet = true; },
+    });
+    const published = [];
+    const h = controllerHarness({
+      engine,
+      timers,
+      ui: {
+        confirmEnable: async () => ({ response: 1 }),
+        confirmRestart: async () => ({ response: 1 }),
+        notify: NOOP,
+        publishStatus: value => published.push(value),
+      },
+    });
+    await h.controller.enable();
+    timers.flushPublications();
+    published.length = 0;
+    const before = h.controller.snapshot(false);
+    assert(before.chat.pool.workers[0]?.state === 'working', 'the worker begins in a normal active state before the housekeeping tick');
+    await h.controller.tick();
+    timers.flushPublications();
+    const quietPublication = published.at(-1);
+    assert(published.length === 1
+      && quietPublication?.chat?.pool?.workers?.[0]?.state === 'quiet'
+      && quietPublication.chat.pool.workers[0].quietReason === 'answer_silent'
+      && quietPublication.chat.pool.workers[0].completed === 3
+      && !JSON.stringify(quietPublication).includes(secret)
+      && !JSON.stringify(quietPublication).includes('PRIVATE-PROMPT'),
+    'crossing into answer-silent quiet on a controller tick publishes the safe roster alert even when no MCP call arrives');
+    await h.controller.tick();
+    timers.flushPublications();
+    assert(published.length === 1, 'unchanged quiet state does not create a noisy status publication every tick');
+    await h.controller.disable();
+  } },
   { name: 'handoff bridge: controls: failed starts retain closed supervisor causes internally', async run() {
     const configRejected = controllerHarness({
       tunnel: { async start() { return { ok: false, code: 'config-rejected' }; }, async stop() {}, status: () => ({ state: 'failed', lastExit: 'config-rejected', probe: { state: 'failing', reason: 'hostile private detail', consecutiveFailures: 7 } }) },
@@ -360,7 +479,7 @@ export default [
       __getInvokeHandler: channel => handlers.get(channel),
     };
     const userData = '/tmp/ic-b6-app-logger'; const appLogger = { info: NOOP }; const captured = [];
-    const config = { hostname: HOST, autoStart: true, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } };
+    const config = { hostname: HOST, autoStart: true, consentVersion: ENABLE_CONSENT_VERSION, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } };
     const runtime = () => ({
       controller: { snapshot: () => ({ enabled: false, serving: 'off', paused: false, pauseCause: null }), enable: async () => ({ success: true }), disable: async () => ({ success: true }), shutdownForQuit: async () => ({ success: true }) },
       listener: {}, tunnel: {}, power: { dispose: NOOP }, tray: { destroy: NOOP },
@@ -468,6 +587,41 @@ export default [
     const order = []; const live = controllerHarness({ listener: { async start() { order.push('listener'); return { ok: true }; }, async quiesce() {}, async drain() {}, async stop() { order.push('listener-stop'); } }, tunnel: { async start() { order.push('tunnel'); return { ok: true }; }, async stop() { order.push('tunnel-stop'); }, status: () => ({ state: 'online' }) }, selfProbe: async () => { order.push('self'); return { ok: true }; }, publicProbe: async () => { order.push('public'); return { ok: true }; } });
     assert((await live.controller.enable()).success && order.join(',') === 'listener,self,tunnel,public', 'listener must self-probe before tunnel/public probe');
     await live.controller.disable(); assert(order.includes('tunnel-stop') && order.includes('listener-stop'), 'hard stop must stop both transport owners');
+  } },
+  { name: 'handoff bridge: controls: long-consent config changes after the first check cannot briefly start a listener', async run() {
+    const durableWrite = deferred(); let current = true; let checks = 0; let listenerStarts = 0; let tunnelStarts = 0;
+    const h = controllerHarness({
+      matchesEnableConsent: (_config, fingerprint) => fingerprint === 'long-consent-fingerprint',
+      currentEnableConsentMatches: fingerprint => { checks += 1; return current && fingerprint === 'long-consent-fingerprint'; },
+      store: { async setEnabled(enabled) { if (enabled) await durableWrite.promise; return true; } },
+      listener: { async start() { listenerStarts += 1; return { ok: true }; }, async stop() {}, async quiesce() {}, async drain() {} },
+      tunnel: { async start() { tunnelStarts += 1; return { ok: true }; }, async stop() {}, status: () => ({ state: 'online' }) },
+    });
+    const enabling = h.controller.enable({ confirmed: true, consentConfirmed: true, consentFingerprint: 'long-consent-fingerprint' });
+    await settle();
+    assert(checks === 1 && h.controller.snapshot(false).serving === 'starting', 'the first fingerprint check must complete before the controlled config save');
+    current = false; durableWrite.resolve();
+    const result = await enabling;
+    assert(result.success === false && result.code === 'CONSENT_STALE' && listenerStarts === 0 && tunnelStarts === 0
+      && h.controller.snapshot(false).enabled === false && h.controller.snapshot(false).serving === 'error',
+    'a post-check config change must fail closed and clean up before either transport owner starts');
+  } },
+  { name: 'handoff bridge: controls: long-consent config changes during listener probing cannot start a tunnel', async run() {
+    const localProbe = deferred(); let current = true; let checks = 0; let listenerStarts = 0; let listenerStops = 0; let tunnelStarts = 0;
+    const h = controllerHarness({
+      matchesEnableConsent: (_config, fingerprint) => fingerprint === 'long-consent-fingerprint',
+      currentEnableConsentMatches: fingerprint => { checks += 1; return current && fingerprint === 'long-consent-fingerprint'; },
+      listener: { async start() { listenerStarts += 1; return { ok: true }; }, async stop() { listenerStops += 1; }, async quiesce() {}, async drain() {} },
+      selfProbe: async () => localProbe.promise,
+      tunnel: { async start() { tunnelStarts += 1; return { ok: true }; }, async stop() {}, status: () => ({ state: 'online' }) },
+    });
+    const enabling = h.controller.enable({ confirmed: true, consentConfirmed: true, consentFingerprint: 'long-consent-fingerprint' });
+    await settle();
+    assert(checks === 2 && listenerStarts === 1, 'the listener starts only while both pre-listener fingerprint checks are current');
+    current = false; localProbe.resolve({ ok: true });
+    const result = await enabling;
+    assert(result.success === false && result.code === 'CONSENT_STALE' && tunnelStarts === 0 && listenerStops === 1,
+      'a config mutation during listener probing must stop that listener and block tunnel activation');
   } },
   { name: 'handoff bridge: controls: app-owned supervisor readiness waits for its closed state without a second public probe', async run() {
     const clock = createFakeClock(1_000_000); let state = 'connecting'; let publicCalls = 0;
@@ -1910,6 +2064,91 @@ export default [
     const key = 'a'.repeat(64);
     assert((await h.controller.releasePushHubs([key])).ok && keys[0] === key, 'opaque hub keys are selected by controller only');
     assert((await h.controller.unreleasePushHub(key)).ok && keys[1] === `-${key}`, 'unrelease uses the matching opaque key');
+  } },
+  { name: 'handoff bridge: controls: selecting a hub polls selected availability again and keeps consent through a transient refresh fault', async run() {
+    const key = 'a'.repeat(64); let refreshes = 0; let outcomes = [];
+    const engine = enginePort({
+      async refreshPushHubs() { refreshes += 1; return outcomes.length ? outcomes.shift() : true; },
+      async selectPushHubKey(value) { return value === key; },
+    });
+    const h = controllerHarness({ engine, config: { hostname: HOST, scope: { applications: true, scoring: true }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } } });
+    await h.controller.enable(); await settle();
+    const before = refreshes;
+    // Presence check succeeds, selected availability poll fails, then the
+    // scheduled ordinary discovery retry succeeds.
+    outcomes = [true, false, true];
+    const result = await h.controller.releasePushHubs([key]);
+    await settle();
+    assert(result.ok && refreshes === before + 3,
+      'a valid selection performs the post-select poll and one best-effort retry without rolling consent back on a transient fault');
+  } },
+  { name: 'handoff bridge: controls: pending-handoff discovery refreshes once when serving starts and remains a scoped, single-flight status update', async run() {
+    const refresh = deferred(); let calls = 0;
+    const engine = enginePort({ async refreshPushHubs() { calls += 1; return refresh.promise; } });
+    const h = controllerHarness({ engine, config: { hostname: HOST, scope: { applications: true, scoring: true, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } } });
+    const enabled = h.controller.enable();
+    await enabled; await settle();
+    assert(calls === 1, 'making the bridge live discovers already-pending handoffs');
+    const one = h.controller.refreshPushDiscovery();
+    const two = h.controller.refreshPushDiscovery();
+    assert(calls === 1, 'duplicate registry wake-ups share the in-flight refresh');
+    refresh.resolve(true);
+    assert((await enabled).success && await one && await two, 'the completed refresh publishes a current serving snapshot');
+    const disabled = controllerHarness({ engine: enginePort({ async refreshPushHubs() { throw new Error('must not poll without consent'); } }), config: { hostname: HOST, scope: { applications: true, scoring: false, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } } });
+    await disabled.controller.enable();
+    assert(await disabled.controller.refreshPushDiscovery() === false, 'application-only bridge scope never discovers scoring handoffs');
+  } },
+  { name: 'handoff bridge: controls: a registry wake during discovery gets one trailing current read', async run() {
+    const first = deferred(); const second = deferred(); let calls = 0;
+    const engine = enginePort({ async refreshPushHubs() { calls += 1; return calls === 1 ? first.promise : second.promise; } });
+    const h = controllerHarness({ engine, config: { hostname: HOST, scope: { applications: true, scoring: true, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } } });
+    await h.controller.enable(); await settle();
+    assert(calls === 1, 'serving starts its initial discovery read');
+    const joined = h.controller.refreshPushDiscovery({ dirty: true });
+    assert(calls === 1, 'the wake joins the snapshot already in flight');
+    first.resolve(true);
+    assert(await joined, 'the original discovery may still succeed');
+    await settle();
+    assert(calls === 2, 'a request arriving after the first list snapshot gets one trailing read');
+    second.resolve(true); await settle();
+    assert(calls === 2, 'the remembered wake is coalesced rather than causing an unbounded refresh loop');
+  } },
+  { name: 'handoff bridge: controls: enabling a push scope through reload discovers work already pending', async run() {
+    let config = { hostname: HOST, scope: { applications: true, scoring: false, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } };
+    let refreshes = 0;
+    const h = controllerHarness({ getConfig: async () => config, engine: enginePort({ async refreshPushHubs() { refreshes += 1; return true; } }) });
+    await h.controller.enable();
+    assert(refreshes === 0, 'application-only scope does not discover push work before consent');
+    config = { ...config, scope: { applications: true, scoring: true, marketplace: false } };
+    assert((await h.controller.reloadConfig()).success, 'scope reload succeeds while bridge is live');
+    await settle();
+    assert(refreshes === 1, 'a scoring consent change refreshes already-pending hubs without waiting for another registry event');
+  } },
+  { name: 'handoff bridge: controls: scope reload during discovery demands one current trailing refresh', async run() {
+    const first = deferred(); const second = deferred(); let calls = 0; let scopes = 0;
+    let config = { hostname: HOST, scope: { applications: true, scoring: true, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } };
+    const h = controllerHarness({ getConfig: async () => config, engine: enginePort({ async setScope() { scopes += 1; }, async refreshPushHubs() { calls += 1; return calls === 1 ? first.promise : second.promise; } }) });
+    await h.controller.enable(); await settle();
+    assert(calls === 1, 'the original scope starts one discovery read');
+    config = { ...config, scope: { applications: true, scoring: true, marketplace: true } };
+    assert((await h.controller.reloadConfig()).success && scopes >= 2 && calls === 1, 'the expanded scope joins the old read while marking it dirty');
+    first.resolve(false); await settle();
+    assert(calls === 2, 'the failed old-scope read is followed by one current-scope discovery');
+    second.resolve(true); await settle();
+  } },
+  { name: 'handoff bridge: controls: re-enable during an old discovery read demands a replacement refresh', async run() {
+    const oldRefresh = deferred(); const freshRefresh = deferred(); let oldCalls = 0; let freshCalls = 0;
+    const oldEngine = enginePort({ async refreshPushHubs() { oldCalls += 1; return oldRefresh.promise; } });
+    const freshEngine = enginePort({ async refreshPushHubs() { freshCalls += 1; return freshRefresh.promise; } });
+    const h = controllerHarness({ engine: oldEngine, recreateEngine: async () => freshEngine, config: { hostname: HOST, scope: { applications: true, scoring: true, marketplace: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce' } } });
+    await h.controller.enable(); await settle();
+    assert(oldCalls === 1, 'the original engine has one pending discovery read');
+    assert((await h.controller.disable()).success, 'Disable replaces the engine without waiting for unrelated discovery');
+    await h.controller.enable(); await settle();
+    assert(freshCalls === 0, 'the replacement enable joins the old read before it settles');
+    oldRefresh.resolve(false); await settle();
+    assert(freshCalls === 1, 'the replacement lifecycle gets exactly one trailing discovery read');
+    freshRefresh.resolve(true); await settle();
   } },
   { name: 'handoff bridge: controls: empty restart ords request all canonical restart lanes', async run() {
     let received = 'unset'; let described = null;

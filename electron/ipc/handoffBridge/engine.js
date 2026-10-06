@@ -26,11 +26,12 @@ import {
   makeRejectedBody,
   makeResultBody,
   makeServedBody,
-  PUSH_INSTRUCTIONS,
+  pushInstructionsFor,
   REJECTED_CAUTION,
   RESULT_NOTES,
   supersededStageNote,
 } from './framing.js';
+import { MAX_WORKER_POOL_PLANNING_UNITS, MAX_WORKER_POOL_SIZE, recommendWorkerPool } from './workerPool.js';
 
 const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Push tasks whose prompt/response carries marketplace listing or pricing
@@ -42,18 +43,33 @@ const JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[
 const MARKETPLACE_PUSH_TASKS = new Set([
   'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
 ]);
+// Status is a public, privacy-reduced surface. Keep its task labels closed so
+// an injected/generic push port cannot turn arbitrary task text into report
+// telemetry. This is the release_one policy vocabulary from sources/push.js.
+const STATUS_PUSH_TASKS = new Set([
+  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'resume-parse', 'job-compensation-research', 'job-compensation-research-batch',
+  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring',
+  'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
+  'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-preference-interpretation', 'job-preference-evaluation',
+  'job-preference-research-assessment', 'job-preference-research-batch-assessment',
+  'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+]);
+const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
+const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
 const STATUS_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
 const STATUS_PHASES = new Set(['unread', 'awaiting', 'host', 'done', 'needs_user', 'held', 'gone']);
 const STATUS_REASONS = new Set([
   'user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap',
-  'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed',
+  'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed',
   'submit_stuck', 'host_silent', 'lapsed', 'restart',
 ]);
 // Closed drop cause -> the per-cause counter it increments.
 const DROP_COUNTER = Object.freeze({
   bundle_discarded: 'droppedDiscarded', bundle_pruned: 'droppedPruned', bundle_missing: 'droppedMissing', bundle_saved: 'droppedSaved',
 });
-const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'closed', 'link_changed']);
+const LOG_EPOCH_CAUSES = new Set(['continued', 'rotated', 'drained', 'source_ended', 'closed', 'link_changed']);
 const LOG_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 // Composition reuses the push source when it replaces a terminal engine after
 // Disable. Keep discovery visibility owned by the current engine instance so
@@ -174,16 +190,14 @@ function normalizeLimits(value = {}) {
 }
 
 function normalizeScope(value = {}) {
-  // Standalone engine users predate the persisted scope preference and retain
-  // the complete source surface by default. Composition always synchronizes
-  // the explicit config (whose scoring default is false) before serving.
-  // marketplace has no such legacy: it is a consent boundary that must never
-  // default on, so an unspecified value stays off even for a standalone
-  // engine, unlike applications/scoring.
+  // Keep the standalone engine's safe fallback aligned with persisted config
+  // and bootstrap: every reviewed text-only handoff family is enabled unless
+  // a caller explicitly opts it out. Composition still synchronizes the
+  // persisted scope before serving, and every false remains an exact fence.
   return Object.freeze({
     applications: value?.applications !== false,
     scoring: value?.scoring !== false,
-    marketplace: value?.marketplace === true,
+    marketplace: value?.marketplace !== false,
   });
 }
 
@@ -224,14 +238,35 @@ export function createHandoffEngine({
     // before its cached rows can be projected again.
     pushDiscoveryCurrent = !PUSH_DISCOVERY_OWNERS.has(push);
     PUSH_DISCOVERY_OWNERS.set(push, pushOwner);
+    try { push.setDiscoveryOwner?.(pushOwner); } catch { /* optional source ownership fence */ }
   }
   const ownsPushDiscovery = () => !pushOwner || PUSH_DISCOVERY_OWNERS.get(push) === pushOwner;
 
   let limits = normalizeLimits(initialLimits);
+  // A zero byte budget means "do not force a chat rollover". This keeps the
+  // bridge's old context-management guard available as an explicit safety
+  // setting without pretending it is a ChatGPT-imposed limit. Per-response
+  // and MCP transport caps remain enforced independently.
+  function workerByteTotal(worker) {
+    return Math.max(0, Number(worker?.bytesServed) || 0) + Math.max(0, Number(worker?.bytesReceived) || 0);
+  }
+  function atSoftByteBudget(worker) {
+    return limits.epochSoftBytes > 0 && workerByteTotal(worker) >= limits.epochSoftBytes;
+  }
+  function atHardByteBudget(worker) {
+    return limits.epochHardBytes > 0 && workerByteTotal(worker) >= limits.epochHardBytes;
+  }
   // Scope is an engine-owned serving fence, rather than a UI-only release
   // preference.  It is checked immediately before every source call so an
   // already-released lane or selected hub cannot survive a scope downgrade.
   let scope = normalizeScope(initialScope);
+  function pushAllowedTasks() {
+    const allowed = new Set();
+    if (scope.scoring) for (const task of SCORING_PUSH_TASKS) allowed.add(task);
+    if (scope.marketplace) for (const task of MARKETPLACE_PUSH_TASKS) allowed.add(task);
+    return allowed;
+  }
+  try { push?.setAllowedTasks?.(pushAllowedTasks()); } catch { /* source remains fail-closed at its own policy */ }
   const lanes = [];
   const codeIndex = new Map();
   const tombstones = new Map();
@@ -316,7 +351,15 @@ export function createHandoffEngine({
   }
   let epoch = null;
   let epochOrdinal = 0;
+  // An epoch is intentionally retired on a genuine queue drain, but a report
+  // taken seconds later must not rewrite a just-finished worker pool as a
+  // "legacy single chat". Keep only a small, capability-free closure receipt.
+  const closedPoolHistory = [];
   let reservedEpochOrdinal = 0;
+  // Pool preparation crosses several async boundaries (restart confirmation
+  // and source discovery). Coalesce overlapping presses so two callers can
+  // never each commit a fresh epoch and strand the first set of starters.
+  let workerPoolStartInFlight = null;
   let laneOrdinal = 0;
   let paused = false;
   let pauseCause = null;
@@ -326,7 +369,6 @@ export function createHandoffEngine({
   let lastHumanActionAt = safeNow(now);
   let lastIdleNoticeAt = 0;
   let fault = null;
-  let lastGetAt = null;
   let restartConfirmation = null;
   // Source operations cannot be cancelled once handed to the application or
   // push seam.  A generation fence nevertheless makes their *results*
@@ -334,6 +376,161 @@ export function createHandoffEngine({
   // result alter lanes, write persistence, notify a renderer, or populate a
   // verdict cache in the next lifecycle.
   let sourceGeneration = 0;
+  // Memory-only sequence for application proof reservations. Every claim also
+  // carries the epoch number, so an obsolete GET can never release a newer
+  // worker-1 reservation after a rotation or source-generation fence.
+  let getClaimOrdinal = 0;
+  // One engine epoch can contain a small, explicitly started pool of distinct
+  // ChatGPT sessions.  The epoch remains the shared source-generation fence;
+  // worker records provide the ownership boundary so concurrent chats never
+  // receive or submit one another's handoffs.
+  function workerId(ordinal) { return `worker-${ordinal}`; }
+  function epochWorkers(target = epoch) {
+    if (!target) return [];
+    return target.workers instanceof Map ? [...target.workers.values()] : [target];
+  }
+  function workerForId(target, id) {
+    if (!target || typeof id !== 'string') return null;
+    return target.workers instanceof Map ? target.workers.get(id) || null : id === 'worker-1' ? target : null;
+  }
+  function workerForSession(target, linkId, session) {
+    const presented = typeof session === 'string' ? session.trim() : '';
+    const boundLinkId = typeof linkId === 'string' ? linkId : '';
+    for (const worker of epochWorkers(target)) {
+      if (sameDigest(epochHash(boundLinkId, presented), worker.keyHash)) return worker;
+    }
+    return null;
+  }
+  function poolWorkerCount(target = epoch) {
+    return Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, epochWorkers(target).length || 1));
+  }
+  function clearLaneWorkerAssignment(lane) {
+    if (!lane) return;
+    for (const worker of epochWorkers()) {
+      const wasFocusedTask = worker.focusLaneOrd === lane.ord;
+      worker.assignedLaneOrds?.delete?.(lane.ord);
+      worker.servedPrompt?.delete?.(lane.ord);
+      if (wasFocusedTask) worker.focusLaneOrd = null;
+      // Application ownership is single-handoff-at-a-time. Clearing the
+      // focused lane must also clear its quiet-watch marker, while a worker
+      // with a later push task stays untouched.
+      if (wasFocusedTask && worker.activeTaskKind === 'application') {
+        worker.activeTask = false;
+        worker.activeTaskKind = null;
+        worker.activeTaskSince = null;
+      }
+    }
+    lane.servedWorkerId = null;
+    lane.pendingWorkerId = null;
+  }
+  function makeWorker({ ordinal, sessionCode, linkId, kind, stamp }) {
+    return {
+      id: workerId(ordinal),
+      workerOrdinal: ordinal,
+      keyHash: epochHash(linkId, sessionCode),
+      endedDigest: endedDigest(sessionCode),
+      ledgerStampAt: 0,
+      starterKey: kind === 'new' ? sessionCode : null,
+      // Reserved before this worker's code can leave the engine. ui.js
+      // releases it only when its clipboard write fails, preventing two chats
+      // from receiving the same worker capability.
+      starterExported: false,
+      mintedBy: kind === 'new' ? 'new' : 'continue',
+      presented: false,
+      mintedAt: stamp,
+      bytesServed: 0,
+      bytesReceived: 0,
+      lastGetAt: null,
+      lastSubmitAt: null,
+      firstCallAt: null,
+      lastCallAt: null,
+      lastCallKind: null,
+      calls: 0,
+      // A small, aggregate-only progress counter for the worker roster. It is
+      // intentionally neither a job identity nor a prompt/result payload.
+      completed: 0,
+      // True only while this worker owns a served handoff. `laneAwaitingAnswer`
+      // remains the authoritative application backstop; this covers push work.
+      activeTask: false,
+      activeTaskKind: null,
+      // Main-process-only activity accounting. A submit may wait on source IO
+      // longer than the recovery threshold, so it must never be mistaken for
+      // a silent worker while that admitted call is still settling.
+      submitInFlight: 0,
+      // The moment this worker was last handed (or re-handed) an unanswered
+      // task. It is process-local liveness bookkeeping only; status projects
+      // the resulting closed state, never this timestamp or task identity.
+      activeTaskSince: null,
+      // Resume moves this floor forward so a deliberate bridge pause never
+      // turns into an immediate false "quiet" retry alert.
+      quietFrom: null,
+      // `waitingSince` is distinct from a handoff being answered.  It starts
+      // when this worker was explicitly told to poll again and lets the pool
+      // offer a safe replacement starter if the ChatGPT composer/session goes
+      // away before making that next call.
+      waitingSince: null,
+      consecutiveWaits: 0,
+      idleSince: null,
+      lastOutcome: null,
+      lastOutcomeAt: null,
+      restarts: 0,
+      focusLaneOrd: null,
+      servedPrompt: new Map(),
+      assignedLaneOrds: new Set(),
+      poolStarted: false,
+      // A quiet worker can be restarted in place.  Its task ownership remains
+      // with this ordinal while a fresh, one-shot starter is waiting to be
+      // copied, so the status projection must offer that starter before it
+      // describes the retained task as working.
+      restartPending: false,
+      // A second transport GET from this chat attaches here while the first
+      // one is selecting, proving, and serving work. Never persisted or
+      // exposed in status.
+      getInFlight: null,
+    };
+  }
+  function attachWorkers(primary, { workerCount = 1, linkId } = {}) {
+    const count = Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, Number.isInteger(workerCount) ? workerCount : 1));
+    // Expanding a live ordinary chat into a pool must preserve worker 1 and
+    // every already-issued sibling. Replacing the map here would strand an
+    // in-flight handoff or silently invalidate a starter the person copied.
+    const workers = primary.workers instanceof Map
+      ? new Map(primary.workers)
+      : new Map([[workerId(1), primary]]);
+    workers.set(workerId(1), primary);
+    for (let ordinal = 2; ordinal <= count; ordinal += 1) {
+      if (workers.has(workerId(ordinal))) continue;
+      const code = makeChatKey(random);
+      workers.set(workerId(ordinal), makeWorker({ ordinal, sessionCode: code, linkId, kind: 'new', stamp: primary.mintedAt }));
+    }
+    primary.id = workerId(1);
+    primary.workerOrdinal = 1;
+    primary.starterExported = false;
+    primary.workers = workers;
+    primary.poolSize = Math.max(count, workers.size);
+    primary.poolGeneration = primary.n;
+    for (const worker of workers.values()) {
+      worker.getInFlight = null;
+      worker.activeTask = worker.activeTask === true;
+      worker.activeTaskKind = worker.activeTaskKind === 'application' || worker.activeTaskKind === 'push'
+        ? worker.activeTaskKind
+        : null;
+      worker.activeTaskSince = Number.isFinite(worker.activeTaskSince) ? worker.activeTaskSince : null;
+      worker.submitInFlight = Number.isSafeInteger(worker.submitInFlight) && worker.submitInFlight > 0
+        ? worker.submitInFlight
+        : 0;
+      worker.quietFrom = Number.isFinite(worker.quietFrom) ? worker.quietFrom : null;
+      worker.waitingSince = Number.isFinite(worker.waitingSince) ? worker.waitingSince : null;
+      worker.completed = Number.isSafeInteger(worker.completed) && worker.completed >= 0
+        ? worker.completed
+        : 0;
+      worker.lastOutcome = typeof worker.lastOutcome === 'string' ? worker.lastOutcome : null;
+      worker.lastOutcomeAt = Number.isFinite(worker.lastOutcomeAt) ? worker.lastOutcomeAt : null;
+      worker.restarts = Number.isSafeInteger(worker.restarts) && worker.restarts >= 0 ? worker.restarts : 0;
+      worker.restartPending = worker.restartPending === true;
+    }
+    return primary;
+  }
   const counts = {
     getServed: 0, getWaiting: 0, getEmpty: 0, getPaused: 0, getUnauthorized: 0,
     submitAccepted: 0, submitRejected: 0, submitDuplicate: 0, submitJunk: 0,
@@ -386,6 +583,7 @@ export function createHandoffEngine({
         lane.inFlight.read = null;
         lane.inFlight.status = null;
         lane.inFlight.submit = null;
+        lane.pendingWorkerId = null;
         if (lane.phase === 'awaiting') {
           lane.snapshot = null;
           lane.needsRefresh = true;
@@ -587,16 +785,20 @@ export function createHandoffEngine({
     queueMicrotask(() => { ledgerPersistQueued = false; persistLedger(); });
   }
 
-  // The live chat's own entry, or null (revoked, or no chat).
+  // The primary worker keeps the historical single-chat digest helper. Pool
+  // aliases are included through liveDigests wherever a key can be recognised
+  // or retained, so ending one pool never makes its sibling starter look
+  // unrecognised.
   const liveDigest = () => (epoch && typeof epoch.endedDigest === 'string' ? epoch.endedDigest : null);
+  const liveDigests = () => epochWorkers().map(worker => worker.endedDigest).filter(value => typeof value === 'string');
 
   function ledgerAdd(digest, stamp) {
     ledger = ledger.filter(entry => !sameHex(entry.digest, digest));
     ledger.push({ digest, retiredAt: stamp });
     // Over the cap, drop the oldest entry that is not the live chat's own.
     while (ledger.length > CONSTANTS.RETIRED_EPOCHS) {
-      const live = liveDigest();
-      const index = ledger.findIndex(entry => !live || !sameHex(entry.digest, live));
+      const live = liveDigests();
+      const index = ledger.findIndex(entry => !live.some(digest => sameHex(entry.digest, digest)));
       ledger.splice(index === -1 ? 0 : index, 1);
     }
   }
@@ -607,9 +809,9 @@ export function createHandoffEngine({
   function pruneLedger({ all = false } = {}) {
     const stamp = safeNow(now);
     const window = ledgerWindowMs();
-    const live = liveDigest();
+    const live = liveDigests();
     const before = ledger.length;
-    ledger = all ? [] : ledger.filter(entry => (live && sameHex(entry.digest, live)) || stamp - entry.retiredAt <= window);
+    ledger = all ? [] : ledger.filter(entry => live.some(digest => sameHex(entry.digest, digest)) || stamp - entry.retiredAt <= window);
     return ledger.length !== before;
   }
 
@@ -617,10 +819,13 @@ export function createHandoffEngine({
   // without this a chat live for more than the window would lose the entry that
   // makes a crash recoverable.
   function refreshLiveEntry(stamp) {
-    const live = liveDigest();
-    if (!live) return;
-    epoch.ledgerStampAt = stamp;
-    ledgerAdd(live, stamp);
+    const workers = epochWorkers();
+    if (workers.length === 0) return;
+    for (const worker of workers) {
+      if (typeof worker.endedDigest !== 'string') continue;
+      worker.ledgerStampAt = stamp;
+      ledgerAdd(worker.endedDigest, stamp);
+    }
     persistLedgerSoon();
   }
 
@@ -638,8 +843,7 @@ export function createHandoffEngine({
 
   function isEndedKey(digest) {
     if (pruneLedger()) persistLedger();
-    const live = liveDigest();
-    if (live && sameHex(digest, live)) return false;
+    if (liveDigests().some(live => sameHex(digest, live))) return false;
     return ledger.some(entry => sameHex(entry.digest, digest));
   }
 
@@ -658,9 +862,62 @@ export function createHandoffEngine({
 
   function retireEpoch(reason) {
     if (!epoch) return;
+    const closingEpoch = epoch;
+    if (closingEpoch.poolStarted === true) {
+      const stamp = safeNow(now);
+      const planned = closingEpoch.poolRecommendation || {};
+      const workers = epochWorkers(closingEpoch).map(worker => {
+        const quiet = workerIsQuiet(worker, stamp);
+        const pollingAfterWait = workerIsPollingAfterWait(worker);
+        const state = worker.restartPending === true
+          ? (worker.starterExported === true ? 'ready' : 'available')
+          : worker.idleSince != null ? 'idle'
+            : quiet ? 'quiet'
+              : worker.activeTask === true || (worker.getInFlight != null && !pollingAfterWait) ? 'working'
+                : worker.presented === true || worker.calls > 0 ? 'waiting'
+                  : worker.starterExported === true ? 'ready' : 'available';
+        return Object.freeze({
+          ordinal: worker.workerOrdinal,
+          state,
+          completed: Math.max(0, Number.isSafeInteger(worker.completed) ? worker.completed : 0),
+          firstCallAt: statusTime(worker.firstCallAt),
+          lastCallAt: statusTime(worker.lastCallAt),
+          lastCallKind: ['get', 'submit'].includes(worker.lastCallKind) ? worker.lastCallKind : null,
+          lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
+          lastOutcomeAt: statusTime(worker.lastOutcomeAt),
+          quietReason: workerQuietReason(worker, stamp),
+          restarts: Math.max(0, Number.isSafeInteger(worker.restarts) ? worker.restarts : 0),
+        });
+      });
+      closedPoolHistory.push(Object.freeze({
+        endedAt: stamp,
+        reason: ['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled'].includes(reason) ? reason : 'other',
+        generation: Number.isSafeInteger(closingEpoch.poolGeneration) ? closingEpoch.poolGeneration : null,
+        workerCount: workers.length,
+        workers: Object.freeze(workers),
+        plan: Object.freeze({
+          recommended: Math.max(0, Number.isInteger(planned.recommended) ? planned.recommended : workers.length),
+          queued: Math.max(0, Number.isInteger(planned.queued) ? planned.queued : 0),
+          materialized: Math.max(0, Number.isInteger(planned.materialized) ? planned.materialized : 0),
+          expandBy: 0,
+          reason: ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(planned.reason) ? planned.reason : 'empty',
+          expansionCount: Math.max(0, Number.isInteger(closingEpoch.poolExpansion?.count) ? closingEpoch.poolExpansion.count : 0),
+          lastExpansionAt: statusTime(closingEpoch.poolExpansion?.at),
+          lastExpansionAdded: Math.max(0, Number.isInteger(closingEpoch.poolExpansion?.added) ? closingEpoch.poolExpansion.added : 0),
+        }),
+      }));
+      while (closedPoolHistory.length > 3) closedPoolHistory.shift();
+    }
     // Drop the plaintext starter with the epoch: nothing may re-copy it (or
     // find it in a still-referenced object) once the chat has ended.
-    epoch.starterKey = null;
+    for (const worker of epochWorkers(epoch)) worker.starterKey = null;
+    // Worker ordinals restart in every pool. Clear both in-memory ownership
+    // hints and transient probe claims so a successor cannot inherit an old
+    // worker-1 assignment or be blocked by its pending source call.
+    for (const lane of lanes) {
+      lane.servedWorkerId = null;
+      lane.pendingWorkerId = null;
+    }
     const retiringPushEpoch = pushEpochId(epoch);
     try { push?.closeEpoch?.(retiringPushEpoch); } catch { /* push state is disposable */ }
     for (const [key, value] of pushVerdicts) if (value.epochId === retiringPushEpoch) pushVerdicts.delete(key);
@@ -668,8 +925,8 @@ export function createHandoffEngine({
     while (retiredEpochs.length > CONSTANTS.RETIRED_EPOCHS) retiredEpochs.shift();
     // Re-stamp this chat's persisted digest with the moment it ended. (No entry
     // is added when the link was revoked: that path cleared the ledger.)
-    if (liveDigest()) {
-      ledgerAdd(liveDigest(), safeNow(now));
+    if (liveDigests().length > 0) {
+      for (const digest of liveDigests()) ledgerAdd(digest, safeNow(now));
       pruneLedger();
       persistLedger();
     }
@@ -691,6 +948,10 @@ export function createHandoffEngine({
 
   function checkIdlePause() {
     if (!epoch || paused || limits.idlePauseMinutes <= 0) return;
+    // Starting a worker pool is an explicit request to keep draining later
+    // waves. Do not make it require another starter solely because a person
+    // has not touched the app for the legacy idle interval.
+    if (epoch.poolStarted === true) return;
     if (safeNow(now) - lastHumanActionAt >= limits.idlePauseMinutes * 60_000) {
       paused = true;
       pauseCause = 'idle';
@@ -702,7 +963,13 @@ export function createHandoffEngine({
 
   function markPresented(target) {
     target.presented = true;
+    target.starterExported = true;
     target.starterKey = null;
+    // Restart uses a reserved replacement starter that was copied directly by
+    // the main-process UI path. Once its fresh chat authenticates, it is an
+    // ordinary live worker again: it must report active work and may later
+    // become quiet/restartable, rather than remaining permanently `ready`.
+    target.restartPending = false;
     target.lastCallAt = safeNow(now);
   }
 
@@ -712,8 +979,9 @@ export function createHandoffEngine({
   function notePresented({ session, linkId, grant } = {}) {
     if (closed || !epoch || typeof session !== 'string') return false;
     const boundLinkId = typeof (grant?.linkId ?? linkId) === 'string' ? (grant?.linkId ?? linkId) : '';
-    if (!sameDigest(epochHash(boundLinkId, session.trim()), epoch.keyHash)) return false;
-    markPresented(epoch);
+    const worker = workerForSession(epoch, boundLinkId, session);
+    if (!worker) return false;
+    markPresented(worker);
     return true;
   }
 
@@ -726,30 +994,29 @@ export function createHandoffEngine({
     // its headers arrived, possibly before a re-pair), so it must not end a
     // healthy chat. The relink event (controller.onLinkChanged) is the
     // authoritative path.
-    const liveKey = liveDigest();
-    if (liveKey && sameHex(endedDigest(presented), liveKey)) noteLink(boundLinkId);
+    if (liveDigests().some(liveKey => sameHex(endedDigest(presented), liveKey))) noteLink(boundLinkId);
     if (!epoch) {
       if (isEndedKey(endedDigest(presented))) endedKeyCount++;
-      return 'session_ended';
+      return { status: 'session_ended', worker: null };
     }
-    const digest = epochHash(boundLinkId, presented);
-    if (sameDigest(digest, epoch.keyHash)) {
+    const worker = workerForSession(epoch, boundLinkId, presented);
+    if (worker) {
       // The chat holds its key and has reached the bridge with it, whatever
       // the gates below decide. The starter can no longer be handed to a second
       // chat, and the chat is no longer "awaiting its first call".
-      markPresented(epoch);
+      markPresented(worker);
       const stamp = safeNow(now);
       if (limits.chatKeyMaxAgeHours > 0
-          && stamp - epoch.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000) return 'session_ended';
+          && stamp - worker.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000) return { status: 'session_ended', worker: null };
       // Keep the crash-recovery entry of a long-lived chat fresh, at most hourly.
-      if (stamp - epoch.ledgerStampAt >= LEDGER_REFRESH_MS) refreshLiveEntry(stamp);
-      return 'ok';
+      if (stamp - worker.ledgerStampAt >= LEDGER_REFRESH_MS) refreshLiveEntry(stamp);
+      return { status: 'ok', worker };
     }
     const ended = endedDigest(presented);
     for (const retired of retiredEpochs) {
-      if (retired.digest && sameHex(retired.digest, ended)) { endedKeyCount++; return 'session_ended'; }
+      if (retired.digest && sameHex(retired.digest, ended)) { endedKeyCount++; return { status: 'session_ended', worker: null }; }
     }
-    if (isEndedKey(ended)) { endedKeyCount++; return 'session_ended'; }
+    if (isEndedKey(ended)) { endedKeyCount++; return { status: 'session_ended', worker: null }; }
     // An unrecognised key. The caller already passed OAuth, so this is our own
     // paired ChatGPT: a stale chat or a garbled code, not an attack (chat keys
     // are high-entropy and the controller rate-limits attempts). It is counted
@@ -760,16 +1027,26 @@ export function createHandoffEngine({
     while (badKeyTimes.length && stamp - badKeyTimes[0] > BAD_KEY_WINDOW_MS) badKeyTimes.shift();
     while (badKeyTimes.length > 1000) badKeyTimes.shift();
     counts.getUnauthorized++;
-    return 'unauthorized';
+    return { status: 'unauthorized', worker: null };
+  }
+
+  // MCP tool arguments intentionally contain only the session (and, for a
+  // submit, its handoff payload). The authenticated OAuth grant supplies the
+  // link binding in production. Keep every post-auth action on the exact same
+  // link-id precedence as authentication; otherwise a valid MCP worker can
+  // serve work but cannot grow a pool after a fresh forecast arrives.
+  function authenticatedLinkId(args = {}) {
+    const value = args?.grant?.linkId ?? args?.linkId;
+    return typeof value === 'string' ? value : '';
   }
 
   function gate(args) {
-    if (closed) return makeResultBody('paused', { reason: 'closed' });
-    const auth = authenticate(args.session, args.grant?.linkId ?? args.linkId);
-    if (auth !== 'ok') return makeResultBody(auth);
+    if (closed) return { body: makeResultBody('paused', { reason: 'closed' }), worker: null };
+    const auth = authenticate(args.session, authenticatedLinkId(args));
+    if (auth.status !== 'ok') return { body: makeResultBody(auth.status), worker: null };
     checkIdlePause();
-    if (paused) return makeResultBody('paused', { reason: pauseCause });
-    return null;
+    if (paused) return { body: makeResultBody('paused', { reason: pauseCause }), worker: null };
+    return { body: null, worker: auth.worker };
   }
 
   function adoptCurrent(lane, handoff) {
@@ -835,7 +1112,105 @@ export function createHandoffEngine({
   // sends Continue (or starts a chat), so the chat reads as idle, not working,
   // until its next authenticated call clears it.
   function markChatStopped(target) {
-    if (target && epoch === target) target.idleSince ??= safeNow(now);
+    if (target && epochWorkers(epoch).includes(target)) {
+      target.idleSince ??= safeNow(now);
+      target.activeTask = false;
+      target.activeTaskKind = null;
+      target.activeTaskSince = null;
+      target.waitingSince = null;
+    }
+  }
+
+  function markWorkerWaiting(target, stamp = safeNow(now)) {
+    if (!target || !epochWorkers(epoch).includes(target)) return;
+    target.idleSince = null;
+    // Every successful `waiting` result renews the next promised poll. A poll
+    // follows the previous instruction but is also positive liveness proof,
+    // so preserving the first wait would falsely mark a healthy long-running
+    // poll loop quiet. The served paths below clear this atomically with new
+    // ownership, avoiding a waiting -> working -> waiting roster flap.
+    target.waitingSince = stamp;
+    target.activeTask = false;
+    target.activeTaskKind = null;
+    target.activeTaskSince = null;
+  }
+
+  // Pool workers share one authenticated MCP grant. Keep their idle polling
+  // comfortably below that grant's one-request-per-second refill rate, while
+  // preserving the established short cadence for a single legacy chat. The
+  // worker-ordinal spread prevents a full-capacity pool from synchronizing every
+  // retry wave and leaves headroom for submit_handoff calls.
+  function workerRetryAfterSeconds(expectedEpoch = epoch, worker = expectedEpoch, singleChatSeconds = 5) {
+    if (expectedEpoch?.poolStarted !== true || !worker) return singleChatSeconds;
+    const workerCount = poolWorkerCount(expectedEpoch);
+    const ordinal = Math.max(1, Math.min(workerCount, Number(worker.workerOrdinal) || 1));
+    const span = CONSTANTS.POOL_WAIT_MAX_SECONDS - CONSTANTS.POOL_WAIT_MIN_SECONDS;
+    const offset = workerCount > 1 ? Math.round((ordinal - 1) * span / (workerCount - 1)) : 0;
+    return CONSTANTS.POOL_WAIT_MIN_SECONDS + offset;
+  }
+
+  function recordWorkerOutcome(target, status, stamp = safeNow(now)) {
+    if (!target || !epochWorkers(epoch).includes(target)) return;
+    const safe = ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(status)
+      ? status
+      : 'retry';
+    target.lastOutcome = safe;
+    target.lastOutcomeAt = stamp;
+  }
+
+  // Keep the worker roster deliberately aggregate-only. The count is updated
+  // at the same durable acceptance points as `counts.submitAccepted`, rather
+  // than on a renderer retry that happens to receive a cached accepted result.
+  function markWorkerCompleted(target) {
+    if (!target || !epochWorkers(epoch).includes(target)) return;
+    target.completed = Math.min(Number.MAX_SAFE_INTEGER,
+      Math.max(0, Number.isSafeInteger(target.completed) ? target.completed : 0) + 1);
+    target.activeTask = false;
+    target.activeTaskKind = null;
+    target.activeTaskSince = null;
+  }
+
+  // An unanswered handoff can legitimately take several minutes. The bridge
+  // cannot prove why a chat has gone silent, but after a bounded interval it
+  // must no longer claim the chat is actively working. This is deliberately a
+  // recovery *warning*, never an automatic revoke/reassignment: a replacement
+  // keeps the same logical worker id and re-reads the same owned handoff.
+  function workerAnswerSilent(worker, stamp = safeNow(now)) {
+    if (paused || !worker || worker.getInFlight != null || worker.submitInFlight > 0) return false;
+    const outstandingApplication = lanes.some(lane => laneAwaitingAnswer(lane, worker));
+    const outstandingPush = worker.activeTask === true && worker.activeTaskKind === 'push';
+    if (!outstandingApplication && !outstandingPush) return false;
+    const servedAt = Number.isFinite(worker.activeTaskSince) ? worker.activeTaskSince : worker.lastGetAt;
+    if (!Number.isFinite(servedAt)) return false;
+    // A submit/re-get while the same task remains open is real liveness and
+    // starts a new ambiguity interval (for example, a correction round).
+    const anchor = Math.max(servedAt, Number.isFinite(worker.lastCallAt) ? worker.lastCallAt : servedAt);
+    return stamp - anchor >= CONSTANTS.STALL_NOTICE_MS;
+  }
+
+  function workerQuietReason(worker, stamp = safeNow(now)) {
+    if (worker?.submitInFlight > 0) return null;
+    if (workerAnswerSilent(worker, stamp)) return 'answer_silent';
+    if (paused || !worker || worker.getInFlight != null || !Number.isFinite(worker.waitingSince)) return null;
+    const anchors = [worker.waitingSince, worker.quietFrom].filter(Number.isFinite);
+    if (anchors.length === 0 || stamp - Math.max(...anchors) < CONSTANTS.STALL_NOTICE_MS) return null;
+    return 'polling_stopped';
+  }
+
+  function workerIsQuiet(worker, stamp = safeNow(now)) {
+    return workerQuietReason(worker, stamp) !== null;
+  }
+
+  // A worker that was explicitly told to wait stays in that lifecycle state
+  // while its next polling GET is selecting. `getInFlight` otherwise denotes
+  // real work (initial claims and active handoffs), but treating an ordinary
+  // wait poll as working makes a healthy pool visibly oscillate on every
+  // cadence tick.
+  function workerIsPollingAfterWait(worker, hasOutstandingApplication = lanes.some(lane => laneAwaitingAnswer(lane, worker))) {
+    return worker?.getInFlight != null
+      && Number.isFinite(worker.waitingSince)
+      && worker.activeTask !== true
+      && !hasOutstandingApplication;
   }
 
   // The result of an in-flight call reached a lane that was held meanwhile. The
@@ -981,6 +1356,7 @@ export function createHandoffEngine({
         // A vanished bundle can never be answered, so it must not keep one of
         // the chat's job slots and starve a live job.
         epoch?.assignedLaneOrds.delete(lane.ord);
+        clearLaneWorkerAssignment(lane);
         persist = true;
       } else if (result.kind === 'threw') {
         if (result.code === 'LOCAL_AI_JOB_INTEGRITY') holdLane(lane, 'job_broken', stamp);
@@ -1113,30 +1489,37 @@ export function createHandoffEngine({
     return raceLaneCall(lane, 'status', promise, generation);
   }
 
-  function canAssign(lane) {
-    if (!epoch) return false;
-    if (epoch.assignedLaneOrds.has(lane.ord)) return true;
-    return epoch.assignedLaneOrds.size < limits.jobsPerChat
-      && epoch.bytesServed + epoch.bytesReceived < limits.epochSoftBytes;
+  function canAssign(lane, worker = epoch) {
+    if (!epoch || !worker || (lane.servedWorkerId && lane.servedWorkerId !== worker.id)
+      // A pending source-proof reservation is never shareable. Duplicate GETs
+      // attach at the worker boundary; distinct workers choose another lane.
+      || lane.pendingWorkerId) return false;
+    if (worker.assignedLaneOrds.has(lane.ord)) return true;
+    // A manually started pool promises that each worker keeps pulling later
+    // handoffs. Keep the per-worker byte ceilings and the lane ownership fence,
+    // but do not apply the legacy two-job single-chat cap to a pool worker.
+    // A non-pool chat retains that conservative context-management limit.
+    return (epoch.poolStarted === true || worker.assignedLaneOrds.size < limits.jobsPerChat)
+      && !atSoftByteBudget(worker);
   }
 
-  function chooseApplicationContinuation() {
-    if (!epoch) return null;
-    const focus = lanes.find(lane => lane.ord === epoch.focusLaneOrd && lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane));
+  function chooseApplicationContinuation(worker = epoch) {
+    if (!epoch || !worker) return null;
+    const focus = lanes.find(lane => lane.ord === worker.focusLaneOrd && lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane, worker));
     if (focus) return focus;
-    const outstanding = lanes.find(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.servedAt != null && canAssign(lane));
+    const outstanding = lanes.find(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.servedAt != null && canAssign(lane, worker));
     if (outstanding) return outstanding;
     // A correction is an application continuation even after a chat rotation;
     // it must never be displaced by an unrelated scoring handoff.
     return [...lanes]
-      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.current?.corrections?.length && canAssign(lane))
+      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && lane.current?.corrections?.length && canAssign(lane, worker))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
   }
 
-  function chooseFreshApplication() {
-    if (!epoch) return null;
+  function chooseFreshApplication(worker = epoch) {
+    if (!epoch || !worker) return null;
     return [...lanes]
-      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane))
+      .filter(lane => lane.phase === 'awaiting' && !lane.needsRefresh && canAssign(lane, worker))
       .sort((a, b) => a.releasedAt - b.releasedAt || a.ord - b.ord)[0] ?? null;
   }
 
@@ -1159,7 +1542,7 @@ export function createHandoffEngine({
     return MARKETPLACE_PUSH_TASKS.has(task) ? scope.marketplace : scope.scoring;
   }
 
-  function framePushGet(raw, generation = sourceGeneration, expectedEpoch = epoch) {
+  function framePushGet(raw, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     const remaining = combinedRemaining(decision.remaining);
@@ -1170,7 +1553,7 @@ export function createHandoffEngine({
         // than leak served content: never expose the prompt to the client.
         return makeResultBody('held', { reason: 'scope_disabled', remaining });
       }
-      if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
+      if (!worker || atHardByteBudget(worker)) {
         return makeResultBody('session_full', { remaining });
       }
       const body = {
@@ -1182,7 +1565,8 @@ export function createHandoffEngine({
         batch: Number.isFinite(decision.batch) ? decision.batch : null,
         batchTotal: Number.isFinite(decision.batchTotal) ? decision.batchTotal : null,
         attempt: Number.isInteger(decision.attempt) ? decision.attempt : 1,
-        instructions: PUSH_INSTRUCTIONS,
+        responseFormat: decision.responseFormat === 'text' ? 'text' : 'json',
+        instructions: pushInstructionsFor(decision.responseFormat),
         prompt: typeof decision.prompt === 'string' ? decision.prompt : '',
         correction: typeof decision.correction === 'string' ? decision.correction : '',
         remaining,
@@ -1195,22 +1579,33 @@ export function createHandoffEngine({
       // Do not charge a ChatGPT retry again: re-serving is intentionally
       // idempotent and can happen several times while a run is settling.
       const promptBytes = Number(decision.promptBytes);
-      expectedEpoch.bytesServed += Number.isFinite(promptBytes) && promptBytes >= 0
+      worker.bytesServed += Number.isFinite(promptBytes) && promptBytes >= 0
         ? Math.floor(promptBytes)
         : Buffer.byteLength(JSON.stringify(body), 'utf8');
-      expectedEpoch.lastGetAt = stamp;
+      worker.lastGetAt = stamp;
+      worker.idleSince = null;
+      worker.waitingSince = null;
+      worker.activeTask = true;
+      worker.activeTaskKind = 'push';
+      worker.activeTaskSince = stamp;
       counts.getServed++;
-      expectedEpoch.consecutiveWaits = 0; // work was served, so the wait streak is broken
+      worker.consecutiveWaits = 0; // work was served, so the wait streak is broken
       auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: 'push' });
       return body;
     }
     if (decision.status === 'needs_user') return makeResultBody('needs_user', { reason: 'app_only_handoffs', remaining });
-    if (decision.status === 'waiting') return makeResultBody('waiting', { retryAfterSeconds: 3, remaining });
+    if (decision.status === 'waiting') {
+      markWorkerWaiting(worker);
+      return makeResultBody('waiting', {
+        retryAfterSeconds: workerRetryAfterSeconds(expectedEpoch, worker, 3),
+        remaining,
+      });
+    }
     if (decision.status === 'queue_empty') return makeResultBody('queue_empty', { remaining });
     return makeResultBody('retry');
   }
 
-  async function readPush(generation = sourceGeneration, expectedEpoch = epoch) {
+  async function readPush(generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     // Either consent alone is enough to poll: the shared push source can hold
     // a mix of scoring and marketplace tasks, and framePushGet applies the
     // exact per-task scope once the served task is known.
@@ -1224,7 +1619,12 @@ export function createHandoffEngine({
       // a new push poll from an already obsolete GET continuation.
       await Promise.resolve();
       if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return { status: 'retry' };
-      const result = await push.get({ epoch: expectedEpochId });
+      const result = await push.get({
+        epoch: expectedEpochId,
+        owner: pushOwner,
+        worker: worker?.id,
+        keepWaiting: expectedEpoch?.poolStarted === true,
+      });
       if (epochCurrent(expectedEpoch, generation)) return result;
       // `push.get` owns per-epoch bookkeeping.  It can finish after Close or
       // rotation, so make the old id disposable even if its late completion
@@ -1279,16 +1679,19 @@ export function createHandoffEngine({
 
   // Core serve logic that runs inside a queued mutation. Factored out so
   // mapSubmitResult can call it directly (it already owns a queued operation).
-  function serveLaneOp(lane, generation, expectedEpoch) {
+  function serveLaneOp(lane, generation, expectedEpoch, worker = expectedEpoch, claimId = null) {
     if (!scope.applications || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     // Nothing between choosing a lane and serving it may have changed it: the
     // serve-time probe is asynchronous, so a lane can be answered, dropped or
     // held while it runs. A lane in any of those states is never served.
-    if (!lanes.includes(lane) || lane.phase !== 'awaiting' || !lane.current || lane.needsRefresh) return makeResultBody('retry');
-    if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) {
+    if (!worker || !lanes.includes(lane) || lane.pendingWorkerId && lane.pendingWorkerId !== claimId
+      || lane.phase !== 'awaiting' || !lane.current || lane.needsRefresh) return makeResultBody('retry');
+    if (claimId && lane.pendingWorkerId === claimId) lane.pendingWorkerId = null;
+    if (!canAssign(lane, worker)) return makeResultBody('retry');
+    if (atHardByteBudget(worker)) {
       return makeResultBody('session_full', { remaining: combinedRemaining() });
     }
-    const marker = expectedEpoch.servedPrompt.get(lane.ord);
+    const marker = worker.servedPrompt.get(lane.ord);
     const servedBefore = marker?.stage === lane.current.stage
       && codeGuard.sameDigest(marker?.codeDigest, codeGuard.digest(lane.current.code));
     lane.current.attempt = (lane.counters.attemptByStage[`${lane.current.stage}@${lane.current.revision}`] ?? 0) + 1;
@@ -1299,6 +1702,7 @@ export function createHandoffEngine({
     lane.servedAt = stamp;
     lane.awaitingAnswer = true;
     lane.servedEpochN = expectedEpoch.n;
+    lane.servedWorkerId = worker.id;
     lane.serves++;
     // The same handoff code going out again (not a new stage after an accepted
     // answer) is what `servedTwice` reports.
@@ -1308,13 +1712,19 @@ export function createHandoffEngine({
     lane.servedCodeAgain = servedBeforeInThisChat && codeGuard.sameDigest(lane.lastServedDigest, servedDigest);
     lane.lastServedDigest = servedDigest;
     touchLane(lane);
-    expectedEpoch.servedPrompt.set(lane.ord, { stage: lane.current.stage, codeDigest: codeGuard.digest(lane.current.code) });
+    worker.servedPrompt.set(lane.ord, { stage: lane.current.stage, codeDigest: codeGuard.digest(lane.current.code) });
     expectedEpoch.assignedLaneOrds.add(lane.ord);
-    expectedEpoch.focusLaneOrd = lane.ord;
-    expectedEpoch.lastGetAt = stamp;
-    expectedEpoch.bytesServed += Buffer.byteLength(JSON.stringify(body), 'utf8');
+    worker.assignedLaneOrds.add(lane.ord);
+    worker.focusLaneOrd = lane.ord;
+    worker.idleSince = null;
+    worker.waitingSince = null;
+    worker.activeTask = true;
+    worker.activeTaskKind = 'application';
+    worker.activeTaskSince = stamp;
+    worker.lastGetAt = stamp;
+    worker.bytesServed += Buffer.byteLength(JSON.stringify(body), 'utf8');
     counts.getServed++;
-    expectedEpoch.consecutiveWaits = 0; // work was served, so the wait streak is broken
+    worker.consecutiveWaits = 0; // work was served, so the wait streak is broken
     auditEvent('served', { tool: 'get_handoff', outcome: 'ok', stage: lane.current.stage });
     const idleNoticeMs = CONSTANTS.SERVE_AFTER_IDLE_NOTICE_HOURS * 3_600_000;
     if (stamp - lastHumanActionAt >= idleNoticeMs && stamp - lastIdleNoticeAt >= 3_600_000) {
@@ -1324,33 +1734,32 @@ export function createHandoffEngine({
     return body;
   }
 
-  function serveLane(lane, generation = sourceGeneration, expectedEpoch = epoch) {
-    return mutateLanes(() => serveLaneOp(lane, generation, expectedEpoch));
+  function serveLane(lane, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch, claimId = null) {
+    return mutateLanes(() => serveLaneOp(lane, generation, expectedEpoch, worker, claimId));
   }
 
   // ---- Per-job answer tracking and stall detection -------------------------
   // A lane is "awaiting an answer" only when its current prompt was served to
   // THIS chat and no accepted submit (or replacement handoff) has come since.
   // Every input is engine-owned state; nothing here reads a source.
-  function laneAwaitingAnswer(lane) {
+  function laneAwaitingAnswer(lane, worker = null) {
     return Boolean(epoch) && lane.phase === 'awaiting' && lane.awaitingAnswer === true
-      && lane.servedEpochN === epoch.n && Number.isFinite(lane.servedAt) && Boolean(lane.current);
+      && lane.servedEpochN === epoch.n && (!worker || lane.servedWorkerId === worker.id)
+      && Number.isFinite(lane.servedAt) && Boolean(lane.current);
   }
 
-  // The moment the chat was last heard on this job: the serve, or a later submit
-  // attempt (a rejected answer hands ChatGPT a correction to answer again, so
-  // that clock restarts). A submit still running is activity, never a stall.
-  // A paused bridge turns every call away, and a hold or pause is time nobody
-  // could answer in: `quietFrom` (set on resume and when a lane returns to
-  // awaiting) is also a floor for the quiet clock. `anchor` is when the quiet
-  // began, which is what the person is told; `since` is when it crossed the
-  // notice threshold, which only orders the hourly stall history.
-  function laneStall(lane, stamp) {
-    if (paused || !laneAwaitingAnswer(lane) || lane.inFlight.submit) return null;
-    let anchor = lane.servedAt;
-    for (const later of [lane.submittedAt, lane.quietFrom]) if (Number.isFinite(later) && later > anchor) anchor = later;
-    if (!(stamp - anchor >= CONSTANTS.STALL_NOTICE_MS)) return null;
-    return { anchor, since: anchor + CONSTANTS.STALL_NOTICE_MS };
+  // Silence is ambiguity, not proof of failure. It becomes a renderer warning
+  // only when the owning worker has crossed the same explicit-recovery gate.
+  function laneStall(lane, stamp = safeNow(now)) {
+    if (!laneAwaitingAnswer(lane)) return null;
+    const worker = workerForId(epoch, lane.servedWorkerId);
+    if (workerQuietReason(worker, stamp) !== 'answer_silent') return null;
+    const anchor = Math.max(
+      Number.isFinite(lane.servedAt) ? lane.servedAt : 0,
+      Number.isFinite(worker?.activeTaskSince) ? worker.activeTaskSince : 0,
+      Number.isFinite(worker?.lastCallAt) ? worker.lastCallAt : 0,
+    );
+    return { anchor, since: anchor };
   }
 
   // Distinct stalls (a lane + the quiet period's anchor) seen in the last hour.
@@ -1419,6 +1828,7 @@ export function createHandoffEngine({
         lane.reason = null;
         lane.snapshot = { at: safeNow(now), kind: 'gone' };
         epoch?.assignedLaneOrds.delete(lane.ord);
+        clearLaneWorkerAssignment(lane);
         touchLane(lane);
       }
       return true;
@@ -1501,33 +1911,71 @@ export function createHandoffEngine({
   // chat is served the next job or an honest empty answer, never a prompt for a
   // job that can no longer be answered. Returns { retry: true } if the world
   // changed under the probe.
-  async function pickVerifiedLane(choose, generation, expectedEpoch) {
+  async function pickVerifiedLane(choose, generation, expectedEpoch, worker = expectedEpoch, claimId = null) {
+    // The reservation belongs to one GET, rather than to a whole worker. A
+    // worker can have two transport requests in flight, and they must attach to
+    // that one GET instead of both being allowed through a worker-scoped claim.
+    if (typeof claimId !== 'string' || !claimId) return { retry: true };
     for (let attempt = 0; attempt <= CONSTANTS.MAX_LANES; attempt += 1) {
-      const lane = choose();
+      const lane = choose(worker);
       if (!lane) return null;
       const claim = await mutateLanes(() => {
-        if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane)) return null;
+        if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane) || !canAssign(lane, worker)) return null;
+        lane.pendingWorkerId = claimId;
         return { lane, revision: laneRevision(lane) };
       });
       if (!claim) return { retry: true };
+      const releaseClaim = async () => {
+        await mutateLanes(() => {
+          if (lane.pendingWorkerId === claimId) lane.pendingWorkerId = null;
+        });
+      };
       const cause = await proveBundleGone(lane, generation, { includeSaved: true });
-      if (!epochCurrent(expectedEpoch, generation)) return { retry: true };
-      if (!lanes.includes(lane) || laneRevision(lane) !== claim.revision) continue;
+      if (!epochCurrent(expectedEpoch, generation)) {
+        await releaseClaim();
+        return { retry: true };
+      }
+      if (!lanes.includes(lane) || laneRevision(lane) !== claim.revision) {
+        await releaseClaim();
+        continue;
+      }
       if (!cause) {
         // The probe was asynchronous: the lane may have been answered, dropped,
         // held or refreshed meanwhile. Only a lane that is still servable goes
         // out; otherwise choose again.
-        if (lanes.includes(lane) && lane.phase === 'awaiting' && lane.current && !lane.needsRefresh && canAssign(lane)) return lane;
+        if (lanes.includes(lane) && lane.phase === 'awaiting' && lane.current && !lane.needsRefresh
+          && lane.pendingWorkerId === claimId) return lane;
+        await releaseClaim();
         continue;
       }
+      await releaseClaim();
       await dropProvenGoneLane(lane, cause, generation, claim.revision);
       if (!epochCurrent(expectedEpoch, generation)) return { retry: true };
     }
     return null;
   }
 
-  function terminalDrain() {
-    return lanes.length === 0 || lanes.every(lane => ['done', 'gone'].includes(lane.phase));
+  function terminalDrain(remaining = null) {
+    const applicationsDrained = lanes.length === 0 || lanes.every(lane => ['done', 'gone'].includes(lane.phase));
+    if (!applicationsDrained) return false;
+    // A pool worker can observe an empty local pull while another worker's
+    // push handoff is still settling. Do not retire the shared epoch until the
+    // source's own aggregate says that no ready, working, or held work remains.
+    // Older source seams omit `remaining`, in which case retain the historic
+    // application-only behavior rather than treating missing metadata as work.
+    if (!remaining || typeof remaining !== 'object') return true;
+    return !['ready', 'working', 'needsYou'].some(key => Number(remaining[key]) > 0);
+  }
+
+  // A source can end or remove a push handoff while a worker still owns it.
+  // Preserve that distinction in the retired-pool receipt rather than calling
+  // the pool naturally drained. This must run before markChatStopped(), which
+  // clears the ownership evidence for the worker that observed queue_empty.
+  function terminalPoolCloseReason(expectedEpoch) {
+    if (!(scope.scoring || scope.marketplace) || !expectedEpoch || epoch !== expectedEpoch) return 'drained';
+    return epochWorkers(expectedEpoch).some(candidate => candidate.activeTask === true && candidate.activeTaskKind === 'push')
+      ? 'source_ended'
+      : 'drained';
   }
 
   async function pruneTerminalLanes(stamp = safeNow(now), generation = sourceGeneration) {
@@ -1576,27 +2024,7 @@ export function createHandoffEngine({
     return !closed;
   }
 
-  async function get(args = {}) {
-    const blocked = gate(args);
-    if (blocked) {
-      if (blocked.status === 'paused') counts.getPaused++;
-      return blocked;
-    }
-    if (args.canvasOpen === false) return makeResultBody('app_unavailable');
-    if (args.signal?.aborted) return makeResultBody('retry');
-    const expectedEpoch = epoch;
-    const callAt = safeNow(now);
-    expectedEpoch.calls += 1;
-    expectedEpoch.idleSince = null; // it called again, so it is not stopped
-    expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
-    expectedEpoch.firstCallAt ??= callAt;
-    expectedEpoch.lastCallAt = callAt;
-    expectedEpoch.lastCallKind = 'get';
-    if (expectedEpoch.bytesServed + expectedEpoch.bytesReceived >= limits.epochHardBytes) return makeResultBody('session_full');
-    const stamp = safeNow(now);
-    if (lastGetAt != null && stamp - lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) expectedEpoch.consecutiveWaits = 0;
-    lastGetAt = stamp;
-    const generation = sourceGeneration;
+  async function getAuthenticated(args, { expectedEpoch, worker, generation, claimId }) {
     const resumedDuringGet = () => !epochCurrent(expectedEpoch, generation);
 
     // A hinted host lane is re-probed here, before a push item is served, so its
@@ -1605,101 +2033,183 @@ export function createHandoffEngine({
       const refreshed = await refreshOneLane(generation);
       if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
     }
-    let lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+    let lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch, worker, claimId) : null;
     if (lane?.retry) return makeResultBody('retry');
-    if (lane) return serveLane(lane, generation, expectedEpoch);
+    if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
 
     // Push handoffs (scoring and marketplace) are preferred only at
     // application job boundaries. A focused, outstanding, or correction
     // application lane has already won.
     let pushDecision = (scope.scoring || scope.marketplace)
-      ? await readPush(generation, expectedEpoch)
+      ? await readPush(generation, expectedEpoch, worker)
       : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
     if (resumedDuringGet()) return makeResultBody('retry');
-    if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
+    if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch, worker);
 
     // A lazy read can reveal a correction or a newly-open continuation after
     // the push poll; give it another chance before starting fresh work.
     const refreshed = scope.applications ? await refreshOneLane(generation) : null;
     if (resumedDuringGet() || refreshed?.kind === 'retry') return makeResultBody('retry');
-    lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+    lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch, worker, claimId) : null;
     if (lane?.retry) return makeResultBody('retry');
-    if (lane) return serveLane(lane, generation, expectedEpoch);
-    lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch) : null;
+    if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
+    lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch, worker, claimId) : null;
     if (lane?.retry) return makeResultBody('retry');
-    if (lane) return serveLane(lane, generation, expectedEpoch);
+    if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
 
     const pushWorking = (scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting';
     const pushNeedsUser = (scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user';
     const working = pushWorking || (scope.applications && lanes.some(laneBusy));
     if (working) {
-      const wakeReason = await waitForWake(holdMs, args.signal);
+      // A pool deliberately has several independent chats. Holding every one
+      // of their MCP requests for GET_HOLD_MS made a completed wave look like
+      // an entire stuck worker roster (and made the advertised retry false).
+      // Pool workers therefore take the existing immediate refresh/drain pass
+      // below without a timer. That pass is important: another worker can be
+      // reading a distinct application lane at the same moment, and the
+      // second worker must still be able to claim it before being told to poll.
+      const wakeReason = await waitForWake(expectedEpoch?.poolStarted === true ? 0 : holdMs, args.signal);
       if (wakeReason === 'aborted' || args.signal?.aborted) return makeResultBody('retry');
       if (resumedDuringGet()) return makeResultBody('retry');
       const refreshedAfterWait = scope.applications ? await refreshOneLane(generation) : null;
       if (resumedDuringGet() || refreshedAfterWait?.kind === 'retry') return makeResultBody('retry');
-      lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch) : null;
+      lane = scope.applications ? await pickVerifiedLane(chooseApplicationContinuation, generation, expectedEpoch, worker, claimId) : null;
       if (lane?.retry) return makeResultBody('retry');
-      if (lane) return serveLane(lane, generation, expectedEpoch);
+      if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
       // A successor can be published during the held poll. Preserve the
       // ordering at the boundary: continuations first, then push, then a
       // fresh application lane.
       pushDecision = (scope.scoring || scope.marketplace)
-        ? await readPush(generation, expectedEpoch)
+        ? await readPush(generation, expectedEpoch, worker)
         : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } };
       if (resumedDuringGet()) return makeResultBody('retry');
-      if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch);
-      lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch) : null;
+      if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'served') return framePushGet(pushDecision, generation, expectedEpoch, worker);
+      lane = scope.applications ? await pickVerifiedLane(chooseFreshApplication, generation, expectedEpoch, worker, claimId) : null;
       if (lane?.retry) return makeResultBody('retry');
-      if (lane) return serveLane(lane, generation, expectedEpoch);
+      if (lane) return serveLane(lane, generation, expectedEpoch, worker, claimId);
       const stillWorking = ((scope.scoring || scope.marketplace) && pushDecision?.status === 'waiting')
         || (scope.applications && lanes.some(laneBusy));
       if (!stillWorking) {
         if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
           counts.getPaused++;
-          markChatStopped(expectedEpoch);
+          markChatStopped(worker);
           return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
+        if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item, worker))) {
           return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
         }
-        if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user') { markChatStopped(expectedEpoch); return framePushGet(pushDecision, generation, expectedEpoch); }
+        if ((scope.scoring || scope.marketplace) && pushDecision?.status === 'needs_user') { markChatStopped(worker); return framePushGet(pushDecision, generation, expectedEpoch, worker); }
         if (pushDecision?.status === 'retry') return makeResultBody('retry');
         counts.getEmpty++;
         const drained = (scope.scoring || scope.marketplace)
-          ? framePushGet(pushDecision, generation, expectedEpoch)
+          ? framePushGet(pushDecision, generation, expectedEpoch, worker)
           : makeResultBody('queue_empty', { remaining: combinedRemaining() });
-        if (drained.status === 'queue_empty') markChatStopped(expectedEpoch);
-        if (drained.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
+        const closeReason = drained.status === 'queue_empty' && terminalDrain(drained.remaining)
+          ? terminalPoolCloseReason(expectedEpoch)
+          : null;
+        if (drained.status === 'queue_empty') markChatStopped(worker);
+        if (closeReason) retireEpoch(closeReason);
         return drained;
       }
-      expectedEpoch.consecutiveWaits++;
-      if (expectedEpoch.consecutiveWaits >= CONSTANTS.MAX_CONSECUTIVE_WAITS) {
+      worker.consecutiveWaits = Math.min(1_000_000, worker.consecutiveWaits + 1);
+      // The pool path is explicitly meant to bridge future upstream waves.
+      // Only legacy single-chat sessions end on the app-owned wait counter.
+      // A `waiting` result is an explicit durable instruction to poll again.
+      // Stopping a legacy chat after an arbitrary count contradicted that
+      // contract and was the direct cause of users having to type Continue.
+      // Silence after that instruction is surfaced as a quiet worker instead
+      // of silently retiring or invalidating a possibly still-writing chat.
+      const waitLimit = Infinity;
+      if (worker.consecutiveWaits >= waitLimit) {
         counts.getPaused++;
-        markChatStopped(expectedEpoch);
+        markChatStopped(worker);
         return makeResultBody('paused', { reason: 'waiting_limit', remaining: combinedRemaining(pushDecision?.remaining) });
       }
       counts.getWaiting++;
-      return makeResultBody('waiting', { pollCount: expectedEpoch.consecutiveWaits, retryAfterSeconds: 5, remaining: combinedRemaining(pushDecision?.remaining) });
+      markWorkerWaiting(worker);
+      return makeResultBody('waiting', {
+        pollCount: worker.consecutiveWaits,
+        retryAfterSeconds: workerRetryAfterSeconds(expectedEpoch, worker),
+        remaining: combinedRemaining(pushDecision?.remaining),
+      });
     }
 
     if (scope.applications && lanes.some(item => ['held', 'needs_user'].includes(item.phase))) {
       counts.getPaused++;
-      markChatStopped(expectedEpoch);
+      markChatStopped(worker);
       return makeResultBody('paused', { reason: 'needs_user', remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item))) {
+    if (scope.applications && lanes.some(item => item.phase === 'awaiting' && !canAssign(item, worker))) {
       return makeResultBody('session_full', { remaining: combinedRemaining(pushDecision?.remaining) });
     }
-    if (pushNeedsUser) { markChatStopped(expectedEpoch); return framePushGet(pushDecision, generation, expectedEpoch); }
+    if (pushNeedsUser) { markChatStopped(worker); return framePushGet(pushDecision, generation, expectedEpoch, worker); }
     if (pushDecision?.status === 'retry') return makeResultBody('retry');
     counts.getEmpty++;
     const result = (scope.scoring || scope.marketplace)
-      ? framePushGet(pushDecision, generation, expectedEpoch)
+      ? framePushGet(pushDecision, generation, expectedEpoch, worker)
       : makeResultBody('queue_empty', { remaining: combinedRemaining() });
-    if (result.status === 'queue_empty') markChatStopped(expectedEpoch);
-    if (result.status === 'queue_empty' && terminalDrain()) retireEpoch('drained');
+    const closeReason = result.status === 'queue_empty' && terminalDrain(result.remaining)
+      ? terminalPoolCloseReason(expectedEpoch)
+      : null;
+    if (result.status === 'queue_empty') markChatStopped(worker);
+    if (closeReason) retireEpoch(closeReason);
     return result;
+  }
+
+  async function get(args = {}) {
+    const admission = gate(args);
+    if (admission.body) {
+      if (admission.body.status === 'paused') counts.getPaused++;
+      return admission.body;
+    }
+    if (args.canvasOpen === false) return makeResultBody('app_unavailable');
+    if (args.signal?.aborted) return makeResultBody('retry');
+    const expectedEpoch = epoch;
+    const worker = admission.worker;
+    const callAt = safeNow(now);
+    // Count each authenticated request for diagnostics, even when it attaches
+    // to an existing GET. The work itself, including bytes and served counts,
+    // is owned by the one in-flight operation below.
+    worker.calls += 1;
+    worker.starterKey = null;
+    worker.firstCallAt ??= callAt;
+    worker.lastCallAt = callAt;
+    worker.lastCallKind = 'get';
+    // A real poll proves this chat still has a usable composer/session, but a
+    // prior `waiting` result remains the roster state until this poll either
+    // receives work or returns its next terminal/wait instruction.
+    const generation = sourceGeneration;
+    const stamp = safeNow(now);
+    if (worker.lastGetAt != null && stamp - worker.lastGetAt >= CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS) worker.consecutiveWaits = 0;
+    worker.lastGetAt = stamp;
+
+    // Same-chat duplicate GETs are retries, not a request to claim a second
+    // application lane. Attach them before any source proof begins so every
+    // caller receives the exact one result and one serve mutation is charged.
+    const existing = worker.getInFlight;
+    if (existing?.epoch === expectedEpoch && existing.generation === generation && existing.promise) return existing.promise;
+    if (atHardByteBudget(worker)) return makeResultBody('session_full');
+
+    // `worker.id` repeats across pools, but the epoch and monotonic sequence
+    // make this memory-only reservation unique across every stale async path.
+    const claimId = `${expectedEpoch.n}:${worker.id}:${++getClaimOrdinal}`;
+    const flight = { epoch: expectedEpoch, generation, claimId, promise: null };
+    worker.getInFlight = flight;
+    const operation = getAuthenticated(args, { expectedEpoch, worker, generation, claimId });
+    flight.promise = operation;
+    try {
+      const result = await operation;
+      // A pool is allowed to grow only after a real authenticated worker
+      // interaction refreshed its source view.  This mints copyable starters
+      // for newly-known work; it never opens a ChatGPT chat or shrinks a pool.
+      maybeExpandWorkerPool(expectedEpoch, generation, authenticatedLinkId(args));
+      recordWorkerOutcome(worker, result?.status);
+      return result;
+    } finally {
+      // A power resume can admit a newer GET on this same worker before the
+      // obsolete source call settles. Never erase that newer operation.
+      if (worker.getInFlight === flight) worker.getInFlight = null;
+    }
   }
 
   function tombstoneResult(code) {
@@ -1823,7 +2333,7 @@ export function createHandoffEngine({
     return detachedSubmitResult(result, code);
   }
 
-  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch, submittedCode = null) {
+  async function mapSubmitResult(lane, text, result, retryCount = 0, generation = sourceGeneration, expectedEpoch = epoch, submittedCode = null, worker = expectedEpoch) {
     if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const stamp = safeNow(now);
     const currentCode = submittedCode ?? lane.current?.code;
@@ -1883,6 +2393,7 @@ export function createHandoffEngine({
         lane.awaitingAnswer = false;
         lane.servedAt = null;
         counts.submitAccepted++;
+        markWorkerCompleted(worker);
         touchLane(lane);
         auditEvent('accepted', { tool: 'submit_handoff', outcome: 'accepted', stage: lane.current?.stage ?? 'unknown' });
         if (result.completed || !result.handoff) {
@@ -1925,7 +2436,7 @@ export function createHandoffEngine({
         if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
         wake();
         if (staged.body) return staged.body;
-        return makeResultBody('accepted', { jobComplete: false, next: serveLaneOp(lane, generation, expectedEpoch) });
+        return makeResultBody('accepted', { jobComplete: false, next: serveLaneOp(lane, generation, expectedEpoch, worker) });
       });
     }
 
@@ -2012,7 +2523,7 @@ export function createHandoffEngine({
           if (isHeldPhase(lane)) return makeResultBody(lane.phase, { reason: lane.reason });
           const recoveryCode = lane.current.code;
           const retried = await callApplicationSubmit(lane, recoveryCode, text, generation, expectedEpoch);
-          return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch, recoveryCode);
+          return mapSubmitResult(lane, text, retried, retryCount + 1, generation, expectedEpoch, recoveryCode, worker);
         }
         if (lane.phase === 'host') return makeResultBody('superseded');
         // The reread proved the bundle is gone, or saved elsewhere ('done' is
@@ -2057,11 +2568,12 @@ export function createHandoffEngine({
     return null;
   }
 
-  async function runSubmit(lane, text, submittedCode, generation = sourceGeneration, expectedEpoch = epoch) {
+  async function runSubmit(lane, text, submittedCode, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     await semaphore.acquire();
     try {
       const claimed = await mutateLanes(() => {
         if (!epochCurrent(expectedEpoch, generation)) return { body: makeResultBody('retry') };
+        if (lane.servedWorkerId && lane.servedWorkerId !== worker?.id) return { body: makeResultBody('unknown_handoff') };
         const stale = staleQueuedSubmitResult(lane, submittedCode, text);
         if (stale) return { body: stale };
         if (lane.phase !== 'awaiting' || !lane.current || !codeGuard.equal(lane.current.code, submittedCode)) {
@@ -2081,7 +2593,7 @@ export function createHandoffEngine({
         // attempt. Never fall through and stamp/send incoming B after *any*
         // recovered outcome (including throw/retry): map it as A so only a
         // definitive result can clear or replace the retained record.
-        return mapSubmitResult(lane, retained.text, recovered, 2, generation, expectedEpoch, code);
+        return mapSubmitResult(lane, retained.text, recovered, 2, generation, expectedEpoch, code, worker);
       }
       await mutateLanes(() => {
         if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane)
@@ -2093,14 +2605,14 @@ export function createHandoffEngine({
       if (!epochCurrent(expectedEpoch, generation) || !lanes.includes(lane)
           || lane.phase !== 'awaiting' || !codeGuard.equal(lane.current?.code, submittedCode)) return makeResultBody('retry');
       const result = await callApplicationSubmit(lane, code, text, generation, expectedEpoch);
-      return await mapSubmitResult(lane, text, result, 0, generation, expectedEpoch, code);
+      return await mapSubmitResult(lane, text, result, 0, generation, expectedEpoch, code, worker);
     } finally {
       semaphore.release();
       if (epochCurrent(expectedEpoch, generation)) wake();
     }
   }
 
-  async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration, expectedEpoch = epoch } = {}) {
+  async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch } = {}) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
     if (decision.status === 'rejected') {
@@ -2118,13 +2630,28 @@ export function createHandoffEngine({
     }
     if (decision.status === 'accepted') {
       counts.submitAccepted++;
+      markWorkerCompleted(worker);
       let next = null;
-      if (successorBudgetMs > 0 && typeof push?.nextAfterAccept === 'function') {
+      // Pools do not keep submit_handoff open to wait for a later wave. Return
+      // the same explicit poll instruction the worker would have received
+      // after that probe, then let its next GET observe the real terminal
+      // state. This keeps the worker's quiet/restart lifecycle accurate too.
+      if (expectedEpoch?.poolStarted === true && successorBudgetMs === 0) {
+        next = makeResultBody('waiting', {
+          retryAfterSeconds: workerRetryAfterSeconds(expectedEpoch, worker),
+        });
+      } else if (successorBudgetMs > 0 && typeof push?.nextAfterAccept === 'function') {
         let successor;
         try {
           if (!epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
           successor = await raceWithBudget(
-            push.nextAfterAccept({ epoch: pushEpochId(expectedEpoch), budgetMs: successorBudgetMs }),
+            push.nextAfterAccept({
+              epoch: pushEpochId(expectedEpoch),
+              budgetMs: successorBudgetMs,
+              owner: pushOwner,
+              worker: worker?.id,
+              keepWaiting: expectedEpoch?.poolStarted === true,
+            }),
             successorBudgetMs,
             { status: 'waiting' },
           );
@@ -2133,7 +2660,13 @@ export function createHandoffEngine({
           try { push?.closeEpoch?.(pushEpochId(expectedEpoch)); } catch { /* stale state is best-effort */ }
           return makeResultBody('retry');
         }
-        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation, expectedEpoch);
+        if (successor?.status && successor.status !== 'queue_empty') next = framePushGet(successor, generation, expectedEpoch, worker);
+      }
+      // A bounded successor probe can legitimately finish while more work is
+      // materialising. Preserve the established top-level accepted contract,
+      // but arm quiet recovery for a chat that never makes the next poll.
+      if (next?.status === 'waiting') {
+        markWorkerWaiting(worker);
       }
       return { status: 'accepted', jobComplete: false, next };
     }
@@ -2158,21 +2691,21 @@ export function createHandoffEngine({
     return makeResultBody('retry', { inFlight: decision.status === 'retry' });
   }
 
-  function runPushSubmit(code, text, generation = sourceGeneration, expectedEpoch = epoch) {
+  function runPushSubmit(code, text, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return null;
     const epochId = pushEpochId(expectedEpoch);
-    const key = verdictKey(`push\n${epochId ?? ''}\n${codeGuard.key(code)}`, text);
+    const key = verdictKey(`push\n${epochId ?? ''}\n${worker?.id ?? ''}\n${codeGuard.key(code)}`, text);
     const cached = pushVerdicts.get(key);
     if (cached && safeNow(now) - cached.at <= CONSTANTS.VERDICT_CACHE_MS) return cached;
     let rawPromise;
     rawPromise = Promise.resolve()
       .then(() => semaphore.acquire())
       .then(() => epochCurrent(expectedEpoch, generation)
-        ? push.submit({ epoch: epochId, handoffCode: code, response: text })
+        ? push.submit({ epoch: epochId, handoffCode: code, response: text, worker: worker?.id })
         : { status: 'retry' })
       .catch(() => ({ status: 'retry' }))
       .finally(() => semaphore.release());
-    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation, expectedEpoch };
+    const record = { at: safeNow(now), rawPromise, framedPromise: null, epochId, generation, expectedEpoch, worker };
     pushVerdicts.set(key, record);
     rawPromise.finally(() => {
       const current = pushVerdicts.get(key);
@@ -2185,26 +2718,38 @@ export function createHandoffEngine({
   // attention), which reads as idle exactly as a stopping get does; an accepted
   // one is progress, so the chat's wait streak starts over.
   async function submit(args = {}) {
-    const blocked = gate(args);
-    if (blocked) return blocked;
+    const admission = gate(args);
+    if (admission.body) return admission.body;
     const startEpoch = epoch;
-    const result = await submitAdmitted(args);
-    if (result?.status === 'accepted' && epoch === startEpoch && startEpoch) startEpoch.consecutiveWaits = 0;
-    if (['held', 'needs_user', 'paused'].includes(result?.status)) markChatStopped(startEpoch);
-    return result;
+    const worker = admission.worker;
+    if (worker) worker.submitInFlight = Math.max(0, Number.isSafeInteger(worker.submitInFlight) ? worker.submitInFlight : 0) + 1;
+    try {
+      const result = await submitAdmitted(args, worker);
+      const expectsPoll = result?.status === 'accepted' && result?.next?.status === 'waiting';
+      if (result?.status === 'accepted' && epoch === startEpoch && worker) worker.consecutiveWaits = 0;
+      if (['held', 'needs_user', 'paused'].includes(result?.status)) markChatStopped(worker);
+      recordWorkerOutcome(worker, result?.status);
+      if (expectsPoll) markWorkerWaiting(worker);
+      maybeExpandWorkerPool(startEpoch, sourceGeneration, authenticatedLinkId(args));
+      return result;
+    } finally {
+      if (worker) worker.submitInFlight = Math.max(0, Number.isSafeInteger(worker.submitInFlight) ? worker.submitInFlight - 1 : 0);
+    }
   }
 
-  async function submitAdmitted(args = {}) {
+  async function submitAdmitted(args = {}, worker = epoch) {
     if (args.canvasOpen === false) return makeResultBody('app_unavailable');
     const generation = sourceGeneration;
     const expectedEpoch = epoch;
     const callAt = safeNow(now);
-    expectedEpoch.calls += 1;
-    expectedEpoch.idleSince = null;
-    expectedEpoch.starterKey = null; // belt and braces: authenticate() already dropped it
-    expectedEpoch.firstCallAt ??= callAt;
-    expectedEpoch.lastCallAt = callAt;
-    expectedEpoch.lastCallKind = 'submit';
+    if (!worker) return makeResultBody('retry');
+    worker.calls += 1;
+    worker.idleSince = null;
+    worker.starterKey = null; // belt and braces: authenticate() already dropped it
+    worker.firstCallAt ??= callAt;
+    worker.lastCallAt = callAt;
+    worker.lastCallKind = 'submit';
+    worker.waitingSince = null;
     const normalized = stringifySubmission(args.response);
     if (!normalized.ok) {
       counts.submitJunk++;
@@ -2216,15 +2761,15 @@ export function createHandoffEngine({
       counts.submitTooLarge++;
       return makeResultBody('too_large');
     }
-    expectedEpoch.bytesReceived += bytes;
-    expectedEpoch.lastSubmitAt = safeNow(now);
+    worker.bytesReceived += bytes;
+    worker.lastSubmitAt = safeNow(now);
     const code = trimHandoffCode(args.handoffCode);
     // Push owns its served-code/tombstone namespace. It has to be consulted
     // before the application unknown-code path so an accepted scoring or
     // marketplace retry is never reported as an application unknown handoff.
     if (push && (scope.scoring || scope.marketplace)) {
       const pushStartedAt = safeNow(now);
-      const pushRecord = runPushSubmit(code, text, generation, expectedEpoch);
+      const pushRecord = runPushSubmit(code, text, generation, expectedEpoch, worker);
       if (!pushRecord) return makeResultBody('retry');
       const pushTimeout = Symbol('push-submit-timeout');
       const pushDecision = await raceWithBudget(pushRecord.rawPromise, submitBudgetMs, pushTimeout);
@@ -2234,9 +2779,17 @@ export function createHandoffEngine({
         const elapsed = Math.max(0, safeNow(now) - pushStartedAt);
         if (!pushRecord.framedPromise) {
           pushRecord.framedPromise = Promise.resolve(pushDecision).then(decision => framePushSubmit(decision, {
-            successorBudgetMs: Math.max(0, submitBudgetMs - elapsed),
+            // Pool workers immediately perform their own next GET. Waiting
+            // here for a successor can consume the complete submit budget for
+            // every worker, despite no result being ready yet. A legacy chat
+            // retains the bounded successor probe that can inline the next
+            // handoff in its accepted response.
+            successorBudgetMs: expectedEpoch?.poolStarted === true
+              ? 0
+              : Math.max(0, submitBudgetMs - elapsed),
             generation,
             expectedEpoch,
+            worker,
           }));
         }
         return raceWithBudget(
@@ -2259,6 +2812,7 @@ export function createHandoffEngine({
     // re-enable, but deny this in-flight handoff without touching its state.
     if (!scope.applications) return makeResultBody('held', { reason: 'scope_disabled' });
     const lane = entry.lane;
+    if (lane.servedWorkerId && lane.servedWorkerId !== worker.id) return makeResultBody('unknown_handoff');
     // Any submit that reaches its lane is ChatGPT being heard on this job, even
     // when it is turned away before the source is asked (junk, wrong stage, a
     // cached verdict, held). runSubmit stamps its own retained record.
@@ -2316,7 +2870,7 @@ export function createHandoffEngine({
       const attached = await raceWithBudget(cached.promise, submitBudgetMs, makeResultBody('retry', { inFlight: true }));
       return epochCurrent(expectedEpoch, generation) ? attached : makeResultBody('retry');
     }
-    const promise = runSubmit(lane, text, code, generation, expectedEpoch);
+    const promise = runSubmit(lane, text, code, generation, expectedEpoch, worker);
     const record = { at: safeNow(now), epochN: expectedEpoch.n, promise, verdict: null };
     verdicts.set(key, record);
     promise.then(verdict => {
@@ -2422,14 +2976,19 @@ export function createHandoffEngine({
       return false;
     }
     if (paused) return false;
-    if (target.bytesServed + target.bytesReceived >= limits.epochHardBytes) return false;
+    if (atHardByteBudget(target)) return false;
     return !(limits.chatKeyMaxAgeHours > 0
       && safeNow(now) - target.mintedAt >= limits.chatKeyMaxAgeHours * 3_600_000);
   }
 
-  async function prepareChat({ linkId, kind = 'new' } = {}) {
+  async function prepareChat({ linkId, kind = 'new', forceNew = false } = {}) {
     if (typeof linkId !== 'string' || !linkId) return { copied: false, status: 'unlinked' };
     if (!await confirmRestartIfNeeded()) return { copied: false, status: 'paused', reason: 'restart' };
+    // A worker pool is a single coordinated generation. Do not let the
+    // ordinary one-chat controls silently retire all of its independently
+    // started workers; only startWorkerPool's explicit forced preparation can
+    // make a replacement generation.
+    if (epoch?.poolStarted === true && forceNew !== true) return { copied: false, status: 'pool_active' };
     // Re-copy: a chat that has been started but has not yet made a single call
     // is still waiting for its starter to be pasted. Pressing "Copy starter"
     // again must hand back THAT starter, not burn the unused chat and bump the
@@ -2444,7 +3003,7 @@ export function createHandoffEngine({
     // no longer reproducible (no plaintext, presented, engine paused, other
     // link, expired, or minted by Continue) falls through to the rotate below.
     const target = epoch;
-    if (kind === 'new' && recopiable(target, linkId)) {
+    if (kind === 'new' && forceNew !== true && recopiable(target, linkId)) {
       return {
         copied: true,
         recopied: true,
@@ -2490,12 +3049,19 @@ export function createHandoffEngine({
       lastCallAt: null,
       lastCallKind: null,
       calls: 0,
+      completed: 0,
+      activeTask: false,
+      activeTaskKind: null,
+      submitInFlight: 0,
+      activeTaskSince: null,
+      quietFrom: null,
       consecutiveWaits: 0,
       idleSince: null,
       focusLaneOrd: null,
       servedPrompt: new Map(),
       assignedLaneOrds: new Set(),
     };
+    attachWorkers(prepared, { workerCount: 1, linkId });
     let committed = false;
     return {
       copied: true,
@@ -2515,9 +3081,9 @@ export function createHandoffEngine({
         pauseCause = null;
         // Record the new chat in the ledger now, so a process that dies before
         // this chat is retired still recognises its key as ended afterwards.
-        prepared.ledgerStampAt = prepared.mintedAt;
+        for (const worker of epochWorkers(prepared)) worker.ledgerStampAt = prepared.mintedAt;
         pruneLedger();
-        ledgerAdd(prepared.endedDigest, prepared.mintedAt);
+        for (const digest of epochWorkers(prepared).map(worker => worker.endedDigest)) ledgerAdd(digest, prepared.mintedAt);
         persistLedger();
         humanAction();
         if (kind === 'continue') counts.chatsContinued++;
@@ -2542,6 +3108,280 @@ export function createHandoffEngine({
     if (!prepared.copied) return prepared;
     prepared.commit();
     return { copied: true, sessionCode: prepared.sessionCode, chatOrdinal: prepared.chatOrdinal };
+  }
+
+  function workerPoolRecommendation(maxWorkers = MAX_WORKER_POOL_SIZE) {
+    let pushState = {};
+    try { pushState = push?.status?.(pushEpochId()) || {}; } catch { pushState = {}; }
+    const pushEnabled = scope.scoring || scope.marketplace;
+    // Production push status exposes the selected opaque hub keys. Discovery
+    // intentionally also remembers opted-out hubs for the chooser, but those
+    // must not inflate the pool plan. Test seams without selection metadata
+    // retain their historical all-discovered fallback.
+    const selectedKnown = Array.isArray(pushState.selectedHubs);
+    const selected = new Set(selectedKnown
+      ? pushState.selectedHubs.filter(key => typeof key === 'string')
+      : []);
+    const rawTasks = pushEnabled && Array.isArray(pushState.discovered)
+      ? pushState.discovered
+        .filter(hub => !selectedKnown || selected.has(hub?.key))
+        .flatMap(hub => Array.isArray(hub?.tasks) ? hub.tasks : [])
+      : [];
+    let plannerBudget = MAX_WORKER_POOL_PLANNING_UNITS;
+    const tasks = [];
+    for (const entry of rawTasks) {
+      if (!STATUS_PUSH_TASKS.has(entry?.task) || plannerBudget < 1) continue;
+      const pending = Number.isSafeInteger(entry.pending) && entry.pending > 0 ? entry.pending : 0;
+      const forecast = Number.isSafeInteger(entry.forecast) && entry.forecast > 0 ? entry.forecast : 0;
+      // Forecast covers the active wave plus later units in its UUID-scoped
+      // scheduler. It may grow the plan, never hide currently materialized
+      // handoffs, and must stay within the aggregate planner bound.
+      const count = Math.min(plannerBudget, Math.max(pending, forecast));
+      if (count < 1) continue;
+      tasks.push({ task: entry.task, pending, forecast });
+      plannerBudget -= count;
+    }
+    // A host lane is still planned work (the app may release its next
+    // handoff), but it is document-building work owned by the app right now,
+    // not a handoff a ChatGPT worker can claim. Keep the two counts separate
+    // so the UI never labels it "released now".
+    const applicationForecastCount = scope.applications
+      ? lanes.filter(lane => ['awaiting', 'unread', 'host'].includes(lane.phase)).length
+      : 0;
+    const applicationCount = scope.applications
+      ? lanes.filter(lane => ['awaiting', 'unread'].includes(lane.phase)).length
+      : 0;
+    return recommendWorkerPool({ tasks, applicationCount, applicationForecastCount, maxWorkers });
+  }
+
+  // The source status is refreshed by authenticated get/submit work.  Grow a
+  // live pool monotonically from that fresh aggregate view, without trying to
+  // launch or control ChatGPT chats on the person's behalf.
+  function maybeExpandWorkerPool(expectedEpoch = epoch, generation = sourceGeneration, linkId = null) {
+    if (!epochCurrent(expectedEpoch, generation) || expectedEpoch?.poolStarted !== true
+      || typeof linkId !== 'string' || !linkId) return false;
+    // Application lanes are already counted when the pool is explicitly
+    // started, but they are not a refreshed upstream forecast.  Restrict
+    // automatic later expansion to the selected push inventory that this
+    // authenticated worker call just refreshed; otherwise an application-only
+    // pool could unexpectedly mint sibling starters mid-run.
+    if (!scope.scoring && !scope.marketplace) return false;
+    const recommendation = workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
+    const before = poolWorkerCount(expectedEpoch);
+    const target = Math.max(before, recommendation.recommended);
+    expectedEpoch.poolRecommendation = Object.freeze({
+      ...recommendation,
+      actualWorkers: target,
+      reason: target > recommendation.recommended ? 'preserved_live_workers' : recommendation.reason,
+    });
+    if (target <= before) return false;
+    attachWorkers(expectedEpoch, { workerCount: target, linkId });
+    expectedEpoch.poolExpansion = Object.freeze({
+      count: Math.min(999, (Number.isInteger(expectedEpoch.poolExpansion?.count) ? expectedEpoch.poolExpansion.count : 0) + 1),
+      at: safeNow(now), added: target - before, queued: recommendation.queued, materialized: recommendation.materialized, recommended: recommendation.recommended,
+    });
+    for (const worker of epochWorkers(expectedEpoch)) {
+      worker.ledgerStampAt = expectedEpoch.mintedAt;
+      ledgerAdd(worker.endedDigest, expectedEpoch.mintedAt);
+    }
+    persistLedger();
+    auditEvent('worker_pool_expanded', { workers: target, added: target - before });
+    log('worker_pool_expanded', {
+      workers: target,
+      recommended: recommendation.recommended,
+      queued: recommendation.queued,
+      added: target - before,
+    });
+    wake();
+    return true;
+  }
+
+  async function startWorkerPoolInternal({ linkId, requestedWorkers } = {}) {
+    if (typeof linkId !== 'string' || !linkId) return { started: false, status: 'unlinked' };
+    if (!await confirmRestartIfNeeded()) return { started: false, status: 'paused', reason: 'restart' };
+    // A relink invalidates every live starter. Make that boundary explicit
+    // before adding a sibling worker whose code would otherwise be bound to a
+    // different link than worker 1.
+    noteLink(linkId);
+    // A new pool retains the historical explicit cap (used by focused callers
+    // that intentionally start one worker).  Once a pool is live, an explicit
+    // target is instead a user-owned capacity reservation: it lets later
+    // workflow waves find already-waiting workers.  The recommendation always
+    // still observes all safely known work, including a source forecast.
+    const requestedTarget = Number.isInteger(requestedWorkers)
+      ? Math.max(1, Math.min(MAX_WORKER_POOL_SIZE, requestedWorkers))
+      : null;
+    // Refresh once before planning. A newly selected hub can otherwise look
+    // empty even though it has already queued handoffs.
+    if (scope.scoring || scope.marketplace) await refreshPushHubs();
+    const recommendation = workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
+    // A fresh empty queue has nothing to start.  A live pool is different:
+    // its current units may all be claimed/in-flight during this refresh, yet
+    // the person can deliberately add waiting workers for the next wave.
+    // Never retire or invalidate the existing starters in either case.
+    if (recommendation.recommended < 1 && epoch?.poolStarted !== true) {
+      return { started: false, status: 'queue_empty', recommendation };
+    }
+    let created = false;
+    if (!epoch) {
+      // No existing chat: prepare a fresh shared generation. The renderer
+      // receives only metadata and copies each unique starter separately.
+      const prepared = await prepareChat({ linkId, kind: 'new', forceNew: true });
+      if (!prepared?.copied || typeof prepared.commit !== 'function') return { started: false, status: prepared?.status || 'paused', reason: prepared?.reason, recommendation };
+      if (prepared.commit() !== true || !epoch) return { started: false, status: 'retry', recommendation };
+      created = true;
+    }
+    // Do not replace an active legacy chat. It becomes worker 1, keeps its
+    // outstanding handoff and session key, and only the added workers receive
+    // new starters. This makes an in-progress long run safely expandable.
+    const before = poolWorkerCount(epoch);
+    // A new pool follows the exact X = min(known work, configured capacity) plan. Existing
+    // copied or active chats cannot be silently retired without stranding a
+    // one-time starter or in-flight handoff, so a later explicit start only
+    // expands the live pool when the newly calculated target is larger.
+    const automaticTarget = created && requestedTarget !== null
+      ? Math.min(recommendation.recommended, requestedTarget)
+      : recommendation.recommended;
+    const manualExpansionTarget = created ? 0 : (requestedTarget || 0);
+    const workerCount = Math.max(before, automaticTarget, manualExpansionTarget);
+    attachWorkers(epoch, { workerCount, linkId });
+    epoch.poolStarted = true;
+    epoch.poolExpansion = Object.freeze({ count: 0, at: null, added: 0, queued: recommendation.queued, materialized: recommendation.materialized, recommended: recommendation.recommended });
+    epoch.poolRecommendation = Object.freeze({
+      ...recommendation,
+      actualWorkers: workerCount,
+      reason: workerCount > recommendation.recommended ? 'preserved_live_workers' : recommendation.reason,
+    });
+    const newWorkerOrdinals = [];
+    for (let ordinal = before + 1; ordinal <= workerCount; ordinal += 1) newWorkerOrdinals.push(ordinal);
+    // A just-created pool's primary worker did not exist before the plan and
+    // must be represented alongside its siblings. An existing untouched
+    // legacy starter remains copyable through its normal re-copy semantics.
+    if (created && before === 1 && !newWorkerOrdinals.includes(1)) newWorkerOrdinals.unshift(1);
+    for (const worker of epochWorkers(epoch)) {
+      worker.ledgerStampAt = epoch.mintedAt;
+      ledgerAdd(worker.endedDigest, epoch.mintedAt);
+    }
+    persistLedger();
+    auditEvent('worker_pool_started', { workers: workerCount, expanded: created ? false : true });
+    log('worker_pool_started', {
+      workers: workerCount,
+      recommended: recommendation.recommended,
+      queued: recommendation.queued,
+      materialized: recommendation.materialized,
+    });
+    wake();
+    return {
+      started: true,
+      existing: !created,
+      generation: epoch.poolGeneration,
+      workerCount,
+      // Keep the calculated target distinct from a preserved older pool.
+      // `workerCount` is the actual live-chat count shown to the user.
+      recommended: recommendation.recommended,
+      queued: recommendation.queued,
+      materialized: recommendation.materialized,
+      newWorkerOrdinals,
+      lockedWorkerOrdinals: epochWorkers(epoch)
+        .filter(worker => worker.starterExported === true || worker.presented === true || worker.calls > 0)
+        .map(worker => worker.workerOrdinal)
+        .filter(ordinal => Number.isInteger(ordinal) && ordinal >= 1 && ordinal <= MAX_WORKER_POOL_SIZE),
+      recommendation: epoch.poolRecommendation,
+    };
+  }
+
+  function startWorkerPool(args = {}) {
+    if (typeof args?.linkId !== 'string' || !args.linkId) return Promise.resolve({ started: false, status: 'unlinked' });
+    if (workerPoolStartInFlight) return workerPoolStartInFlight;
+    const operation = startWorkerPoolInternal(args);
+    const shared = operation.finally(() => {
+      if (workerPoolStartInFlight === shared) workerPoolStartInFlight = null;
+    });
+    workerPoolStartInFlight = shared;
+    return shared;
+  }
+
+  function copyWorkerStarter({ linkId, generation, workerOrdinal } = {}) {
+    if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
+    if (typeof linkId !== 'string' || !linkId) return { copied: false, status: 'unlinked' };
+    if (!Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
+    const worker = workerForId(epoch, workerId(workerOrdinal));
+    if (worker?.starterExported === true) return { copied: false, status: 'starter_copied' };
+    if (!worker || !recopiable(worker, linkId)) {
+      return { copied: false, status: worker?.presented ? 'session_started' : 'session_ended' };
+    }
+    // This precedes returning the session code. ui.js abandons this temporary
+    // reservation if its main-process clipboard write cannot complete.
+    worker.starterExported = true;
+    worker.restartPending = false;
+    return {
+      copied: true,
+      sessionCode: worker.starterKey,
+      generation: epoch.poolGeneration,
+      workerOrdinal: worker.workerOrdinal,
+      workerCount: epoch.poolSize,
+    };
+  }
+
+  function abandonWorkerStarter({ linkId, generation, workerOrdinal } = {}) {
+    if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return false;
+    if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal)) return false;
+    const worker = workerForId(epoch, workerId(workerOrdinal));
+    if (!worker?.starterExported || worker.presented || worker.calls !== 0 || typeof worker.starterKey !== 'string') return false;
+    if (!sameDigest(epochHash(linkId, worker.starterKey), worker.keyHash)) return false;
+    worker.starterExported = false;
+    return true;
+  }
+
+  // Replace only a quiet worker's session capability.  Keep its ordinal,
+  // aggregate completion count, and lane/push ownership so a fresh chat can
+  // safely re-get the exact outstanding handoff.  The prior key stays in the
+  // ended-key ledger and can never authenticate again.
+  function restartWorker({ linkId, generation, workerOrdinal } = {}) {
+    if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
+    if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
+    const worker = workerForId(epoch, workerId(workerOrdinal));
+    if (!worker || !workerIsQuiet(worker)) return { copied: false, status: 'not_quiet' };
+    const stamp = safeNow(now);
+    // The live ledger already contains this digest, but stamp it again before
+    // dropping the only credential that could authenticate it.
+    ledgerAdd(worker.endedDigest, stamp);
+    const sessionCode = makeChatKey(random);
+    worker.keyHash = epochHash(linkId, sessionCode);
+    worker.endedDigest = endedDigest(sessionCode);
+    worker.ledgerStampAt = stamp;
+    ledgerAdd(worker.endedDigest, stamp);
+    worker.starterKey = sessionCode;
+    worker.starterExported = true;
+    worker.restartPending = true;
+    worker.mintedBy = 'new';
+    worker.presented = false;
+    worker.mintedAt = stamp;
+    worker.bytesServed = 0;
+    worker.bytesReceived = 0;
+    worker.firstCallAt = null;
+    worker.lastCallAt = null;
+    worker.lastCallKind = null;
+    worker.lastGetAt = null;
+    worker.lastSubmitAt = null;
+    worker.calls = 0;
+    worker.getInFlight = null;
+    worker.submitInFlight = 0;
+    // Keep the current lane/push ownership, but start a fresh ambiguity
+    // interval for its deliberately replaced credential. Until this starter
+    // actually calls get, a second restart must not invalidate it merely
+    // because the prior chat had already been silent for five minutes.
+    worker.activeTaskSince = stamp;
+    worker.quietFrom = stamp;
+    worker.waitingSince = null;
+    worker.consecutiveWaits = 0;
+    worker.idleSince = null;
+    worker.restarts = Math.min(Number.MAX_SAFE_INTEGER, (Number.isSafeInteger(worker.restarts) ? worker.restarts : 0) + 1);
+    persistLedger();
+    auditEvent('worker_restarted', { worker: workerOrdinal });
+    log('worker_restarted', { worker: workerOrdinal });
+    wake();
+    return { copied: true, sessionCode, generation: epoch.poolGeneration, workerOrdinal, workerCount: epoch.poolSize };
   }
 
   // Job ids whose bundle the app discarded or pruned this session (insertion
@@ -2699,14 +3539,16 @@ export function createHandoffEngine({
         codeIndex.delete(codeKey);
       }
       const hadSlot = epoch?.assignedLaneOrds.delete(lane.ord) === true;
+      const assignedWorkerId = lane.servedWorkerId;
+      clearLaneWorkerAssignment(lane);
       clearLaneHint(lane);
       const revision = touchLane(lane);
-      return { generation, lane, removedCodes, hadSlot, cause, revision, persist: true };
+      return { generation, lane, removedCodes, hadSlot, assignedWorkerId, cause, revision, persist: true };
     });
     if (!staged?.persist) return staged;
     const saved = await persistLanes(staged.generation);
     const finished = await mutateLanes(() => {
-      const { generation, lane, removedCodes, hadSlot } = staged;
+      const { generation, lane, removedCodes, hadSlot, assignedWorkerId } = staged;
       if (!sourceCurrent(generation)) return { ok: false, code: 'not_ready' };
       if (!saved) {
         // Only this lane goes back, and only if the job has no lane again: a
@@ -2715,6 +3557,9 @@ export function createHandoffEngine({
         if (reinstateLane(lane)) {
           for (const [codeKey, entry] of removedCodes) if (!codeIndex.has(codeKey)) codeIndex.set(codeKey, entry);
           if (hadSlot) epoch?.assignedLaneOrds.add(lane.ord);
+          const owner = workerForId(epoch, assignedWorkerId);
+          if (owner) owner.assignedLaneOrds.add(lane.ord);
+          lane.servedWorkerId = assignedWorkerId || null;
           // An answer the app accepted while the lane was out was not applied to it.
           settleAcceptedElsewhere(lane);
           rollbackRevision = laneRevision(lane);
@@ -2768,7 +3613,7 @@ export function createHandoffEngine({
     const staged = await mutateLanes(() => {
       const lane = lanes.find(item => item.jobId === jobId);
       if (!lane) return { ok: false, code: 'not_found' };
-      const targetPhase = ['job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
+      const targetPhase = ['job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent'].includes(reason)
         ? 'needs_user'
         : 'held';
       // An identical later hold is a no-op, rather than a second optimistic
@@ -2858,6 +3703,7 @@ export function createHandoffEngine({
           lane.quietFrom = resumedAt;
           touchLane(lane);
         }
+        for (const worker of epochWorkers()) worker.quietFrom = resumedAt;
         return { bridge: true };
       }
     });
@@ -2896,12 +3742,14 @@ export function createHandoffEngine({
   function pause(cause = 'user') {
     // A revoked link or a quitting app ends any chance of re-copying the
     // starter: drop the plaintext now rather than at the next rotation.
-    if ((cause === 'revoked' || cause === 'quit') && epoch) epoch.starterKey = null;
+    if ((cause === 'revoked' || cause === 'quit') && epoch) {
+      for (const worker of epochWorkers(epoch)) worker.starterKey = null;
+    }
     if (cause === 'revoked') {
       // The link is gone (unpaired). Forget every ended chat, in memory and on
       // disk, and stop the live chat from re-entering the ledger when it is
       // retired: after an unpair a stale key reads as unrecognised again.
-      if (epoch) epoch.endedDigest = null;
+      if (epoch) for (const worker of epochWorkers(epoch)) worker.endedDigest = null;
       for (const retired of retiredEpochs) retired.digest = null;
       const had = ledger.length > 0;
       pruneLedger({ all: true });
@@ -3006,7 +3854,7 @@ export function createHandoffEngine({
 
   function snapshot() {
     const queue = remainingCounts(lanes);
-    let pushState = { served: 0, held: 0, selectedHubs: 0, working: 0, needsYou: 0 };
+    let pushState = { served: 0, held: 0, selectedHubs: 0, optedOutHubs: 0, working: 0, needsYou: 0 };
     try {
       if (push?.status) pushState = { ...pushState, ...push.status(pushEpochId()) };
     } catch { /* status is advisory and must never break the control plane */ }
@@ -3026,6 +3874,27 @@ export function createHandoffEngine({
     const safeSelectedHubs = Array.isArray(pushState.selectedHubs)
       ? pushState.selectedHubs.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)).slice(0, 50)
       : [];
+    // Opaque UUIDs correlate a renderer's own pending handoff with a live
+    // bridge claim. They carry no request id/code/content and are not an
+    // authority surface (all bridge submission remains main-process gated).
+    const safePushClaims = Array.isArray(pushState.claimed)
+      ? pushState.claimed.filter(value => typeof value === 'string' && JOB_ID_RE.test(value)).slice(0, 100)
+      : [];
+    const safePushClaimSet = new Set(safePushClaims);
+    const safePushClaimWorkers = Array.isArray(pushState.claimWorkers)
+      ? pushState.claimWorkers.flatMap(item => {
+        if (!item || typeof item !== 'object' || typeof item.claimId !== 'string' || !JOB_ID_RE.test(item.claimId)
+            || !safePushClaimSet.has(item.claimId) || !Number.isInteger(item.workerOrdinal)
+            || item.workerOrdinal < 1 || item.workerOrdinal > MAX_WORKER_POOL_SIZE) return [];
+        return [Object.freeze({ claimId: item.claimId, workerOrdinal: item.workerOrdinal })];
+      }).slice(0, 100)
+      : [];
+    // Same opaque, renderer-only correlation token as `claimed`, but for a
+    // selected eligible handoff that has not been delivered to a chat yet.
+    // It is deliberately never copied into reports or tool responses.
+    const safePushAvailable = Array.isArray(pushState.available)
+      ? pushState.available.filter(value => typeof value === 'string' && JOB_ID_RE.test(value)).slice(0, 100)
+      : [];
     const pushDiscovered = pushDiscoveryCurrent && ownsPushDiscovery() && Array.isArray(pushState.discovered) ? pushState.discovered : [];
     const pushTasks = new Map();
     const safeDiscoveredHubs = [];
@@ -3034,13 +3903,13 @@ export function createHandoffEngine({
       if (typeof hub?.key !== 'string' || !/^[a-f0-9]{64}$/.test(hub.key) || safeDiscoveredHubs.length >= 50) continue;
       const tasks = [];
       for (const task of Array.isArray(hub?.tasks) ? hub.tasks : []) {
-        if (task?.task !== 'job-scoring') continue;
+        if (!STATUS_PUSH_TASKS.has(task?.task)) continue;
         const pending = Number.isSafeInteger(task.pending) ? Math.max(0, task.pending) : 0;
         tasks.push(Object.freeze({ task: task.task, pending }));
         pushTasks.set(task.task, (pushTasks.get(task.task) || 0) + pending);
       }
       const excluded = {};
-      for (const reason of ['ending', 'settling', 'attachment', 'grounded', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing']) {
+      for (const reason of PUSH_EXCLUSION_REASONS) {
         excluded[reason] = Number.isSafeInteger(hub?.excluded?.[reason]) ? Math.max(0, hub.excluded[reason]) : 0;
       }
       safeDiscoveredHubs.push(Object.freeze({
@@ -3051,8 +3920,137 @@ export function createHandoffEngine({
       }));
       discoveredPending += Number.isSafeInteger(hub.pending) ? Math.max(0, hub.pending) : 0;
     }
-    const safePush = Object.freeze({ selectedHubs: Object.freeze(safeSelectedHubs), discovered: Object.freeze(safeDiscoveredHubs) });
-    const chatCalls = epoch?.calls ?? 0;
+    const rawPushDiagnostics = pushState.diagnostics && typeof pushState.diagnostics === 'object' ? pushState.diagnostics : {};
+    const pushDiagnosticCount = value => Number.isSafeInteger(value) && value >= 0 ? Math.min(999999, value) : 0;
+    const pushDiagnosticTime = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const safePush = Object.freeze({
+      selectedHubs: Object.freeze(safeSelectedHubs),
+      optedOutHubs: pushDiagnosticCount(pushState.optedOutHubs),
+      discovered: Object.freeze(safeDiscoveredHubs),
+      claimed: Object.freeze(safePushClaims),
+      claimWorkers: Object.freeze(safePushClaimWorkers),
+      available: Object.freeze(safePushAvailable),
+      // Aggregate ownership is report-safe; individual opaque claim UUIDs
+      // remain available only to the renderer so its own dock row can hide.
+      served: pushDiagnosticCount(pushState.served),
+      held: pushDiagnosticCount(pushState.held),
+      diagnostics: Object.freeze({
+        refreshAttempts: pushDiagnosticCount(rawPushDiagnostics.refreshAttempts),
+        refreshFailures: pushDiagnosticCount(rawPushDiagnostics.refreshFailures),
+        lastRefreshAt: pushDiagnosticTime(rawPushDiagnostics.lastRefreshAt),
+        lastRefreshOk: rawPushDiagnostics.lastRefreshOk === true ? true : rawPushDiagnostics.lastRefreshOk === false ? false : null,
+        selectedPolls: pushDiagnosticCount(rawPushDiagnostics.selectedPolls),
+        selectedPollFailures: pushDiagnosticCount(rawPushDiagnostics.selectedPollFailures),
+        lastSelectedPollAt: pushDiagnosticTime(rawPushDiagnostics.lastSelectedPollAt),
+        lastSelectedPollOk: rawPushDiagnostics.lastSelectedPollOk === true ? true : rawPushDiagnostics.lastSelectedPollOk === false ? false : null,
+        exclusions: Object.freeze(Object.fromEntries(PUSH_EXCLUSION_REASONS.map(reason => [reason, pushDiagnosticCount(rawPushDiagnostics.exclusions?.[reason])]))),
+        exclusionScope: rawPushDiagnostics.exclusionScope === 'all' || rawPushDiagnostics.exclusionScope === 'selected' ? rawPushDiagnostics.exclusionScope : 'none',
+      }),
+    });
+    // A pool is one logical chat generation in the renderer, but each
+    // starter has its own request/byte counters. Project the aggregate here
+    // so a quiet primary worker cannot make nine actively serving workers look
+    // like an untouched or full single chat.
+    const statusWorkers = epochWorkers(epoch);
+    const chatCalls = statusWorkers.reduce((total, worker) => total + Math.max(0, Number(worker?.calls) || 0), 0);
+    const firstWorkerCallAt = statusWorkers.reduce((earliest, worker) => {
+      const stamp = worker?.firstCallAt;
+      return Number.isFinite(stamp) && stamp >= 0 && (earliest === null || stamp < earliest) ? stamp : earliest;
+    }, null);
+    const lastWorker = statusWorkers.reduce((latest, worker) => {
+      const stamp = worker?.lastCallAt;
+      if (!Number.isFinite(stamp) || stamp < 0) return latest;
+      return !latest || stamp > latest.stamp ? { worker, stamp } : latest;
+    }, null);
+    const allWorkersAtHardBudget = statusWorkers.length > 0 && statusWorkers.every(worker => atHardByteBudget(worker));
+    const anyWorkerStillServing = statusWorkers.some(worker => worker?.idleSince == null);
+    const anyWorkerPresented = statusWorkers.some(worker => worker?.presented === true);
+    const chatState = !epoch
+      ? 'none'
+      : allWorkersAtHardBudget
+        ? 'full'
+        : chatCalls === 0
+          ? (anyWorkerPresented ? 'reached' : 'awaiting-first-call')
+          : anyWorkerStillServing ? 'working' : 'idle';
+    // A legacy primary can retain an older bookkeeping reference while a
+    // sibling owns the live lane. Count the lane ordinals, not the worker-set
+    // sizes, so diagnostics never inflate a pool's application assignments.
+    const assignedLaneOrdinals = new Set();
+    for (const worker of statusWorkers) {
+      if (!(worker?.assignedLaneOrds instanceof Set)) continue;
+      for (const ordinal of worker.assignedLaneOrds) if (Number.isInteger(ordinal) && ordinal > 0) assignedLaneOrdinals.add(ordinal);
+    }
+    const jobsAssigned = assignedLaneOrdinals.size;
+    const chatBytesServed = statusWorkers.reduce((total, worker) => total + Math.max(0, Number(worker?.bytesServed) || 0), 0);
+    const chatBytesReceived = statusWorkers.reduce((total, worker) => total + Math.max(0, Number(worker?.bytesReceived) || 0), 0);
+    // This is deliberately only a process-local correlation identity for the
+    // renderer. It lets a permanently mounted panel prove that its local
+    // worker controls still name the live pool after Disable/re-enable or a
+    // drained epoch, without exposing any worker capability or prompt.
+    const activePool = epoch?.poolStarted === true;
+    const poolGeneration = activePool && Number.isSafeInteger(epoch?.poolGeneration) && epoch.poolGeneration > 0
+      ? epoch.poolGeneration
+      : null;
+    const workerCount = poolGeneration === null ? 0 : poolWorkerCount(epoch);
+    const poolPlan = poolGeneration === null
+      ? { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty', expansionCount: 0, lastExpansionAt: null, lastExpansionAdded: 0 }
+      : (() => {
+        const planned = epoch?.poolRecommendation || workerPoolRecommendation(MAX_WORKER_POOL_SIZE);
+        const recommended = Math.max(0, Math.min(MAX_WORKER_POOL_SIZE, Number.isInteger(planned?.recommended) ? planned.recommended : workerCount));
+        const queued = Math.max(0, Math.min(MAX_WORKER_POOL_PLANNING_UNITS, Number.isInteger(planned?.queued) ? planned.queued : 0));
+        const materialized = Math.max(0, Math.min(MAX_WORKER_POOL_PLANNING_UNITS, Number.isInteger(planned?.materialized) ? planned.materialized : queued));
+        const expandBy = Math.max(0, recommended - workerCount);
+        const reason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(planned?.reason)
+          ? planned.reason
+          : 'empty';
+        const expansion = epoch?.poolExpansion || {};
+        return {
+          recommended, queued, materialized, expandBy, reason,
+          expansionCount: Math.max(0, Number.isInteger(expansion.count) ? expansion.count : 0),
+          lastExpansionAt: statusTime(expansion.at),
+          lastExpansionAdded: Math.max(0, Number.isInteger(expansion.added) ? expansion.added : 0),
+        };
+      })();
+    const workerRoster = poolGeneration === null
+      ? []
+      : statusWorkers
+        .filter(worker => Number.isInteger(worker?.workerOrdinal)
+          && worker.workerOrdinal >= 1 && worker.workerOrdinal <= workerCount)
+        .sort((left, right) => left.workerOrdinal - right.workerOrdinal)
+        .map(worker => {
+          const hasOutstandingApplication = lanes.some(lane => laneAwaitingAnswer(lane, worker));
+          const pollingAfterWait = workerIsPollingAfterWait(worker, hasOutstandingApplication);
+          // A restarted worker is only copyable again when the protected
+          // main-process clipboard write failed and abandoned its reserved
+          // starter.  A successfully copied restart remains `ready`, just
+          // like every other one-time starter, so a status refresh cannot
+          // invite a second, invalid copy attempt.
+          const state = worker.restartPending === true
+            ? (worker.starterExported === true ? 'ready' : 'available')
+            : worker.idleSince != null
+            ? 'idle'
+            : workerIsQuiet(worker, stamp)
+              ? 'quiet'
+              : worker.activeTask === true || (worker.getInFlight != null && !pollingAfterWait) || hasOutstandingApplication
+              ? 'working'
+              : worker.presented === true || worker.calls > 0
+                ? 'waiting'
+                : worker.starterExported === true
+                  ? 'ready'
+                  : 'available';
+          return Object.freeze({
+            ordinal: worker.workerOrdinal,
+            state,
+            completed: Math.max(0, Number.isSafeInteger(worker.completed) ? worker.completed : 0),
+            firstCallAt: statusTime(worker.firstCallAt),
+            lastCallAt: statusTime(worker.lastCallAt),
+            lastCallKind: ['get', 'submit'].includes(worker.lastCallKind) ? worker.lastCallKind : null,
+            lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
+            lastOutcomeAt: statusTime(worker.lastOutcomeAt),
+            quietReason: state === 'quiet' ? workerQuietReason(worker, stamp) : null,
+            restarts: Math.max(0, Number.isSafeInteger(worker.restarts) ? worker.restarts : 0),
+          });
+        });
     const keyStamp = safeNow(now);
     return Object.freeze({
       paused,
@@ -3070,15 +4068,23 @@ export function createHandoffEngine({
       chat: Object.freeze({
         ordinal: epoch?.n ?? 0,
         startedAt: statusTime(epoch?.mintedAt),
-        firstCallAt: statusTime(epoch?.firstCallAt),
-        lastCallAt: statusTime(epoch?.lastCallAt),
-        lastCallKind: ['get', 'submit'].includes(epoch?.lastCallKind) ? epoch.lastCallKind : null,
+        firstCallAt: statusTime(firstWorkerCallAt),
+        lastCallAt: statusTime(lastWorker?.stamp),
+        lastCallKind: ['get', 'submit'].includes(lastWorker?.worker?.lastCallKind) ? lastWorker.worker.lastCallKind : null,
         calls: Number.isSafeInteger(chatCalls) ? chatCalls : 0,
-        state: !epoch ? 'none' : epoch.bytesServed + epoch.bytesReceived >= limits.epochHardBytes ? 'full' : chatCalls === 0 ? (epoch.presented ? 'reached' : 'awaiting-first-call') : epoch.idleSince != null ? 'idle' : 'working',
-        jobsAssigned: epoch?.assignedLaneOrds.size ?? 0,
+        state: chatState,
+        jobsAssigned,
         jobsCap: limits.jobsPerChat,
-        bytesServed: epoch?.bytesServed ?? 0,
-        bytesReceived: epoch?.bytesReceived ?? 0,
+          pool: Object.freeze({
+            active: poolGeneration !== null && workerCount > 0,
+            generation: poolGeneration,
+            workerCount,
+            workers: Object.freeze(workerRoster),
+            plan: Object.freeze(poolPlan),
+            history: Object.freeze(closedPoolHistory.slice(-3)),
+          }),
+        bytesServed: chatBytesServed,
+        bytesReceived: chatBytesReceived,
         outstanding: outstandingLane ? Object.freeze({
           servedAt: statusTime(outstandingLane.servedAt),
           kind: 'application',
@@ -3098,6 +4104,8 @@ export function createHandoffEngine({
               ? 'link_changed'
               : item.reason === 'drained'
                 ? 'queue_empty'
+                : item.reason === 'source_ended'
+                  ? 'source_ended'
                 : 'disabled',
         }))),
       }),
@@ -3118,11 +4126,16 @@ export function createHandoffEngine({
             stage: statusStage(lane.current?.stage),
             reason: statusReason(lane.reason),
             servedToChat: epoch?.assignedLaneOrds.has(lane.ord) ? epoch.n : null,
+            workerOrdinal: (() => {
+              const worker = workerForId(epoch, lane.servedWorkerId);
+              return Number.isInteger(worker?.workerOrdinal) && worker.workerOrdinal >= 1
+                && worker.workerOrdinal <= MAX_WORKER_POOL_SIZE ? worker.workerOrdinal : null;
+            })(),
             changedAt: statusTime(lane.changedAt ?? lane.releasedAt),
-            // Per-job answer tracking, all for the CURRENT chat only:
-            // servedAt is when this job's current stage went out, answeredAt
-            // the last accepted submit, awaitingAnswer that the stage is out
-            // and unanswered, stalled that it has been quiet too long.
+            // Per-job answer tracking, all for the CURRENT chat only.
+            // Silence becomes an ambiguity warning only after the owning
+            // worker's closed answer_silent recovery state; it never proves a
+            // slow answer failed or revokes its ownership.
             servedAt: epoch && lane.servedEpochN === epoch.n && lane.phase === 'awaiting' ? statusTime(lane.servedAt) : null,
             answeredAt: statusTime(lane.answeredAt),
             awaitingAnswer: laneAwaitingAnswer(lane),
@@ -3183,6 +4196,10 @@ export function createHandoffEngine({
     if (updated.applications === scope.applications && updated.scoring === scope.scoring
         && updated.marketplace === scope.marketplace) return { ...scope };
     scope = updated;
+    // Source polling must use the same consent boundary as framePushGet. This
+    // also releases any already-served task that a scope downgrade handed
+    // back to the dock before it can suppress its paste controls.
+    try { push?.setAllowedTasks?.(pushAllowedTasks()); } catch { /* source port is optional */ }
     // Scope changes are an exposure boundary just like sleep/Disable. Discard
     // every pre-change result before it can populate a cache or frame a push
     // successor under the newly lowered scope.
@@ -3224,7 +4241,7 @@ export function createHandoffEngine({
     const generation = sourceGeneration;
     if ((!scope.scoring && !scope.marketplace) || !sourceCurrent(generation) || !ownsPushDiscovery()) return false;
     try {
-      const refreshed = await push?.refreshHubs?.();
+      const refreshed = await push?.refreshHubs?.({ owner: pushOwner });
       if (!sourceCurrent(generation) || !ownsPushDiscovery()) {
         // Do not clear the shared push source: a replacement engine may have
         // refreshed it since this old call began. Its stale rows remain
@@ -3287,6 +4304,10 @@ export function createHandoffEngine({
     pause,
     newChat,
     continueChat,
+    startWorkerPool,
+    copyWorkerStarter,
+    abandonWorkerStarter,
+    restartWorker,
     notePresented,
     noteLink,
     prepareChat,

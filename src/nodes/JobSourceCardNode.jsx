@@ -17,6 +17,13 @@ import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage, warn
 import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePausedSourceOwner, findJobSearchBoardPausedContinuationOwner, isJobSearchBoardPausedContinuationBlocked } from '../utils/jobBoardSearchSelection';
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
+import { moduleFingerprint } from './jobboard/mergeJobs';
+import {
+  JOB_CONTINUATION_RECEIPTS_FIELD,
+  findJobContinuationAppliedReceipt,
+  jobContinuationAppliedReceipt,
+  upsertJobContinuationAppliedReceipt,
+} from '../utils/jobContinuationReceipt';
 
 // Backstop for the one-press blocked-query walk. The real stop signal is the
 // backend's own recovery guidance (it reports `stalled` / recommendation
@@ -171,11 +178,29 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // quick double-click could otherwise open two native Chrome verification
   // windows. Keep a synchronous latch for the actual IPC lifetime.
   const resolveInFlightRef = useRef(false);
+  // `searching` covers both live provider gathering and the later manual-AI
+  // processing phase. Only a same-run durable provider-gathered peek distinguishes
+  // those safely: a Solve may run beside downstream AI handoffs, but never
+  // while providers are still writing this run's recovery snapshot.
+  const [providerGatheredRunId, setProviderGatheredRunId] = useState(null);
+  // Re-derived from the durable manifest after a restart. The matching hub
+  // flag is transient, so a saved provider-only pause never flashes Solve
+  // while Resume is still required.
+  // `pending` is intentionally fail-closed for a saved, actionable card while
+  // its durable run receipt is being read. A render before the first IPC reply
+  // must never start Resolve or Skip/score continuation against an incomplete
+  // old run; listing/login preparation remains a safe exception.
+  const [providerRecoveryReadiness, setProviderRecoveryReadiness] = useState({
+    status: 'pending',
+    proofKey: null,
+  });
   // `resolveInFlightRef` is set before acquiring the lane so the source card
   // can cancel its *queued* work when removed. Only this flag says the card
   // owns the hub-scoped IPC task; a queued sibling must never abort whichever
   // source currently owns the same hub id.
   const resolveStartedRef = useRef(false);
+  const activeContinuationRef = useRef(null);
+  const autoClaimedContinuationIdsRef = useRef(new Set());
   // The resolver IPC is intentionally hub-scoped so recovered rows merge into
   // the right paused run. Its UI lifetime is narrower: deleting this source
   // card must prevent a queued/late resolver from opening a browser or
@@ -319,6 +344,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // queued card must leave its active sibling's hub-scoped browser/request
     // untouched.
     if (resolveStartedRef.current) {
+      // Unmount also covers canvas navigation and renderer teardown, not only
+      // an explicit card deletion. Abort this process's worker but preserve the
+      // durable continuation mode so an unexpected interruption remains
+      // auto-recoverable and a native/manual intent remains manual.
       window.electronAPI?.cancelNodeTask?.(data.hubId, 'job-source-card-removed');
     }
     resolveInFlightRef.current = false;
@@ -518,7 +547,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     return () => document.removeEventListener('job-source-dismiss-clean', onDismiss);
   }, [data.hubId, progress?.status, progress?.warning, id, deleteElements]);
 
-  const handleSolve = async () => {
+  const handleSolve = async ({ continuation = null } = {}) => {
     // Claim the driver's request id (if any) before the first await, and clear
     // it so a later manual click cannot re-use it.
     const solveRequestId = solveRequestIdRef.current;
@@ -545,6 +574,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     };
     const warningAction = progress?.warning?.action;
     const resumeState = progress?.warning?.resumeState;
+    // Opening a listing or platform-login window is observation/preparation,
+    // not a source mutation. Keep these two actions usable while saved recovery
+    // proof is pending; the actual resolver and Skip/score continuation fence
+    // below remain fail-closed.
     // "Open listing" is intentionally not a source resolve. A ZipRecruiter
     // job-detail URL has no ItemList for the generic resolver to extract, and
     // treating it as a captcha solve used to close a perfectly good detail
@@ -626,13 +659,31 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // the live hub token here: an old rendered card with no token must not
     // become authorized merely because a newer Board pause uses that hub.
     const hubDataAtClick = getNode(data.hubId)?.data || {};
+    if (hubDataAtClick.providerPhaseAwaitingResume === true || sourceActionRecoveryFenced) {
+      addToast({
+        title: providerRecoveryReadiness.status === 'pending' ? 'Checking Saved Recovery' : 'Resume Job Search First',
+        description: providerRecoveryReadiness.status === 'pending'
+          ? 'Checking this saved search before opening a source action.'
+          : 'This provider-only recovery has not prepared its final source-recovery checkpoint yet.',
+        type: 'info',
+      });
+      finishSolveRequest('recovery-not-ready');
+      return;
+    }
     const jobRunId = effectiveJobSourceCardRunId(
       progress,
       data.persistedProgress,
       hubDataAtClick,
       data.sourceId,
     );
-    if ((hubDataAtClick.jobRunId || null) !== jobRunId) {
+    // A fresh search does not receive its run token until its first source
+    // progress event, while the durable provider boundary already proves this
+    // card's token belongs to that exact in-flight run. Retain the click on the
+    // shared lane in that brief gap; when it reaches the lane after downstream
+    // handoffs finish, the normal strict token check below still fences any
+    // replacement run.
+    const providerBoundaryMatches = providerGatheredRunId === jobRunId;
+    if ((hubDataAtClick.jobRunId || null) !== jobRunId && !providerBoundaryMatches) {
       addToast({
         title: 'Search Updated',
         description: 'This source card belongs to an older search run. Wait for the current source status.',
@@ -696,6 +747,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     // that reaches the finally sets this; the default covers an unexpected throw.
     let solveOutcome = 'failed';
     let solveOutcomeExtra = {};
+    let continuationIntent = continuation;
+    let continuationLeaseToken = null;
+    let terminalContinuationCheckpoint = null;
+    let retireContinuationAsSuperseded = false;
     try {
       lease = await acquireModuleRun({
         nodeId: data.hubId,
@@ -712,13 +767,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           resolveQueueCancelled = true;
         },
       });
-      if (!resolverAlive()) { solveOutcome = 'fenced'; return; }
+      if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }
       resolveStartedRef.current = true;
       // A queued resolve can outlive its source warning. Re-read both ownership
       // dimensions after the app-wide lease starts so it never targets a newer
       // run or a hub that has resumed normal gathering/scoring.
       const hubNode = getNode(data.hubId);
       const hubData = hubNode?.data || {};
+      const queuedGenerationSuperseded = !hubNode
+        || (hubData.jobRunId || null) !== (jobRunId || null);
       if (!hubNode || isJobWorkflowDeletionPending(data.hubId) || hubData.locked
         || hasBlockingJobSearchCleanup(hubData)
         // A persisted pre-token hub has no `jobRunId` property (`undefined`),
@@ -730,7 +787,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           findJobSearchBoardActiveRecoveryOwner(data.hubId, getNodes(), getEdges())
           && !findJobSearchBoardPausedContinuationOwner(data.hubId, jobRunId, getNodes(), getEdges())
         )
-        || isJobSourceResolveBusyHubState(hubData.hubState)) {
+        || isJobSourceResolveBusyHubState(hubData.hubState, {
+          jobRunId,
+          providerGatheredRunId,
+        })) {
         // `prev` is genuinely nullable — a card that has received no progress
         // beat yet (fresh mount, or a run reset that cleared it) holds null.
         // The sibling access is optional-chained but `prev.status` is not, so
@@ -742,8 +802,142 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             ? prevForRestore
             : prev
         ));
+        retireContinuationAsSuperseded = queuedGenerationSuperseded;
         solveOutcome = 'fenced';
         return;
+      }
+      const continuationOperation = resumeState ? 'resume-job-source' : 'resolve-job-source';
+      // Only the exact description-enrichment replay is unattended-safe.
+      // Generic resolve opens a visible CAPTCHA/browser window, while every
+      // other Indeed resume mode can open native login/challenge UI or repeat
+      // a broader provider scrape. Those remain durable, but manual.
+      const continuationIsAutomatic = continuationOperation === 'resume-job-source'
+        && String(resumeState?.mode || '').toLowerCase() === 'retry-descriptions';
+      const continuationOperationInput = resumeState
+        ? {
+            sourceId: data.sourceId,
+            resumeState,
+            collectionLimits: normalizeJobCollectionLimits(hubData.collectionLimits),
+            enabledSourceIds: hubData.enabledSourceIds,
+            preferredLocation: hubData.canonicalLocation || '',
+          }
+        : {
+            sourceId: data.sourceId,
+            url: progress.url,
+            secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+            collectionLimits: normalizeJobCollectionLimits(hubData.collectionLimits),
+            enabledSourceIds: hubData.enabledSourceIds,
+          };
+      const continuationIdentity = {
+        canvasFilePath: nav?.currentFile || null,
+        nodeId: data.hubId,
+        parentRunId: jobRunId,
+        profileFingerprint: hubData.resumeFingerprint,
+        kind: 'source-recovery',
+        operation: continuationOperation,
+        sourceId: data.sourceId,
+        searchWindow: hubData.searchWindow || null,
+        canonicalLocation: hubData.canonicalLocation || hubData.preferredLocation || '',
+        generationFingerprint: `${hubData.resultDisposition || ''}:${moduleFingerprint(hubData.scoredJobs)}:${moduleFingerprint(hubData.pendingJobs)}`,
+        ...(!continuationIntent?.intentId || continuationIntent.operationInputFingerprint
+          ? { operationInput: continuationOperationInput }
+          : {}),
+      };
+      if (
+        !continuationIdentity.canvasFilePath
+        || !continuationIdentity.parentRunId
+        || !continuationIdentity.profileFingerprint
+        || !window.electronAPI?.beginJobContinuation
+      ) {
+        throw new Error('This source recovery could not save its exact restart checkpoint.');
+      }
+      if (continuationIntent?.intentId) {
+        const claimed = await window.electronAPI.claimJobContinuation?.({
+          ...continuationIdentity,
+          intentId: continuationIntent.intentId,
+          autoResume: true,
+          automaticOperation: continuationIntent.terminalResultAvailable ? 'replay' : 'execute',
+        });
+        if (claimed?.success !== true || claimed?.ok !== true) {
+          if (claimed?.tokenMismatch) {
+            await window.electronAPI.completeJobContinuation?.({
+              canvasFilePath: continuationIdentity.canvasFilePath,
+              nodeId: data.hubId,
+              parentRunId: continuationIntent.parentRunId,
+              intentId: continuationIntent.intentId,
+              superseded: true,
+            });
+            retireContinuationAsSuperseded = true;
+            solveOutcome = 'fenced';
+          } else if (claimed?.absent) {
+            solveOutcome = 'fenced';
+          } else {
+            // Busy/one-shot/manual refusal is not evidence that the saved
+            // intent is obsolete. Another window may be checkpointing its
+            // terminal result right now, so retain it untouched.
+            solveOutcome = 'busy';
+          }
+          return;
+        }
+        continuationIntent = claimed.intent;
+        continuationLeaseToken = claimed.leaseToken || null;
+      } else {
+        const begun = await window.electronAPI.beginJobContinuation({
+          ...continuationIdentity,
+          recoveryMode: continuationIsAutomatic ? 'automatic' : 'manual',
+          // Reaching here from a card click is explicit consent to re-run a
+          // prior manual intent. Automatic mount recovery never sees manual
+          // intents and therefore cannot grant that consent.
+          allowManualResume: true,
+        });
+        if (begun?.success !== true || begun?.ok !== true || !begun?.intent?.intentId) {
+          throw new Error('This source recovery restart checkpoint could not be committed.');
+        }
+        continuationIntent = begun.intent;
+        const claimed = await window.electronAPI.claimJobContinuation?.({
+          ...continuationIdentity,
+          intentId: continuationIntent.intentId,
+          allowManualResume: true,
+        });
+        if (claimed?.success !== true || claimed?.ok !== true || !claimed?.leaseToken) {
+          if (claimed?.busy) {
+            solveOutcome = 'busy';
+            return;
+          }
+          throw new Error('This source recovery could not claim its restart checkpoint.');
+        }
+        continuationIntent = claimed.intent;
+        continuationLeaseToken = claimed.leaseToken;
+      }
+      if (!continuationLeaseToken) {
+        solveOutcome = 'busy';
+        return;
+      }
+      // At most one unattended attempt per mounted card. A retained transient
+      // intent is retried after the next app/window start, not in a tight loop
+      // immediately after the same provider reports it still blocked.
+      autoClaimedContinuationIdsRef.current.add(continuationIntent.intentId);
+      activeContinuationRef.current = continuationIntent;
+      let stagedContinuationResult = null;
+      if (continuationIntent.terminalResultAvailable) {
+        const replay = await window.electronAPI.readJobContinuationResult?.({
+          canvasFilePath: continuationIdentity.canvasFilePath,
+          nodeId: data.hubId,
+          parentRunId: continuationIntent.parentRunId,
+          intentId: continuationIntent.intentId,
+          leaseToken: continuationLeaseToken,
+        });
+        if (replay?.success !== true || replay?.found !== true || !replay.result) {
+          throw new Error('The saved source recovery result could not be read for exact replay.');
+        }
+        stagedContinuationResult = replay.result;
+        terminalContinuationCheckpoint = {
+          resultKey: replay.resultKey,
+          processEpoch: replay.processEpoch,
+        };
+        EventLogger.log(
+          `[JobSource][${data.hubId}/${data.sourceId}] Replaying saved source result ${continuationIntent.intentId}`,
+        );
       }
       // An exact Board rollback may have fenced late progress from an abandoned
       // continuation that reused this warning's run id. Reaching this point is
@@ -775,7 +969,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
       let result;
       for (;;) {
-      if (resumeState) {
+      if (stagedContinuationResult) {
+        result = stagedContinuationResult;
+        stagedContinuationResult = null;
+      } else if (resumeState) {
         result = await window.electronAPI.resumeJobSource?.({
           sourceId: data.sourceId,
           nodeId: data.hubId,
@@ -802,6 +999,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             ?? ''
           ).trim(),
           resumeState,
+          continuationIntentId: continuationIntent.intentId,
+          continuationLeaseToken,
         });
       } else {
         result = await window.electronAPI.resolveJobSource({
@@ -822,13 +1021,20 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             ?? hubData.targetRole
             ?? ''
           ).trim(),
+          continuationIntentId: continuationIntent.intentId,
+          continuationLeaseToken,
         });
       }
       // handleSafe resolves failures as { success:false, error }, so they do
       // not reach the catch below unless we explicitly convert the envelope.
       // Keep the raw diagnostic in EventLogger; card data gets only concise,
       // actionable copy so a Puppeteer stderr blob is never persisted.
-      if (!resolverAlive() || !capturedRunIsCurrent()) return;
+      if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }
+      if (!capturedRunIsCurrent()) {
+        retireContinuationAsSuperseded = true;
+        solveOutcome = 'fenced';
+        return;
+      }
       // Board cancellation is deliberately durable before its child cleanup
       // finishes. A browser Solve can settle during that interval with the
       // same Search token, so the token check above is not enough: only the
@@ -879,6 +1085,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         else EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Solve IPC failed:`, result?.error || message);
         error.solveIpcResult = result;
         throw error;
+      }
+      if (result?.continuationCheckpoint?.saved === true) {
+        terminalContinuationCheckpoint = result.continuationCheckpoint;
       }
       // When the captcha-resolve window auto-detects the challenge as
       // cleared, the visible browser session that just bypassed the bot
@@ -1190,7 +1399,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // Queue cancellation/reset and IPC failures are normal races here. Keep
       // the original actionable state when this card still belongs to the
       // captured run, and never leak an async click-handler rejection.
-      if (!resolverAlive() || !capturedRunIsCurrent()) { solveOutcome = 'fenced'; return; }
+      if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }
+      if (!capturedRunIsCurrent()) {
+        retireContinuationAsSuperseded = true;
+        solveOutcome = 'fenced';
+        return;
+      }
       let solveIpcResult = error?.solveIpcResult || null;
       if (resolveQueueCancelled) {
         solveOutcome = 'cancelled';
@@ -1283,6 +1497,51 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] terminal progress was not committed before queue release`);
         }
       }
+      if (continuationIntent?.intentId && solveOutcome === 'resolved') {
+        const receipt = jobContinuationAppliedReceipt(
+          continuationIntent,
+          terminalContinuationCheckpoint,
+        );
+        if (receipt) {
+          const hub = getNode(data.hubId)?.data || {};
+          updateNodeData(data.hubId, {
+            [JOB_CONTINUATION_RECEIPTS_FIELD]: upsertJobContinuationAppliedReceipt(hub, receipt),
+          });
+        }
+      }
+      const shouldRetireSupersededContinuation = !!(
+        continuationIntent?.intentId
+        && solveOutcome === 'fenced'
+        && retireContinuationAsSuperseded
+      );
+      if (activeContinuationRef.current?.intentId === continuationIntent?.intentId) {
+        activeContinuationRef.current = null;
+      }
+      // Release the long canvas read lease before any sidecar mutation takes a
+      // fresh read lease. Otherwise a waiting Save-As writer creates a cycle:
+      // complete waits behind writer, writer waits behind this execution.
+      if (continuationIntent?.intentId && continuationLeaseToken) {
+        try {
+          await window.electronAPI?.releaseJobContinuation?.({
+            intentId: continuationIntent.intentId,
+            leaseToken: continuationLeaseToken,
+          });
+        } catch { /* sender teardown releases the in-memory lease */ }
+        continuationLeaseToken = null;
+      }
+      if (shouldRetireSupersededContinuation) {
+        try {
+          await window.electronAPI?.completeJobContinuation?.({
+            canvasFilePath: nav?.currentFile || null,
+            nodeId: data.hubId,
+            parentRunId: continuationIntent.parentRunId,
+            intentId: continuationIntent.intentId,
+            superseded: true,
+          });
+        } catch (error) {
+          EventLogger.error(`[JobSource][${data.hubId}/${data.sourceId}] Could not retire source restart checkpoint:`, error);
+        }
+      }
       lease?.release();
       if (resolverAlive()) {
         resolveInFlightRef.current = false;
@@ -1312,6 +1571,105 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   useEffect(() => {
     handleSolveRef.current = handleSolve;
   });
+
+  // Resume only sidecars explicitly classified as unattended-safe. Interactive
+  // login/CAPTCHA/native-challenge attempts are persisted with `manual` mode
+  // and therefore remain visible for a person to continue from the card.
+  useEffect(() => {
+    if (
+      !nav?.currentFile
+      || !window.electronAPI?.listJobContinuations
+      || resolving
+      || resolveInFlightRef.current
+      || !progress?.warning
+      || isJobWorkflowDeletionPending(data.hubId)
+    ) return undefined;
+    const hubData = getNode(data.hubId)?.data || {};
+    const currentRunId = effectiveJobSourceCardRunId(
+      progress,
+      data.persistedProgress,
+      hubData,
+      data.sourceId,
+    );
+    if (!currentRunId || (hubData.jobRunId || null) !== currentRunId) return undefined;
+    const activeBoardOwner = findJobSearchBoardActiveRecoveryOwner(
+      data.hubId,
+      getNodes(),
+      getEdges(),
+    );
+    // A Board ordinarily owns every continuation for its active child. The one
+    // deliberate exception is its exact sources-ready handoff: that receipt is
+    // specifically waiting for this source card to finish the same generation.
+    // Automatic intents remain filtered below, so login/CAPTCHA/native/manual
+    // recovery can never gain consent through this exception.
+    if (
+      activeBoardOwner
+      && !findJobSearchBoardPausedContinuationOwner(
+        data.hubId,
+        currentRunId,
+        getNodes(),
+        getEdges(),
+      )
+    ) return undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const listed = await window.electronAPI.listJobContinuations({
+          canvasFilePath: nav.currentFile,
+          nodeId: data.hubId,
+        });
+        if (cancelled || listed?.success !== true) return;
+        const intent = (listed.intents || []).find(candidate => (
+          candidate?.kind === 'source-recovery'
+          && candidate?.sourceId === data.sourceId
+          && candidate?.parentRunId === currentRunId
+          && candidate?.recoveryMode === 'automatic'
+          && candidate?.operation === 'resume-job-source'
+          && String(progress?.warning?.resumeState?.mode || '').toLowerCase() === 'retry-descriptions'
+        ));
+        if (!intent || autoClaimedContinuationIdsRef.current.has(intent.intentId)) return;
+        const appliedReceipt = findJobContinuationAppliedReceipt(hubData, intent);
+        if (appliedReceipt) {
+          // Same-process observation proves only that React state was patched,
+          // not that the debounced canvas save reached disk. A later process
+          // may retire the exact staged result; a remount in this process must
+          // neither replay nor acknowledge it.
+          if (appliedReceipt.appliedProcessEpoch !== intent.processEpoch) {
+            await window.electronAPI.completeJobContinuation?.({
+              canvasFilePath: nav.currentFile,
+              nodeId: data.hubId,
+              parentRunId: intent.parentRunId,
+              intentId: intent.intentId,
+              expectedResultKey: appliedReceipt.resultKey,
+              appliedProcessEpoch: appliedReceipt.appliedProcessEpoch,
+            });
+          }
+          return;
+        }
+        autoClaimedContinuationIdsRef.current.add(intent.intentId);
+        EventLogger.log(
+          `[JobSource][${data.hubId}/${data.sourceId}] Auto-resuming unattended source recovery ${intent.intentId}`,
+        );
+        await handleSolveRef.current?.({ continuation: intent });
+      } catch (error) {
+        EventLogger.error(
+          `[JobSource][${data.hubId}/${data.sourceId}] Could not inspect saved source recovery:`,
+          error,
+        );
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    data.hubId,
+    data.persistedProgress,
+    data.sourceId,
+    getEdges,
+    getNode,
+    getNodes,
+    nav?.currentFile,
+    progress,
+    resolving,
+  ]);
   useEffect(() => {
     const onSolveRequest = (event) => {
       const detail = event.detail || {};
@@ -1348,14 +1706,42 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // since that doesn't touch this card's own `data` prop. Wrapped in
   // React.memo, a plain snapshot would go stale until some unrelated
   // re-render happened to refresh it (mirrors JobGroupNode.jsx).
+  const sourceResolveRunId = useStore(
+    useCallback((s) => effectiveJobSourceCardRunId(
+      progress,
+      data.persistedProgress,
+      s.nodeLookup.get(data.hubId)?.data || {},
+      data.sourceId,
+    ), [data.hubId, data.persistedProgress, data.sourceId, progress])
+  );
+  // Positive recovery proof belongs to this exact persisted canvas owner, not
+  // merely a reused run token. Save As and a hub replacement can otherwise
+  // inherit a stale ready receipt for one render before their own peek returns.
+  const providerRecoveryProofKey = `${nav?.currentFile || ''}\u0000${data.hubId || ''}\u0000${sourceResolveRunId || ''}`;
+  const hubResolveState = useStore(
+    useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.hubState || null, [data.hubId])
+  );
   const hubBusy = useStore(
-    useCallback((s) => isJobSourceResolveBusyHubState(s.nodeLookup.get(data.hubId)?.data?.hubState), [data.hubId])
+    useCallback((s) => isJobSourceResolveBusyHubState(
+      s.nodeLookup.get(data.hubId)?.data?.hubState,
+      { jobRunId: sourceResolveRunId, providerGatheredRunId },
+    ), [data.hubId, providerGatheredRunId, sourceResolveRunId])
   );
   // Hub-cascading lock: when the owning Job Search Module is locked, the source card's
   // interactive controls (Solve, Skip) become no-ops. The card itself stays
   // visible and informational.
   const hubLocked = useStore(
     useCallback((s) => !!s.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
+  );
+  // Automatic provider-only recovery deliberately pauses before the final
+  // post-filter recovery checkpoint. Its manifest has no provider marker and
+  // a source resolver would be fenced by the backend, so do not offer a dead
+  // Solve control; the hub's explicit Resume is the required next action.
+  const hubProviderPhaseAwaitingResume = useStore(
+    useCallback(
+      (s) => s.nodeLookup.get(data.hubId)?.data?.providerPhaseAwaitingResume === true,
+      [data.hubId],
+    ),
   );
   const hubCleanupBlocked = useStore(
     useCallback(
@@ -1421,26 +1807,107 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const warningAction = jobSourceWarningAction(warning);
   const warningCanResolve = canAttemptJobSourceResolve(warning);
   const warningBlocksScoring = isJobSourceWarningGating(warning);
-  const resolverBusy = hubBusy && warningAction !== 'open-external';
+  const hasBlock    = warning?.severity === 'block';
+  const hasThrottle = warning?.severity === 'throttle';
+  const hasInfo     = warning?.severity === 'info';
+  const hasWarn     = warning?.severity === 'warn';
+  // Keep the durable-recovery poll behind the exact same gate as the Resolve
+  // control. Informational cards (notably country-source-skipped) have no
+  // resolver control, so polling their recovery receipt every 750ms cannot
+  // enable an action and only creates background IPC noise.
+  const hasVisibleResolverControl = Boolean(
+    warningCanResolve
+    && (progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn))
+    && !hasInfo
+    && (!hasWarn || warningBlocksScoring)
+  );
+
+  // A completed provider gather is durable before the main process starts its
+  // potentially long role-screen/scoring handoffs. Poll the small, hub-scoped
+  // recovery receipt for a currently actionable card. Matching the run id
+  // prevents a prior gather receipt from authorizing a fresh provider run; the
+  // IPC repeats this check before it mutates anything, so this is an enablement
+  // hint rather than authority. A stopped provider-only recovery is also
+  // detected here after reload so its transient hub flag is safely re-derived.
+  useEffect(() => {
+    if (
+      !hasVisibleResolverControl
+      || !sourceResolveRunId
+      || !nav?.currentFile
+      || !window.electronAPI?.peekJobRun
+    ) {
+      setProviderGatheredRunId(null);
+      setProviderRecoveryReadiness({ status: 'pending', proofKey: providerRecoveryProofKey });
+      return undefined;
+    }
+    let cancelled = false;
+    let retryTimer = null;
+    const inspect = async () => {
+      try {
+        const run = await window.electronAPI.peekJobRun({
+          canvasFilePath: nav.currentFile,
+          nodeId: data.hubId,
+        });
+        if (cancelled) return;
+        const exactRun = run?.found === true
+          && run?.nodeId === data.hubId
+          && run?.runId === sourceResolveRunId;
+        const liveProviderBoundary = hubResolveState === 'searching'
+          && exactRun
+          && run?.providerGathered === true;
+        setProviderGatheredRunId(liveProviderBoundary ? sourceResolveRunId : null);
+        // A current gathered receipt is the only positive proof that a saved
+        // source action can proceed. A missing, mismatched, malformed, or
+        // incomplete receipt stays fenced: it cannot mirror backend authority.
+        const savedReady = exactRun && run?.stage === 'gathered';
+        setProviderRecoveryReadiness({
+          status: savedReady ? 'ready' : 'fenced',
+          proofKey: providerRecoveryProofKey,
+        });
+      } catch {
+        if (!cancelled) {
+          setProviderGatheredRunId(null);
+          // A failed read revokes prior positive proof for this render
+          // generation. Keep the saved action fail-closed until a successful
+          // exact read replaces it; retry below.
+          setProviderRecoveryReadiness({ status: 'pending', proofKey: providerRecoveryProofKey });
+        }
+      }
+      if (!cancelled) retryTimer = setTimeout(inspect, 750);
+    };
+    void inspect();
+    return () => {
+      cancelled = true;
+      if (retryTimer != null) clearTimeout(retryTimer);
+    };
+  }, [data.hubId, hasVisibleResolverControl, hubResolveState, nav?.currentFile, providerRecoveryProofKey, sourceResolveRunId]);
+
+  const needsSavedRecoveryProof = hubResolveState !== 'searching' && hasVisibleResolverControl;
+  const savedRecoveryFence = needsSavedRecoveryProof && (
+    providerRecoveryReadiness.proofKey !== providerRecoveryProofKey
+    || providerRecoveryReadiness.status !== 'ready'
+  );
+  const providerPhaseAwaitingResume = hubProviderPhaseAwaitingResume || savedRecoveryFence;
+  const sourceActionRecoveryFenced = providerPhaseAwaitingResume;
+  // Listing opens and platform login are safe preparation actions; only a
+  // mutating resolver/continuation inherits the recovery fence and wait copy.
+  const resolverBusy = (hubBusy || providerPhaseAwaitingResume)
+    && !['open-external', 'login-platform'].includes(warningAction);
   const resolverActionDisabled = resolving || hubLocked || hubCleanupBlocked
     || hubBoardRecoveryOwned || resolverBusy;
   // Skipping is safe during an ordinary live search, but not while this card's
   // own resolver is queued/running: that would race its terminal warning.
   const sourceOwnershipBlocked = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned;
-  const sourceActionDisabled = sourceOwnershipBlocked || resolving;
+  const sourceActionDisabled = sourceOwnershipBlocked || sourceActionRecoveryFenced || resolving;
   // A one-press walk can span many blocked queries. Leaving Skip disabled for
   // its whole duration commits the user to every remaining one, so during a
   // walk Skip stays live — but ONLY to stop the walk. Ownership guards are
   // deliberately preserved; only the `resolving` term is relaxed.
-  const canStopSolveWalk = !sourceOwnershipBlocked && resolving;
+  const canStopSolveWalk = !sourceOwnershipBlocked && !sourceActionRecoveryFenced && resolving;
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
   const isError     = status === 'error';
   const isSkipped   = status === 'skipped';
-  const hasBlock    = warning?.severity === 'block';
-  const hasThrottle = warning?.severity === 'throttle';
-  const hasInfo     = warning?.severity === 'info';
-  const hasWarn     = warning?.severity === 'warn';
   const warningLabel = warning?.shortLabel || warning?.code || null;
   const progressTotal = Number.isFinite(liveProgress?.total) && liveProgress.total > 0 ? liveProgress.total : null;
   const progressDone = progressTotal && Number.isFinite(liveProgress?.completed)
@@ -1543,7 +2010,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
         warning={warning}
         hasBlock={hasBlock}
         stopClick
-        note={resolverBusy
+        note={savedRecoveryFence && providerRecoveryReadiness.status === 'pending'
+          ? 'Checking the saved Job Search recovery before source actions become available.'
+          : providerPhaseAwaitingResume
+          ? 'Provider collection is paused before final recovery preparation. Resume this Job Search before solving a source.'
+          : resolverBusy
           ? 'Source gathering/checkpointing is still in progress. Solve becomes available after it finishes.'
           : !warningBlocksScoring ? 'Scoring continues automatically; dismissing only hides this warning.' : null}
       />}
@@ -1558,18 +2029,22 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           button inside keeps its own `warning`-dependent gating. */}
       {((warning && !dismissed) || canStopSolveWalk) && (
         <div className="flex border-t border-white/10">
-          {warningCanResolve && (progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn)) && !hasInfo && (!hasWarn || warningBlocksScoring) && (
+          {hasVisibleResolverControl && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={['open-external', 'login-platform'].includes(warningAction) ? (resolving || hubLocked) : resolverActionDisabled}
+              // External listing/login actions are safe prerequisites: neither
+              // clears a warning nor mutates the source run, unlike Solve.
+              disabled={['open-external', 'login-platform'].includes(warningAction)
+                ? (resolving || hubLocked)
+                : resolverActionDisabled}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
                 : hubBoardRecoveryOwned
                   ? 'The owning Job Board run must finish or be cancelled first'
                 : resolverBusy
-                  ? 'Source gathering/checkpointing is still in progress. Solve becomes available after it finishes.'
+                  ? 'Source recovery is waiting for the active Job Search. Wait for processing, or Resume the search to prepare recovery.'
                 : progress?.warning?.actionTitle
                   ? progress.warning.actionTitle
                   : progress?.warning?.resumeState?.mode === 'native-challenge'
@@ -1595,6 +2070,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               e.stopPropagation();
               if (
                 sourceOwnershipBlocked
+                || sourceActionRecoveryFenced
+                || getNode(data.hubId)?.data?.providerPhaseAwaitingResume === true
                 || isJobWorkflowDeletionPending(data.hubId)
                 || hasBlockingJobSearchCleanup(getNode(data.hubId)?.data)
               ) return;

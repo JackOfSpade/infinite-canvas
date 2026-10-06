@@ -1,3 +1,6 @@
+import { sanitizeActivityItem } from './log.js';
+import { HANDOFF_CONCURRENCY } from '../../../src/utils/handoffScheduler.js';
+
 // A single redacted failed-start receipt survives runtime disposal so a FULL
 // bug report can distinguish a rejected tunnel configuration from a readiness
 // timeout. This module deliberately accepts and retains only closed values.
@@ -51,6 +54,12 @@ let latest = null;
 let latestOAuthRejection = null;
 let latestSourceRejection = null;
 let latestClientAuth = null;
+// Authenticated MCP throttles are an operational signal, not an identity
+// signal. Keep only a bounded aggregate so a burst of ordinary waiting logs
+// cannot evict the one fact needed to explain why workers stopped polling.
+// In particular, this receipt never accepts a grant/link id, session key,
+// source address, token, request body, or tool arguments.
+let latestMcpRateLimit = null;
 const finite = value => Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000 ? Math.round(value) : null;
 const enumOr = (value, allowed, fallback = 'unknown') => allowed.has(value) ? value : fallback;
 
@@ -179,6 +188,25 @@ export function recordClientAuthDiagnostic({ telemetry = false, outcome, grant, 
 
 export function getClientAuthDiagnostic() { return latestClientAuth; }
 
+export function clearMcpRateLimitDiagnostic() { latestMcpRateLimit = null; }
+
+export function recordMcpRateLimitDiagnostic({ telemetry = false, retryAfterSeconds, at = Date.now() } = {}) {
+  if (telemetry !== true) return null;
+  const stamp = finite(at) ?? Date.now();
+  const retry = Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 1
+    ? Math.min(3600, retryAfterSeconds)
+    : null;
+  latestMcpRateLimit = Object.freeze({
+    telemetry: true,
+    count: Math.min(999999, (latestMcpRateLimit?.telemetry === true ? latestMcpRateLimit.count : 0) + 1),
+    at: stamp,
+    retryAfterSeconds: retry,
+  });
+  return latestMcpRateLimit;
+}
+
+export function getMcpRateLimitDiagnostic() { return latestMcpRateLimit; }
+
 // Copying a starter or continuation is a user-visible bridge transition, but
 // neither the clipboard payload nor the prepared-chat capability is safe
 // report data. Retain a short, opt-in trace of only the action and its closed
@@ -284,24 +312,137 @@ export function getFailedStartDiagnosticLines() {
 // when the person's report-telemetry opt-in is off.
 const QUEUE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
 const QUEUE_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
-const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart']);
+const QUEUE_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart']);
 const QUEUE_SERVING = new Set(['off', 'live', 'paused', 'stopping', 'starting', 'failed', 'error']);
 const QUEUE_PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'network', 'expiry', 'sleep', 'quit', 'tunnel', 'other']);
 const QUEUE_FAULTS = new Set(['persist_failed', 'source_failed', 'other']);
 const QUEUE_CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended']);
-const QUEUE_COUNT_KEYS = ['releaseCalls', 'releaseNoops', 'unreleaseCalls', 'lanesDropped', 'droppedDiscarded', 'droppedPruned', 'droppedMissing', 'droppedSaved'];
+const QUEUE_COUNT_KEYS = [
+  'releaseCalls', 'releaseNoops', 'unreleaseCalls', 'lanesDropped', 'droppedDiscarded', 'droppedPruned', 'droppedMissing', 'droppedSaved',
+  // These are engine-owned aggregate verdict totals. They make a rejected
+  // submit visible even when a later flood of waiting GETs displaced its log
+  // line, without retaining response text, handoff codes, or worker keys.
+  'submitAccepted', 'submitRejected', 'submitDuplicate', 'submitJunk', 'submitSuperseded', 'submitMisrouted', 'submitHeld', 'submitTooLarge',
+];
 const QUEUE_MAX_LANES = 20;
+// Worker lifecycle is intentionally a closed, capability-free diagnostic.
+// The engine must never send a worker key, prompt, handoff code, or task label
+// through this seam. These states are sufficient to tell an unstarted worker
+// from a copied starter, a connected chat, and a chat currently processing
+// work without turning the report into a transcript.
+const QUEUE_WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
+const QUEUE_WORKER_OUTCOMES = new Set(['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended']);
+const QUEUE_WORKER_QUIET_REASONS = new Set(['polling_stopped', 'answer_silent']);
+const QUEUE_POOL_CLOSE_REASONS = new Set(['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled', 'other']);
+const QUEUE_MAX_WORKERS = HANDOFF_CONCURRENCY;
+const QUEUE_ACTIVITY_LIMIT = 20;
+const QUEUE_PUSH_TASKS = new Set([
+  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'resume-parse', 'job-compensation-research', 'job-compensation-research-batch',
+  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring',
+  'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
+  'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-preference-interpretation', 'job-preference-evaluation',
+  'job-preference-research-assessment', 'job-preference-research-batch-assessment',
+  'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
+]);
+const QUEUE_PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
+const QUEUE_MAX_PUSH_HUBS = 50;
+const QUEUE_CLAIM_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 let queueProvider = null;
 let retiredQueue = null;
 
 const smallInt = (value, max = 999999) => Number.isSafeInteger(value) && value >= 0 ? Math.min(value, max) : 0;
 
+function reduceWorkerPool(rawPool) {
+  const pool = rawPool && typeof rawPool === 'object' ? rawPool : {};
+  const active = pool.active === true;
+  const workers = active && Number.isSafeInteger(pool.workerCount)
+    && pool.workerCount >= 1 && pool.workerCount <= QUEUE_MAX_WORKERS
+    ? pool.workerCount
+    : 0;
+  const stateCounts = { available: 0, ready: 0, working: 0, quiet: 0, waiting: 0, idle: 0 };
+  const seenOrdinals = new Set();
+  const roster = [];
+  let completed = 0;
+  // This remains a reduction boundary even though engine.snapshot() already
+  // projects it: a diagnostic provider is optional and must not inject an
+  // arbitrary object into a retained bug report.
+  if (active && workers > 0) for (const candidate of (Array.isArray(pool.workers) ? pool.workers : []).slice(0, QUEUE_MAX_WORKERS)) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const ordinal = candidate.ordinal;
+    const state = candidate.state;
+    if (!Number.isSafeInteger(ordinal) || ordinal < 1 || ordinal > workers || seenOrdinals.has(ordinal)
+      || !QUEUE_WORKER_STATES.has(state)) continue;
+    seenOrdinals.add(ordinal);
+    const workerCompleted = smallInt(candidate.completed);
+    completed = Math.min(999999, completed + workerCompleted);
+    stateCounts[state] += 1;
+    roster.push(Object.freeze({
+      ordinal, state, completed: workerCompleted,
+      firstCallAt: finite(candidate.firstCallAt), lastCallAt: finite(candidate.lastCallAt),
+      lastCallKind: candidate.lastCallKind === 'get' || candidate.lastCallKind === 'submit' ? candidate.lastCallKind : null,
+      lastOutcome: QUEUE_WORKER_OUTCOMES.has(candidate.lastOutcome) ? candidate.lastOutcome : null,
+      lastOutcomeAt: finite(candidate.lastOutcomeAt),
+      quietReason: QUEUE_WORKER_QUIET_REASONS.has(candidate.quietReason) ? candidate.quietReason : null,
+      restarts: smallInt(candidate.restarts),
+    }));
+  }
+  roster.sort((left, right) => left.ordinal - right.ordinal);
+  const connected = stateCounts.working + stateCounts.quiet + stateCounts.waiting + stateCounts.idle;
+  const rawPlan = pool.plan && typeof pool.plan === 'object' ? pool.plan : {};
+  const recommended = Math.min(QUEUE_MAX_WORKERS, smallInt(rawPlan.recommended));
+  const queued = smallInt(rawPlan.queued);
+  const materialized = Number.isSafeInteger(rawPlan.materialized) && rawPlan.materialized >= 0
+    ? Math.min(queued, QUEUE_MAX_WORKERS * 1000, rawPlan.materialized)
+    : queued;
+  const expandBy = Math.min(QUEUE_MAX_WORKERS, smallInt(rawPlan.expandBy));
+  const reason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(rawPlan.reason)
+    ? rawPlan.reason
+    : 'empty';
+  const expansionCount = Math.min(999, smallInt(rawPlan.expansionCount));
+  const lastExpansionAt = finite(rawPlan.lastExpansionAt);
+  const lastExpansionAdded = Math.min(QUEUE_MAX_WORKERS, smallInt(rawPlan.lastExpansionAdded));
+  const history = (Array.isArray(pool.history) ? pool.history : []).slice(-3).flatMap(item => {
+    if (!item || typeof item !== 'object' || !QUEUE_POOL_CLOSE_REASONS.has(item.reason)) return [];
+    const workerCount = Number.isSafeInteger(item.workerCount) && item.workerCount >= 1 && item.workerCount <= QUEUE_MAX_WORKERS ? item.workerCount : 0;
+    if (!workerCount) return [];
+    const prior = reduceWorkerPool({ active: true, workerCount, workers: item.workers, plan: item.plan });
+    return [Object.freeze({
+      endedAt: finite(item.endedAt), reason: item.reason,
+      workerCount, workers: prior.roster, plan: prior.plan,
+    })];
+  });
+  return Object.freeze({
+    active,
+    // `workers` is the plan/capacity, never a claim that every chat connected.
+    workers,
+    observed: roster.length,
+    unreported: Math.max(0, workers - roster.length),
+    readyToCopy: stateCounts.available,
+    starterCopied: stateCounts.ready,
+    connected,
+    working: stateCounts.working,
+    quiet: stateCounts.quiet,
+    waiting: stateCounts.waiting,
+    idle: stateCounts.idle,
+    completed,
+    roster: Object.freeze(roster),
+    // Aggregate-only planner evidence: safe to retain in a FULL report and
+    // enough to distinguish a six-chat starter plan from later queued work.
+    plan: Object.freeze({ recommended, queued, materialized, expandBy, reason, expansionCount, lastExpansionAt, lastExpansionAdded }),
+    history: Object.freeze(history),
+  });
+}
+
 export function reduceBridgeQueue(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const at = finite(raw.at) ?? Date.now();
   const applications = raw.queue && typeof raw.queue === 'object' ? raw.queue : {};
   const chat = raw.chat && typeof raw.chat === 'object' ? raw.chat : {};
+  const limits = raw.limits && typeof raw.limits === 'object' ? raw.limits : {};
+  const setup = raw.setup && typeof raw.setup === 'object' ? raw.setup : {};
   const lanes = [];
   // Live lanes are what a report is FOR, so they are kept first and in full;
   // the room left over goes to the most recently changed finished lanes. (The
@@ -332,6 +473,51 @@ export function reduceBridgeQueue(raw) {
   // Chat keys the engine did not recognise: counts and one time, nothing more.
   const keys = raw.keys && typeof raw.keys === 'object' ? raw.keys : {};
   const lastUnrecognisedAt = finite(keys.lastUnrecognisedAt);
+  // Push/MCP state has already been projected by engine.snapshot(), but reduce
+  // it again here: a diagnostic provider is an optional seam and must not be
+  // able to put a hub key, path, node id, request id, prompt, or arbitrary
+  // label into a report. Only closed task/reason enums and aggregate counts
+  // survive. In particular, unselected pending work is kept as a count so a
+  // live bridge can be distinguished from work left in the manual dock.
+  const rawScope = raw.scope && typeof raw.scope === 'object' ? raw.scope : {};
+  const rawPush = raw.push && typeof raw.push === 'object' ? raw.push : {};
+  const selectedKeys = new Set((Array.isArray(rawPush.selectedHubs) ? rawPush.selectedHubs : [])
+    .filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/i.test(key)).slice(0, QUEUE_MAX_PUSH_HUBS).map(key => key.toLowerCase()));
+  const pushTasks = new Map();
+  let discoveredHubs = 0;
+  let discoveredPending = 0;
+  let selectedDiscoveredHubs = 0;
+  let selectedPending = 0;
+  for (const hub of (Array.isArray(rawPush.discovered) ? rawPush.discovered : [])) {
+    if (discoveredHubs >= QUEUE_MAX_PUSH_HUBS || !hub || typeof hub !== 'object'
+        || typeof hub.key !== 'string' || !/^[a-f0-9]{64}$/i.test(hub.key)) continue;
+    discoveredHubs += 1;
+    const pending = smallInt(hub.pending);
+    discoveredPending += pending;
+    if (selectedKeys.has(hub.key.toLowerCase())) { selectedDiscoveredHubs += 1; selectedPending += pending; }
+    for (const task of (Array.isArray(hub.tasks) ? hub.tasks : [])) {
+      if (!task || typeof task !== 'object' || !QUEUE_PUSH_TASKS.has(task.task)) continue;
+      pushTasks.set(task.task, Math.min(999999, (pushTasks.get(task.task) || 0) + smallInt(task.pending)));
+    }
+  }
+  const rawPushDiagnostics = rawPush.diagnostics && typeof rawPush.diagnostics === 'object' ? rawPush.diagnostics : {};
+  // Claim UUIDs are renderer-only correlation values. The report may state
+  // only how many current claims exist, and only when they have the exact
+  // opaque UUID shape; neither their text nor any arbitrary provider value
+  // crosses this reduction boundary.
+  const claimed = (Array.isArray(rawPush.claimed) ? rawPush.claimed : [])
+    .filter(value => typeof value === 'string' && QUEUE_CLAIM_ID.test(value)).slice(0, 100).length;
+  const available = (Array.isArray(rawPush.available) ? rawPush.available : [])
+    .filter(value => typeof value === 'string' && QUEUE_CLAIM_ID.test(value)).slice(0, 100).length;
+  const pushAtAge = value => {
+    const stamp = finite(value);
+    return stamp === null ? null : Math.max(0, Math.floor((at - stamp) / 1000));
+  };
+  const pushExclusions = Object.fromEntries(QUEUE_PUSH_EXCLUSION_REASONS.map(reason => [reason, smallInt(rawPushDiagnostics.exclusions?.[reason])]));
+  const activity = (Array.isArray(raw.activity) ? raw.activity : []).slice(-QUEUE_ACTIVITY_LIMIT).flatMap(item => {
+    const safe = sanitizeActivityItem(item);
+    return safe ? [Object.freeze({ ...safe })] : [];
+  });
   return Object.freeze({
     at,
     enabled: raw.enabled === true,
@@ -348,7 +534,14 @@ export function reduceBridgeQueue(raw) {
     chat: Object.freeze({
       state: enumOr(chat.state, QUEUE_CHAT_STATES, 'none'),
       jobsAssigned: smallInt(chat.jobsAssigned, 99), jobsCap: smallInt(chat.jobsCap, 99),
+      startedAt: finite(chat.startedAt), firstCallAt: finite(chat.firstCallAt), lastCallAt: finite(chat.lastCallAt),
+      lastCallKind: chat.lastCallKind === 'get' || chat.lastCallKind === 'submit' ? chat.lastCallKind : null,
+      calls: smallInt(chat.calls),
+      pool: reduceWorkerPool(chat.pool),
+      bytes: smallInt(smallInt(chat.bytesServed, 100_000_000) + smallInt(chat.bytesReceived, 100_000_000), 100_000_000),
+      byteBudget: smallInt(limits.epochHardBytes, 100_000_000),
     }),
+    activity: Object.freeze(activity),
     lanes: Object.freeze(lanes),
     counts: Object.freeze(counts),
     keys: Object.freeze({
@@ -356,6 +549,41 @@ export function reduceBridgeQueue(raw) {
       unrecognisedWindowMinutes: smallInt(keys.unrecognisedWindowMinutes, 1440) || 10,
       lastUnrecognisedAt: lastUnrecognisedAt === null || lastUnrecognisedAt < 0 ? null : lastUnrecognisedAt,
       ended: smallInt(keys.ended),
+    }),
+    scope: Object.freeze({
+      applications: rawScope.applications === true,
+      scoring: rawScope.scoring === true,
+      marketplace: rawScope.marketplace === true,
+    }),
+    readiness: Object.freeze({
+      linked: setup.linked === true,
+      tunnelReachable: setup.tunnelReachable === true,
+    }),
+    push: Object.freeze({
+      discoveredHubs,
+      selectedHubs: selectedKeys.size,
+      optedOutHubs: smallInt(rawPush.optedOutHubs, QUEUE_MAX_PUSH_HUBS),
+      selectedDiscoveredHubs,
+      discoveredPending: Math.min(999999, discoveredPending),
+      selectedPending: Math.min(999999, selectedPending),
+      unselectedPending: Math.max(0, Math.min(999999, discoveredPending - selectedPending)),
+      served: smallInt(rawPush.served),
+      held: smallInt(rawPush.held),
+      claimed,
+      available,
+      tasks: Object.freeze([...pushTasks.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([task, pending]) => Object.freeze({ task, pending }))),
+      exclusions: Object.freeze(pushExclusions),
+      exclusionScope: rawPushDiagnostics.exclusionScope === 'all' || rawPushDiagnostics.exclusionScope === 'selected' ? rawPushDiagnostics.exclusionScope : 'none',
+      refreshAttempts: smallInt(rawPushDiagnostics.refreshAttempts),
+      refreshFailures: smallInt(rawPushDiagnostics.refreshFailures),
+      lastRefresh: rawPushDiagnostics.lastRefreshOk === true ? 'succeeded' : rawPushDiagnostics.lastRefreshOk === false ? 'failed' : 'none',
+      lastRefreshAt: finite(rawPushDiagnostics.lastRefreshAt),
+      lastRefreshAgeSeconds: pushAtAge(rawPushDiagnostics.lastRefreshAt),
+      selectedPolls: smallInt(rawPushDiagnostics.selectedPolls),
+      selectedPollFailures: smallInt(rawPushDiagnostics.selectedPollFailures),
+      lastSelectedPoll: rawPushDiagnostics.lastSelectedPollOk === true ? 'succeeded' : rawPushDiagnostics.lastSelectedPollOk === false ? 'failed' : 'none',
+      lastSelectedPollAt: finite(rawPushDiagnostics.lastSelectedPollAt),
+      lastSelectedPollAgeSeconds: pushAtAge(rawPushDiagnostics.lastSelectedPollAt),
     }),
   });
 }

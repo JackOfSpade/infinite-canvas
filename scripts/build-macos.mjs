@@ -411,6 +411,39 @@ export function verifyMacApplications({
   return apps;
 }
 
+// electron-builder normally signs a macOS app itself. On current macOS builds,
+// however, a local (non-Developer-ID) identity can be reported in its log while
+// the final `dir` target is still ad-hoc signed. Seal the freshly emitted bundle
+// explicitly before verification so the configured identity is the authority
+// that reaches the release artifact, rather than trusting that log line.
+export function signMacApplications({
+  apps,
+  identity,
+  platform = process.platform,
+  runCommand = spawnSync,
+} = {}) {
+  if (platform !== 'darwin') throw new Error('macOS package signing can only run on macOS.');
+  if (!Array.isArray(apps) || !apps.length) throw new Error('At least one freshly emitted macOS application is required to sign package integrity.');
+  if (!identity || identity === '-') throw new Error('A named configured signing identity is required to sign macOS package integrity.');
+  for (const appPath of apps) {
+    const result = runCommand('/usr/bin/codesign', [
+      '--force',
+      '--deep',
+      '--preserve-metadata=identifier,entitlements,requirements,flags,runtime',
+      '--sign',
+      identity,
+      appPath,
+    ], {
+      encoding: 'utf8',
+      stdio: 'inherit',
+    });
+    if (result?.error || result?.status !== 0) {
+      throw commandFailure(`macOS package signing failed for ${appPath}.`, result);
+    }
+  }
+  return apps;
+}
+
 function runOrThrow(command, args, { cwd }) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit' });
   if (result?.error || result?.status !== 0) throw commandFailure(`${path.basename(command)} ${args.join(' ')} failed.`, result);
@@ -451,7 +484,9 @@ export function buildMacApplication(projectDir = process.cwd()) {
   const before = snapshotMacApplications(releaseDir);
   packageApplication(projectDir, 'darwin');
 
-  return verifyMacApplications({ apps: findCurrentMacApplications(releaseDir, before), identity });
+  const apps = findCurrentMacApplications(releaseDir, before);
+  signMacApplications({ apps, identity });
+  return verifyMacApplications({ apps, identity });
 }
 
 export function buildApplication(projectDir = process.cwd(), platform = process.platform) {

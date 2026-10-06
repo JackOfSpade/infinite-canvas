@@ -7,7 +7,7 @@ import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '
 import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
 import { buildMainProcessLogsMarkdown, newestFirstLogLines, timestampedLogLines } from '../test-dependencies.js';
 import { formatEventLogEntry, localIsoTimestampWithOffset } from '../../src/utils/EventLogger.js';
-import { descriptionPanelFailureAttribution } from '../../electron/ipc/browser/manualScraper.js';
+import { descriptionPanelFailureAttribution, selectManualSourcePageJobs } from '../../electron/ipc/browser/manualScraper.js';
 // Imported directly rather than through test-dependencies.js (a file this task
 // must not touch): clipboardCap.js has zero electron/module dependencies, so
 // this is safe and mirrors the EventLogger.js direct-import pattern above.
@@ -43,13 +43,14 @@ import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
-import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
+import { __listDescriptionRecoveryCheckpointsForTests, __withLockedLinkedInEnrichmentForTests, authenticatedIndeedScrapeStatus, capPlatformJobsAfterWindow, indeedWarningRequiresManualVerification, registerJobsHandlers, withFreshManualScraperTelemetry } from '../../electron/ipc/jobs.js';
 import { logger } from '../../electron/logger.js';
 import { GLASSDOOR_EXTRACTOR, recordActivityBeat, setActivitySink, scrapeManualSources } from '../test-dependencies.js';
 import { isTerminalSourceStatus } from '../test-dependencies.js';
 import { clipReportText } from '../test-dependencies.js';
 import { composeDetailBlockReprobeResult, didDetailBlockReprobeRecover } from '../test-dependencies.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
+import { recordJobAnalysisRecoveryLifecycle } from '../../electron/ipc/jobAnalysisRecoveryLifecycle.js';
 import { jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas } from '../../electron/ipc/jobRunStaging.js';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import { __recordJobSourceDispatchForTests, __resetJobsTelemetryForTests } from '../../electron/ipc/jobs.js';
@@ -59,6 +60,50 @@ import os from 'node:os';
 import { appendJobsHistory, loadJobsHistory } from '../../electron/ipc/jobsHistory.js';
 
 export default [
+  {
+    name: 'per-platform collection cap admits date-valid source-unique jobs before limiting',
+    run: () => {
+      const start = Date.parse('2026-10-01T00:00:00.000Z');
+      const row = (source, id, posted) => ({
+        source,
+        jobId: id,
+        title: `Role ${id}`,
+        company: `Company ${id}`,
+        location: 'Toronto, ON',
+        url: `https://example.test/${source}/${id}`,
+        posted,
+      });
+      const result = capPlatformJobsAfterWindow([
+        row('google', 'old', '2026-09-30T23:59:59.000Z'),
+        row('google', 'dup', '2026-10-02T00:00:00.000Z'),
+        row('google', 'dup', '2026-10-02T00:00:00.000Z'),
+        row('google', 'one', '2026-10-02T00:00:00.000Z'),
+        row('google', 'two', '2026-10-03T00:00:00.000Z'),
+        row('google', 'three', '2026-10-04T00:00:00.000Z'),
+        row('indeed', 'one', '2026-10-02T00:00:00.000Z'),
+        row('indeed', 'two', '2026-10-03T00:00:00.000Z'),
+      ], start, 2, { now: new Date('2026-10-04T12:00:00.000Z') });
+      const google = result.jobs.filter(job => job.source === 'google');
+      const indeed = result.jobs.filter(job => job.source === 'indeed');
+      assert(google.length === 2 && indeed.length === 2,
+        'each platform receives its own limit after its eligible rows are considered');
+      assert(!google.some(job => job.jobId === 'old') && !google.some(job => job.jobId === 'dup' && google.filter(x => x.jobId === 'dup').length > 1),
+        'out-of-window and same-platform duplicate rows do not consume platform slots');
+      assert(result.ageDropped === 1
+        && result.sourceStats.google.duplicateDropped === 1
+        && result.sourceStats.google.capDropped === 2,
+      'the cap seam records age, duplicate, and true post-dedup overflow separately');
+      const manualSelection = selectManualSourcePageJobs([
+        row('google', 'old-manual', '2026-09-30T23:59:59.000Z'),
+        row('google', 'fresh-manual-a', '2026-10-02T00:00:00.000Z'),
+        row('google', 'fresh-manual-a', '2026-10-02T00:00:00.000Z'),
+        row('google', 'fresh-manual-b', '2026-10-03T00:00:00.000Z'),
+      ], [], 2, start);
+      assert(manualSelection.map(job => job.jobId).join(',') === 'fresh-manual-a,fresh-manual-b',
+        'the live manual walker backfills past old and duplicate cards before reaching its source cap');
+      return { google: google.length, indeed: indeed.length, overflow: result.sourceStats.google.capDropped, manual: manualSelection.length };
+    },
+  },
   {
     name: 'Local Application paste handoff diagnostics retain bounded safe parse metadata only',
     run: () => {
@@ -1403,7 +1448,7 @@ export default [
       const analysisPaths = getJobAnalysisPaths(canvas, path.join(dir, 'unsaved-analysis'));
       try {
         fs.writeFileSync(path.join(dir, 'canvas.jobs-run.json'), JSON.stringify({
-          runId: 'interrupted-run', stage: 'gathered', lastUpdated: 1_700_000_000_000,
+          runId: 'interrupted-run', stage: 'gathered', lastUpdated: 1_700_000_000_000, recoveryDisposition: 'manual',
           inputs: { nodeId, jobPreferences: 'private preference text must never appear' },
           sources: { google: { status: 'done' }, linkedin: { status: 'blocked' } },
         }), 'utf8');
@@ -1424,6 +1469,8 @@ export default [
         const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
         assert(recovery.includes('stage **gathered**')
           && recovery.includes('`google`=done, `linkedin`=blocked')
+          && recovery.includes('Recovery disposition: `manual`')
+          && recovery.includes('explicit user Pause & Save; automatic restart is disabled until Resume')
           && recovery.includes('1 parseable row(s) · 1 torn/unparseable row(s)')
           && recovery.includes('1 score-ready job(s) · 1 recovery-pool job(s)')
           && recovery.includes('hub `recovery-hub` is present in this canvas')
@@ -1461,6 +1508,126 @@ export default [
       }
   },
 },
+{
+    name: 'job recovery diagnostics distinguish provider collection boundary from active searching',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-provider-boundary-report-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'provider-boundary-diagnostic-hub';
+      const runId = 'provider-boundary-diagnostic-run';
+      const manifestPath = path.join(dir, 'canvas.jobs-run.json');
+      const manifest = {
+        runId, stage: 'searching', lastUpdated: 1_700_000_000_000,
+        providerGatheredAt: 1_700_000_000_123,
+        inputs: { nodeId, queries: ['PRIVATE QUERY'] },
+        sources: { google: { status: 'blocked' }, glassdoor: { status: 'done' } },
+      };
+      const base = {
+        description: 'Solve stayed unavailable after provider collection.',
+        nodes: [{ id: nodeId, type: 'jobhub', data: {} }], edges: [], drawings: [],
+        frontEndState: { currentFile: canvas }, nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+      };
+      const focused = () => generateMarkdown({
+        ...base, filterCode: 'JOBRESOLVE', nodes: [],
+        filterStats: {
+          hasJobNodes: true, hasSellNodes: false, currentNodeIds: [nodeId], currentJobHubIds: [nodeId],
+          omittedSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+        },
+      }).markdown;
+      try {
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8');
+        const full = generateMarkdown({ ...base, filterCode: 'FULL' }).markdown;
+        const jobResolve = focused();
+        assert(full.includes('Provider collection boundary: providerGathered=`true`')
+          && jobResolve.includes('Provider collection boundary: providerGathered=`true`')
+          && jobResolve.includes('source Solve can queue behind downstream processing'),
+        'FULL and JOBRESOLVE show that a searching manifest has crossed the provider boundary');
+
+        delete manifest.providerGatheredAt;
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8');
+        const legacyTerminal = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(legacyTerminal.includes('Provider collection boundary: providerGathered=`false`')
+          && legacyTerminal.includes('provider collection is not yet checkpointed; source Solve remains gated'),
+        'a legacy searching manifest with a non-empty all-terminal source ledger remains fenced without the explicit provider boundary');
+
+        manifest.sources.google.status = 'pending';
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8');
+        const collecting = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(collecting.includes('Provider collection boundary: providerGathered=`false`')
+          && collecting.includes('provider collection is not yet checkpointed; source Solve remains gated'),
+        'an otherwise searching manifest without the boundary remains distinguishable as provider collection still active');
+        for (const privateValue of ['PRIVATE QUERY', '1700000000123', 'providerGatheredAt']) {
+          assert(!full.includes(privateValue) && !jobResolve.includes(privateValue)
+            && !legacyTerminal.includes(privateValue) && !collecting.includes(privateValue),
+            `provider boundary diagnostics must not expose ${privateValue}`);
+        }
+        return { full: true, jobResolve: true, providerBoundary: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+},
+{
+    name: 'job recovery diagnostics expose bounded, index-only per-query restart plans',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-query-resume-diagnostics-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'query-resume-diagnostics-hub';
+      const privateQueries = ['PRIVATE ROLE QUERY A', 'PRIVATE ROLE QUERY B', 'PRIVATE ROLE QUERY C', 'PRIVATE ROLE QUERY D'];
+      try {
+        fs.writeFileSync(path.join(dir, 'canvas.jobs-run.json'), JSON.stringify({
+          runId: 'query-resume-diagnostics-run', stage: 'searching', lastUpdated: 1_700_000_000_000,
+          inputs: { nodeId, queries: privateQueries, collectionLimits: { pagesPerPlatform: 3 } },
+          sources: {
+            // Addressable providers can start at their individually durable
+            // page, except a query that has exhausted its original cap.
+            indeed: { status: 'blocked', queries: {
+              '#0': { lastPage: 2 },
+              // Its sibling reached a natural end before the source stopped;
+              // it must not be mistaken for an exhausted page continuation.
+              '#1': { lastPage: 3, terminal: true },
+              '#2': { lastPage: 3 },
+            } },
+            ziprecruiter: { status: 'pending', queries: { '#0': { lastPage: 1 } } },
+            // Google has only one durable result view; a page-1 cursor means
+            // that query is omitted rather than opened again.
+            google: { status: 'blocked', queries: { '#0': { lastPage: 1 } } },
+            // Glassdoor cannot address a later load-more page by URL, so the
+            // report must describe the replay rather than inventing a jump.
+            glassdoor: { status: 'blocked', queries: {
+              '#0': { lastPage: 2 },
+              // This terminal sibling must never be rendered as an
+              // unaddressable replay just because Glassdoor uses load-more.
+              '#1': { lastPage: 2, terminal: true },
+            } },
+            // Terminal source cursors remain deliberately absent from the
+            // restart plan: status already proves this source will not rerun.
+            linkedin: { status: 'done', queries: { '#0': { lastPage: 99 } } },
+          },
+        }), 'utf8');
+        const report = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
+        assert(report.includes('Query resume plan (`indeed`): durable/exact 3 · missing/restart 1 · skipped exhausted 1 · skipped terminal 1')
+          && report.includes('q1: durable page 2 → start 3')
+          && report.includes('q2: durable page 3 → skip (terminal)')
+          && report.includes('q3: durable page 3 → skip (page budget exhausted)')
+          && report.includes('q4: no durable page → restart 1'),
+        `addressable provider diagnostics retain exact per-slot continuation and exhaustion facts, got:\n${report}`);
+        assert(report.includes('Query resume plan (`ziprecruiter`): durable/exact 1 · missing/restart 3')
+          && report.includes('Query resume plan (`google`): durable/exact 1 · missing/restart 3 · skipped one-view 1')
+          && report.includes('q1: durable page 1 → skip (one view)')
+          && report.includes('Query resume plan (`glassdoor`): durable/exact 2 · missing/restart 2 · skipped terminal 1 · unaddressable replay 1')
+          && report.includes('q1: durable page 2 → replay from 1 (load-more view)')
+          && report.includes('q2: durable page 2 → skip (terminal)'),
+        'one-view and load-more providers disclose their non-addressable restart decisions instead of appearing as ordinary page jumps');
+        assert(!report.includes('PRIVATE ROLE QUERY') && !report.includes('lastPage: 99')
+          && !report.includes('Query resume plan (`linkedin`)'),
+        'restart diagnostics expose only source ids and query-slot indices; query text and terminal sources do not enter the report');
+        return { inspectedSlots: privateQueries.length };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
 {
     name: 'job recovery diagnostics enumerate independently scoped hub ledgers and terminal receipts',
     run: () => {
@@ -1796,7 +1963,7 @@ export default [
   },
   {
     name: 'job recovery reads a validated first-property metadata envelope for oversized snapshots',
-    run: () => {
+    run: async () => {
       const dir = fs.mkdtempSync(path.join('/tmp', 'ic-oversized-envelope-snapshot-'));
       const canvas = path.join(dir, 'canvas.json');
       const hubId = 'envelope-snapshot-hub';
@@ -1861,6 +2028,178 @@ export default [
           && completion.includes('The saved snapshot was verified from ownership/count metadata only; its job payload was not inspected.')
           && !completion.includes(secret),
         'completion reconciliation accepts a matching metadata-only snapshot without loading job contents');
+
+        const reanalysisMetadata = metadataFor(hubId, null, {
+          schemaVersion: 2,
+          recoveryMode: 'reanalyze-saved-jobs',
+          analysisRevisionId: 'oversized-saved-job-revision',
+          gatheredJobCount: 96,
+          candidatePoolJobCount: 96,
+        });
+        writeSnapshot(hubId, oversizedPayload(reanalysisMetadata, {
+          rootOverrides: {
+            snapshotContext: {
+              recoveryMode: 'reanalyze-saved-jobs',
+              analysisRevisionId: 'oversized-saved-job-revision',
+            },
+          },
+        }));
+        const originalReceiptText = fs.readFileSync(receiptPath, 'utf8');
+        fs.writeFileSync(receiptPath, JSON.stringify({
+          runId: 'prior-zero-source-run', nodeId: hubId,
+          terminal: { status: 'completed', outcome: 'zero', scoreReadyCount: 0 },
+          cleanup: { attempted: true, cleared: true },
+        }), 'utf8');
+        const reanalysisReads = [];
+        originalReadSync = fs.readSync;
+        fs.readSync = (...args) => {
+          reanalysisReads.push(Number(args[3]) || 0);
+          return originalReadSync(...args);
+        };
+        const reanalysisTelemetry = getJobsTelemetry();
+        const savedReanalysisTelemetry = { nodeId: reanalysisTelemetry.nodeId, windowId: reanalysisTelemetry.windowId, pipeline: reanalysisTelemetry.pipeline, search: reanalysisTelemetry.search, resolves: reanalysisTelemetry.resolves, scoring: reanalysisTelemetry.scoring };
+        try {
+          Object.assign(reanalysisTelemetry, {
+            nodeId: hubId, windowId: null, pipeline: null, search: null, resolves: {},
+            scoring: {
+              recoveryMode: 'reanalyze-saved-jobs', analysisRevisionId: 'oversized-saved-job-revision',
+              ts: Date.parse('2026-10-01T00:00:00.000Z'),
+              snapshotCreatedAtMs: Date.parse(createdAt),
+              input: 96, selectedForScoring: 96, candidatePoolJobCount: 96, scored: 96,
+              placeholders: 0, unscored: 0, failedBatches: 0,
+            },
+          });
+          const reanalysisCompletion = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(Math.max(...reanalysisReads) <= 16 * 1024
+            && reanalysisCompletion.includes('✅ **SAVED-JOB REANALYSIS SCORING COMPLETE**')
+            && reanalysisCompletion.includes('Source collection/search: not rerun for this operation')
+            && reanalysisCompletion.includes('Prior source terminal receipt: completed · terminal score-ready 0')
+            && !reanalysisCompletion.includes('terminal score-ready 0 ≠ scored 96'),
+          'an oversized 96-style v2 saved-job reanalysis is bounded, physically envelope-owned, and reconciles independently from a zero-result prior source receipt');
+
+          reanalysisTelemetry.scoring = null;
+          const incompleteReanalysis = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(incompleteReanalysis.includes('⚠️ **INDETERMINATE**')
+            && incompleteReanalysis.includes('no matching clean scoring completion evidence')
+            && !incompleteReanalysis.includes('SAVED-JOB REANALYSIS SCORING COMPLETE'),
+          'a saved-job reanalysis snapshot without correlated completion evidence never earns a green verdict');
+
+          const lifecyclePath = path.join(electronPkg.app.getPath('userData'), 'job-search', 'analysis-recovery-lifecycle.json');
+          await recordJobAnalysisRecoveryLifecycle(lifecyclePath, {
+            operation: 'reanalysis-score-complete', result: 'completed', reason: 'reanalysis-score-complete',
+            canvasFilePath: canvas, ownerId: hubId, recoveryMode: 'reanalyze-saved-jobs',
+            analysisRevisionId: 'oversized-saved-job-revision', snapshotCreatedAtMs: Date.parse(createdAt),
+            candidatePoolJobCount: 96, scoringInputCount: 96, scoredJobCount: 96,
+            placeholderCount: 0, unscoredJobCount: 0, failedBatchCount: 0,
+          });
+          const lifecycleReanalysis = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(lifecycleReanalysis.includes('✅ **SAVED-JOB REANALYSIS SCORING COMPLETE**')
+            && lifecycleReanalysis.includes('durable lifecycle receipt'),
+          'a current v2 snapshot can prove saved-job scoring after restart from its exact lifecycle receipt without live scoring telemetry');
+
+          const newerCreatedAt = '2026-10-13T08:00:00.000Z';
+          const newerMetadata = { ...reanalysisMetadata, createdAt: newerCreatedAt };
+          writeSnapshot(hubId, oversizedPayload(newerMetadata, {
+            rootOverrides: {
+              createdAt: newerCreatedAt,
+              snapshotContext: {
+                recoveryMode: 'reanalyze-saved-jobs',
+                analysisRevisionId: 'oversized-saved-job-revision',
+              },
+            },
+          }));
+          const staleLifecycle = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(staleLifecycle.includes('⚠️ **INDETERMINATE**')
+            && !staleLifecycle.includes('SAVED-JOB REANALYSIS SCORING COMPLETE'),
+          'a prior lifecycle receipt with the same owner/revision/counts cannot green a newer retry snapshot');
+
+          reanalysisTelemetry.scoring = {
+            recoveryMode: 'reanalyze-saved-jobs', analysisRevisionId: 'oversized-saved-job-revision',
+            ts: 1, snapshotCreatedAtMs: 1, input: 96, selectedForScoring: 96, candidatePoolJobCount: 96, scored: 96,
+            placeholders: 0, unscored: 0, failedBatches: 0,
+          };
+          const staleReanalysis = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(staleReanalysis.includes('⚠️ **INDETERMINATE**')
+            && !staleReanalysis.includes('SAVED-JOB REANALYSIS SCORING COMPLETE'),
+          'a matching revision/count scoring record predating the current snapshot cannot green a later retry of that revision');
+        } finally {
+          Object.assign(reanalysisTelemetry, savedReanalysisTelemetry);
+          fs.readSync = originalReadSync;
+          originalReadSync = null;
+        }
+
+        // This is the layout written before the compact reportMetadata
+        // envelope existed. Its useful fields appear first, but its counts and
+        // job payload sit far beyond the 16KiB diagnostic budget. The
+        // compatibility reader may identify the declared operation only; it
+        // must not manufacture an ownership/count/completion receipt.
+        const legacyRevision = 'legacy-oversized-saved-job-revision';
+        const legacyReanalysisPayloadFor = (runId = null) => JSON.stringify({
+          version: 2,
+          createdAt,
+          nodeId: hubId,
+          sourceHubId: hubId,
+          runId,
+          canvasFilePath: canvas,
+          snapshotContext: {
+            recoveryMode: 'reanalyze-saved-jobs',
+            analysisRevisionId: legacyRevision,
+          },
+          privatePayload: `${secret}${'x'.repeat(4 * 1024 * 1024)}`,
+        });
+        const legacyReanalysisPayload = legacyReanalysisPayloadFor();
+        writeSnapshot(hubId, legacyReanalysisPayload);
+        const legacyReads = [];
+        originalReadSync = fs.readSync;
+        fs.readSync = (...args) => {
+          legacyReads.push(Number(args[3]) || 0);
+          return originalReadSync(...args);
+        };
+        const legacyRecovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        const legacyCompletion = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+        fs.readSync = originalReadSync;
+        originalReadSync = null;
+        assert(Math.max(...legacyReads) <= 16 * 1024
+          && legacyRecovery.includes('legacy oversized saved-job reanalysis header (bounded prefix only; payload, counts, ownership, and completion are unverified)')
+          && legacyCompletion.includes('⚠️ **INDETERMINATE**')
+          && legacyCompletion.includes('declares that source collection/search was not rerun for this operation')
+          && legacyCompletion.includes('Prior source terminal receipt: completed · terminal score-ready 0')
+          && !legacyCompletion.includes('SAVED-JOB REANALYSIS SCORING COMPLETE')
+          && !legacyCompletion.includes('terminal score-ready 0 ≠ scored 96')
+          && !legacyRecovery.includes(secret) && !legacyRecovery.includes(legacyRevision)
+          && !legacyCompletion.includes(secret) && !legacyCompletion.includes(legacyRevision),
+        'a real-order legacy oversized saved-job reanalysis remains bounded and separate from its zero-result source receipt without gaining a green completion claim');
+
+        const legacySourceRun = 'legacy-saved-source-run-42';
+        writeSnapshot(hubId, legacyReanalysisPayloadFor(legacySourceRun));
+        const legacyWithSourceRun = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+        const legacyWithSourceRunRecovery = buildJobRecoverySnapshot(canvas, new Set([hubId]), new Set([hubId]));
+        assert(legacyWithSourceRun.includes(`source run \`${legacySourceRun}\``)
+          && legacyWithSourceRunRecovery.includes(`source run \`${legacySourceRun}\``)
+          && legacyWithSourceRun.includes('⚠️ **INDETERMINATE**')
+          && !legacyWithSourceRun.includes('SAVED-JOB REANALYSIS SCORING COMPLETE'),
+        'a legacy saved-job reanalysis may retain a safe original source-run token without becoming a source-receipt/count reconciliation or green completion claim');
+
+        // The compatibility marker is intentionally strict: reordering,
+        // duplicate nested keys, or a nested lookalike cannot create it.
+        const legacyPrefix = legacyReanalysisPayload.slice(0, legacyReanalysisPayload.indexOf(',"privatePayload"'));
+        const malformedLegacyHeaders = [
+          legacyPrefix.replace('"nodeId":"envelope-snapshot-hub","sourceHubId"', '"sourceHubId":"envelope-snapshot-hub","nodeId"'),
+          legacyPrefix.replace('"analysisRevisionId":"legacy-oversized-saved-job-revision"', '"analysisRevisionId":"legacy-oversized-saved-job-revision","analysisRevisionId":"duplicate"'),
+          legacyPrefix.replace('"snapshotContext":{', '"nested":{"snapshotContext":{'),
+          legacyPrefix.replace('"runId":null', '"runId":"malformed run token"'),
+        ].map(prefix => `${prefix},"privatePayload":"${'x'.repeat(4 * 1024 * 1024)}"}`);
+        for (const malformedLegacy of malformedLegacyHeaders) {
+          writeSnapshot(hubId, malformedLegacy);
+          const rejected = buildJobCompletionAssessment(canvas, new Set([hubId]), [], 0, new Set([hubId]));
+          assert(!rejected.includes('legacy oversized saved-job reanalysis header')
+            && !rejected.includes('declares that source collection/search was not rerun for this operation'),
+          'reordered, duplicate, and nested legacy header lookalikes must not enter the bounded reanalysis compatibility path');
+        }
+        // Restore the ordinary v1 fixture for the remaining backwards-
+        // compatibility checks in this test.
+        writeSnapshot(hubId, oversizedPayload(metadata));
+        fs.writeFileSync(receiptPath, originalReceiptText, 'utf8');
 
         const telemetry = getJobsTelemetry();
         const savedTelemetry = {
@@ -8288,6 +8627,9 @@ export default [
         jobRunId: 'run-1',
         completed: 0,
         total: 10,
+        activity: 'description-enrichment',
+        activityCompleted: 0,
+        activityTotal: 476,
       });
       const terminal = mergeSourceProgress(first, { status: 'done', count: 12 });
       assert(terminal.warning?.code === 'captcha', 'Source progress merge: warning should stay sticky when omitted');
@@ -8311,6 +8653,8 @@ export default [
         && stoppedRunGuard.resume(null) === false,
       'only verified Stop → Resume may reopen its exact retired token; unrelated generations and missing tokens stay fenced');
       assert(terminal.completed === 0 && terminal.total === 10, 'Source progress merge: completed/total should stay sticky when omitted');
+      assert(terminal.activity === null && terminal.activityCompleted === null && terminal.activityTotal === null,
+        'Source progress merge: terminal source progress clears a post-gather activity instead of leaving a completed source looking active');
       const advanced = mergeSourceProgress(terminal, { status: 'searching', count: 12, completed: 4, total: 10 });
       assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
       const cleared = mergeSourceProgress(terminal, { status: 'done', count: 12, warning: null, url: null });
@@ -8322,12 +8666,25 @@ export default [
       // post-Solve comp rescrape — all on the same sourceId and the same card.
       const reEntered = mergeSourceProgress(
         { status: 'done', count: 12, detail: null, warning: null, url: null, completed: 1, total: 1 },
-        { status: 'searching', count: 12, detail: 'enriching descriptions' },
+        {
+          status: 'searching',
+          count: 12,
+          detail: 'Fetching descriptions… 140/476',
+          activity: 'description-enrichment',
+          activityCompleted: 140,
+          activityTotal: 476,
+        },
       );
       assert(reEntered.status === 'searching',
         'a terminal source must be able to re-enter searching — a guard here would re-break the disappearing card');
+      assert(reEntered.activity === 'description-enrichment'
+        && reEntered.activityCompleted === 140
+        && reEntered.activityTotal === 476,
+      'a post-gather LinkedIn description walk retains its distinct phase and item progress without pretending it is a new source scan');
       const jobsSrc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
-      assert(jobsSrc.includes("status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions'"),
+      assert(jobsSrc.includes("activity: 'description-enrichment'")
+        && jobsSrc.includes('activityCompleted: completed')
+        && jobsSrc.includes('activityTotal: total'),
         'the producer that depends on the non-guard still exists, so the non-guard is not dead weight');
       assert(isTerminalSourceStatus('done') && isTerminalSourceStatus('error') && isTerminalSourceStatus('skipped')
         && !isTerminalSourceStatus('searching') && !isTerminalSourceStatus(undefined),
@@ -8469,22 +8826,70 @@ export default [
       assert(failedAttemptFinal.length === 1 && failedAttemptFinal[0] === zipBlocked,
         'a failed resolved:false attempt has no override and cannot suppress the backend final warning');
       assert(['queued', 'parsing', 'querying', 'interpreting-preferences', 'searching', 'scoring', 'evaluating-preferences']
-        .every(isJobSourceResolveBusyHubState)
+        .every(state => isJobSourceResolveBusyHubState(state))
+        && !isJobSourceResolveBusyHubState('searching', { jobRunId: 'run-1', providerGatheredRunId: 'run-1' })
+        && isJobSourceResolveBusyHubState('searching', { jobRunId: 'run-1', providerGatheredRunId: 'other-run' })
         && !isJobSourceResolveBusyHubState('sources-ready'),
-      'Solve stays disabled through every gathering/checkpointing state and re-enables only once the source checkpoint is ready');
+      'Solve stays disabled through provider gathering/checkpointing, but re-enables for the exact durable gathered run while downstream AI work retains the searching label');
+      assert(sourceCard.includes('run?.providerGathered === true')
+        && sourceCard.includes('run?.runId === sourceResolveRunId')
+        && sourceCard.includes('setTimeout(inspect, 750)')
+        && sourceCard.includes('providerGatheredRunId'),
+      'an actionable searching card rechecks the exact hub-scoped provider-gathered receipt and never enables from a stale run');
+      assert(sourceCard.includes('const providerBoundaryMatches = providerGatheredRunId === jobRunId;')
+        && sourceCard.includes("detail: `Waiting to resolve (${position})…`"),
+      'a provider-boundary Solve retains the click behind the shared job-workflow lane while downstream handoffs finish, rather than rejecting it as a stale pre-return run');
+      const jobsIpc = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      assert(jobsIpc.includes('if (canvasFilePath && !providerPhaseOnly) {\n      const providerGathered = await markProviderGathered(canvasFilePath, Date.now(), {')
+        && jobsIpc.includes('requiredSourceIds: activeSourceIds')
+        && jobsIpc.includes('providerGathered: providerGatheredAtForManifest(state.manifest) != null')
+        && jobsIpc.includes("if (state.manifest.stage === 'gathered') return { authorized: true, reason: 'gathered' };")
+        && jobsIpc.includes('raw provider\n    // rows have not yet crossed the deterministic age/history/preference'),
+      'the provider receipt admits a same-run Solve to the shared queue, while the backend requires the normal post-filter gathered checkpoint before mutation');
+      assert(jobsIpc.includes("sourceActionAuthorization.reason === 'provider-boundary-awaiting-final-checkpoint'")
+        && jobsIpc.includes("'live-run-checkpoint-not-ready'"),
+      'an abnormal exit after queue admission returns the explicit recovery-not-ready warning rather than a silent stale source action');
+      assert(!jobsIpc.includes('earlyRecoverySnapshot')
+        && !jobsIpc.includes('providerRecoveryCheckpointReady')
+        && jobsIpc.includes('if (canvasFilePath && !providerPhaseOnly) {'),
+      'provider-boundary admission does not create a raw recovery snapshot, and provider-only recovery stays fenced until explicit Resume creates the normal checkpoint');
+      const jobSearchRenderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      assert(jobSearchRenderer.includes('providerPhaseAwaitingResume: true')
+        && jobSearchRenderer.includes('providerPhaseAwaitingResume: false')
+        && sourceCard.includes('const hubProviderPhaseAwaitingResume = useStore(')
+        && sourceCard.includes("const [providerRecoveryReadiness, setProviderRecoveryReadiness] = useState({")
+        && sourceCard.includes("status: 'pending'")
+        && sourceCard.includes("const savedReady = exactRun && run?.stage === 'gathered';")
+        && sourceCard.includes('hubDataAtClick.providerPhaseAwaitingResume === true')
+        && sourceCard.includes('Provider collection is paused before final recovery preparation. Resume this Job Search before solving a source.'),
+      'provider-only recovery makes its explicit Resume boundary visible, re-derives it from the manifest after restart, and disables Solve instead of exposing a backend-fenced control');
       assert(sourceCard.includes('function hasBlockingJobSearchCleanup(data)')
         && sourceCard.includes('data?.manualAiResume?.retirementPending === true')
         && sourceCard.includes("data.manualAiCleanupReceipts.some(receipt => receipt?.cancellationPending === true)")
         && sourceCard.includes('const hubCleanupBlocked = useStore(')
         && sourceCard.includes('const hubBoardRecoveryOwned = useStore(')
+        && sourceCard.includes('const savedRecoveryFence = needsSavedRecoveryProof && (')
+        && sourceCard.includes('const hasVisibleResolverControl = Boolean(')
+        && sourceCard.includes('!hasVisibleResolverControl\n      || !sourceResolveRunId')
+        && sourceCard.includes('{hasVisibleResolverControl && (')
+        && sourceCard.includes('const needsSavedRecoveryProof = hubResolveState !== \'searching\' && hasVisibleResolverControl;')
+        && sourceCard.includes('const providerRecoveryProofKey = `${nav?.currentFile || \'\'}\\u0000${data.hubId || \'\'}\\u0000${sourceResolveRunId || \'\'}`;')
+        && sourceCard.includes('providerRecoveryReadiness.proofKey !== providerRecoveryProofKey')
+        && sourceCard.includes("providerRecoveryReadiness.status !== 'ready'")
+        && sourceCard.includes("const savedReady = exactRun && run?.stage === 'gathered';")
+        && sourceCard.includes("setProviderRecoveryReadiness({ status: 'pending', proofKey: providerRecoveryProofKey });")
+        && sourceCard.includes("const liveProviderBoundary = hubResolveState === 'searching'")
+        && sourceCard.includes('const providerPhaseAwaitingResume = hubProviderPhaseAwaitingResume || savedRecoveryFence;')
         && sourceCard.includes('const resolverActionDisabled = resolving || hubLocked || hubCleanupBlocked\n    || hubBoardRecoveryOwned || resolverBusy;')
         // Ownership and cleanup gating is factored into one predicate that BOTH
         // the full Skip and the mid-walk Stop must clear; only the `resolving`
         // term is relaxed for Stop, so a walk can be stopped without committing
         // the user to every remaining blocked query.
         && sourceCard.includes('const sourceOwnershipBlocked = hubLocked || hubCleanupBlocked || hubBoardRecoveryOwned;')
-        && sourceCard.includes('const sourceActionDisabled = sourceOwnershipBlocked || resolving;')
-        && sourceCard.includes('const canStopSolveWalk = !sourceOwnershipBlocked && resolving;')
+        && sourceCard.includes('const sourceActionDisabled = sourceOwnershipBlocked || sourceActionRecoveryFenced || resolving;')
+        && sourceCard.includes('const canStopSolveWalk = !sourceOwnershipBlocked && !sourceActionRecoveryFenced && resolving;')
+        && sourceCard.includes('not a source mutation. Keep these two actions usable while saved recovery')
+        && sourceCard.includes('External listing/login actions are safe prerequisites: neither')
         // Still the first guard in handleSolve; it now also reports back to a
         // "Solve all" driver instead of returning silently, which is what kept
         // the driver from hanging on a locked hub.
@@ -8494,7 +8899,7 @@ export default [
         && sourceCard.includes('|| isJobWorkflowDeletionPending(data.hubId)')
         && sourceCard.includes('disabled={sourceActionDisabled && !canStopSolveWalk}')
         && !sourceCard.includes('const sourceActionDisabled = hubLocked || hubBusy;'),
-      'Solve and Skip must block for both primary and receipt-backed cancellation cleanup, including live rechecks after queue admission, while Skip remains available during an unrelated in-flight search');
+      'Solve and Skip must block for both primary and receipt-backed cancellation cleanup and fail closed on initial/remount, failed-peek, or marked-crash recovery receipts; only an exact gathered receipt clears a saved card while a live searching marker remains queue-enabled');
       // One Solve press walks EVERY remaining blocked query for the source.
       // Each of these is a failure mode that a behavioural test cannot see:
       // a stale closure re-solving query 1 forever, a restore that rewinds to
@@ -8865,6 +9270,116 @@ export default [
       assert(moduleFingerprint(before) !== moduleFingerprint(after),
         'a saved-job re-analysis changes the connected board fingerprint when fit output changes');
       return { oldFingerprint: moduleFingerprint(before), newFingerprint: moduleFingerprint(after) };
+  },
+},
+{
+    name: 'Job Search: paused saved-job re-analysis resumes score-only without manufacturing a scrape',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const recovery = fs.readFileSync(path.resolve('src/utils/manualAiRecovery.js'), 'utf8');
+      const reanalysisStart = search.indexOf('const handleReanalyze = useCallback');
+      const reanalysisEnd = search.indexOf('// Drop the hub\'s career identity', reanalysisStart);
+      const reanalysis = search.slice(reanalysisStart, reanalysisEnd);
+      const listenerStart = search.indexOf('const onPending = (event) =>');
+      const listenerEnd = search.indexOf("document.addEventListener('non-api-ai-node-pending'", listenerStart);
+      const pendingListener = search.slice(listenerStart, listenerEnd);
+      const pauseStart = search.indexOf('const exactStoppedRun = stoppedOffer?.found === true');
+      const pauseEnd = search.indexOf('cleanupAllJobChildren();', pauseStart);
+      const pause = search.slice(pauseStart, pauseEnd);
+      const resetStart = search.indexOf('const resetHandler = useCallback');
+      const pauseCaptureAt = search.indexOf('const reanalysisRestoreAtPauseRequest = preserveRecovery', resetStart);
+      const cancellationEpochAt = search.indexOf('epoch.bump();', pauseCaptureAt);
+      const resumeStart = search.indexOf('const resumeManualAiRecovery = useCallback');
+      const reanalysisRoute = search.indexOf('if (isSavedJobReanalysisManualAiResume(resume))', resumeStart);
+      const savedScrapeRoute = search.indexOf('isSavedScrapeManualAiResume(resume)', resumeStart);
+      const legacyMigrationAt = search.indexOf('if (isLegacyPausedSavedJobReanalysis(resume, liveData))', resumeStart);
+      const routedReanalysis = search.slice(reanalysisRoute, savedScrapeRoute);
+
+      assert(recovery.includes("REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE = 'reanalyze-saved-jobs'")
+        && recovery.includes('isSavedJobReanalysisManualAiResume')
+        && recovery.includes('!isSavedJobReanalysisManualAiResume(resume)'),
+      'saved-job re-analysis has a durable operation identity which wins over a job-scoring task name');
+      assert(reanalysisStart >= 0 && reanalysisEnd > reanalysisStart
+        && (reanalysis.match(/manualAiRecoveryMode,/g) || []).length >= 4
+        && reanalysis.includes('resumingSavedReanalysis')
+        && reanalysis.includes('const manualAiRunId = resumedManualAiRunId || createManualAiRunId(currentId);'),
+      'every re-analysis handoff carries its score-only recovery identity and a resumed run reuses the exact manual-AI run id');
+      assert(pendingListener.includes('const recoveryMode = detail.recoveryMode')
+        && pendingListener.includes('recoveryMode !== REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE')
+        && pendingListener.includes('recoveryMode,'),
+      'the pending-handoff marker preserves same-run re-analysis identity and never assigns it a pre-search window');
+      assert(pause.includes('const pausedReanalysisRestore = !exactStoppedRun')
+        && pause.includes('reanalysisRestoreAtPauseRequest?.patch')
+        && pause.includes('saved-result re-analysis and prior results retained')
+        && search.includes('Saved-job re-analysis was paused. Continue will re-evaluate only the saved jobs; it will not start a new scrape.')
+        && pause.includes('const hasPreviousResults = pausedReanalysis ||')
+        && pause.includes('recoveryMode: REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE')
+        && pause.includes('...(pausedReanalysisRestore || {})'),
+      'Pause & Save restores the exact completed state, including a zero-scored run with a retained candidate pool, and saves a re-analysis marker');
+      assert(pauseCaptureAt >= resetStart && cancellationEpochAt > pauseCaptureAt
+        && search.includes('function isLegacyPausedSavedJobReanalysis(resume, data)')
+        && search.includes("['job-preference-evaluation', 'job-scoring'].includes(resume.task)")
+        && legacyMigrationAt > savedScrapeRoute
+        && search.slice(legacyMigrationAt, legacyMigrationAt + 2400).includes('await waitForRendererCommitFrame();'),
+      'Pause captures the re-analysis restore before cancellation can clear its ref, and only an explicitly continued legacy marker with a persisted candidate pool is migrated after staged-run inspection proves absent');
+      assert(reanalysisRoute >= 0 && savedScrapeRoute > reanalysisRoute
+        && routedReanalysis.includes('return handleReanalyze({')
+        && routedReanalysis.includes('manualAiRunId: resume.runId')
+        && !routedReanalysis.includes('runPipeline'),
+      'Resume routes a paused re-analysis before saved-scrape routing and cannot call the search pipeline');
+      return { mode: 'reanalyze-saved-jobs', scoreOnlyResume: true };
+    },
+  },
+{
+    name: 'Job Search: zero-match completion persists a raw candidate snapshot for restart-safe brief re-evaluation',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const reanalysisStart = search.indexOf('const handleReanalyze = useCallback');
+      const reanalysisEnd = search.indexOf('// Drop the hub\'s career identity', reanalysisStart);
+      const reanalysis = search.slice(reanalysisStart, reanalysisEnd);
+      const freshStart = search.indexOf('const finalCollectionScopeCaveats = normalizeCollectionScopeCaveats(searchResult.collectionScopeCaveats);');
+      const freshEnd = search.indexOf('if (SKIP_AI_FOR_TESTING)', freshStart);
+      const fresh = search.slice(freshStart, freshEnd);
+      const resumeStart = search.indexOf('const resumedRunId = searchResult?.runId || offer.runId || null;');
+      const resumeEnd = search.indexOf('return await runScoringAndSpawn({', resumeStart);
+      const resumed = search.slice(resumeStart, resumeEnd);
+
+      const freshSnapshot = fresh.indexOf('const snapshotReceipt = await window.electronAPI?.saveJobAnalysisSnapshot?.({');
+      const freshPreferences = fresh.indexOf('const preferenceResult = await evaluatePreferencesForRun({');
+      const freshCompletion = fresh.indexOf("await completeJobRun(searchResult.runId, 'completed', 'preference-filtered'");
+      assert(freshSnapshot >= 0 && freshPreferences > freshSnapshot && freshCompletion > freshPreferences
+        && fresh.includes('jobs: foundJobs,')
+        && fresh.includes('preferenceCandidatePool: foundJobs,')
+        && fresh.includes('if (snapshotReceipt?.saved !== true)')
+        && fresh.includes("retryOperation: 'resume-scoring'")
+        && !fresh.slice(freshSnapshot, freshCompletion).includes('discardJobAnalysisSnapshot'),
+      'a fresh all-filtered completion must durably write the raw candidate pool before evaluating preferences, retain a no-scrape retry on write failure, and never discard that snapshot before terminal completion');
+
+      const resumeSnapshot = resumed.indexOf('const snapshotReceipt = await window.electronAPI?.saveJobAnalysisSnapshot?.({');
+      const resumePreferences = resumed.indexOf('const preferenceResult = await evaluatePreferencesForRun({');
+      const resumeCompletion = resumed.indexOf("await completeJobRun(resumedRunId, 'completed', 'preference-filtered'");
+      assert(resumeStart >= 0 && resumed.includes('recordCollectionCompletion({ ...searchResult, runId: resumedRunId }, cancelled);')
+        && resumeSnapshot >= 0 && resumePreferences > resumeSnapshot && resumeCompletion > resumePreferences
+        && resumed.includes('runId: resumedRunId,')
+        && resumed.includes('jobs: foundJobs,')
+        && resumed.includes('preferenceCandidatePool: foundJobs,')
+        && resumed.includes('if (snapshotReceipt?.saved !== true)')
+        && !resumed.slice(resumeSnapshot, resumeCompletion).includes('discardJobAnalysisSnapshot'),
+      'a crash-resumed all-filtered completion must use its exact saved run token for the completion anchor and preserve the raw candidate snapshot through terminal completion');
+
+      assert(reanalysis.includes('const savedCandidatePool = savedPool.length > 0')
+        && reanalysis.includes('dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])')
+        && reanalysis.includes('runId: runData.jobRunId || null,')
+        && reanalysis.includes('if (preferenceResult.jobs.length === 0) {')
+        && reanalysis.includes('const snapshotResult = await window.electronAPI.saveJobAnalysisSnapshot({')
+        && reanalysis.includes('// The pool is persisted separately by the snapshot builder.')
+        && reanalysis.includes('jobs: [],')
+        && reanalysis.includes('recoveryMode: manualAiRecoveryMode,')
+        && reanalysis.includes('analysisRevisionId: manualAiRunId,')
+        && reanalysis.includes("throw new Error(snapshotResult?.error || 'Failed to save the re-analysis recovery snapshot');")
+        && !reanalysis.includes('lastCompletedRunAt'),
+      'saved-job re-evaluation must persist even an all-filtered downstream revision with its candidate pool and unique recovery identity, retain the scrape run token, and not alter the scrape/completion anchor');
+      return { freshAndResumedSnapshotsPersisted: true, zeroMatchReevaluationPreservesAnchor: true };
     },
   },
 {
@@ -9030,6 +9545,26 @@ export default [
         && windowFirst.dedupDropped === 1
         && windowFirst.expectedKept === 3,
       `a window-before-dedup funnel must count age and duplicate drops exactly once, got ${JSON.stringify(windowFirst)}`);
+      const cappedAfterWindow = reconcileSearchFunnel({
+        raw: 12, relevanceDropped: 0, windowEligible: 10, ageDropped: 2,
+        platformDuplicateDropped: 2, platformCapDropped: 3,
+        platformUnique: 8, platformCapped: 5,
+        deduped: 4, roleDropped: 1, historyDropped: 1,
+        descriptionEvidenceDropped: { total: 0 }, kept: 2,
+      });
+      assert(cappedAfterWindow.reconciled
+        && cappedAfterWindow.dedupDropped === 1
+        && cappedAfterWindow.platformDuplicateDropped === 2
+        && cappedAfterWindow.platformCapDropped === 3,
+      `the platform duplicate/cap stages must reconcile separately from cross-platform dedup, got ${JSON.stringify(cappedAfterWindow)}`);
+      const countryScope = reconcileSearchFunnel({
+        raw: 10, relevanceDropped: 1, countryScopeDropped: 2, windowEligible: 5,
+        ageDropped: 2, deduped: 5, roleDropped: 1, historyDropped: 1,
+        descriptionEvidenceDropped: { total: 1 }, kept: 2,
+      });
+      assert(countryScope.reconciled && countryScope.countryScopeDropped === 2
+        && countryScope.expectedWindowEligible === 5 && countryScope.expectedKept === 2,
+      `a confirmed cross-border drop must reconcile before the date window, got ${JSON.stringify(countryScope)}`);
       return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped, windowBeforeDedup: true };
     },
   },
@@ -13739,6 +14274,20 @@ export default [
       });
       assert(!('providerTotal' in clean.sources.usajobs) && !('truncated' in clean.sources.usajobs),
         'Receipt sanitizer omits coverage fields a source never reported rather than inventing a zero');
+      const cappedFunnel = sanitizeLastRunReceipt({
+        runId: 'hub-1', nodeId: 'hub', terminal: { status: 'completed', outcome: 'populated' },
+        funnel: {
+          raw: 10, relevanceDropped: 0, countryScopeDropped: 0, windowEligible: 8,
+          platformDuplicateDropped: 1, platformCapDropped: 2,
+          platformUnique: 7, platformCapped: 5, deduped: 4, ageDropped: 2,
+          roleDropped: 0, historyDropped: 0, descriptionEvidenceDropped: 0, kept: 4,
+        },
+      });
+      assert(cappedFunnel.funnel.platformDuplicateDropped === 1
+        && cappedFunnel.funnel.platformCapDropped === 2
+        && cappedFunnel.funnel.platformUnique === 7
+        && cappedFunnel.funnel.platformCapped === 5,
+      'receipt sanitization preserves explicit platform cap stages across restart');
 
       // queryFanOut is the hop that dropped them first; the wrapper below reads
       // them straight off its return value.
@@ -13747,8 +14296,19 @@ export default [
         'queryFanOut returns the corpus-coverage facts its caller reads');
       assert(jobsSrc.includes('if (data.providerTotal != null) bySource[sid].providerTotal = data.providerTotal;'),
         'per-source telemetry carries providerTotal for API sources, the twin of claimedTotal for browser sources');
-      assert(jobsSrc.includes('const capDropped = rawJobs.length - jobs.length;'),
-        'the per-platform cap is measured where it is applied, not derived from a figure that also includes cross-query dedup');
+      assert(jobsSrc.includes('export function capPlatformJobsAfterWindow')
+        && jobsSrc.includes('const jobs = rawJobs;')
+        && jobsSrc.includes("data.stopReasons.add(autoJobsPerPlatform ? 'auto-jobs-per-platform' : 'jobs-per-platform');"),
+      'the per-platform cap is measured after window/source-dedup admission, not by an earlier API fan-out slice');
+      const indeedSrc = fs.readFileSync(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8');
+      assert(jobsSrc.includes('const usajobsRowBudget = resolveJobsPerPlatform(limits);')
+        && !jobsSrc.includes('JOB_COLLECTION_LIMITS_MAX')
+        && indeedSrc.includes('let queryCollected = 0;')
+        && indeedSrc.includes('resultCap - queryCollected')
+        && indeedSrc.includes('filterJobsByPostedSince(')
+        && indeedSrc.includes("queryRetrievalBudgetReached ? ['query-retrieval-budget'] : []")
+        && !indeedSrc.includes("jobBudgetReached ? [limits.jobsPerPlatform"),
+      'small explicit platform limits remain bounded per retrieval query while Indeed admits exact-window rows before its query budget');
       return { ok: true };
     },
   },

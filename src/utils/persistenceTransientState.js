@@ -12,6 +12,10 @@ export const TRANSIENT_PROCESSING_HUB_STATES = [
 
 const JOBSEARCH_TRANSIENT_KEYS = [
   'queuedModuleRun',
+  // Re-derived from the durable run manifest on mount. Persisting a stopped
+  // provider-only gate would leave a saved hub unable to recalculate its true
+  // Resume state after the run changes externally.
+  'providerPhaseAwaitingResume',
   // Renderer-only cancellation receipt. It keeps a remounted hub from
   // accepting late source progress from a Board child that was rolled back;
   // a process restart has no such in-memory event stream to fence.
@@ -83,6 +87,7 @@ const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
   // payload, but let reload offer its normal Skip/Score actions instead of
   // preserving a queue lock with no worker behind it.
   'queuedModuleRun',
+  'providerPhaseAwaitingResume',
   '_boardRollbackSourceProgressFence',
   'errorMessage',
   // Stripped with errorMessage here too — see JOBSEARCH_TRANSIENT_KEYS.

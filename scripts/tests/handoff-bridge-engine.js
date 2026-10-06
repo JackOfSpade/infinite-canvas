@@ -10,7 +10,7 @@ import { MAX_LIVE_LANES, createLaneStore } from '../../electron/ipc/handoffBridg
 import { createAuditSink, makeAuditLine, SECURITY_AUDIT_EVENTS } from '../../electron/ipc/handoffBridge/audit.js';
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { APPLICATION_FENCE_RE, DUPLICATE_RESPONSE_MIN_CHARS, MAX_RESPONSE_BYTES, classifySubmission, extractPasteEnvelopeIdentity, normalizePastedResponse, responseFingerprint, stringifySubmission, trimHandoffCode } from '../../electron/ipc/handoffBridge/preflight.js';
-import { APPLICATION_INSTRUCTIONS, REJECTED_CAUTION, RESULT_NOTES, clipCorrectionItem, frameCorrections, makeRejectedBody, makeServedBody } from '../../electron/ipc/handoffBridge/framing.js';
+import { APPLICATION_INSTRUCTIONS, REJECTED_CAUTION, RESULT_NOTES, clipCorrectionItem, frameCorrections, makeRejectedBody, makeServedBody, makeResultBody } from '../../electron/ipc/handoffBridge/framing.js';
 import { createApplicationLane, createHandoffCodeGuard, holdLane, isHumanAdvance, makeChatKey, rehydrateApplicationLane, remainingCounts, resumeLane, tombstoneCode } from '../../electron/ipc/handoffBridge/lanes.js';
 import { AUDIT_LINE_EXAMPLE, ENGINE_PORT_SHAPE, SOURCE_ADAPTER_SHAPE, STATUS_SNAPSHOT_EXAMPLE, TUNNEL_PORT_SHAPE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { classifyThrow, fixedError } from '../../electron/ipc/handoffBridge/errors.js';
@@ -19,9 +19,11 @@ import { createApplicationSource } from '../../electron/ipc/handoffBridge/source
 import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
 import { reduceBridgeQueue } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { SURFACE_PIN, TOOLS_LIST, surfaceHash } from '../../electron/ipc/handoffBridge/tools.js';
+import { MAX_WORKER_POOL_PLANNING_UNITS, recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
+const JOB_C = '33333333-3333-4333-8333-333333333333';
 const PATH_A = '/tmp/marisol.canvas';
 const PATH_B = '/tmp/ada.canvas';
 const LINK = 'link-synthetic';
@@ -73,6 +75,844 @@ function cleanDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), 'ic-han
 
 const tests = [
   {
+    name: 'handoff bridge: worker pool planner deploys the maximum safe work count up to ten',
+    run: () => {
+      // Copying starters is cheap enough that every safe available work item
+      // gets a worker until the hard ten-chat ceiling. Use short units here:
+      // the old elapsed-time heuristic under-sized these at nine and eleven.
+      for (const [work, expected] of [[1, 1], [6, 6], [9, 9], [10, 10], [11, 10]]) {
+        const plan = recommendWorkerPool({ tasks: [{ task: 'job-scoring', pending: work }] });
+        assert(plan.queued === work && plan.materialized === work && plan.max === expected && plan.recommended === expected,
+          `${work} available work items must deploy ${expected} workers (${JSON.stringify(plan)})`);
+      }
+      const aggregate = recommendWorkerPool({
+        tasks: [{ task: 'job-scoring', pending: 2 }],
+        applicationCount: 4,
+      });
+      assert(aggregate.queued === 6 && aggregate.materialized === 6 && aggregate.recommended === 6,
+        'the worker count must include every safe push and application work item');
+      const hostApplication = recommendWorkerPool({ applicationCount: 0, applicationForecastCount: 1 });
+      assert(hostApplication.queued === 1 && hostApplication.materialized === 0 && hostApplication.recommended === 1,
+        'app-owned host work remains planned capacity but is not presented as a released handoff');
+      const restricted = recommendWorkerPool({
+        tasks: [{ task: 'job-scoring', pending: 6 }],
+        maxWorkers: 4,
+      });
+      assert(restricted.queued === 6 && restricted.max === 4 && restricted.recommended === 4,
+        'an explicit per-start cap remains a valid restriction on the maximum worker count');
+    },
+  },
+  {
+    name: 'handoff bridge: an application host lane remains forecast work until the app releases its next handoff',
+    run: async () => {
+      const engine = createHandoffEngine({
+        source: source({ read: async () => ({ kind: 'host' }) }).api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'the application lane releases');
+      const chat = await engine.newChat({ linkId: LINK });
+      assert((await engine.get({ session: chat.sessionCode, linkId: LINK })).status === 'waiting', 'the app retains the lane in its host phase');
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      assert(pool.started && pool.queued === 1 && pool.materialized === 0
+        && engine.snapshot().chat.pool.plan.queued === 1 && engine.snapshot().chat.pool.plan.materialized === 0,
+      `a host lane forecasts one later worker unit without claiming it is available now (${JSON.stringify(pool)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: worker-pool start deploys one chat for each safe work item up to ten',
+    run: async () => {
+      for (const [work, expected] of [[6, 6], [11, 10]]) {
+        const push = {
+          refreshHubs: async () => true,
+          status: () => ({
+            discovered: [{ tasks: [{ task: 'job-scoring', pending: work }] }],
+            working: 0,
+          }),
+          get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+          submit: async () => ({ status: 'unknown_handoff' }),
+          closeEpoch: () => undefined,
+        };
+        const engine = createHandoffEngine({
+          sources: { application: source().api, push },
+          scope: { applications: false, scoring: true, marketplace: false },
+        });
+        const pool = await engine.startWorkerPool({ linkId: LINK });
+        assert(pool.started === true && pool.queued === work && pool.workerCount === expected && pool.recommended === expected,
+          `${work} safe work items must start ${expected} worker chats (${JSON.stringify(pool)})`);
+        await engine.close();
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: an active five-item preference-research wave forecasts the full phase before choosing worker count',
+    run: async () => {
+      // The source keeps only a small active wave materialized, but its safe
+      // aggregate forecast says that roughly two hundred batches remain. The
+      // plan must use the latter for its one-time starter decision; otherwise
+      // a 209-batch research phase wrongly looks like five short tasks.
+      const task = { task: 'job-preference-research-batch', pending: 5, forecast: 209 };
+      const direct = recommendWorkerPool({ tasks: [task] });
+      assert(direct.recommended === 10 && direct.queued === 209 && direct.max === 10,
+        `the full forecast must justify the ten-worker maximum (${JSON.stringify(direct)})`);
+      const capped = recommendWorkerPool({ tasks: [{ ...task, forecast: MAX_WORKER_POOL_PLANNING_UNITS * 2 }] });
+      assert(capped.queued === MAX_WORKER_POOL_PLANNING_UNITS && capped.recommended === 10,
+        'a malformed/adaptor-sized forecast must stay bounded before planner expansion');
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [task] }], working: 0 }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      assert(pool.started === true && pool.workerCount === 10 && pool.queued === 209 && pool.materialized === 5,
+        `engine planning must retain the source forecast, not just the five visible tasks (${JSON.stringify(pool)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an explicit worker target reserves later-wave capacity without hiding the automatic forecast',
+    run: async () => {
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 6 }] }], working: 0 }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+      });
+      const automatic = await engine.startWorkerPool({ linkId: LINK });
+      assert(automatic.started && automatic.workerCount === 6 && automatic.recommended === 6,
+        `six known units must still get the lean automatic pool (${JSON.stringify(automatic)})`);
+      const expanded = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+      assert(expanded.started && expanded.existing && expanded.workerCount === 10 && expanded.recommended === 6
+        && JSON.stringify(expanded.newWorkerOrdinals) === JSON.stringify([7, 8, 9, 10]),
+      `an explicit target must add waiting capacity without misreporting the six-unit automatic plan (${JSON.stringify(expanded)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an explicit worker target expands a fully claimed live pool for later waves',
+    run: async () => {
+      let pending = 6;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: pending ? [{ tasks: [{ task: 'job-preference-evaluation', pending }] }] : [], working: 0 }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+      });
+      const initial = await engine.startWorkerPool({ linkId: LINK });
+      pending = 0;
+      const expanded = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+      assert(initial.started && initial.workerCount === 6 && expanded.started && expanded.workerCount === 10
+        && JSON.stringify(expanded.newWorkerOrdinals) === JSON.stringify([7, 8, 9, 10]),
+      `a claimed current wave must not prevent explicitly reserving later-wave workers (${JSON.stringify(expanded)})`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: worker pool mints distinct one-time starters without exposing their session codes in status',
+    run: async () => {
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({
+          discovered: [{ tasks: [{ task: 'job-role-screen-batch', pending: 13 }] }],
+          working: 0,
+        }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      let entropy = 0;
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        random: () => Buffer.alloc(26, ++entropy),
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      assert(pool.started === true && pool.workerCount === 10 && pool.recommended === 10 && pool.queued === 13,
+        `the engine must create the planner-selected pool (${JSON.stringify(pool)})`);
+      const reserved = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(reserved.copied === true
+        && engine.abandonWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }) === true,
+      'a main-process clipboard failure can release an unobserved worker reservation');
+      const starters = [];
+      for (let workerOrdinal = 1; workerOrdinal <= pool.workerCount; workerOrdinal += 1) {
+        const copied = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal });
+        assert(copied.copied === true && copied.workerOrdinal === workerOrdinal && copied.workerCount === pool.workerCount,
+          `worker ${workerOrdinal} must get only its own starter`);
+        starters.push(copied.sessionCode);
+      }
+      assert(new Set(starters).size === pool.workerCount, 'every worker starter must carry a distinct session capability');
+      assert(engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'starter_copied',
+        'a worker starter must be exported at most once before its chat connects');
+      const poolStatus = engine.snapshot().chat.pool;
+      assert(poolStatus?.active === true && poolStatus.generation === pool.generation && poolStatus.workerCount === pool.workerCount,
+        'status must expose only the bounded live-pool identity needed to retire stale renderer controls');
+      assert(Array.isArray(poolStatus.workers) && poolStatus.workers.length === pool.workerCount
+        && poolStatus.workers.every((worker, index) => worker.ordinal === index + 1 && worker.state === 'ready' && worker.completed === 0),
+      'a copied-but-not-yet-connected starter is reported as ready without exposing its capability');
+      const serializedStatus = JSON.stringify(engine.snapshot());
+      assert(starters.every(sessionCode => !serializedStatus.includes(sessionCode)), 'worker session codes must never reach status');
+      assert((await engine.newChat({ linkId: LINK })).status === 'pool_active'
+        && (await engine.continueChat({ linkId: LINK })).status === 'pool_active',
+      'ordinary one-chat controls must not silently replace an active worker pool');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a drained worker pool retains bounded closed lifecycle evidence without capabilities',
+    run: async () => {
+      const privateStarter = 'PRIVATE-DRAINED-STARTER';
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 0 }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }), closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0,
+        random: () => Buffer.from(privateStarter.padEnd(26, 'X').slice(0, 26)) });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'queue_empty', 'the empty pull drains the live pool');
+      const closed = engine.snapshot().chat.pool.history;
+      assert(engine.snapshot().chat.pool.active === false && closed.length === 1 && closed[0].reason === 'drained'
+        && closed[0].workerCount === 1 && closed[0].workers[0]?.ordinal === 1,
+      'a terminal queue_empty keeps one bounded closed-pool receipt instead of relabelling it legacy');
+      assert(!JSON.stringify(closed).includes(starter.sessionCode) && !JSON.stringify(closed).includes(privateStarter),
+        'closed pool diagnostics never expose a session capability or prompt material');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a push source ending an owned handoff records source_ended instead of drained',
+    run: async () => {
+      const rec = recorders();
+      let gets = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 2 }] }], working: 1 }),
+        get: async () => (gets++ === 0
+          ? { status: 'served', handoffCode: 'PUSH-SOURCE-ENDED', task: 'job-scoring', prompt: 'Synthetic push prompt.', remaining: { ready: 0, working: 1, needsYou: 0 } }
+          : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }), closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0, ...rec.port });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const owner = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const observer = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      assert((await engine.get({ session: owner.sessionCode, linkId: LINK })).status === 'served', 'worker 1 must first own the push handoff');
+      assert((await engine.get({ session: observer.sessionCode, linkId: LINK })).status === 'queue_empty', 'worker 2 observes the disappeared source handoff');
+      const status = engine.snapshot();
+      assert(status.chat.pool.active === false && status.chat.pool.history[0]?.reason === 'source_ended'
+        && status.chat.previous[0]?.reason === 'source_ended',
+      'a terminal source disappearance is retained as source_ended rather than a natural drain');
+      assert(rec.logs.some(entry => entry.code === 'epoch_closed' && entry.fields.cause === 'source_ended')
+        && rec.audit.some(entry => entry.event === 'epoch_closed' && entry.fields.reason === 'source_ended'),
+      'the neutral close reason reaches audit and structured diagnostics');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: a worker that stops after waiting becomes a restartable polling-silence recovery, including an accepted successor wait',
+    run: async () => {
+      const clock = createFakeClock();
+      let served = false;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 1 }),
+        get: async () => served
+          ? { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }
+          : (served = true, { status: 'served', handoffCode: 'PUSH-WAIT-RECOVERY', task: 'job-scoring', prompt: 'Synthetic prompt.', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'accepted' }),
+        nextAfterAccept: async () => ({ status: 'waiting', retryAfterSeconds: 3, remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const first = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({ session: starter.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: 'Synthetic completed response '.repeat(8) });
+      assert(first.status === 'served' && accepted.status === 'accepted' && accepted.next?.status === 'waiting',
+        'an accepted submit preserves its established result while exposing the successor wait');
+      let worker = engine.snapshot().chat.pool.workers[0];
+      assert(worker?.state === 'waiting' && worker.lastOutcome === 'accepted',
+        'the accepted successor wait leaves the worker connected and expecting another poll');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      worker = engine.snapshot().chat.pool.workers[0];
+      assert(worker?.state === 'quiet' && worker.quietReason === 'polling_stopped',
+        'a chat that stops after an explicit wait gets the safe polling-silence recovery signal');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(replacement.copied && engine.snapshot().chat.pool.workers[0]?.state === 'ready'
+        && engine.snapshot().chat.pool.workers[0]?.restarts === 1,
+      'the quiet polling worker receives a fresh replacement starter without auto-invalidating it first');
+      assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'session_ended',
+        'the old worker is retired only when the user explicitly requests replacement');
+      const directWait = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(directWait.status === 'waiting', 'a fresh worker can receive a plain get_handoff waiting result before work exists');
+      for (let poll = 0; poll < 3; poll++) {
+        clock.advance(Math.ceil(CONSTANTS.STALL_NOTICE_MS / 2));
+        assert((await engine.get({ session: replacement.sessionCode, linkId: LINK })).status === 'waiting',
+          `healthy waiting poll ${poll + 1} is acknowledged`);
+        assert(engine.snapshot().chat.pool.workers[0]?.state === 'waiting'
+          && engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).status === 'not_quiet',
+        `a repeated promised poll refreshes the silence deadline (${poll + 1})`);
+      }
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'quiet'
+        && engine.snapshot().chat.pool.workers[0]?.quietReason === 'polling_stopped'
+        && engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 }).copied,
+      'a worker that stops immediately after a direct waiting result is also restartable');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an unanswered preference handoff becomes answer-silent at five minutes without revoking its late submit',
+    run: async () => {
+      const clock = createFakeClock();
+      const privatePrompt = 'PRIVATE-PREFERENCE-PROMPT';
+      let pulls = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({
+          discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 1 }] }],
+          working: 0,
+        }),
+        get: async () => {
+          pulls += 1;
+          if (pulls === 1) {
+            return {
+              status: 'served',
+              handoffCode: 'PUSH-QUIET-WORKER',
+              task: 'job-preference-evaluation',
+              prompt: privatePrompt,
+              remaining: { ready: 0, working: 1, needsYou: 0 },
+            };
+          }
+          return { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } };
+        },
+        submit: async () => ({ status: 'accepted' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now,
+        timers: clock,
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const served = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(pool.started && starter.copied && served.status === 'served' && served.kind === 'push',
+        'the fixture must give the single worker a preference handoff');
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'working'
+        && engine.snapshot().chat.pool.workers[0]?.completed === 0,
+      'a freshly served push handoff is processing, not quiet');
+
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'working',
+        'a worker remains working until its response grace period has actually elapsed');
+      clock.advance(1);
+      const slowSnapshot = engine.snapshot();
+      assert(slowSnapshot.chat.pool.workers[0]?.state === 'quiet'
+        && slowSnapshot.chat.pool.workers[0]?.quietReason === 'answer_silent',
+      'an unanswered preference handoff becomes an actionable answer-silent warning at the five-minute boundary');
+      const accepted = await engine.submit({
+        session: starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+        response: 'Synthetic completed preference response '.repeat(8),
+      });
+      const settled = engine.snapshot().chat.pool.workers[0];
+      assert(accepted.status === 'accepted' && settled?.completed === 1 && settled?.state === 'waiting',
+        'the original slow worker can submit its valid late response and then return to the explicit waiting lifecycle');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an unanswered application handoff becomes answer-silent but accepts a late original response',
+    run: async () => {
+      const clock = createFakeClock();
+      const privatePrompt = 'PRIVATE-APPLICATION-PROMPT';
+      const application = source({
+        read: async () => ({ kind: 'open', handoff: handoff({ code: 'APPLICATION-QUIET-WORKER', prompt: privatePrompt }) }),
+      });
+      const engine = createHandoffEngine({
+        source: application.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        now: clock.now,
+        timers: clock,
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok,
+        'the application worker fixture must have one released handoff');
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const served = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(pool.started && starter.copied && served.status === 'served' && served.kind === 'application',
+        'the application pool worker must receive the released handoff');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'working',
+        'a slow application response does not look stale before the grace period');
+      clock.advance(1);
+      const slowSnapshot = engine.snapshot();
+      assert(slowSnapshot.chat.pool.workers[0]?.state === 'quiet'
+        && slowSnapshot.chat.pool.workers[0]?.quietReason === 'answer_silent',
+      'an unanswered application handoff becomes answer-silent at the five-minute boundary instead of claiming the chat is still working');
+      const accepted = await engine.submit({
+        session: starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+        response: answer({ code: served.handoffCode, stage: served.stage }),
+      });
+      assert(accepted.status === 'accepted' && engine.snapshot().chat.pool.workers[0]?.completed === 1,
+        'the original application worker can submit its valid late answer without losing ownership');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an authenticated worker refresh expands a live pool monotonically from fresh forecast work',
+    run: async () => {
+      let forecast = 1;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({
+          discovered: [{ tasks: [{ task: 'job-scoring', pending: 1, forecast }] }],
+          working: 1,
+        }),
+        get: async () => ({ status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(pool.workerCount === 1 && starter.copied, 'the initial one-item forecast must create exactly one copyable worker');
+      forecast = 12;
+      // MCP's tool schema intentionally supplies only `session`; its
+      // authenticated OAuth grant owns the link binding. Pool expansion must
+      // use that grant too, not silently require a renderer-only linkId.
+      const refreshed = await engine.get({ session: starter.sessionCode, grant: { linkId: LINK } });
+      const expanded = engine.snapshot().chat.pool;
+      assert(refreshed.status === 'waiting' && expanded.workerCount === 10
+        && expanded.plan.recommended === 10 && expanded.plan.queued === 12
+        && expanded.plan.materialized === 1
+        && expanded.plan.expandBy === 0 && expanded.plan.reason === 'maximum_parallelism',
+      `fresh authenticated work must grow the existing pool to the safe ceiling (${JSON.stringify(expanded)})`);
+      assert(expanded.workers.slice(1).every(worker => worker.state === 'available')
+        && engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 10 }).copied,
+      'newly planned workers remain available starters; expansion never opens chats itself');
+      forecast = 1;
+      await engine.get({ session: starter.sessionCode, grant: { linkId: LINK } });
+      assert(engine.snapshot().chat.pool.workerCount === 10,
+        'a later smaller forecast never silently retires live workers or copied starters');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an outstanding push handoff is answer-silent after five minutes but its original chat may still submit',
+    run: async () => {
+      const clock = createFakeClock();
+      let pulls = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 1 }),
+        get: async () => {
+          pulls += 1;
+          return {
+            status: 'served', handoffCode: 'PUSH-RESTART-SAME', task: 'job-scoring',
+            prompt: 'Complete this same outstanding scoring handoff.',
+            remaining: { ready: 0, working: 1, needsYou: 0 },
+          };
+        },
+        submit: async () => ({ status: 'accepted' }),
+        closeEpoch: () => undefined,
+      };
+      let entropy = 0;
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now, timers: clock, holdMs: 0,
+        random: () => Buffer.alloc(26, ++entropy),
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const oldStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const initial = await engine.get({ session: oldStarter.sessionCode, linkId: LINK });
+      assert(initial.status === 'served' && initial.handoffCode === 'PUSH-RESTART-SAME', 'the worker must own the push handoff before it can be answered');
+      const accepted = await engine.submit({
+        session: oldStarter.sessionCode, linkId: LINK, handoffCode: initial.handoffCode,
+        response: 'Completed the first safe scoring result. '.repeat(8),
+      });
+      const outstanding = await engine.get({ session: oldStarter.sessionCode, linkId: LINK });
+      assert(accepted.status === 'accepted' && outstanding.status === 'served',
+        'the fixture must retain a later outstanding handoff after one completed result');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'working', 'an outstanding push answer stays working before the five-minute grace period');
+      clock.advance(1);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'quiet'
+        && engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent',
+      'a silent outstanding push answer becomes recoverable at five minutes rather than claiming its chat is still working');
+      const late = await engine.submit({
+        session: oldStarter.sessionCode, linkId: LINK, handoffCode: outstanding.handoffCode,
+        response: 'Completed the delayed scoring result. '.repeat(8),
+      });
+      assert(late.status === 'accepted' && engine.snapshot().chat.pool.workers[0]?.completed === 2 && pulls === 2,
+        'the original chat retains the outstanding push handoff and can submit it late');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: an answer-silent application worker replacement replays its assigned lane without losing the late-response fence',
+    run: async () => {
+      const clock = createFakeClock();
+      const application = source({
+        read: async () => ({ kind: 'open', handoff: handoff({ code: 'APPLICATION-ANSWER-SILENT-REPLAY' }) }),
+        submit: async () => ({ kind: 'accepted', completed: true }),
+      });
+      const engine = createHandoffEngine({
+        source: application.api, scope: { applications: true, scoring: false, marketplace: false },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok,
+        'the replay fixture must own one released application lane');
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const oldStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const first = await engine.get({ session: oldStarter.sessionCode, linkId: LINK });
+      assert(engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A)?.workerOrdinal === 1,
+        'the application status exposes only the owning worker ordinal, never a session capability');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent',
+        'application ownership must expose the same answer-silent recovery signal');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const duplicateRestart = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(replacement.copied && duplicateRestart.status === 'not_quiet'
+        && engine.snapshot().chat.pool.workers[0]?.state === 'ready'
+        && engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A)?.workerOrdinal === 1,
+      'a replacement starter resets only the ambiguity clock, so a double restart cannot invalidate it before its first get');
+      const replay = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(replay.status === 'served' && replay.handoffCode === first.handoffCode
+        && (await engine.get({ session: oldStarter.sessionCode, linkId: LINK })).status === 'session_ended',
+      'the replacement owns the original application lane while the old chat cannot submit it');
+      const settled = await engine.submit({
+        session: replacement.sessionCode, linkId: LINK, handoffCode: replay.handoffCode,
+        response: answer({ code: replay.handoffCode }),
+      });
+      assert(settled.status === 'accepted' && engine.snapshot().chat.pool.workers[0]?.completed === 1,
+        'the replayed application lane settles once through its replacement worker');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: replacing an answer-silent worker retains its handoff for the replacement and ends only the old chat',
+    run: async () => {
+      const clock = createFakeClock();
+      let gets = 0;
+      let submissions = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 1 }] }], working: 1 }),
+        get: async () => ({
+          status: 'served', handoffCode: 'PUSH-ANSWER-SILENT-REPLAY', task: 'job-preference-evaluation',
+          prompt: `Synthetic replayable prompt ${++gets}.`, remaining: { ready: 0, working: 1, needsYou: 0 },
+        }),
+        submit: async () => ({ status: ++submissions === 1 ? 'accepted' : 'duplicate' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now, timers: clock, holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const oldStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const first = await engine.get({ session: oldStarter.sessionCode, linkId: LINK });
+      clock.advance(CONSTANTS.STALL_NOTICE_MS);
+      assert(engine.snapshot().chat.pool.workers[0]?.state === 'quiet'
+        && engine.snapshot().chat.pool.workers[0]?.quietReason === 'answer_silent',
+      'only a truly silent outstanding response offers recovery');
+      const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(replacement.copied && (await engine.get({ session: oldStarter.sessionCode, linkId: LINK })).status === 'session_ended',
+        'replacement explicitly invalidates the old chat but no passive timeout does');
+      const replay = await engine.get({ session: replacement.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && replay.status === 'served' && replay.handoffCode === first.handoffCode,
+        'the replacement receives the same logical handoff and code rather than a duplicate claim');
+      const settled = await engine.submit({
+        session: replacement.sessionCode, linkId: LINK, handoffCode: replay.handoffCode,
+        response: 'Synthetic replacement response '.repeat(8),
+      });
+      assert(settled.status === 'accepted' && submissions === 1 && engine.snapshot().chat.pool.workers[0]?.completed === 1,
+        'the replacement settles the replayed handoff exactly once');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: worker pool plans only selected enabled sources',
+    run: async () => {
+      const selectedKey = 'a'.repeat(64); const optedOutKey = 'b'.repeat(64);
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({
+          selectedHubs: [selectedKey],
+          discovered: [
+            { key: selectedKey, tasks: [{ task: 'job-scoring', pending: 1 }] },
+            { key: optedOutKey, tasks: [{ task: 'job-role-screen-batch', pending: 13 }] },
+          ],
+          working: 0,
+        }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      assert(pool.started === true && pool.queued === 1 && pool.workerCount === 1,
+        'unselected push hubs and disabled application lanes must not cause needless worker chats');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: concurrent worker-pool starts share one committed generation',
+    run: async () => {
+      const refreshGate = deferred(); let refreshes = 0;
+      const push = {
+        refreshHubs: async () => { refreshes += 1; await refreshGate.promise; return true; },
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-role-screen-batch', pending: 13 }] }], working: 0 }),
+        get: async () => ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      let entropy = 0;
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        random: () => Buffer.alloc(26, ++entropy),
+      });
+      const first = engine.startWorkerPool({ linkId: LINK });
+      const second = engine.startWorkerPool({ linkId: LINK });
+      await Promise.resolve(); await Promise.resolve();
+      assert(refreshes === 1, 'overlapping pool starts must share the one discovery/commit operation');
+      refreshGate.resolve(true);
+      const [left, right] = await Promise.all([first, second]);
+      assert(left.started === true && right.started === true && left.generation === right.generation && left.workerCount === right.workerCount,
+        'every concurrent caller must receive the same live pool generation');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: expanding a live chat preserves worker one and only mints missing worker starters',
+    run: async () => {
+      const app = source({
+        read: async ({ jobId }) => ({
+          kind: 'open',
+          handoff: handoff({ jobId, code: jobId === JOB_A ? 'HANDOFF-A' : 'HANDOFF-B' }),
+        }),
+      });
+      const engine = createHandoffEngine({
+        source: app.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [
+        { jobId: JOB_A, canvasFilePath: PATH_A },
+        { jobId: JOB_B, canvasFilePath: PATH_B },
+      ] })).ok, 'two application lanes must be ready');
+      const legacy = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: legacy.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && first.handoffCode === 'HANDOFF-A', 'worker one must own the already-served handoff before expansion');
+      const pool = await engine.startWorkerPool({ linkId: LINK });
+      assert(pool.started && pool.existing && pool.workerCount === 2
+        && JSON.stringify(pool.newWorkerOrdinals) === JSON.stringify([2]),
+      `the live chat must become worker one without a replacement (${JSON.stringify(pool)})`);
+      const sibling = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      assert(sibling.copied, 'only the newly minted worker needs a new starter');
+      const second = await engine.get({ session: sibling.sessionCode, linkId: LINK });
+      assert(second.status === 'served' && second.handoffCode === 'HANDOFF-B', 'the sibling worker must receive the other lane');
+      const accepted = await engine.submit({
+        session: legacy.sessionCode,
+        linkId: LINK,
+        handoffCode: first.handoffCode,
+        response: answer({ code: first.handoffCode, stage: first.stage }),
+      });
+      assert(accepted.status === 'accepted', 'expanding must not strand worker one\'s outstanding answer');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: pool workers own distinct application handoffs and keep rolling past the single-chat job cap',
+    run: async () => {
+      const app = source({
+        read: async ({ jobId }) => ({
+          kind: 'open',
+          handoff: handoff({
+            jobId,
+            code: jobId === JOB_A ? 'HANDOFF-A' : jobId === JOB_B ? 'HANDOFF-B' : 'HANDOFF-C',
+          }),
+        }),
+      });
+      let entropy = 0;
+      const engine = createHandoffEngine({
+        source: app.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        random: () => Buffer.alloc(26, ++entropy),
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [
+        { jobId: JOB_A, canvasFilePath: PATH_A },
+        { jobId: JOB_B, canvasFilePath: PATH_A },
+        { jobId: JOB_C, canvasFilePath: PATH_A },
+      ] })).ok, 'three application lanes must be available to the pool');
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(pool.started && pool.workerCount === 1 && starter.copied, 'the forced one-worker pool must expose its one starter');
+      for (const [expected, expectedCode] of [[JOB_A, 'HANDOFF-A'], [JOB_B, 'HANDOFF-B'], [JOB_C, 'HANDOFF-C']]) {
+        const got = await engine.get({ session: starter.sessionCode, linkId: LINK });
+        assert(got.status === 'served' && got.handoffCode === expectedCode, `pool worker must keep claiming ${expected}`);
+        const accepted = await engine.submit({
+          session: starter.sessionCode,
+          linkId: LINK,
+          handoffCode: got.handoffCode,
+          response: answer({ jobId: expected, code: got.handoffCode, stage: got.stage }),
+        });
+        assert(accepted.status === 'accepted', `pool worker must finish ${expected}`);
+      }
+      const workerProgress = engine.snapshot().chat.pool.workers;
+      assert(workerProgress.length === 1 && workerProgress[0].ordinal === 1
+        && workerProgress[0].state === 'waiting' && workerProgress[0].completed === 3,
+      'one connected worker reports every accepted handoff as completed after its rolling queue drains');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: concurrent application pool workers receive distinct routes and cannot submit for one another',
+    run: async () => {
+      const app = source({
+        read: async ({ jobId }) => ({ kind: 'open', handoff: handoff({ jobId, code: jobId === JOB_A ? 'HANDOFF-A' : 'HANDOFF-B' }) }),
+      });
+      let entropy = 0;
+      const engine = createHandoffEngine({
+        source: app.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        random: () => Buffer.alloc(26, ++entropy),
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [
+        { jobId: JOB_A, canvasFilePath: PATH_A },
+        { jobId: JOB_B, canvasFilePath: PATH_A },
+      ] })).ok, 'two application lanes must be available to the pool');
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const firstStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const secondStarter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      const [firstInitial, secondInitial] = await Promise.all([
+        engine.get({ session: firstStarter.sessionCode, linkId: LINK }),
+        engine.get({ session: secondStarter.sessionCode, linkId: LINK }),
+      ]);
+      assert(firstInitial.status === 'served' && secondInitial.status === 'served'
+        && firstInitial.handoffCode !== secondInitial.handoffCode,
+      'two workers must immediately receive distinct application handoffs from a concurrent pull');
+      const foreign = await engine.submit({
+        session: secondStarter.sessionCode,
+        linkId: LINK,
+        handoffCode: firstInitial.handoffCode,
+        response: answer({ code: firstInitial.handoffCode, stage: firstInitial.stage }),
+      });
+      assert(foreign.status === 'unknown_handoff', 'a worker cannot submit an application handoff owned by another worker');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: snapshot aggregates live-worker traffic instead of reporting only worker one',
+    run: async () => {
+      const app = source({
+        read: async ({ jobId }) => ({
+          kind: 'open',
+          handoff: handoff({
+            jobId,
+            code: jobId === JOB_A ? 'HANDOFF-SNAPSHOT-A' : 'HANDOFF-SNAPSHOT-B',
+            // Make worker two's contribution unmistakable in the aggregate.
+            prompt: jobId === JOB_B ? 'x'.repeat(12_000) : 'small worker-one prompt',
+          }),
+        }),
+      });
+      const engine = createHandoffEngine({
+        source: app.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [
+        { jobId: JOB_A, canvasFilePath: PATH_A },
+        { jobId: JOB_B, canvasFilePath: PATH_B },
+      ] })).ok, 'two application lanes must release');
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+      const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+      assert((await engine.get({ session: one.sessionCode, linkId: LINK })).status === 'served', 'worker one must receive the first lane');
+      assert((await engine.get({ session: two.sessionCode, linkId: LINK })).status === 'served', 'worker two must receive the second lane');
+      const chat = engine.snapshot().chat;
+      assert(chat.calls === 2 && chat.jobsAssigned === 2 && chat.bytesServed > 10_000
+        && chat.pool.active === true && chat.pool.workerCount === 2,
+      `pool diagnostics must aggregate every active worker (${JSON.stringify(chat)})`);
+      assert(chat.pool.workers.length === 2 && chat.pool.workers.every((worker, index) =>
+        worker.ordinal === index + 1 && worker.state === 'working' && worker.completed === 0),
+      'each served worker has a bounded active-processing roster entry before it submits');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: same worker concurrent application GETs attach to one proof reservation',
+    run: async () => {
+      let statusCalls = 0; let heldProof = null;
+      const app = source({
+        status: async () => {
+          statusCalls += 1;
+          if (heldProof) await heldProof.promise;
+          return { kind: 'host' };
+        },
+      });
+      const engine = createHandoffEngine({
+        source: app.api,
+        scope: { applications: true, scoring: false, marketplace: false },
+        holdMs: 0,
+      });
+      assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'application lane must release');
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served', 'the first GET establishes an outstanding application handoff');
+      const beforeProof = statusCalls;
+      heldProof = deferred();
+      const one = engine.get({ session: chat.sessionCode, linkId: LINK });
+      const two = engine.get({ session: chat.sessionCode, linkId: LINK });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(statusCalls === beforeProof + 1, 'same-worker retries must start only one asynchronous bundle proof');
+      heldProof.resolve();
+      const [left, right] = await Promise.all([one, two]);
+      const snapshot = engine.snapshot();
+      assert(left.status === 'served' && right.status === 'served' && left.handoffCode === first.handoffCode && right.handoffCode === first.handoffCode
+        && snapshot.counts.getServed === 2 && snapshot.chat.calls === 3 && snapshot.chat.servedTwice === true,
+      'both retries must receive the one re-served handoff, with no duplicate serve or byte/count mutation');
+      await engine.close();
+    },
+  },
+  {
     name: 'handoff bridge: engine: frozen port and status contracts are complete and immutable',
     run: () => {
       assert(ENGINE_PORT_SHAPE.join(',') === 'get,submit,snapshot,close', 'engine port shape drifted');
@@ -92,6 +932,8 @@ const tests = [
       assert(classifyThrow({ code: 'no_hostname', message: 'secret prompt' }).code === 'no_hostname', 'classification must use only code');
       assert(classifyThrow({ code: 'not-a-code', message: 'secret prompt' }).code === 'internal_error', 'unknown codes must collapse');
       assert(makeLogRecord('pause', { cause: 'idle' }).fields.cause === 'idle', 'safe enumerated log fields must pass');
+      assert(makeLogRecord('worker_pool_started', { workers: 10, recommended: 10, queued: 184 }).fields.queued === 184,
+        'worker-pool lifecycle evidence must use the closed aggregate log schema');
       for (const attempt of [
         () => makeLogRecord('unknown', {}), () => makeLogRecord('pause', { reason: 'free text with spaces' }),
         () => makeLogRecord('link_created', { candidate: 'ada' }), () => makeLogRecord('pause', { tool: 'get_handoff' }),
@@ -114,6 +956,11 @@ const tests = [
       try { log.record('tool_call', { tool: 'get', outcome: 'secret prompt with spaces', ms: 8 }); } catch { threw = true; }
       assert(threw && lines.length === 1 && log.getRecent().length === 1 && log.getVersion() === 1,
         'unsafe fields must be rejected before either the app logger or Activity ring changes');
+      log.record('worker_pool_started', { workers: 10, recommended: 10, queued: 184 });
+      log.record('worker_pool_expanded', { workers: 10, recommended: 10, queued: 184, added: 4 });
+      assert(lines.includes('[HandoffBridge] worker_pool_started workers=10 recommended=10 queued=184')
+        && lines.includes('[HandoffBridge] worker_pool_expanded workers=10 recommended=10 queued=184 added=4'),
+      'FULL-report main logs retain closed aggregate worker-pool planning and expansion evidence');
       for (let index = 0; index < 205; index += 1) log.record('pause', { cause: 'user' });
       const activity = log.getRecent();
       assert(activity.length === 200 && log.getVersion() === 206 && activity.every(item => item.kind === 'paused' && item.outcome === 'paused'),
@@ -255,7 +1102,11 @@ const tests = [
     run: () => {
       const lane = createApplicationLane({ ord: 1, jobId: JOB_A, canvasFilePath: PATH_A, handoff: handoff() });
       const body = makeServedBody({ lane, remaining: { ready: 0, working: 0, needsYou: 0 } });
-      assert(body.instructions === APPLICATION_INSTRUCTIONS && body.instructions.includes('submit_handoff'), 'application instructions must remain byte-stable directive text');
+      assert(body.instructions === APPLICATION_INSTRUCTIONS
+        && body.instructions.includes('submit_handoff')
+        && body.instructions.includes('second validation pass')
+        && body.instructions.includes('every requested section and shared field')
+        && body.instructions.includes('every correction is satisfied'), 'application instructions must require complete second-pass validation before submission');
     },
   },
   {
@@ -332,10 +1183,16 @@ const tests = [
       const keyA = 'a'.repeat(64); const keyB = 'b'.repeat(64);
       const engine = createHandoffEngine({
         source: source().api,
-        sources: { application: source().api, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }), status: () => ({ served: 1, discovered: [{ key: keyA, pending: 2, tasks: [{ task: 'job-scoring', pending: 2 }] }, { key: keyB, pending: 3, tasks: [{ task: 'job-scoring', pending: 3 }] }] }) } },
+        sources: { application: source().api, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }), status: () => ({ served: 1, held: 2, claimed: ['22222222-2222-4222-8222-222222222222', 'unsafe-claim'], discovered: [{ key: keyA, pending: 2, tasks: [{ task: 'job-scoring', pending: 2 }] }, { key: keyB, pending: 3, tasks: [{ task: 'job-scoring', pending: 3 }, { task: 'job-role-screen-batch', pending: 3 }] }] }) } },
       });
       const scoring = engine.snapshot().queue.scoring;
-      assert(scoring.pending === 5 && scoring.withChat === 1 && scoring.tasks[0]?.pending === 5, 'discovery and served counts must not be conflated');
+      assert(scoring.pending === 5 && scoring.withChat === 1 && scoring.tasks.find(task => task.task === 'job-scoring')?.pending === 5
+        && scoring.tasks.find(task => task.task === 'job-role-screen-batch')?.pending === 3,
+      'discovery and served counts must not be conflated, and every closed bridgeable task remains visible');
+      const ownership = engine.snapshot().queue.push;
+      assert(ownership.served === 1 && ownership.held === 2 && ownership.claimed.length === 1
+        && ownership.claimed[0] === '22222222-2222-4222-8222-222222222222',
+      'only aggregate push ownership and opaque UUID-shaped claims survive the engine status projection');
     },
   },
   {
@@ -565,10 +1422,44 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: hard byte budget stops serving before any prompt read',
+    name: 'handoff bridge: engine: an explicitly enabled hard byte budget stops the next handoff after it is spent',
     run: async () => {
-      const { engine, session } = await started({ engineOptions: { limits: { epochHardBytes: 0 } } });
-      assert((await engine.get({ session, linkId: LINK })).status === 'session_full', 'hard byte budget must fence before source read');
+      const { engine, session } = await started({ engineOptions: { limits: { epochHardBytes: 1 } } });
+      assert((await engine.get({ session, linkId: LINK })).status === 'served', 'the first prompt spends the explicitly enabled byte budget');
+      assert((await engine.get({ session, linkId: LINK })).status === 'session_full', 'the explicit hard byte budget must fence the next handoff');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: the default zero byte budget never rolls a healthy chat over',
+    run: async () => {
+      let reads = 0;
+      const push = {
+        get: async () => ({
+          status: 'served',
+          handoffCode: `PUSH-ZERO-BUDGET-${++reads}`,
+          task: 'job-scoring',
+          prompt: 'Synthetic scoring prompt.',
+          // Cross the old invisible 900 KB fence in one otherwise valid
+          // response. A second GET proves zero is disabled rather than a
+          // literal zero-byte ceiling or an implicit legacy default.
+          promptBytes: 900_001,
+          remaining: { ready: 1, working: 0, needsYou: 0 },
+        }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        limits: { epochSoftBytes: 0, epochHardBytes: 0 },
+        holdMs: 0,
+      });
+      const chat = await engine.newChat({ linkId: LINK });
+      const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      const second = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(first.status === 'served' && second.status === 'served' && reads === 2
+        && engine.snapshot().chat.bytesServed > 900_000,
+      'a zero budget must leave rollover off after traffic exceeds the retired default');
+      await engine.close();
     },
   },
   {
@@ -857,14 +1748,17 @@ const tests = [
     },
   },
   {
-    name: 'handoff bridge: engine: concurrent get calls share one pending read and both serve it',
+    name: 'handoff bridge: engine: concurrent get calls attach to one pending read and one serve',
     run: async () => {
       const pending = deferred(); let reads = 0;
       const state = await started({ sourceOverrides: { read: async () => { reads++; return pending.promise; } } });
       const one = state.engine.get({ session: state.session, linkId: LINK }); const two = state.engine.get({ session: state.session, linkId: LINK });
       await new Promise(resolve => setImmediate(resolve)); pending.resolve({ kind: 'open', handoff: handoff() });
       const [left, right] = await Promise.all([one, two]);
-      assert(reads === 1 && left.status === 'served' && right.status === 'served', 'concurrent polls must attach to one source read');
+      const snapshot = state.engine.snapshot();
+      assert(reads === 1 && left.status === 'served' && right.status === 'served' && left.handoffCode === right.handoffCode
+        && snapshot.counts.getServed === 1 && snapshot.chat.servedTwice === false && snapshot.chat.calls === 2,
+      'concurrent polls must attach to one source read and one application serve while retaining both call observations');
     },
   },
   {
@@ -1027,6 +1921,25 @@ const tests = [
       await state.engine.submit({ session: state.session, linkId: LINK, handoffCode: state.result.handoffCode, response: answer({ code: state.result.handoffCode, stage: state.result.stage }) }); state.clock.advance(CONSTANTS.HOST_POLL_MS);
       await state.engine.get({ session: state.session, linkId: LINK });
       const lane = state.engine.snapshot().queue.jobs[0]; assert(lane.phase === 'needs_user' && lane.reason === 'canvas_unavailable', 'missing canvas must never be silently retried');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a deterministic app-side layout failure stays an app-fix hold, never a retryable handoff',
+    run: async () => {
+      // This is the bridge-facing end of the PDF comparator fence. The source
+      // has already decided the exact same bytes would reproduce its failure;
+      // keep that distinct reason through the host poll rather than offering
+      // ChatGPT another application handoff or collapsing it to render_retry.
+      const state = await served({ sourceOverrides: { status: async () => ({ kind: 'needs_user', reason: 'app_fix_required' }) } });
+      await state.engine.submit({
+        session: state.session, linkId: LINK, handoffCode: state.result.handoffCode,
+        response: answer({ code: state.result.handoffCode, stage: state.result.stage }),
+      });
+      state.clock.advance(CONSTANTS.HOST_POLL_MS);
+      const response = await state.engine.get({ session: state.session, linkId: LINK });
+      const lane = state.engine.snapshot().queue.jobs[0];
+      assert(response.status === 'paused' && response.reason === 'needs_user', `ChatGPT must stop for an app fix, got ${response.status}/${response.reason || ''}`);
+      assert(lane.phase === 'needs_user' && lane.reason === 'app_fix_required', `the deterministic block must not become retryable (${lane.phase}/${lane.reason})`);
     },
   },
   {
@@ -1223,6 +2136,37 @@ tests.push(
     },
   },
   {
+    name: 'handoff bridge: engine: injects an exact mixed-scope task set into the push source before polling',
+    run: () => {
+      const received = [];
+      const push = {
+        setAllowedTasks(tasks) { received.push(new Set(tasks)); },
+        async get() { return { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false } });
+      const scoringOnly = received.at(-1);
+      assert(scoringOnly.has('job-scoring') && !scoringOnly.has('price-synthesis'), 'scoring consent injects scoring tasks but not marketplace tasks');
+      engine.setScope({ applications: false, scoring: false, marketplace: true });
+      const marketplaceOnly = received.at(-1);
+      assert(JSON.stringify([...marketplaceOnly].sort()) === JSON.stringify(['bundle-price-synthesis', 'platform-fit-assessment', 'price-synthesis', 'price-synthesis-batch']), 'marketplace-only consent injects exactly its closed task family');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: an omitted scope retains the default-on marketplace family',
+    run: async () => {
+      const push = {
+        async get() { return { status: 'served', handoffCode: 'PUSH-MARKET-DEFAULT', task: 'price-synthesis', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async submit() { return { status: 'unknown_handoff' }; },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push }, holdMs: 0 });
+      const chat = await engine.newChat({ linkId: LINK });
+      const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
+      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis',
+        'the standalone fallback must agree with persisted/bootstrap default-on marketplace scope');
+    },
+  },
+  {
     name: 'handoff bridge: engine: scope changes fence each source family independently',
     run: async () => {
       const app = source(); let pushGets = 0; let pushSubmits = 0;
@@ -1230,17 +2174,17 @@ tests.push(
         async get() { pushGets++; return { status: 'served', handoffCode: 'PUSH-SCOPE', task: 'job-scoring', prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
         async submit() { pushSubmits++; return { status: 'unknown_handoff' }; },
       };
-      const engine = createHandoffEngine({ sources: { application: app.api, push }, scope: { applications: true, scoring: true }, holdMs: 0 });
+      const engine = createHandoffEngine({ sources: { application: app.api, push }, scope: { applications: true, scoring: true, marketplace: false }, holdMs: 0 });
       assert((await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] })).ok, 'fixture must release an application lane before lowering scope');
       const chat = await engine.newChat({ linkId: LINK });
-      engine.setScope({ applications: false, scoring: true });
+      engine.setScope({ applications: false, scoring: true, marketplace: false });
       const pushed = await engine.get({ session: chat.sessionCode, linkId: LINK });
       assert(pushed.kind === 'push' && app.calls.read === 0 && pushGets === 1, 'applications-off must leave released lanes inert while scoring remains live');
       const frozenPushGets = pushGets;
-      engine.setScope({ applications: true, scoring: false });
+      engine.setScope({ applications: true, scoring: false, marketplace: false });
       const applied = await engine.get({ session: chat.sessionCode, linkId: LINK });
       assert(applied.kind === 'application' && app.calls.read === 1 && pushGets === frozenPushGets, 'scoring-off must stop scoring polls while application serving resumes');
-      engine.setScope({ applications: false, scoring: false });
+      engine.setScope({ applications: false, scoring: false, marketplace: false });
       const denied = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: applied.handoffCode, response: answer({ code: applied.handoffCode, stage: applied.stage }) });
       assert(denied.status === 'held' && denied.reason === 'scope_disabled' && app.calls.submit === 0 && pushSubmits === 0,
         'a later scope downgrade must block outstanding application answers without either adapter call');
@@ -1478,7 +2422,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: concurrent drain retires to null and fences a delayed old push call before replacement',
+    name: 'handoff bridge: engine: a resumed drain retires to null and fences a delayed old push call before replacement',
     run: async () => {
       const delayedOld = deferred(); const getEpochs = []; const closedEpochs = [];
       const push = {
@@ -1495,9 +2439,13 @@ tests.push(
       const oldChat = await engine.newChat({ linkId: LINK });
       const stale = engine.get({ session: oldChat.sessionCode, linkId: LINK });
       await new Promise(resolve => setImmediate(resolve));
+      // Same-generation duplicate GETs now deliberately attach to the first
+      // request. A power resume makes this a real new generation, so it must
+      // still be able to poll/drain while the old source call is fenced off.
+      assert(engine.onPowerResume(), 'the source generation can resume while an old push GET is pending');
       const draining = await engine.get({ session: oldChat.sessionCode, linkId: LINK });
       assert(draining.status === 'queue_empty' && JSON.stringify(getEpochs) === JSON.stringify(['epoch-1', 'epoch-1'])
-        && engine.snapshot().chat.ordinal === 0, 'a concurrent empty GET must retire the old epoch to null while both old calls used epoch-1');
+        && engine.snapshot().chat.ordinal === 0, 'a new-generation empty GET must retire the old epoch to null while both calls used epoch-1');
 
       delayedOld.resolve({ status: 'served', handoffCode: 'PUSH-MARISOL-LATE', task: 'job-scoring', prompt: 'Synthetic Marisol late scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } });
       assert((await stale).status === 'retry', 'a delayed call that resumes after drain-to-null must never serve');
@@ -1852,7 +2800,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: a lane served to the current chat and quiet past STALL_NOTICE_MS is stalled per job and for the chat; a submit, a new chat or a later serve clears it',
+    name: 'handoff bridge: engine: a lane served to the current chat becomes a bounded response-overdue warning after STALL_NOTICE_MS',
     run: async () => {
       const clock = createFakeClock();
       const engine = createHandoffEngine({
@@ -1869,27 +2817,24 @@ tests.push(
       let snap = engine.snapshot();
       const jobA = () => engine.snapshot().queue.jobs.find(job => job.jobId === JOB_A);
       assert(snap.chat.outstanding?.stalled === false && snap.chat.outstanding.stalledSince === null && snap.chat.outstanding.servedAt === servedAt, 'freshly served is not stalled');
-      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
-      assert(engine.snapshot().chat.outstanding.stalled === false && jobA().stalled === false, 'one millisecond short of the threshold is not stalled');
-      clock.advance(1);
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
       snap = engine.snapshot();
-      assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === servedAt, `stalledSince is when the quiet began (servedAt), got ${snap.chat.outstanding.stalledSince}`);
-      assert(jobA().stalled === true && jobA().stalledSince === servedAt && jobA().awaitingAnswer === true && jobA().servedAt === servedAt, 'the same facts are on the job row');
-      assert(snap.chat.outstanding.stallsLastHour === 1, 'one distinct stall in the last hour');
-      // Reading status again does not count the same stall twice; the tick records it too.
+      assert(snap.chat.outstanding.stalled === true && jobA().stalled === true && jobA().awaitingAnswer === true && jobA().servedAt === servedAt,
+        'an unanswered handoff becomes a response-overdue warning on its owning chat and job row');
+      assert(snap.chat.outstanding.stallsLastHour === 1, 'an answer-silent handoff records one bounded stale interval');
+      // Reading status again cannot multiply the same stale interval.
       await engine.tick(); engine.snapshot();
-      assert(engine.snapshot().chat.outstanding.stallsLastHour === 1, 'the same quiet period is one stall, however often it is observed');
-      // An accepted answer clears the stall and moves the job to the next stage.
+      assert(engine.snapshot().chat.outstanding.stallsLastHour === 1, 'polling status does not duplicate the same response-overdue interval');
+      // An accepted answer moves the job to the next stage.
       await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
       snap = engine.snapshot();
-      assert(snap.chat.outstanding?.stalled === false && jobA().stalled === false && jobA().awaitingAnswer === true && jobA().answeredAt === clock.now(), 'an accepted submit clears the stall; the next stage is served and awaited');
-      // A second, distinct stall in the same hour is counted separately.
-      clock.advance(CONSTANTS.STALL_NOTICE_MS);
-      assert(engine.snapshot().chat.outstanding.stalled === true && engine.snapshot().chat.outstanding.stallsLastHour === 2, 'a later quiet period is a second stall');
-      // A new chat never inherits a stall for work it was not served.
+      assert(snap.chat.outstanding?.stalled === false && jobA().stalled === false && jobA().awaitingAnswer === true && jobA().answeredAt === clock.now(), 'an accepted submit clears the prior warning and starts the successor response grace period');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+      assert(engine.snapshot().chat.outstanding.stalled === true && engine.snapshot().chat.outstanding.stallsLastHour === 2, 'a later unanswered successor has its own response-overdue interval');
+      // A new chat never inherits an outstanding answer for work it was not served.
       await engine.newChat({ linkId: LINK });
       snap = engine.snapshot();
-      assert(snap.chat.outstanding === null && jobA().stalled === false && jobA().awaitingAnswer === false && jobA().servedAt === null, 'a lane served to a previous chat is neither outstanding nor stalled for the new one');
+      assert(snap.chat.outstanding === null && jobA().stalled === false && jobA().awaitingAnswer === false && jobA().servedAt === null, 'a lane served to a previous chat is neither outstanding nor awaiting for the new one');
     },
   },
   {
@@ -1918,22 +2863,21 @@ tests.push(
       const b = await engine.get({ session: chat.sessionCode, linkId: LINK });
       assert(b.status === 'served' && jobOf(JOB_B).awaitingAnswer === true && jobOf(JOB_B).servedAt === clock.now() && jobOf(JOB_A).awaitingAnswer === false,
         'the second job is awaited; the first is not, even though it was served earlier');
-      // A rejected answer keeps the job awaited and restarts its quiet clock.
+      // A rejected answer keeps the job awaited without treating response time as failure.
       const rejectEngine = createHandoffEngine({ source: source({ submit: async () => ({ kind: 'rejected', validationErrors: ['fix it'], handoff: handoff({ code: 'HANDOFF-A2' }) }) }).api, now: clock.now, timers: clock, holdMs: 0 });
       await rejectEngine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
       const rejectChat = await rejectEngine.newChat({ linkId: LINK });
       const served = await rejectEngine.get({ session: rejectChat.sessionCode, linkId: LINK });
-      clock.advance(CONSTANTS.STALL_NOTICE_MS);
-      const rejectedAt = clock.now(); // the moment of the rejected submit below
-      const stalledBefore = rejectEngine.snapshot().queue.jobs[0];
-      assert(stalledBefore.stalled === true, 'quiet past the threshold');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+      const beforeReject = rejectEngine.snapshot().queue.jobs[0];
+      assert(beforeReject.stalled === true, 'a delayed answer becomes response-overdue without being revoked');
       const rejected = await rejectEngine.submit({ session: rejectChat.sessionCode, linkId: LINK, handoffCode: served.handoffCode, response: answer({ code: served.handoffCode, stage: served.stage }) });
       assert(rejected.status === 'rejected', 'the answer is rejected');
       const afterReject = rejectEngine.snapshot().queue.jobs[0];
       assert(afterReject.awaitingAnswer === true && afterReject.answeredAt === null && afterReject.stalled === false,
         'a rejected answer is not an accepted one (still awaited) and the chat was just heard, so it is not stalled');
-      clock.advance(CONSTANTS.STALL_NOTICE_MS);
-      assert(rejectEngine.snapshot().queue.jobs[0].stalled === true && rejectEngine.snapshot().queue.jobs[0].stalledSince === rejectedAt, 'the quiet clock restarted at the submit');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+      assert(rejectEngine.snapshot().queue.jobs[0].stalled === true, 'a correction response also becomes response-overdue if the worker stays silent again');
     },
   },
   {
@@ -1998,7 +2942,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: stalledSince is when the chat went quiet (the last-heard moment), so a stalled job reports its real quiet age',
+    name: 'handoff bridge: engine: response age creates one bounded stale timestamp and a rejected answer restarts it',
     run: async () => {
       const clock = createFakeClock();
       const engine = createHandoffEngine({
@@ -2008,21 +2952,20 @@ tests.push(
       await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
       const chat = await engine.newChat({ linkId: LINK });
       const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      const servedAt = clock.now();
       clock.advance(CONSTANTS.STALL_NOTICE_MS + 4 * 60_000);
       let snap = engine.snapshot();
-      assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === servedAt && snap.queue.jobs[0].stalledSince === servedAt,
-        `quiet since the serve, 9 minutes ago, got ${snap.chat.outstanding.stalledSince}`);
+      assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince !== null && snap.queue.jobs[0].stalledSince !== null,
+        'a slow first answer creates a bounded stale timestamp');
       const rejected = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
       assert(rejected.status === 'rejected', 'a rejected answer restarts the quiet clock');
-      const heardAt = clock.now();
       clock.advance(CONSTANTS.STALL_NOTICE_MS + 2 * 60_000);
       snap = engine.snapshot();
-      assert(snap.queue.jobs[0].stalledSince === heardAt && snap.chat.outstanding.stalledSince === heardAt, 'after a rejected answer the quiet started at that submit');
+      assert(snap.queue.jobs[0].stalledSince !== null && snap.chat.outstanding.stalledSince !== null,
+        'the corrected answer gets a fresh response-overdue timestamp only after another full grace period');
     },
   },
   {
-    name: 'handoff bridge: engine: the stall clock does not run through a hold or a pause, and resume starts a fresh quiet period',
+    name: 'handoff bridge: engine: holds and pauses reset stale evidence, while a re-served unanswered lane can become response-overdue',
     run: async () => {
       // Per-job hold, then resume.
       {
@@ -2039,13 +2982,14 @@ tests.push(
         assert(jobA().stalled === false && engine.snapshot().chat.outstanding?.stalled !== true && (engine.snapshot().chat.outstanding?.stallsLastHour ?? 0) === 0,
           'ChatGPT was never able to answer during the hold, so resume is not an instant stall');
         assert(jobA().awaitingAnswer === false, 'and nothing was re-served, so no answer is claimed as owed');
-        // The wait starts again from the next serve, not from the resume.
+        // The next serve is still working regardless of answer duration.
         clock.advance(60_000);
         await engine.get({ session: chat.sessionCode, linkId: LINK });
         const reservedAt = clock.now();
         assert(jobA().awaitingAnswer === true && jobA().servedAt === reservedAt, 'the next get serves it again and the wait starts there');
-        clock.advance(CONSTANTS.STALL_NOTICE_MS);
-        assert(jobA().stalled === true && jobA().stalledSince === reservedAt, `a fresh quiet period runs from the re-serve, got ${jobA().stalledSince}`);
+        clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+        assert(jobA().stalled === true && jobA().stalledSince === reservedAt && jobA().servedAt === reservedAt,
+          'a re-served application becomes response-overdue only after its own full grace period');
       }
       // Bridge-wide pause, a refused submit, then resume.
       {
@@ -2061,10 +3005,9 @@ tests.push(
         const jobA = () => engine.snapshot().queue.jobs[0];
         assert(jobA().stalled === false && engine.snapshot().chat.outstanding?.stalled !== true, 'a paused bridge reports no stall');
         await engine.resume();
-        const resumedAt = clock.now();
         assert(jobA().stalled === false && (engine.snapshot().chat.outstanding?.stallsLastHour ?? 0) === 0, 'resume does not report an instant stall');
-        clock.advance(CONSTANTS.STALL_NOTICE_MS);
-        assert(jobA().stalled === true && jobA().stalledSince === resumedAt, 'the quiet period runs from the resume');
+        clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+        assert(jobA().stalled === true && jobA().stalledSince !== null, 'a resumed unanswered application gets a fresh response-overdue warning after a full grace period');
       }
     },
   },
@@ -2153,7 +3096,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: a submit still running is activity, not a stall; a stalled lane is the chat\'s outstanding job; a rotated handoff restarts the wait; stall history ages out after an hour',
+    name: 'handoff bridge: engine: submits, rotated handoffs, and delayed answers never fabricate a dead-chat stall',
     run: async () => {
       // A submit in flight is never a stall.
       {
@@ -2168,7 +3111,7 @@ tests.push(
         assert(engine.snapshot().queue.jobs[0].stalled === false, 'a submit that is still running is not a stall');
         gate.resolve(); await pending;
       }
-      // The chat's outstanding job is the stalled one when another lane is fresher.
+      // Multiple outstanding paths remain working even when one was served earlier.
       {
         const clock = createFakeClock();
         const engine = createHandoffEngine({
@@ -2186,8 +3129,10 @@ tests.push(
         clock.advance(60_000);
         const snap = engine.snapshot();
         const rowOf = id => snap.queue.jobs.find(job => job.jobId === id);
-        assert(rowOf(JOB_B).stalled === true && rowOf(JOB_A).stalled === false, 'only the second job has been quiet long enough');
-        assert(snap.chat.outstanding.stalled === true && snap.chat.outstanding.stalledSince === rowOf(JOB_B).stalledSince, 'the chat\'s outstanding job is the stalled one, not the first awaiting one');
+        assert(rowOf(JOB_B).stalled === true && rowOf(JOB_A).stalled === false,
+          'the older unanswered job is response-overdue while the recently resumed-but-unserved lane is not');
+        assert(snap.chat.outstanding?.stalled === true && snap.chat.outstanding.stalledSince !== null,
+          'the chat-wide projection identifies the actual silent owner rather than treating the fresher sibling as stalled');
       }
       // A handoff that replaces the one the chat was given clears the wait.
       {
@@ -2222,7 +3167,7 @@ tests.push(
         const again = await pending;
         assert(again.status === 'served' && again.handoffCode === 'HANDOFF-B' && engine.snapshot().queue.jobs[0].awaitingAnswer === true, 'the new handoff is then served and awaited');
       }
-      // Stall history is an hour long.
+      // Slow-answer status records one bounded response-overdue interval per silent handoff.
       {
         const clock = createFakeClock();
         const engine = createHandoffEngine({
@@ -2232,12 +3177,14 @@ tests.push(
         await engine.release({ jobs: [{ jobId: JOB_A, canvasFilePath: PATH_A }] });
         const chat = await engine.newChat({ linkId: LINK });
         const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
-        clock.advance(CONSTANTS.STALL_NOTICE_MS);
-        assert(engine.snapshot().chat.outstanding.stallsLastHour === 1, 'the first stall is counted');
+        clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+        assert(engine.snapshot().chat.outstanding.stalled === true && engine.snapshot().chat.outstanding.stallsLastHour === 1,
+          'a slow answer is counted once as a response-overdue interval');
         await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: first.stage }) });
         clock.advance(66 * 60_000);
         const outstanding = engine.snapshot().chat.outstanding;
-        assert(outstanding.stalled === true && outstanding.stallsLastHour === 1, `a stall older than an hour is no longer counted, got ${outstanding.stallsLastHour}`);
+        assert(outstanding.stalled === true && outstanding.stallsLastHour === 1,
+          `the current successor has one response-overdue interval after the old one ages out, got ${outstanding.stallsLastHour}`);
       }
     },
   },
@@ -2325,7 +3272,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: every submit that reaches a lane restarts its quiet clock, whether it is junk, superseded, a cached verdict or a held answer',
+    name: 'handoff bridge: engine: each bridge call renews answer-silence timing, but an unanswered lane becomes response-overdue after the next full grace period',
     run: async () => {
       const clock = createFakeClock(); const minute = 60_000;
       const engine = createHandoffEngine({
@@ -2342,26 +3289,22 @@ tests.push(
       clock.advance(minute);
       const wrongStage = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode, stage: 'cover-letter' }) });
       assert(wrongStage.status === 'superseded', `the second attempt is for the wrong stage, got ${wrongStage.status}`);
-      const heardAt = clock.now();
       clock.advance(minute);
-      assert(jobA().stalled === false && engine.snapshot().chat.outstanding.stalled === false, 'ChatGPT submitted a minute ago, so the job is not quiet');
-      clock.advance(CONSTANTS.STALL_NOTICE_MS - minute);
-      assert(jobA().stalled === true && jobA().stalledSince === heardAt, `it is quiet ${CONSTANTS.STALL_NOTICE_MS} ms after the last submit, got ${jobA().stalledSince}`);
+      assert(jobA().stalled === false && engine.snapshot().chat.outstanding.stalled === false, 'ChatGPT submitted a minute ago, so the job remains working');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000 - minute);
+      assert(jobA().stalled === true && jobA().stalledSince !== null, 'a long quiet response interval becomes a bounded response-overdue warning');
       // An identical retry answered from the verdict cache is also the chat being heard.
       const rejected = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
       assert(rejected.status === 'rejected', 'a valid answer is rejected once');
       clock.advance(30_000);
       const again = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
       assert(again.status === 'rejected', 'the identical retry is answered from the verdict cache');
-      const retriedAt = clock.now();
-      clock.advance(CONSTANTS.STALL_NOTICE_MS - 1);
-      assert(jobA().stalled === false, 'the cached-verdict retry restarted the quiet clock');
-      clock.advance(1);
-      assert(jobA().stalled === true && jobA().stalledSince === retriedAt, 'and the quiet period is counted from that retry');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+      assert(jobA().stalled === true && jobA().stalledSince !== null, 'a cached-verdict retry renews liveness once, then becomes response-overdue after another full grace period');
     },
   },
   {
-    name: 'handoff bridge: engine: a rejected answer after a re-read that rotated the code still leaves ChatGPT owing the corrected answer, awaited and able to stall',
+    name: 'handoff bridge: engine: a rejected answer after a re-read that rotated the code stays awaited and becomes response-overdue only after silence',
     run: async () => {
       const clock = createFakeClock(); let reads = 0; let submits = 0;
       const engine = createHandoffEngine({
@@ -2380,12 +3323,11 @@ tests.push(
       const first = await engine.get({ session: chat.sessionCode, linkId: LINK });
       const reply = await engine.submit({ session: chat.sessionCode, linkId: LINK, handoffCode: first.handoffCode, response: answer({ code: first.handoffCode }) });
       assert(reply.status === 'rejected' && reply.handoffCode === 'HANDOFF-A2', `the correction carries the rotated code, got ${reply.status} ${reply.handoffCode}`);
-      const heardAt = clock.now();
       let job = engine.snapshot().queue.jobs[0];
-      assert(job.awaitingAnswer === true && job.servedAt === heardAt && engine.snapshot().chat.outstanding !== null, 'ChatGPT was just handed a code, so the corrected answer is awaited');
-      clock.advance(CONSTANTS.STALL_NOTICE_MS + 1000);
+      assert(job.awaitingAnswer === true && engine.snapshot().chat.outstanding !== null, 'ChatGPT was just handed a code, so the corrected answer is awaited');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
       job = engine.snapshot().queue.jobs[0];
-      assert(job.stalled === true && job.stalledSince === heardAt, 'and going quiet on it is a stall');
+      assert(job.stalled === true && job.stalledSince !== null, 'and a silent corrected answer becomes response-overdue');
     },
   },
   {
@@ -2808,16 +3750,16 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: resuming a lane that is not held is a no-op that leaves a live stall visible',
+    name: 'handoff bridge: engine: resuming a lane that is not held is a no-op and preserves its active unanswered handoff',
     run: async () => {
       const state = await served();
       const { engine, clock } = state;
-      clock.advance(CONSTANTS.STALL_NOTICE_MS + 60_000);
-      assert(rowOf(engine).stalled === true, 'the lane has stalled');
+      clock.advance(CONSTANTS.STALL_NOTICE_MS + 8 * 60_000);
+      assert(rowOf(engine).stalled === true, 'the lane is response-overdue while its answer is silent');
       assert((await engine.resume({ jobId: JOB_A })).ok, 'a stale Resume click still answers ok');
       const row = rowOf(engine);
-      assert(row.stalled === true && row.awaitingAnswer === true, `the stall is still visible (stalled ${row.stalled})`);
-      assert(engine.snapshot().chat.outstanding?.stalled === true, 'and so is the chat\'s outstanding stall');
+      assert(row.stalled === true && row.awaitingAnswer === true, `the awaited handoff is preserved (stalled ${row.stalled})`);
+      assert(engine.snapshot().chat.outstanding?.stalled === true, 'and the chat-wide response-overdue warning remains visible');
     },
   },
 );
@@ -3275,7 +4217,7 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: one starter pasted into two chats shares one epoch, so every cap stays epoch-wide',
+    name: 'handoff bridge: engine: one starter pasted into two chats coalesces a duplicate GET, so every cap stays epoch-wide',
     run: async () => {
       const clock = createFakeClock();
       const jobs = [[JOB_A, PATH_A], [JOB_B, PATH_B]];
@@ -3290,7 +4232,8 @@ tests.push(
       assert(chatA.status === 'served' && chatB.status === 'served' && chatA.handoffCode === chatB.handoffCode
         && snapshot.ordinal === 1 && snapshot.jobsAssigned === 1 && snapshot.jobsAssigned <= snapshot.jobsCap,
       'two chats holding one key are both handed the same single outstanding handoff, never a second job past the epoch cap');
-      assert(snapshot.servedTwice === true && snapshot.calls === 2, 'the epoch records the duplicate serve, and counts both chats as one epoch');
+      assert(snapshot.servedTwice === false && snapshot.calls === 2 && engine.snapshot().counts.getServed === 1,
+        'the epoch counts both transport calls but coalesces their one handoff serve');
     },
   },
 );
@@ -3827,7 +4770,18 @@ tests.push(
     },
   },
   {
-    name: 'handoff bridge: engine: waiting_limit is truthful, the bridge is not paused, and the chat reads idle until it calls again',
+    name: 'handoff bridge: engine: waiting explicitly keeps a pool worker polling for later waves',
+    run: async () => {
+      const waiting = makeResultBody('waiting', { retryAfterSeconds: 3 });
+      assert(waiting.status === 'waiting' && waiting.retryAfterSeconds === 3, 'the bounded retry delay survives framing');
+      assert(/retryAfterSeconds/.test(waiting.note) && /call get_handoff again/i.test(waiting.note)
+        && /same session/i.test(waiting.note) && /queue_empty/.test(waiting.note)
+        && /paused/.test(waiting.note) && /do not stop on waiting/i.test(waiting.note),
+      'waiting tells every worker exactly how to drain later waves');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: legacy waiting remains durable instead of requiring Continue',
     run: async () => {
       const harness = liveBridgeHarness();
       const { engine, clock } = harness;
@@ -3840,19 +4794,195 @@ tests.push(
         if (last.status !== 'waiting') break;
         assert(engine.snapshot().chat.state === 'working', 'a waiting chat is working');
       }
-      assert(polls === CONSTANTS.MAX_CONSECUTIVE_WAITS - 1 && last.status === 'paused' && last.reason === 'waiting_limit', `the wait limit ends the polling, got ${last?.status}/${last?.reason} after ${polls}`);
-      assert(last.note === RESULT_NOTES.waitingLimit && !/is paused/i.test(last.note) && /idle/.test(last.note) && /Continue/.test(last.note),
-        'the waiting_limit note says the chat is idle and to send Continue, never that the bridge is paused');
+      assert(polls === CONSTANTS.MAX_CONSECUTIVE_WAITS + 2 && last.status === 'waiting',
+        `legacy waits remain an explicit poll instruction, got ${last?.status}/${last?.reason} after ${polls}`);
       assert(engine.snapshot().paused === false, 'the bridge itself is not paused');
-      assert(engine.snapshot().chat.state === 'idle', `the stopped chat reads idle, got ${engine.snapshot().chat.state}`);
-      // ChatGPT calling again (the person sent Continue) clears it.
+      assert(engine.snapshot().chat.state === 'working', `a waiting chat stays working, got ${engine.snapshot().chat.state}`);
+      // A later authenticated call keeps the durable wait contract.
       clock.advance(CONSTANTS.WAIT_COUNTER_RESET_IDLE_MS + 1);
       const resumed = await engine.get({ session, linkId: LINK });
-      assert(resumed.status === 'waiting' && engine.snapshot().chat.state === 'working', 'a fresh call clears idle');
+      assert(resumed.status === 'waiting' && engine.snapshot().chat.state === 'working', 'a fresh call remains in the durable wait state');
       // A real pause still says paused.
       engine.pause('user');
       const paused = await engine.get({ session, linkId: LINK });
       assert(paused.status === 'paused' && /paused/.test(paused.note), 'a real pause keeps its own wording');
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a prepared pool worker keeps waiting beyond the legacy poll limit',
+    run: async () => {
+      const calls = [];
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({
+          discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 1 }] }],
+          working: 1,
+        }),
+        get: async ({ keepWaiting } = {}) => {
+          calls.push(keepWaiting);
+          return { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } };
+        },
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      assert(pool.started && starter.copied, 'the one-worker adaptive plan must produce a persistent pool starter');
+      let last = null;
+      for (let poll = 0; poll < CONSTANTS.MAX_CONSECUTIVE_WAITS + 4; poll += 1) {
+        last = await engine.get({ session: starter.sessionCode, linkId: LINK });
+        assert(last.status === 'waiting', `pool poll ${poll + 1} must keep draining later waves, got ${last.status}/${last.reason ?? ''}`);
+      }
+      assert(calls.length > CONSTANTS.MAX_CONSECUTIVE_WAITS && calls.every(value => value === true)
+        && engine.snapshot().chat.pool.active === true && engine.snapshot().chat.state === 'working',
+      'pool workers must pass the durable-wait mode to the source and never hit the legacy waiting_limit');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: pool waits return promptly and the next poll still drains the finished queue',
+    run: async () => {
+      const clock = createFakeClock();
+      let state = 'waiting';
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 1 }] }], working: state === 'waiting' ? 1 : 0 }),
+        get: async () => state === 'waiting'
+          ? { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }
+          : { status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } },
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        now: clock.now, timers: clock, holdMs: CONSTANTS.GET_HOLD_MS,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const waiting = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(waiting.status === 'waiting' && clock.pendingCount() === 0,
+        'a pool wait returns immediately instead of scheduling the legacy 20-second held GET');
+      state = 'empty';
+      const drained = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      assert(drained.status === 'queue_empty' && engine.snapshot().chat.pool.active === false,
+        'the first poll after work settles still returns queue_empty and retires the pool');
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a ten-worker pool uses one rate-safe waiting cadence across every worker',
+    run: async () => {
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-preference-evaluation', pending: 10 }] }], working: 1 }),
+        get: async () => ({ status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 10 });
+      assert(pool.started && pool.workerCount === 10, 'fixture must create the maximum worker pool');
+      const delays = [];
+      for (let ordinal = 1; ordinal <= 10; ordinal += 1) {
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: ordinal });
+        const waiting = await engine.get({ session: starter.sessionCode, linkId: LINK });
+        assert(waiting.status === 'waiting', `worker ${ordinal} must receive the poll instruction`);
+        delays.push(waiting.retryAfterSeconds);
+      }
+      assert(delays.every(delay => delay >= CONSTANTS.POOL_WAIT_MIN_SECONDS && delay <= CONSTANTS.POOL_WAIT_MAX_SECONDS)
+        && delays[0] === CONSTANTS.POOL_WAIT_MIN_SECONDS && delays.at(-1) === CONSTANTS.POOL_WAIT_MAX_SECONDS,
+      `ten workers must receive the staggered conservative cadence, got ${JSON.stringify(delays)}`);
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a waiting pool worker stays waiting while its next GET is in flight',
+    run: async () => {
+      const firstPoll = deferred();
+      const slowPoll = deferred();
+      let phase = 'first'; let firstStarted = false; let slowStarted = false;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 0 }),
+        get: async () => {
+          if (phase === 'first') {
+            firstStarted = true;
+            return firstPoll.promise;
+          }
+          if (phase === 'waiting') return { status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } };
+          slowStarted = true;
+          return slowPoll.promise;
+        },
+        submit: async () => ({ status: 'unknown_handoff' }),
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const initial = engine.get({ session: starter.sessionCode, linkId: LINK });
+      for (let attempt = 0; attempt < 20 && !firstStarted; attempt += 1) await Promise.resolve();
+      assert(firstStarted && engine.snapshot().chat.pool.workers[0]?.state === 'working',
+        'an initial claim remains working while the source is selecting its result');
+      phase = 'waiting';
+      firstPoll.resolve({ status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } });
+      const waiting = await initial;
+      assert(waiting.status === 'waiting' && engine.snapshot().chat.pool.workers[0]?.state === 'waiting',
+        'a completed poll that finds no work leaves this worker waiting for its scheduled retry');
+      phase = 'slow';
+      const poll = engine.get({ session: starter.sessionCode, linkId: LINK });
+      for (let attempt = 0; attempt < 20 && !slowStarted; attempt += 1) await Promise.resolve();
+      assert(slowStarted && engine.snapshot().chat.pool.workers[0]?.state === 'waiting',
+        'a worker following a waiting instruction must not flap to working before new work is actually served');
+      slowPoll.resolve({ status: 'waiting', remaining: { ready: 0, working: 1, needsYou: 0 } });
+      await poll;
+      await engine.close();
+    },
+  },
+  {
+    name: 'handoff bridge: engine: a pool submit does not spend its successor-probe budget before polling again',
+    run: async () => {
+      let successorProbes = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 0 }),
+        get: async () => ({
+          status: 'served', handoffCode: 'POOL-PROMPT', task: 'job-scoring', prompt: 'Synthetic prompt.',
+          remaining: { ready: 0, working: 0, needsYou: 0 },
+        }),
+        submit: async () => ({ status: 'accepted' }),
+        nextAfterAccept: async () => { successorProbes += 1; return new Promise(() => {}); },
+        closeEpoch: () => undefined,
+      };
+      const engine = createHandoffEngine({
+        sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false },
+        holdMs: 0,
+      });
+      const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+      const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+      const served = await engine.get({ session: starter.sessionCode, linkId: LINK });
+      const accepted = await engine.submit({
+        session: starter.sessionCode, linkId: LINK, handoffCode: served.handoffCode,
+        response: 'Synthetic completed response '.repeat(8),
+      });
+      assert(accepted.status === 'accepted' && accepted.next?.status === 'waiting'
+        && accepted.next.retryAfterSeconds === CONSTANTS.POOL_WAIT_MIN_SECONDS && successorProbes === 0,
+        'a pool submit immediately gives its worker a poll instruction instead of spending the successor-probe budget');
+      await engine.close();
     },
   },
   {
@@ -3992,8 +5122,7 @@ tests.push(
     },
   },
   {
-    // Reverting only `expectedEpoch.idleSince = null` inside submit().
-    name: 'handoff bridge: engine: a submit from an idle chat clears idle, and a submit that ends the chat marks it idle',
+    name: 'handoff bridge: engine: a submit from a durable-waiting chat remains working, and a held submit marks it idle',
     run: async () => {
       const harness = liveBridgeHarness();
       const { engine, clock } = harness;
@@ -4002,7 +5131,7 @@ tests.push(
         clock.advance(CONSTANTS.HOST_POLL_MS + 1);
         if ((await engine.get({ session, linkId: LINK })).status !== 'waiting') break;
       }
-      assert(engine.snapshot().chat.state === 'idle', 'the wait limit left the chat idle');
+      assert(engine.snapshot().chat.state === 'working', 'durable waiting leaves the chat available to submit');
       // ChatGPT is heard again, by a submit rather than a get.
       const reply = await engine.submit({ session, linkId: LINK, handoffCode: 'HANDOFF-REVIEW', response: answer({ code: 'HANDOFF-REVIEW', stage: 'review' }) });
       assert(reply.status !== 'paused', `the submit is answered normally, got ${reply.status}`);

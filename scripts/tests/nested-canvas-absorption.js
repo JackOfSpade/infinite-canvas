@@ -2,12 +2,17 @@ import {
   ABSORB_EXCLUDED_TYPES,
   assert,
   buildGroupHoverState,
+  collectNestedStartupRecoveryGraph,
+  backgroundJobResumeRequest,
   collectAbsorptionClosure,
+  createWorkspaceStartupRecoveryCoordinator,
   findSeveredRelations,
   fs,
   getAbsorptionRejection,
   getNodeDims,
   hasActiveExternalRunState,
+  hasNestedStartupRecoveryCandidate,
+  isNestedStartupRecoveryCandidate,
   isJobWorkflowDeletionPending,
   isJobWorkflowRelocationPending,
   markJobWorkflowDeletionPending,
@@ -19,9 +24,242 @@ import {
   sanitizeNodesForSave,
   settleJobWorkflowDeletion,
   settleJobWorkflowRelocation,
+  terminalMarketplaceReplayDisposition,
 } from '../test-dependencies.js';
 
 export default [
+{
+    name: 'nested startup recovery coordinator: recursively discovers exact child work without re-mounting root workflow nodes',
+    run: async () => {
+      const rootSearch = { id: 'root-search', type: 'jobhub', data: { resumeProfile: { name: 'Root' } } };
+      const nestedSearch = { id: 'nested-search', type: 'jobhub', data: { resumeProfile: { name: 'Nested' } } };
+      const nestedBoard = { id: 'nested-board', type: 'jobboard', data: { boardScanResume: { boardRunId: 'board-1' } } };
+      const nestedSell = { id: 'nested-sell', type: 'sellhub', data: {
+        marketplaceRunResume: { version: 1, runId: 'sell-1', phase: 'synthesis', pendingItems: [{ key: 'lamp' }], inputKey: '' },
+      } };
+      const group = {
+        id: 'group-a', type: 'group', data: { canvasData: {
+          nodes: [nestedSearch, nestedBoard, nestedSell],
+          edges: [{ id: 'edge-1', source: 'nested-board', target: 'nested-search' }],
+        } },
+      };
+      const graph = collectNestedStartupRecoveryGraph([rootSearch, group]);
+      assert(!graph.nodes.some(node => node.id === 'root-search'),
+        'the visible root Search must not be duplicated into the nested recovery graph');
+      assert(graph.nodes.map(node => node.id).join(',') === 'nested-search,nested-board,nested-sell',
+        'the graph must retain every nested node in its original canvas order for Board graph hydration');
+      assert(graph.edges.length === 1 && graph.edges[0].source === 'nested-board' && graph.edges[0].target === 'nested-search',
+        'the graph must retain intra-canvas Board ownership edges');
+      assert(hasNestedStartupRecoveryCandidate([rootSearch, group]),
+        'a nested durable Board/Sell/Search recovery must be discovered by the workspace coordinator');
+      const coordinator = createWorkspaceStartupRecoveryCoordinator({
+        peekJobRun: async ({ nodeId }) => nodeId === 'nested-search'
+          ? { found: true, incomplete: true, nodeId, runId: 'search-1', autoResumeEligible: true }
+          : { found: false },
+        peekMarketplaceRecovery: async ({ nodeId }) => nodeId === 'nested-sell'
+          ? { found: true, recovery: nestedSell.data.marketplaceRunResume }
+          : { found: false },
+      });
+      const plan = await coordinator.discover({ canvasFilePath: '/work/recovery.canvas', rootNodes: [rootSearch, group] });
+      const boardOwned = plan.find(entry => entry.nodeId === 'nested-search');
+      assert(boardOwned?.state === 'board-owned' && boardOwned.boardIds?.[0] === 'nested-board',
+        'a Board-connected child must never claim its own exact sidecar before Board hydration');
+      assert(plan.some(entry => entry.nodeId === 'nested-board' && entry.state === 'awaiting-board-hydration')
+        && plan.some(entry => entry.nodeId === 'nested-sell' && entry.state === 'manual-ai-paused'),
+      'the Board remains owner-hydrated and a SellHub synthesis receipt remains a deliberate manual-AI pause');
+      const edgeLostGroup = { id: 'group-b', type: 'group', data: { canvasData: {
+        nodes: [nestedSearch, { id: 'board-with-selection', type: 'jobboard', data: { selectedSearchModuleIds: ['nested-search'] } }],
+        edges: [],
+      } } };
+      const edgeLostPlan = await createWorkspaceStartupRecoveryCoordinator({ peekJobRun: async () => ({
+        found: true, incomplete: true, nodeId: 'nested-search', runId: 'search-2', autoResumeEligible: true,
+      }) }).discover({ canvasFilePath: '/work/edge-lost.canvas', rootNodes: [edgeLostGroup] });
+      assert(edgeLostPlan.find(entry => entry.nodeId === 'nested-search')?.state === 'board-owned',
+        'persisted Board selection must retain ownership when a saved graph edge is missing');
+    },
+  },
+{
+    name: 'nested startup recovery coordinator: provider resume is exact and includes auto-eligible browser sources',
+    run: async () => {
+      const safeSearch = {
+        id: 'safe-search', type: 'jobhub', data: {
+          resumeProfile: { locations: ['Canada'] }, resumeFingerprint: 'fp-safe', canonicalLocation: 'Toronto, Canada',
+        },
+      };
+      const group = { id: 'safe-group', type: 'group', data: { canvasData: { nodes: [safeSearch], edges: [] } } };
+      const offer = {
+        found: true, incomplete: true, nodeId: 'safe-search', runId: 'safe-run', autoResumeEligible: true,
+        locationRecorded: true, canonicalLocation: 'Toronto, Canada', profileFingerprint: 'fp-safe',
+        queries: ['software engineer'], unfinishedSourceIds: ['remoteok'], searchWindow: { startTimestamp: 1 }, jobPreferencePlan: { titles: [] },
+      };
+      const coordinator = createWorkspaceStartupRecoveryCoordinator({ peekJobRun: async () => offer });
+      const plan = await coordinator.discover({ canvasFilePath: '/work/safe.canvas', rootNodes: [group] });
+      assert(plan[0]?.state === 'ready' && plan[0].request?.resumeRunId === 'safe-run'
+        && plan[0].request?.preferredLocation === 'Toronto, Canada',
+      'provider-only recovery must carry the exact run, profile, queries, and saved location to main');
+      const duplicate = await coordinator.discover({ canvasFilePath: '/work/safe.canvas', rootNodes: [group] });
+      assert(duplicate.length === 0,
+        'the workspace coordinator must claim an exact node/run only once per workspace session');
+      const browser = backgroundJobResumeRequest(safeSearch, { ...offer, unfinishedSourceIds: ['indeed'] }, '/work/safe.canvas');
+      assert(browser?.providerPhaseOnly === true && browser.resumeRunId === 'safe-run',
+        'an auto-eligible browser source must carry the same exact provider-only recovery capability');
+      const interactiveRoleScreen = backgroundJobResumeRequest(safeSearch, {
+        ...offer, jobPreferencePlan: { titles: ['Software Engineer'] },
+      }, '/work/safe.canvas');
+      assert(interactiveRoleScreen?.providerPhaseOnly === true
+        && interactiveRoleScreen.resumeRunId === 'safe-run',
+      'title-bearing recovery may finish exact unattended providers but must stop before the mounted role-screen AI handoff');
+      const stopped = await createWorkspaceStartupRecoveryCoordinator({
+        peekJobRun: async () => ({ ...offer, autoResumeEligible: false }),
+      }).discover({ canvasFilePath: '/work/safe.canvas', rootNodes: [group] });
+      assert(stopped.length === 0, 'a manually stopped sidecar must never receive an automatic provider request');
+  },
+},
+{
+    name: 'nested startup recovery coordinator: marketplace sidecars recover terminal/status fetch work without reviving interactive SellHub phases',
+    run: async () => {
+      const statusInput = { platformIds: ['ebay', 'mercari'], watchUrlsByPlatform: { ebay: ['https://example.test/ebay'], mercari: ['https://example.test/mercari'] } };
+      const statusRecovery = {
+        version: 1, runId: 'status-run', input: statusInput, inputKey: JSON.stringify(statusInput),
+        remainingPlatformIds: ['ebay', 'mercari'], preparedByPlatform: {}, completedResults: {},
+      };
+      const sellTerminal = {
+        version: 1, runId: 'sell-terminal', phase: 'analysis-result', input: { imagePaths: ['/tmp/lamp.jpg'] }, inputKey: '["/tmp/lamp.jpg"]',
+        result: { product: { title: 'Lamp' } },
+      };
+      const root = {
+        id: 'group-marketplace', type: 'group', data: { canvasData: { nodes: [
+          // The terminal receipt deliberately has no renderer marker: this
+          // proves the coordinator can close the sidecar-before-autosave gap.
+          { id: 'sell-terminal', type: 'sellhub', data: {} },
+          { id: 'sell-scrape', type: 'sellhub', data: { marketplaceRunResume: {
+            version: 1, runId: 'sell-scrape-run', phase: 'scrape', input: { items: [{ key: 'lamp' }] }, inputKey: 'scrape', completedSources: {},
+          } } },
+          { id: 'status', type: 'marketplacestatus', data: {} },
+          { id: 'locked-status', type: 'marketplacestatus', data: { locked: true } },
+          { id: 'stopped-sell', type: 'sellhub', data: { marketplaceRunResume: { ...sellTerminal, runId: 'stopped-run', autoResumeEligible: false } } },
+        ], edges: [] } },
+      };
+      const peeks = [];
+      const coordinator = createWorkspaceStartupRecoveryCoordinator({
+        peekMarketplaceRecovery: async (args) => {
+          peeks.push(args.nodeId);
+          if (args.nodeId === 'sell-terminal') return { found: true, recovery: sellTerminal };
+          if (args.nodeId === 'sell-scrape') return { found: true, recovery: root.data.canvasData.nodes[1].data.marketplaceRunResume };
+          if (args.nodeId === 'status') return { found: true, recovery: statusRecovery };
+          return { found: false };
+        },
+      });
+      const plan = await coordinator.discover({ canvasFilePath: '/work/marketplace.canvas', rootNodes: [root] });
+      assert(plan.find(entry => entry.nodeId === 'sell-terminal')?.state === 'terminal-replay-ready',
+        'a durable SellHub terminal receipt must be replayable even when its canvas mirror missed autosave');
+      assert(plan.find(entry => entry.nodeId === 'sell-scrape')?.state === 'ready',
+        'SellHub comp scraping is a bounded unattended phase and may resume from its exact sidecar checkpoint');
+      assert(plan.find(entry => entry.nodeId === 'status')?.state === 'ready'
+        && plan.find(entry => entry.nodeId === 'status')?.recovery?.runId === 'status-run',
+      'Marketplace Status must carry its exact durable run/input identity to the hidden provider executor');
+      assert(!peeks.includes('locked-status') && !peeks.includes('stopped-sell'),
+        'locked and explicitly stopped marketplace nodes must not even claim a sidecar probe for recovery');
+      const duplicate = await coordinator.discover({ canvasFilePath: '/work/marketplace.canvas', rootNodes: [root] });
+      assert(duplicate.length === 0, 'a nested marketplace sidecar run must be claimed only once per workspace coordinator');
+  },
+},
+{
+    name: 'nested startup recovery terminal receipts: first replay waits for autosave and later persisted observation is acknowledged',
+    run: async () => {
+      const sellRecovery = {
+        version: 1, runId: 'sell-replay', phase: 'analysis-result', input: { imagePaths: ['/tmp/item.jpg'] }, inputKey: '["/tmp/item.jpg"]',
+        result: { product: { generated_title: 'Item' } }, updatedAt: 101,
+      };
+      const statusInput = { platformIds: ['ebay'], watchUrlsByPlatform: { ebay: ['https://example.test/ebay'] } };
+      const statusRecovery = {
+        version: 1, runId: 'status-replay', phase: 'status-result', input: statusInput, inputKey: JSON.stringify(statusInput),
+        remainingPlatformIds: [], completedResults: { ebay: { status: 'ok' } }, updatedAt: 102,
+      };
+      const firstRoot = { id: 'first-group', type: 'group', data: { canvasData: { nodes: [
+        { id: 'sell', type: 'sellhub', data: {} },
+        { id: 'status', type: 'marketplacestatus', data: {} },
+      ], edges: [] } } };
+      const firstPlan = await createWorkspaceStartupRecoveryCoordinator({
+        peekMarketplaceRecovery: async ({ nodeId }) => ({ found: true, recovery: nodeId === 'sell' ? sellRecovery : statusRecovery }),
+      }).discover({ canvasFilePath: '/work/replay.canvas', rootNodes: [firstRoot] });
+      assert(firstPlan.every(entry => terminalMarketplaceReplayDisposition(entry) === 'apply'),
+        'the first terminal observation must patch the nested canvas but retain its receipt until autosave can persist it');
+
+      const laterRoot = { id: 'later-group', type: 'group', data: { canvasData: { nodes: [
+        { id: 'sell', type: 'sellhub', data: { hubState: 'draft', product: { generated_title: 'Item' }, marketplaceRunResume: sellRecovery } },
+        { id: 'status', type: 'marketplacestatus', data: { marketplaceStatusRunResume: statusRecovery, platformStatus: { ebay: { status: 'ok' } } } },
+      ], edges: [] } } };
+      const laterPlan = await createWorkspaceStartupRecoveryCoordinator({
+        peekMarketplaceRecovery: async ({ nodeId }) => ({ found: true, recovery: nodeId === 'sell' ? sellRecovery : statusRecovery }),
+      }).discover({ canvasFilePath: '/work/replay.canvas', rootNodes: [laterRoot] });
+      assert(laterPlan.every(entry => terminalMarketplaceReplayDisposition(entry) === 'acknowledge'),
+        'a later launch that observes the persisted terminal node state must consume the exact sidecar receipt before clearing its marker');
+
+      const newerSell = {
+        ...sellRecovery,
+        runId: 'sell-newer',
+        result: { product: { generated_title: 'New Item' } },
+        updatedAt: 201,
+      };
+      const newerPriced = {
+        version: 1, runId: 'priced-newer', phase: 'priced-result', inputKey: 'priced-input',
+        result: { hubState: 'priced', pricing: { recommended_price: 99 }, errorMessage: null }, updatedAt: 202,
+      };
+      const newerStatus = {
+        ...statusRecovery,
+        runId: 'status-newer',
+        completedResults: { ebay: { status: 'ok', summary: 'new result' } },
+        updatedAt: 203,
+      };
+      const staleRoot = { id: 'stale-group', type: 'group', data: { canvasData: { nodes: [
+        { id: 'draft', type: 'sellhub', data: {
+          hubState: 'draft', product: { generated_title: 'Old Item' }, marketplaceRunResume: sellRecovery,
+        } },
+        { id: 'priced', type: 'sellhub', data: {
+          hubState: 'priced', pricing: { recommended_price: 10 }, marketplaceRunResume: {
+            ...newerPriced, runId: 'priced-old', result: { hubState: 'priced', pricing: { recommended_price: 10 }, errorMessage: null }, updatedAt: 200,
+          },
+        } },
+        { id: 'status', type: 'marketplacestatus', data: {
+          marketplaceStatusRunResume: statusRecovery, platformStatus: { ebay: { status: 'ok' } },
+        } },
+      ], edges: [] } } };
+      const stalePlan = await createWorkspaceStartupRecoveryCoordinator({
+        peekMarketplaceRecovery: async ({ nodeId }) => ({
+          found: true,
+          recovery: nodeId === 'draft' ? newerSell : nodeId === 'priced' ? newerPriced : newerStatus,
+        }),
+      }).discover({ canvasFilePath: '/work/replay.canvas', rootNodes: [staleRoot] });
+      assert(stalePlan.every(entry => terminalMarketplaceReplayDisposition(entry) === 'apply'),
+        'a stale draft/priced/status canvas result, even in the same terminal state, must not acknowledge or clear a newer sidecar receipt');
+    },
+  },
+{
+    name: 'nested startup recovery candidate: explicit pause, reset, clear, and locks cannot be auto-claimed',
+    run: () => {
+      const pausedSearch = { id: 'paused', type: 'jobhub', data: {
+        resumeProfile: { name: 'Paused' },
+        manualAiResume: { runId: 'manual-1', autoResumeEligible: false },
+      } };
+      const clearedSell = { id: 'cleared', type: 'sellhub', data: { marketplaceRunResume: null } };
+      const lockedBoard = { id: 'locked', type: 'jobboard', data: {
+        locked: true,
+        boardScanResume: { boardRunId: 'board-locked' },
+      } };
+      const staleStatus = { id: 'status', type: 'marketplacestatus', data: {
+        marketplaceStatusRunResume: { version: 1, runId: 'status-1', input: { platformIds: [] }, remainingPlatformIds: [] },
+      } };
+      assert(!isNestedStartupRecoveryCandidate(pausedSearch),
+        'an explicit manual Job Search pause must not become eligible just because its profile remains saved');
+      assert(!isNestedStartupRecoveryCandidate(clearedSell),
+        'a reset/clear SellHub marker must not be reconstructed into a run');
+      assert(!isNestedStartupRecoveryCandidate(lockedBoard),
+        'locked Board recovery must remain paused even with a durable plan');
+      assert(!isNestedStartupRecoveryCandidate(staleStatus),
+        'a status checkpoint with no remaining exact platform work is terminal, not restartable');
+    },
+  },
 {
     name: 'getAbsorptionRejection: a locked sub-canvas outranks every condition on the dragged nodes',
     run: () => {

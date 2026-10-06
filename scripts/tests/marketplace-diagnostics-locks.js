@@ -1,5 +1,36 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, routeLegacyPriceSynthesisHandoff, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
-import { packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission } from '../../electron/ipc/marketplace.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, routeLegacyPriceSynthesisHandoff, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { isMarketplaceSourceLifecycleAbort, packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission, validateMarketplaceBatchExecution } from '../../electron/ipc/marketplace.js';
+import { collectMarketplaceRecoveryOwners } from '../../src/utils/canvasInteractions.js';
+import { createWorkspaceStartupRecoveryCoordinator } from '../../src/utils/workspaceStartupRecovery.js';
+import {
+  abandonMarketplaceRecovery,
+  abandonMarketplaceRecoveryBatch,
+  acknowledgeMarketplaceRecovery,
+  acquireMarketplaceRecoveryClaim,
+  beginMarketplaceRecovery,
+  checkpointMarketplaceRecovery,
+  peekMarketplaceRecovery,
+  prepareCanvasRecoveryRebind,
+  __marketplaceRecoveryStoreForTests,
+} from '../../electron/ipc/marketplaceRecoveryStore.js';
+import { withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
+import {
+  isAutomaticMarketplaceResolveIntent,
+  markMarketplaceTerminalApplied,
+  marketplaceTerminalReceiptApplied,
+  marketplaceResolveInput,
+  marketplaceResolveInputKey,
+  marketplaceResearchIdentityMatches,
+  marketplaceResearchInput,
+  marketplaceResearchInputKey,
+  marketplaceResearchInputMatches,
+  marketplaceStatusInputMatches,
+  mergeMarketplaceSourceCheckpoint,
+  mergeMarketplaceStatusPrepared,
+  newMarketplaceRecovery,
+  newMarketplaceStatusRecovery,
+  recordMarketplaceStatusResult,
+} from '../../src/utils/marketplaceRunRecovery.js';
 
 export default [
 {
@@ -119,10 +150,11 @@ export default [
       }
       assert(crossed && crossedSource, 'a response cannot cite a listing URL or source id from another pricing item');
       const marketplaceSource = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
-      assert(marketplaceSource.includes('resolved = await mapWithConcurrency(')
-        && marketplaceSource.includes('batchMetadata,\n        MANUAL_HANDOFF_CONCURRENCY,')
-        && marketplaceSource.includes('batchesWithProgress,\n        MANUAL_HANDOFF_CONCURRENCY,'),
-      'pricing and hub-scan batch handoffs must use the shared ten-slot pool instead of launching an unbounded backlog');
+      assert(marketplaceSource.includes('resolved = await mapAutomaticHandoffs(')
+        && marketplaceSource.includes('batchMetadata,\n        HANDOFF_CONCURRENCY,')
+        && marketplaceSource.includes('await mapManualHandoffWaves(')
+        && marketplaceSource.includes('batchesWithProgress,\n        HANDOFF_CONCURRENCY,'),
+      'automatic price synthesis refills the shared ten-slot roster, while manual hub scans keep their stable bounded work sets');
       return { batches: batches.length, provenanceBound: true };
     },
   },
@@ -135,7 +167,7 @@ export default [
       const main = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
       assert(preload.includes("synthesizePricesBatch: (args) => ipcRenderer.invoke('synthesize-prices-batch', args)")
         && hook.includes('window.electronAPI.synthesizePricesBatch({')
-        && hub.includes('const synthResults = await synthesizePricesBatch(aiItems);')
+        && hub.includes('const synthResults = await synthesizePricesBatch(aiItems, manualAiRunId, synthesisRecovery, options.autoResume === true);')
         && !hub.includes('const synthResult = await synthesizePrice(comps, overrides);')
         && main.includes("handleSafe('synthesize-prices-batch'")
         && main.includes("handleSafe('synthesize-price'"),
@@ -1788,6 +1820,23 @@ export default [
         'single query at page 0 → resume at 1 (0-based ledger, 1-based start)');
       assert(computeResumeStartPage({ queries: { only: { lastPage: 4 } } }, 1) === 5,
         'single query at page 4 → resume at 5');
+      const perQuery = computeResumeStartPagesByQuery({
+        queries: { qa: { lastPage: 3 }, qb: { lastPage: 1 } },
+      }, ['qa', 'qb', 'qc']);
+      assert(JSON.stringify(perQuery) === JSON.stringify([
+        { startPage: 4, durable: true, terminal: false }, { startPage: 2, durable: true, terminal: false }, { startPage: 1, durable: false, terminal: false },
+      ]), 'each query gets its own index-aligned next-page cursor and only an unrecorded query restarts at page 1');
+      const duplicateLegacy = computeResumeStartPagesByQuery({ queries: { duplicate: { lastPage: 4 } } }, ['duplicate', 'duplicate']);
+      assert(JSON.stringify(duplicateLegacy) === JSON.stringify([
+        { startPage: 1, durable: false, terminal: false }, { startPage: 1, durable: false, terminal: false },
+      ]), 'a legacy text-keyed cursor must not skip either ambiguous duplicate query slot');
+      const duplicateIndexed = computeResumeStartPagesByQuery({ queries: { '#0': { lastPage: 4 }, '#1': { lastPage: 1 } } }, ['duplicate', 'duplicate']);
+      assert(JSON.stringify(duplicateIndexed) === JSON.stringify([
+        { startPage: 5, durable: true, terminal: false }, { startPage: 2, durable: true, terminal: false },
+      ]), 'indexed cursors preserve distinct resume positions for duplicate query text');
+      const terminalSibling = computeResumeStartPagesByQuery({ queries: { '#0': { lastPage: 3, terminal: true }, '#1': { lastPage: 1 } } }, ['first', 'second']);
+      assert(terminalSibling[0]?.terminal === true && terminalSibling[1]?.terminal === false,
+        'a completed query has a durable terminal marker independent of an interrupted sibling cursor');
       return { ok: true };
     },
   },
@@ -1895,6 +1944,1017 @@ export default [
       } finally {
         await fs.promises.rm(base, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'marketplace recovery sidecar: exact owner claims, phase replay, and tombstones are crash durable',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-recovery-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const nodeId = 'sell-node-a';
+      const items = [{ key: 'primary', label: 'Camera', query: 'Camera X', condition: 'Used - Good', pricingNotes: '' }];
+      const marker = newMarketplaceRecovery({
+        runId: 'run-a',
+        phase: 'scrape',
+        input: marketplaceResearchInput(items, 'Electronics'),
+        inputKey: marketplaceResearchInputKey(items, 'Electronics'),
+      });
+      try {
+        const firstClaim = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: marker.runId, inputKey: marker.inputKey,
+        });
+        const duplicateClaim = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: marker.runId, inputKey: marker.inputKey,
+        });
+        assert(firstClaim.claimed && !duplicateClaim.claimed && duplicateClaim.reason === 'already-running',
+          'two windows cannot own the same canonical canvas/node/run concurrently');
+        firstClaim.release();
+        const afterRelease = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: marker.runId, inputKey: marker.inputKey,
+        });
+        assert(afterRelease.claimed, 'the exact owner claim releases after the handler settles');
+        afterRelease.release();
+
+        const begun = await beginMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub', recovery: marker });
+        assert(begun.saved, `initial write-ahead barrier must succeed: ${JSON.stringify(begun)}`);
+        const ownerScope = await __marketplaceRecoveryStoreForTests.owner({ canvasFilePath, nodeId, kind: 'sellhub' });
+        const beforeAbortedWrite = await fs.promises.readFile(ownerScope.filePath, 'utf8');
+        const abortController = new AbortController();
+        abortController.abort(Object.assign(new Error('Window closed'), { name: 'AbortError' }));
+        let abortedBeforeCommit = false;
+        try {
+          await __marketplaceRecoveryStoreForTests.atomicWrite(ownerScope.filePath, { invalid: true }, { signal: abortController.signal });
+        } catch (error) {
+          abortedBeforeCommit = error?.name === 'AbortError';
+        }
+        assert(abortedBeforeCommit
+          && await fs.promises.readFile(ownerScope.filePath, 'utf8') === beforeAbortedWrite,
+        'an abort observed after temp-file fsync but before rename cannot publish a late recovery checkpoint');
+        const sourceMarker = mergeMarketplaceSourceCheckpoint(marker, {
+          runId: marker.runId,
+          inputKey: marker.inputKey,
+          itemIndex: 0,
+          sourceId: 'ebay-sold',
+          record: { kind: 'browser', sourceId: 'ebay-sold', category: 'sold', success: true, items: [{ title: 'Camera X', price: 100 }] },
+        });
+        const sourceSaved = await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', expectedInputKey: marker.inputKey, recovery: sourceMarker,
+        });
+        assert(sourceSaved.saved, 'a completed source is atomically checkpointed before terminal progress');
+
+        // A second window entering between batch and bundle receives the
+        // authoritative on-disk payload instead of overwriting it with stale
+        // renderer state and repeating the finished AI batch.
+        const withBatch = { ...sourceMarker, phase: 'synthesis', inputKey: 'synthesis-key', batchResult: { items: [{ itemKey: 'primary', pricing: { recommended_price: 100 } }] } };
+        const transitioned = await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', expectedInputKey: marker.inputKey, recovery: withBatch,
+        });
+        assert(transitioned.saved, 'scrape→synthesis transition is exact-key fenced');
+        const staleBegin = await beginMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', recovery: { ...withBatch, batchResult: undefined },
+        });
+        assert(staleBegin.saved && staleBegin.existing && staleBegin.recovery.batchResult?.items?.length === 1,
+          'a stale second renderer reuses the durable batch result between synthesis IPC phases');
+        const wrongInput = await beginMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', recovery: { ...withBatch, inputKey: 'different-key' },
+        });
+        assert(!wrongInput.saved && wrongInput.reason === 'input-mismatch', 'same run id cannot silently change input');
+
+        const priced = { ...withBatch, phase: 'priced-result', result: { hubState: 'priced', pricing: { recommended_price: 100 } } };
+        assert((await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', expectedInputKey: withBatch.inputKey, recovery: priced,
+        })).saved, 'terminal UI result persists as a replay receipt');
+        const replay = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+        assert(replay.found && replay.status === 'replay' && replay.recovery.phase === 'priced-result',
+          'restart reads the terminal receipt without repeating network/AI work');
+        const replayBegin = await beginMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub', recovery: withBatch });
+        assert(!replayBegin.saved && replayBegin.reason === 'replay-pending', 'unapplied terminal result cannot be restarted as active work');
+        const sameProcessAck = await acknowledgeMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: marker.runId, inputKey: priced.inputKey,
+          appliedProcessEpoch: __marketplaceRecoveryStoreForTests.PROCESS_EPOCH,
+        });
+        assert(!sameProcessAck.completed && sameProcessAck.reason === 'same-process-autosave-unproven',
+          'a remount in the same process cannot close a receipt before debounced canvas autosave is proven');
+        assert((await acknowledgeMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: marker.runId, inputKey: priced.inputKey,
+          appliedProcessEpoch: 'prior-process-epoch',
+        })).completed,
+          'a later canvas observation closes the replay receipt');
+        assert(!(await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' })).found,
+          'completed receipt is no longer auto-resumable');
+
+        const markerB = { ...marker, runId: 'run-b' };
+        assert((await beginMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub', recovery: markerB })).saved,
+          'a deliberate new run can supersede a completed receipt');
+        const wrongStop = await abandonMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: 'run-b', inputKey: 'stale-input', reason: 'user-reset',
+        });
+        assert(!wrongStop.abandoned && wrongStop.reason === 'input-mismatch',
+          'a stale renderer cannot tombstone the same run under a different phase/input generation');
+        assert((await abandonMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: 'run-b', inputKey: markerB.inputKey, reason: 'user-reset',
+        })).abandoned,
+          'explicit Reset writes an exact-run tombstone');
+        const late = await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', expectedInputKey: markerB.inputKey, recovery: markerB,
+        });
+        assert(!late.saved && late.reason === 'abandoned', 'late source settlement cannot resurrect a reset run');
+        return { claimFenced: true, batchReplayed: true, tombstoneFenced: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery sidecars never follow a substituted symlink',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-recovery-nofollow-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      const nodeId = 'sell-node-nofollow';
+      const items = [{ key: 'primary', label: 'Camera', query: 'Camera X', condition: 'Used - Good', pricingNotes: '' }];
+      const marker = newMarketplaceRecovery({
+        runId: 'run-nofollow',
+        phase: 'scrape',
+        input: marketplaceResearchInput(items, 'Electronics'),
+        inputKey: marketplaceResearchInputKey(items, 'Electronics'),
+      });
+      try {
+        await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+        assert((await beginMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub', recovery: marker })).saved,
+          'fixture sidecar must be written before testing a path substitution');
+        const scope = await __marketplaceRecoveryStoreForTests.owner({ canvasFilePath, nodeId, kind: 'sellhub' });
+        const foreignPath = path.join(base, 'foreign-recovery.json');
+        await fs.promises.writeFile(foreignPath, await fs.promises.readFile(scope.filePath, 'utf8'), 'utf8');
+        await fs.promises.unlink(scope.filePath);
+        await fs.promises.symlink(foreignPath, scope.filePath);
+        const peeked = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+        assert(!peeked.found && peeked.status === null,
+          'a sidecar name swapped to a symlink is rejected rather than reading its target');
+        return { symlinkRejected: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery reader rejects same-inode growth after descriptor validation',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-recovery-growth-'));
+      const filePath = path.join(base, 'recovery.json');
+      const originalOpen = fs.promises.open;
+      try {
+        await fs.promises.writeFile(filePath, '{"safe":true}', 'utf8');
+        // Inject the append at the only interesting boundary: after the
+        // reader has opened and fstat'd the descriptor, immediately before it
+        // starts consuming bytes. The pathname and inode remain unchanged.
+        fs.promises.open = async (...args) => {
+          const handle = await originalOpen(...args);
+          let grew = false;
+          return {
+            stat: (...statArgs) => handle.stat(...statArgs),
+            read: async (...readArgs) => {
+              if (!grew) {
+                grew = true;
+                await fs.promises.appendFile(filePath, 'x', 'utf8');
+              }
+              return await handle.read(...readArgs);
+            },
+            close: () => handle.close(),
+          };
+        };
+        let rejected = false;
+        try {
+          await __marketplaceRecoveryStoreForTests.readRegularNoFollowUtf8(filePath);
+        } catch (error) {
+          rejected = /Refusing changed Marketplace recovery record/.test(error?.message || '');
+        }
+        assert(rejected,
+          'a same-inode append after fstat must be rejected rather than read through EOF');
+        return { sameInodeGrowthRejected: true };
+      } finally {
+        fs.promises.open = originalOpen;
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery sidecar: nested owner reads retain the canvas lease across claim release',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-lease-race-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      const reboundPath = path.join(base, 'workspace-moved.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const ownerA = { sender: 'marketplace-owner-a' };
+      const ownerB = { sender: 'marketplace-owner-b' };
+      const args = {
+        canvasFilePath,
+        nodeId: 'lease-race-node',
+        kind: 'sellhub',
+        runId: 'lease-race-run',
+        inputKey: 'lease-race-input',
+      };
+      try {
+        const claim = await withCanvasRecoveryOwner(ownerA, () => acquireMarketplaceRecoveryClaim(args));
+        assert(claim.claimed, 'test precondition: Marketplace handler owns the long canvas reader lease');
+
+        let writerEntered = false;
+        const writer = withCanvasRecoveryRebind(canvasFilePath, reboundPath, async () => {
+          writerEntered = true;
+          return { success: true };
+        });
+        await Promise.resolve();
+
+        let releaseNested;
+        let signalNested;
+        const nestedEntered = new Promise(resolve => { signalNested = resolve; });
+        const nestedHold = new Promise(resolve => { releaseNested = resolve; });
+        const nested = withCanvasRecoveryOwner(ownerA, () => (
+          __marketplaceRecoveryStoreForTests.withMarketplaceRecoveryReadLease(args, async () => {
+            signalNested();
+            await nestedHold;
+          })
+        ));
+        await nestedEntered;
+        claim.release();
+        assert(writerEntered === false,
+          'releasing the Marketplace claim does not release a nested same-owner store operation');
+
+        let outsiderEntered = false;
+        const outsider = withCanvasRecoveryOwner(ownerB, () => (
+          __marketplaceRecoveryStoreForTests.withMarketplaceRecoveryReadLease(args, async () => {
+            outsiderEntered = true;
+          })
+        ));
+        await Promise.resolve();
+        assert(outsiderEntered === false,
+          'after claim removal, a different standalone operation takes a regular lease behind the queued writer');
+        releaseNested();
+        await nested;
+        await writer;
+        await outsider;
+        assert(writerEntered && outsiderEntered,
+          'the writer drains the final nested ref before the later standalone operation enters');
+        return { nestedRefHeld: true, outsiderRegularLease: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery sidecar: exact cross-window cancel joins a queued rebind and migrates no live work',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-cancel-rebind-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      const reboundPath = path.join(base, 'workspace-moved.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const marker = newMarketplaceRecovery({
+        runId: 'cancel-rebind-run',
+        phase: 'scrape',
+        input: marketplaceResearchInput([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+        inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+      });
+      const ownerA = { sender: 'claim-window' };
+      const ownerB = { sender: 'cancel-window' };
+      try {
+        await beginMarketplaceRecovery({
+          canvasFilePath, nodeId: 'cancel-rebind-node', kind: 'sellhub', recovery: marker,
+        });
+        let claim;
+        let claimAborted = false;
+        claim = await withCanvasRecoveryOwner(ownerA, () => acquireMarketplaceRecoveryClaim({
+          canvasFilePath,
+          nodeId: 'cancel-rebind-node',
+          kind: 'sellhub',
+          runId: marker.runId,
+          inputKey: marker.inputKey,
+          sender: ownerA,
+          abort: () => {
+            claimAborted = true;
+            claim.release();
+          },
+        }));
+        assert(claim.claimed, 'test precondition: first window owns the exact recovery claim');
+        let writerEntered = false;
+        const writer = withCanvasRecoveryRebind(canvasFilePath, reboundPath, async () => {
+          writerEntered = true;
+          return { success: true };
+        });
+        await Promise.resolve();
+        assert(writerEntered === false, 'queued path migration waits for the live Marketplace claim');
+
+        const stopped = await withCanvasRecoveryOwner(ownerB, () => abandonMarketplaceRecovery({
+          canvasFilePath,
+          nodeId: 'cancel-rebind-node',
+          kind: 'sellhub',
+          runId: marker.runId,
+          inputKey: marker.inputKey,
+          reason: 'user-reset',
+        }));
+        await writer;
+        assert(stopped.abandoned && stopped.claimSettled && claimAborted && writerEntered,
+          `exact cancel must tombstone/abort before the queued writer proceeds: ${JSON.stringify(stopped)}`);
+        const retired = await peekMarketplaceRecovery({
+          canvasFilePath, nodeId: 'cancel-rebind-node', kind: 'sellhub',
+        });
+        assert(!retired.found && retired.status === 'abandoned',
+          'the writer can observe only the durable tombstone, never migrate live work after explicit Reset');
+        return { cancellationJoinedExactClaim: true, writerDrainedAfterTombstone: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery sidecar: destroyed sender aborts and releases a non-cooperative canonical claim',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-sender-destroyed-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      const reboundPath = path.join(base, 'workspace-moved.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      let onDestroyed = null;
+      let destroyed = false;
+      const sender = {
+        once(event, callback) { if (event === 'destroyed') onDestroyed = callback; },
+        isDestroyed() { return destroyed; },
+      };
+      let abortReason = null;
+      try {
+        const recovery = newMarketplaceRecovery({
+          runId: 'destroyed-sender-run',
+          phase: 'scrape',
+          input: marketplaceResearchInput([{ key: 'primary', query: 'Lens' }], '', ['ebay-sold']),
+          inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Lens' }], '', ['ebay-sold']),
+        });
+        await beginMarketplaceRecovery({
+          canvasFilePath,
+          nodeId: 'destroyed-sender-node',
+          kind: 'sellhub',
+          recovery,
+        });
+        const claim = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath,
+          nodeId: 'destroyed-sender-node',
+          kind: 'sellhub',
+          runId: 'destroyed-sender-run',
+          inputKey: recovery.inputKey,
+          sender,
+          abort: reason => { abortReason = reason; },
+        });
+        assert(claim.claimed && typeof onDestroyed === 'function',
+          'a canonical Marketplace claim retains its sender destruction hook');
+        let writerEntered = false;
+        const writer = withCanvasRecoveryRebind(canvasFilePath, reboundPath, async () => {
+          writerEntered = true;
+          return { success: true };
+        });
+        await Promise.resolve();
+        assert(writerEntered === false, 'live sender claim owns the long recovery reader');
+        destroyed = true;
+        onDestroyed();
+        await writer;
+        claim.release();
+        assert(writerEntered
+          && abortReason?.name === 'AbortError'
+          && abortReason?.cancelCause === 'sender-destroyed',
+        'sender destruction aborts the handler and releases its process claim/read even if the dependency never settles');
+        assert((await peekMarketplaceRecovery({
+          canvasFilePath, nodeId: 'destroyed-sender-node', kind: 'sellhub',
+        })).found,
+        'window destruction retains the active durable checkpoint for a later safe restart');
+        const replacement = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath,
+          nodeId: 'destroyed-sender-node',
+          kind: 'sellhub',
+          runId: 'destroyed-sender-run',
+          inputKey: recovery.inputKey,
+        });
+        assert(replacement.claimed, 'normal handler-finally double release cannot leave the canonical claim occupied');
+        replacement.release();
+        return { senderAbort: true, leaseReleased: true, doubleReleaseSafe: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace recovery reducers: full-input fences and retryable status phases preserve exact work',
+    run: () => {
+      const urls = { ebay: ['https://ebay.test/messages'], mercari: ['https://mercari.test/selling'] };
+      let recovery = newMarketplaceStatusRecovery({ runId: 'status-a', platformIds: ['ebay', 'mercari'], watchUrlsByPlatform: urls });
+      assert(marketplaceStatusInputMatches(recovery, ['ebay', 'mercari'], urls), 'exact watch URL snapshot matches');
+      assert(!marketplaceStatusInputMatches(recovery, ['ebay', 'mercari'], { ...urls, ebay: ['https://ebay.test/changed'] }),
+        'watch URL change invalidates recovery ownership');
+      const prepared = { platformId: 'ebay', llmInputs: [{ spec: { url: urls.ebay[0], urlLabel: 'hub' }, snippet: 'saved page' }], sources: [], readState: { read: 0, unread: 1 } };
+      recovery = mergeMarketplaceStatusPrepared(recovery, { runId: recovery.runId, platformId: 'ebay', prepared });
+      assert(recovery.preparedByPlatform.ebay === prepared, 'post-network/pre-AI prepared pages are checkpointed exactly');
+      recovery = recordMarketplaceStatusResult(recovery, 'ebay', { status: 'error', message: 'AI unavailable' }, { retryable: true });
+      assert(recovery.remainingPlatformIds.includes('ebay') && recovery.preparedByPlatform.ebay,
+        'transient AI error keeps the platform and its prepared page eligible for restart');
+      recovery = recordMarketplaceStatusResult(recovery, 'ebay', { status: 'ok', summary: 'done' });
+      assert(!recovery.remainingPlatformIds.includes('ebay') && !recovery.preparedByPlatform.ebay,
+        'successful platform result retires only that exact platform checkpoint');
+      return { remaining: recovery.remainingPlatformIds };
+    },
+  },
+  {
+    name: 'marketplace recovery fences: absent Reset, cross-window owner cancellation, and atomic multi-node deletion cannot revive',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-fences-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const markerFor = (runId) => newMarketplaceRecovery({
+        runId,
+        phase: 'scrape',
+        input: marketplaceResearchInput([{ key: 'primary', query: 'Camera' }], 'Electronics', ['ebay-sold']),
+        inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Camera' }], 'Electronics', ['ebay-sold']),
+      });
+      try {
+        const missingMarker = markerFor('run-missing');
+        const absentStop = await abandonMarketplaceRecovery({
+          canvasFilePath, nodeId: 'missing-node', kind: 'sellhub', runId: missingMarker.runId,
+          inputKey: missingMarker.inputKey, reason: 'user-reset',
+        });
+        assert(absentStop.abandoned, 'Reset writes an exact tombstone even before acquire→begin creates a sidecar');
+        const absentLateBegin = await beginMarketplaceRecovery({
+          canvasFilePath, nodeId: 'missing-node', kind: 'sellhub', recovery: missingMarker,
+        });
+        assert(!absentLateBegin.saved && absentLateBegin.reason === 'abandoned',
+          'a late begin cannot cross the absent-record Reset tombstone');
+
+        const claimedMarker = markerFor('run-claimed');
+        const claim = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId: 'claimed-node', kind: 'sellhub', runId: claimedMarker.runId,
+          inputKey: claimedMarker.inputKey, abort: () => {},
+        });
+        assert(claim.claimed, 'first window owns the canonical run');
+        const ownStop = await abandonMarketplaceRecovery({
+          canvasFilePath, nodeId: 'claimed-node', kind: 'sellhub', runId: claimedMarker.runId,
+          inputKey: claimedMarker.inputKey, reason: 'manual-ai-cancelled',
+        }, { ownerToken: claim.ownerToken });
+        assert(ownStop.abandoned && ownStop.ownerWillRelease,
+          'the owning handler can durably tombstone itself without waiting on its own release');
+        claim.release();
+
+        const first = markerFor('run-first');
+        const second = markerFor('run-second');
+        await beginMarketplaceRecovery({ canvasFilePath, nodeId: 'node-first', kind: 'sellhub', recovery: first });
+        await beginMarketplaceRecovery({ canvasFilePath, nodeId: 'node-second', kind: 'sellhub', recovery: second });
+        const mismatchedBatch = await abandonMarketplaceRecoveryBatch({
+          canvasFilePath,
+          reason: 'canvas-cleared',
+          owners: [
+            { nodeId: 'node-first', kind: 'sellhub', runId: first.runId, inputKey: 'stale-input' },
+            { nodeId: 'node-second', kind: 'sellhub', runId: second.runId, inputKey: second.inputKey },
+          ],
+        });
+        assert(!mismatchedBatch.fenced && mismatchedBatch.reason === 'input-mismatch'
+          && (await peekMarketplaceRecovery({ canvasFilePath, nodeId: 'node-first', kind: 'sellhub' })).found
+          && (await peekMarketplaceRecovery({ canvasFilePath, nodeId: 'node-second', kind: 'sellhub' })).found,
+        'batch deletion validates every requested run/input before committing any cancellation fence');
+        let cleanupCall = 0;
+        const fenced = await abandonMarketplaceRecoveryBatch({
+          canvasFilePath,
+          reason: 'canvas-cleared',
+          owners: [
+            { nodeId: 'node-first', kind: 'sellhub', runId: first.runId, inputKey: first.inputKey },
+            { nodeId: 'node-second', kind: 'sellhub', runId: second.runId, inputKey: second.inputKey },
+          ],
+        }, {
+          tombstoneWriter: async (args) => {
+            cleanupCall += 1;
+            if (cleanupCall === 2) throw new Error('injected second cleanup failure');
+            return abandonMarketplaceRecovery(args);
+          },
+        });
+        assert(fenced.fenced && fenced.cleanupErrors.length === 1,
+          'the canvas-scoped fence commits every owner before fallible individual cleanup');
+        const lateFirst = await beginMarketplaceRecovery({ canvasFilePath, nodeId: 'node-first', kind: 'sellhub', recovery: first });
+        const lateSecond = await beginMarketplaceRecovery({ canvasFilePath, nodeId: 'node-second', kind: 'sellhub', recovery: second });
+        assert(!lateFirst.saved && !lateSecond.saved && lateFirst.reason === 'abandoned' && lateSecond.reason === 'abandoned',
+          'even the owner whose cleanup failed remains durably inert');
+        return { absentFenced: true, selfStopNoDeadlock: true, atomicTargets: fenced.targetCount };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace exact inputs: source plan order and product specification are bound to recovery',
+    run: () => {
+      const researchItems = [{
+        key: 'primary', label: 'Camera', query: 'Camera X', condition: 'Used - Good', pricingNotes: '',
+        productSpec: { model: 'X', color: 'black', title: 'Camera X' },
+      }];
+      const sourcePlan = ['ebay-sold', 'poshmark'];
+      const recovery = newMarketplaceRecovery({
+        runId: 'exact-input-run', phase: 'scrape',
+        input: marketplaceResearchInput(researchItems, 'Electronics', sourcePlan),
+        inputKey: marketplaceResearchInputKey(researchItems, 'Electronics', sourcePlan),
+      });
+      assert(marketplaceResearchInputMatches(recovery, researchItems, 'Electronics', sourcePlan),
+        'the exact ordered source contract matches');
+      assert(!marketplaceResearchInputMatches(recovery, researchItems, 'Electronics', [...sourcePlan].reverse()),
+        'reordering or changing sources cannot silently alter a resumed scrape');
+      assert(!marketplaceResearchInputMatches(recovery, [{ ...researchItems[0], productSpec: { ...researchItems[0].productSpec, color: 'silver' } }], 'Electronics', sourcePlan),
+        'same query with changed price-driving product bytes is a different recovery input');
+
+      const pending = [{ ...researchItems[0], comps: { sold: [{ title: 'Camera', price: 100 }], active: [] } }];
+      const synthesis = { ...recovery, phase: 'synthesis', pendingItems: pending };
+      const supplied = [{
+        itemKey: 'primary', itemLabel: 'Camera', query: 'Camera X', condition: 'Used - Good', pricingNotes: '',
+        productSpec: pending[0].productSpec, comps: pending[0].comps,
+      }];
+      assert(validateMarketplaceBatchExecution(synthesis, supplied) === supplied,
+        'the durable product specification admits the exact synthesis prompt');
+      let rejected = false;
+      try {
+        validateMarketplaceBatchExecution(synthesis, [{ ...supplied[0], productSpec: { ...supplied[0].productSpec, color: 'silver' } }]);
+      } catch { rejected = true; }
+      assert(rejected, 'a live product edit cannot change the AI prompt under the old synthesis key');
+      return { sourcePlanBound: true, productSpecBound: true };
+    },
+  },
+  {
+    name: 'nested marketplace source rescrape: exact interrupted intent resumes once while stop and input drift stay paused',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-hidden-rescrape-'));
+      const canvasFilePath = path.join(base, 'workspace.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const nodeId = 'nested-source-rescrape';
+      const product = {
+        generated_title: 'Camera X',
+        condition: 'Used - Good',
+        category: 'Electronics',
+        model: 'X',
+        color: 'black',
+      };
+      const researchItems = buildRefreshResearchItems(product, [], {}, 'Includes box');
+      const sourcePlan = ['ebay-sold'];
+      const active = newMarketplaceRecovery({
+        runId: 'hidden-rescrape-run',
+        phase: 'scrape',
+        input: marketplaceResearchInput(researchItems, product.category, sourcePlan),
+        inputKey: marketplaceResearchInputKey(researchItems, product.category, sourcePlan),
+      });
+      const resolveInput = marketplaceResolveInput({
+        sourceId: 'ebay-sold',
+        query: researchItems[0].query,
+        items: null,
+        noChallengeConfirmed: false,
+      });
+      const paused = {
+        ...active,
+        phase: 'comps-ready',
+        pendingItems: researchItems.map(item => ({ ...item, comps: { sold: [], active: [] } })),
+        scrapeWarnings: [{ sourceId: 'ebay-sold', code: 'task-failed', severity: 'block' }],
+        resolveIntent: {
+          input: resolveInput,
+          inputKey: marketplaceResolveInputKey(resolveInput),
+          status: 'running',
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      const rootNodes = [{ id: 'nested-group', type: 'group', data: { canvasData: { nodes: [{
+        id: nodeId,
+        type: 'sellhub',
+        data: {
+          product,
+          extraItems: [],
+          itemPricings: {},
+          pricingNotes: 'Includes box',
+          marketplaceRunResume: paused,
+        },
+      }], edges: [] } } }];
+      try {
+        assert(isAutomaticMarketplaceResolveIntent(paused),
+          'a bounded exact running headless source intent is automatically recoverable');
+        assert(marketplaceResearchIdentityMatches(paused, researchItems, product.category, sourcePlan),
+          'comps-ready source recovery remains bound to the original ordered source/product snapshot');
+        assert(!marketplaceResearchIdentityMatches(
+          paused,
+          buildRefreshResearchItems({ ...product, color: 'silver' }, [], {}, 'Includes box'),
+          product.category,
+          sourcePlan,
+        ), 'a changed product specification pauses hidden source recovery before IPC');
+
+        await beginMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub', recovery: active });
+        assert((await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', expectedInputKey: active.inputKey, recovery: paused,
+        })).saved, 'interrupted source intent is durable before any rescrape side effect');
+        const coordinator = createWorkspaceStartupRecoveryCoordinator({
+          peekMarketplaceRecovery: args => peekMarketplaceRecovery(args),
+        });
+        const firstPlan = await coordinator.discover({ canvasFilePath, rootNodes });
+        const duplicatePlan = await coordinator.discover({ canvasFilePath, rootNodes });
+        assert(firstPlan.length === 1 && firstPlan[0].state === 'source-rescrape-ready'
+          && duplicatePlan.length === 0,
+        'restart discovers the exact hidden rescrape once and coordinator dedup prevents a second dispatch');
+
+        const firstAttempt = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: paused.runId, inputKey: paused.inputKey,
+          autoResume: true, operation: 'rescrape:ebay-sold',
+        });
+        assert(firstAttempt.claimed, 'main admits the first automatic source attempt');
+        firstAttempt.release();
+        const duplicateAttempt = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: paused.runId, inputKey: paused.inputKey,
+          autoResume: true, operation: 'rescrape:ebay-sold',
+        });
+        assert(!duplicateAttempt.claimed && duplicateAttempt.reason === 'automatic-attempted',
+          'main enforces one provider attempt per process even across hidden/mounted renderers');
+        const fullAttempt = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: paused.runId, inputKey: paused.inputKey,
+          autoResume: true, operation: 'scrape',
+        });
+        assert(fullAttempt.claimed, 'full hidden scrape gets its own exact automatic-operation admission');
+        fullAttempt.release();
+        const duplicateFullAttempt = await acquireMarketplaceRecoveryClaim({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: paused.runId, inputKey: paused.inputKey,
+          autoResume: true, operation: 'scrape',
+        });
+        assert(!duplicateFullAttempt.claimed && duplicateFullAttempt.reason === 'automatic-attempted',
+          'a remounted hidden coordinator cannot repeat the full provider scrape in the same process');
+
+        assert((await abandonMarketplaceRecovery({
+          canvasFilePath, nodeId, kind: 'sellhub', runId: paused.runId, inputKey: paused.inputKey,
+          reason: 'user-reset',
+        })).abandoned, 'explicit Reset durably tombstones the interrupted source intent');
+        const afterStop = await createWorkspaceStartupRecoveryCoordinator({
+          peekMarketplaceRecovery: args => peekMarketplaceRecovery(args),
+        }).discover({ canvasFilePath, rootNodes });
+        assert(afterStop.length === 0,
+          'a tombstoned source intent is never rediscovered after restart even if stale canvas data remains');
+
+        const startupHook = fs.readFileSync(path.join(process.cwd(), 'src/hooks/useWorkspaceStartupRecovery.js'), 'utf8');
+        const mountedHub = fs.readFileSync(path.join(process.cwd(), 'src/nodes/SellHubNode.jsx'), 'utf8');
+        const fullResumeStart = startupHook.indexOf("entry.kind === 'sellhub' && entry.state === 'ready'");
+        const fullResumeEnd = startupHook.indexOf("entry.kind === 'marketplacestatus'", fullResumeStart);
+        assert(startupHook.includes("entry.state === 'source-rescrape-ready'")
+          && startupHook.includes('window.electronAPI?.rescrapeSource?.({')
+          && startupHook.includes('autoResume: true')
+          && !startupHook.slice(
+            startupHook.indexOf("entry.state === 'source-rescrape-ready'"),
+            startupHook.indexOf("entry.kind === 'sellhub' && entry.state === 'ready'"),
+          ).includes('resolveCaptcha'),
+        'hidden execution invokes only the exact headless rescrape and cannot auto-open CAPTCHA/native UI');
+        assert(fullResumeStart >= 0
+          && startupHook.slice(fullResumeStart, fullResumeEnd).includes('window.electronAPI?.scrapePriceComps?.({')
+          && startupHook.slice(fullResumeStart, fullResumeEnd).includes('autoResume: true'),
+        'hidden full-scrape recovery is admitted through the main one-attempt-per-process fence on every remount');
+        const mountedResolveStart = mountedHub.indexOf('// A headless source retry is safe to continue once per process');
+        const mountedResolveEnd = mountedHub.indexOf('const acceptImagePaths', mountedResolveStart);
+        assert(mountedResolveStart >= 0
+          && mountedHub.slice(mountedResolveStart, mountedResolveEnd).includes('isAutomaticMarketplaceResolveIntent(recovery)')
+          && mountedHub.slice(mountedResolveStart, mountedResolveEnd).includes('marketplaceResearchIdentityMatches('),
+        'mounted recovery applies the same exact-intent and current-product fence before dispatching a headless retry');
+        return { restartReady: true, processDedup: true, explicitStopInert: true, inputDriftPaused: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace status manual pause: login/native/CAPTCHA gates do not issue a second startup IPC',
+    run: async () => {
+      const input = {
+        platformIds: ['ebay'],
+        watchUrlsByPlatform: { ebay: ['https://example.test/watch'] },
+      };
+      const paused = {
+        version: 1,
+        runId: 'status-manual-pause',
+        phase: 'status',
+        input,
+        inputKey: JSON.stringify(input),
+        remainingPlatformIds: ['ebay'],
+        preparedByPlatform: {},
+        completedResults: { ebay: { status: 'needs-login' } },
+        manualPause: {
+          kind: 'login-required',
+          status: 'manual-required',
+          platformIds: ['ebay'],
+          updatedAt: 10,
+        },
+      };
+      let peekCalls = 0;
+      const plan = await createWorkspaceStartupRecoveryCoordinator({
+        peekMarketplaceRecovery: async () => {
+          peekCalls += 1;
+          return { found: true, recovery: paused, processEpoch: 'status-process' };
+        },
+      }).discover({
+        canvasFilePath: '/work/status-paused.json',
+        // Simulate the sidecar winning the crash race before the debounced
+        // canvas marker recorded manualPause.
+        rootNodes: [{ id: 'status-group', type: 'group', data: { canvasData: { nodes: [
+          { id: 'status-paused', type: 'marketplacestatus', data: {
+            marketplaceStatusRunResume: { ...paused, manualPause: null },
+          } },
+        ], edges: [] } } }],
+      });
+      assert(peekCalls === 1 && plan[0]?.state === 'human-paused',
+        'restart discovers the exact sidecar but classifies the human gate as non-runnable');
+      const startupHook = fs.readFileSync(path.join(process.cwd(), 'src/hooks/useWorkspaceStartupRecovery.js'), 'utf8');
+      const mountedStatus = fs.readFileSync(path.join(process.cwd(), 'src/nodes/MarketplaceStatusNode.jsx'), 'utf8');
+      assert(startupHook.includes("entry.kind === 'marketplacestatus' && entry.state === 'ready'")
+        && mountedStatus.includes("if (recovery.manualPause?.status === 'manual-required') return;"),
+      'neither hidden nor mounted startup paths invoke a status IPC for a durable manual pause');
+      return { peekCalls, statusIpcCalls: 0 };
+    },
+  },
+  {
+    name: 'marketplace terminal proof: same-process remount stays replayable and later edits survive next-process acknowledgement',
+    run: () => {
+      const receipt = {
+        version: 1, runId: 'terminal-run', phase: 'priced-result', inputKey: 'terminal-input', updatedAt: 123,
+        result: { hubState: 'priced', pricing: { recommended_price: 100 } },
+      };
+      const applied = markMarketplaceTerminalApplied(receipt, 'process-before-restart');
+      assert(marketplaceTerminalReceiptApplied(receipt, applied), 'exact result application writes a verifiable process-bound proof');
+      const userEditedNode = { product: { generated_title: 'My edited title' }, marketplaceRunResume: applied };
+      assert(marketplaceTerminalReceiptApplied(receipt, userEditedNode.marketplaceRunResume)
+        && userEditedNode.product.generated_title === 'My edited title',
+      'acknowledgement relies on the applied receipt proof, so later legitimate product edits are preserved');
+      const stale = markMarketplaceTerminalApplied({ ...receipt, updatedAt: 122 }, 'older-process');
+      assert(!marketplaceTerminalReceiptApplied(receipt, stale), 'stale proof cannot acknowledge a newer terminal receipt');
+      return { exactProof: true, laterEditPreserved: true };
+    },
+  },
+  {
+    name: 'nested marketplace terminal replay: same-process autosave gap defers ACK and a later process consumes it',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-nested-epoch-'));
+      const canvasFilePath = path.join(base, 'nested.json');
+      await fs.promises.writeFile(canvasFilePath, '{}', 'utf8');
+      const receipt = {
+        version: 1, runId: 'nested-terminal', phase: 'analysis-result', input: { imagePaths: ['staged'] },
+        inputKey: 'nested-input', result: { product: { generated_title: 'Lamp' } }, updatedAt: 777,
+      };
+      try {
+        await beginMarketplaceRecovery({ canvasFilePath, nodeId: 'nested-sell', kind: 'sellhub', recovery: { ...receipt, phase: 'analysis' } });
+        await checkpointMarketplaceRecovery({
+          canvasFilePath, nodeId: 'nested-sell', kind: 'sellhub', expectedInputKey: receipt.inputKey, recovery: receipt,
+        });
+        const sameProcessMarker = markMarketplaceTerminalApplied(receipt, __marketplaceRecoveryStoreForTests.PROCESS_EPOCH);
+        const rootNodes = [{ id: 'group', type: 'group', data: { canvasData: { nodes: [
+          { id: 'nested-sell', type: 'sellhub', data: {
+            hubState: 'draft', product: { generated_title: 'Lamp' }, marketplaceRunResume: sameProcessMarker,
+          } },
+        ], edges: [] } } }];
+        const plan = await createWorkspaceStartupRecoveryCoordinator({ peekMarketplaceRecovery })
+          .discover({ canvasFilePath, rootNodes });
+        const entry = plan[0];
+        assert(entry?.alreadyApplied && entry.processEpoch === __marketplaceRecoveryStoreForTests.PROCESS_EPOCH,
+          'nested coordinator carries the main-process epoch alongside the exact applied proof');
+        const sameProcess = await acknowledgeMarketplaceRecovery({
+          canvasFilePath, nodeId: entry.nodeId, kind: 'sellhub', runId: entry.runId,
+          inputKey: entry.recovery.inputKey,
+          appliedProcessEpoch: entry.nodeData.marketplaceRunResume.terminalApplied.appliedProcessEpoch,
+        });
+        assert(!sameProcess.completed && sameProcess.reason === 'same-process-autosave-unproven',
+          'nested remount before autosave cannot consume the only durable result copy');
+        const nextProcess = await acknowledgeMarketplaceRecovery({
+          canvasFilePath, nodeId: entry.nodeId, kind: 'sellhub', runId: entry.runId,
+          inputKey: entry.recovery.inputKey, appliedProcessEpoch: 'process-before-restart',
+        });
+        assert(nextProcess.completed, 'a subsequent process observing the persisted proof consumes the receipt');
+        return { sameProcessDeferred: true, nextProcessAcknowledged: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace nested deletion and recovery source code preserve every restart boundary',
+    run: () => {
+      const marker = (runId) => ({ version: 1, runId, inputKey: `key-${runId}`, phase: 'scrape' });
+      const owners = collectMarketplaceRecoveryOwners([{ id: 'group', type: 'group', data: { canvasData: { nodes: [
+        { id: 'nested-sell', type: 'sellhub', data: { marketplaceRunResume: marker('sell') } },
+        { id: 'nested-status', type: 'marketplacestatus', data: { marketplaceStatusRunResume: { ...marker('status'), phase: 'status' } } },
+      ] } } }]);
+      assert(owners.length === 2 && owners.some(owner => owner.nodeId === 'nested-sell') && owners.some(owner => owner.nodeId === 'nested-status'),
+        'group deletion recursively discovers SellHub and Marketplace Status recovery owners');
+      const main = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
+      const pool = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/browserPool.js'), 'utf8');
+      const store = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplaceRecoveryStore.js'), 'utf8');
+      assert(pool.includes('if (onSettled) await onSettled(result, task)')
+        && main.includes('scrapeMultiple(pendingBrowserTasks, null, signal, async (res, task) =>')
+        && main.indexOf('await onSourceSettled(res.id, checkpointBrowserResult') < main.indexOf("status: res.success ? 'done' : 'error'"),
+      'each browser source crosses an awaited durable checkpoint before terminal progress, independent of sibling completion');
+      assert(main.includes("reason: 'manual-ai-cancelled'")
+        && main.includes('{ ownerToken: claim?.ownerToken }')
+        && main.includes("manualPause: {\n          kind: 'login-required'"),
+      'manual AI cancel and login gates are main-process durable and cannot auto-retry after renderer loss');
+      assert(main.includes("await writeExclusiveFile(path.join(stageDir, 'owner.json')")
+        && main.includes("await fs.promises.open(filePath, 'wx', 0o600)")
+        && main.includes('pruneOrphanedMarketplacePhotoStages')
+        && main.includes('replaceOwnedPartial: true')
+        && main.includes('activePaths.length > 0 && activePaths.every')
+        && main.includes("persisted.recovery?.phase !== 'analysis'"),
+      'photo bytes are staged only into an exclusive, owned, prunable run directory');
+      assert(store.includes('crypto.randomBytes(12)')
+        && store.includes('fs.constants.O_EXCL')
+        && store.includes('fs.constants.O_NOFOLLOW'),
+      'recovery sidecar temp files use unpredictable exclusive no-follow creation');
+      return { nestedOwners: owners.length, perSourceBarrier: true, privateStageBounded: true };
+    },
+  },
+  {
+    name: 'marketplace path rebind: prepared commit and rollback migrate exact sidecars without duplication',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-rebind-'));
+      const oldCanvas = path.join(base, 'old.json');
+      const newCanvas = path.join(base, 'new.json');
+      await fs.promises.writeFile(oldCanvas, '{}', 'utf8');
+      await fs.promises.writeFile(newCanvas, '{}', 'utf8');
+      const marker = newMarketplaceRecovery({
+        runId: 'rebind-run', phase: 'scrape',
+        input: marketplaceResearchInput([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+        inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+      });
+      try {
+        await beginMarketplaceRecovery({ canvasFilePath: oldCanvas, nodeId: 'rebind-node', kind: 'sellhub', recovery: marker });
+        const prepared = await prepareCanvasRecoveryRebind(oldCanvas, newCanvas);
+        assert(prepared.success && prepared.migratedCount === 1, 'rebind validates and stages the exact old owner');
+        const committed = await prepared.commit();
+        assert(committed.success && (await peekMarketplaceRecovery({ canvasFilePath: newCanvas, nodeId: 'rebind-node', kind: 'sellhub' })).found,
+          'commit publishes the new path owner before old cleanup');
+        await prepared.rollback();
+        assert((await peekMarketplaceRecovery({ canvasFilePath: oldCanvas, nodeId: 'rebind-node', kind: 'sellhub' })).found
+          && !(await peekMarketplaceRecovery({ canvasFilePath: newCanvas, nodeId: 'rebind-node', kind: 'sellhub' })).found,
+        'rollback restores the exact old sidecar and removes the prepared new owner');
+        return { migrated: prepared.migratedCount, rollbackSafe: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace path rebind: post-publication unlink and source-fsync failures preserve the durable destination',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-rebind-cleanup-'));
+      const oldCanvas = path.join(base, 'old.json');
+      const newCanvas = path.join(base, 'new.json');
+      const fsyncOldCanvas = path.join(base, 'fsync-old.json');
+      const fsyncNewCanvas = path.join(base, 'fsync-new.json');
+      await Promise.all([oldCanvas, newCanvas, fsyncOldCanvas, fsyncNewCanvas]
+        .map(filePath => fs.promises.writeFile(filePath, '{}', 'utf8')));
+      const markerFor = (runId) => newMarketplaceRecovery({
+        runId,
+        phase: 'scrape',
+        input: marketplaceResearchInput([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+        inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Camera' }], '', ['ebay-sold']),
+      });
+      try {
+        const unlinkMarker = markerFor('rebind-unlink-run');
+        await beginMarketplaceRecovery({
+          canvasFilePath: oldCanvas,
+          nodeId: 'unlink-node',
+          kind: 'sellhub',
+          recovery: unlinkMarker,
+        });
+        const unlinkPrepared = await prepareCanvasRecoveryRebind(oldCanvas, newCanvas, {
+          removeOldSource: async filePath => {
+            // Model a filesystem/runtime that reports failure after the unlink
+            // may already have reached the kernel.
+            await fs.promises.unlink(filePath);
+            throw new Error('injected post-unlink failure');
+          },
+        });
+        const unlinkCommit = await unlinkPrepared.commit();
+        assert(unlinkCommit.success && unlinkCommit.destinationDurable && unlinkCommit.cleanupPending,
+          `post-publication unlink failure must be deferred, got ${JSON.stringify(unlinkCommit)}`);
+        assert((await peekMarketplaceRecovery({
+          canvasFilePath: newCanvas, nodeId: 'unlink-node', kind: 'sellhub',
+        })).found,
+        'a source unlink that throws after taking effect never rolls back the fsynced destination');
+
+        const fsyncMarker = markerFor('rebind-fsync-run');
+        await beginMarketplaceRecovery({
+          canvasFilePath: fsyncOldCanvas,
+          nodeId: 'fsync-node',
+          kind: 'sellhub',
+          recovery: fsyncMarker,
+        });
+        const fsyncPrepared = await prepareCanvasRecoveryRebind(fsyncOldCanvas, fsyncNewCanvas, {
+          syncSourceDirectory: async () => { throw new Error('injected old directory fsync failure'); },
+        });
+        const fsyncCommit = await fsyncPrepared.commit();
+        assert(fsyncCommit.success && fsyncCommit.destinationDurable && fsyncCommit.cleanupPending,
+          `old-directory fsync failure must not reverse durable publication, got ${JSON.stringify(fsyncCommit)}`);
+        assert((await peekMarketplaceRecovery({
+          canvasFilePath: fsyncNewCanvas, nodeId: 'fsync-node', kind: 'sellhub',
+        })).found,
+        'the new sidecar remains authoritative after old-directory fsync failure');
+        return { unlinkConverged: true, sourceFsyncConverged: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace path rebind: a failed rollback restore never deletes the durable destination',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-marketplace-rebind-rollback-fail-'));
+      const oldCanvas = path.join(base, 'old.json');
+      const newCanvas = path.join(base, 'new.json');
+      await fs.promises.writeFile(oldCanvas, '{}', 'utf8');
+      await fs.promises.writeFile(newCanvas, '{}', 'utf8');
+      const marker = newMarketplaceRecovery({
+        runId: 'rollback-restore-fail',
+        phase: 'scrape',
+        input: marketplaceResearchInput([{ key: 'primary', query: 'Lens' }], '', ['ebay-sold']),
+        inputKey: marketplaceResearchInputKey([{ key: 'primary', query: 'Lens' }], '', ['ebay-sold']),
+      });
+      try {
+        await beginMarketplaceRecovery({
+          canvasFilePath: oldCanvas, nodeId: 'rollback-node', kind: 'sellhub', recovery: marker,
+        });
+        const prepared = await prepareCanvasRecoveryRebind(oldCanvas, newCanvas, {
+          restoreOldSource: async (filePath, value) => {
+            await __marketplaceRecoveryStoreForTests.atomicWrite(filePath, value);
+            throw new Error('injected post-restore failure');
+          },
+        });
+        const committed = await prepared.commit();
+        assert(committed.success && committed.destinationDurable, 'test precondition: destination commit is durable');
+        const rolledBack = await prepared.rollback();
+        assert(!rolledBack.success && rolledBack.destinationPreserved,
+          `rollback must fail closed around the durable destination, got ${JSON.stringify(rolledBack)}`);
+        assert((await peekMarketplaceRecovery({
+          canvasFilePath: newCanvas, nodeId: 'rollback-node', kind: 'sellhub',
+        })).found,
+        'failed source restoration cannot delete the only durable destination sidecar');
+        const oldRetired = await peekMarketplaceRecovery({
+          canvasFilePath: oldCanvas, nodeId: 'rollback-node', kind: 'sellhub',
+        });
+        assert(!oldRetired.found && oldRetired.status === 'completed',
+          'an ambiguous post-restore failure re-retires the old owner so two active spellings cannot resume');
+        return { destinationPreserved: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'marketplace restart safety: manual vision and pricing recovery stay paused until an exact mounted Continue',
+    run: () => {
+      const hub = fs.readFileSync(path.join(process.cwd(), 'src/nodes/SellHubNode.jsx'), 'utf8');
+      const autoStart = hub.indexOf('// Auto-start analysis if images were dropped');
+      const scrapeRecovery = hub.indexOf('// A persisted active marker means the process stopped');
+      const continueRecovery = hub.indexOf('const resumePausedManualAiRecovery = useCallback');
+      assert(autoStart >= 0 && hub.slice(autoStart, scrapeRecovery).includes('!data.marketplaceRunResume')
+        && !hub.slice(autoStart, scrapeRecovery).includes("data.marketplaceRunResume?.phase === 'analysis'"),
+      'a persisted photo-analysis marker must not be treated like a fresh image drop on mount');
+      assert(scrapeRecovery >= 0
+        && hub.slice(scrapeRecovery, continueRecovery).includes("['analysis', 'synthesis'].includes(recovery.phase)")
+        && !hub.slice(scrapeRecovery, continueRecovery).includes('Auto-resuming price synthesis'),
+      'automatic recovery advances only the browser scrape phase, never a manual-AI phase');
+      assert(continueRecovery >= 0
+        && hub.slice(continueRecovery).includes('User continued saved photo analysis')
+        && hub.slice(continueRecovery).includes('User continued saved price synthesis')
+        && hub.slice(continueRecovery).includes('Continue only when you are ready to resume this exact task.'),
+      'an explicit mounted Continue owns the exact saved analysis or synthesis handoff');
+      assert(hub.includes("['analysis-result', 'priced-result'].includes(recovery.phase)"),
+        'terminal recovery remains an automatic result replay rather than a new manual task');
+      return { manualAiPaused: true, explicitContinue: true, terminalReplayPreserved: true };
+    },
+  },
+  {
+    name: 'marketplace restart safety: aborts stay pending, tombstones precede cancel, and native readers never auto-open',
+    run: () => {
+      assert(isMarketplaceSourceLifecycleAbort({ aborted: true }, new Error('network')),
+        'AbortSignal cancellation is lifecycle interruption, not a durable source failure');
+      assert(isMarketplaceSourceLifecycleAbort(null, Object.assign(new Error('cancelled'), { name: 'AbortError' })),
+        'AbortError stays pending for restart');
+      assert(isMarketplaceSourceLifecycleAbort(null, 'Browser pool is shutting down'),
+        'browser shutdown stays pending for restart');
+      assert(!isMarketplaceSourceLifecycleAbort(null, new Error('HTTP 503')),
+        'a genuine fetch failure remains a checkpointable diagnostic');
+
+      const main = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
+      const hub = fs.readFileSync(path.join(process.cwd(), 'src/nodes/SellHubNode.jsx'), 'utf8');
+      const status = fs.readFileSync(path.join(process.cwd(), 'src/nodes/MarketplaceStatusNode.jsx'), 'utf8');
+      const deletion = fs.readFileSync(path.join(process.cwd(), 'src/hooks/useCanvasOSDeletion.js'), 'utf8');
+      const clear = fs.readFileSync(path.join(process.cwd(), 'src/hooks/useCanvasActions.js'), 'utf8');
+      const resetStart = hub.indexOf('const resetHandler = useCallback');
+      const resetEnd = hub.indexOf('const nodeWidth', resetStart);
+      const resetBody = hub.slice(resetStart, resetEnd);
+      assert(resetBody.indexOf("await abandonRecovery(recoveryRunId, 'user-reset')") < resetBody.indexOf("await window.electronAPI.cancelNodeTaskAndWait(id, 'user-reset')"),
+        'Reset commits the tombstone before aborting the main handler');
+      assert(main.includes('if (isMarketplaceSourceLifecycleAbort(signal, error))')
+        && main.includes('if (isMarketplaceSourceLifecycleAbort(signal, res.success ? null : res.error))'),
+      'API and browser source paths both exclude lifecycle aborts from durable terminal checkpoints');
+      assert(main.includes('? ids.filter(id => !shouldUseNativeRead(id) || durableRecovery.preparedByPlatform?.[id])'),
+        'startup recovery filters every native-reader platform before pass 1');
+      assert(status.includes('autoResume: true') && status.includes('One automatic attempt per app process'),
+        'renderer issues one explicitly-marked restart attempt');
+      assert(deletion.includes("reason: 'node-deleted'") && deletion.includes('abandonMarketplaceRecoveryBatch')
+        && clear.includes("reason: 'canvas-cleared'") && clear.includes('abandonMarketplaceRecoveryBatch'),
+      'node deletion and Clear Canvas discover autosave-gap sidecars and durably abandon them');
+      return { abortPending: true, resetOrdered: true, nativePaused: true, deletionTombstoned: true };
     },
   }
 ];

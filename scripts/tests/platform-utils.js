@@ -806,6 +806,7 @@ export default [
       assert(languageLabel('en') === 'English', 'known lowercase code');
       assert(languageLabel('EN') === 'English', 'wrong-case code still resolves (case-insensitive fix)');
       assert(languageLabel(' Fr ') === 'Français', 'trimmed + lowercased');
+      assert(languageLabel('tl') === 'Tagalog', 'every language emitted by the detector has a user-facing label');
       assert(languageLabel('xx') === 'XX', 'unknown code → uppercased fallback');
       assert(languageLabel('') === '' && languageLabel(null) === '' && languageLabel(undefined) === '', 'empty/null → empty string');
       assert(Object.keys(LANGUAGE_LABELS).every(k => k === k.toLowerCase()), 'all map keys are canonical lowercase');

@@ -10,6 +10,7 @@ import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { BridgeProgress } from './BridgeProgress';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
+import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
@@ -292,6 +293,22 @@ const ownerBadgeForNode = (nodeId) => {
   return `Hub ${((hash >>> 0).toString(36).toUpperCase()).padStart(7, '0')}`;
 };
 
+// Only Job Search's own manual-AI runs understand the saved-stop event below.
+// A Job Search may pause during profile parsing too, so retain those two
+// pre-search tasks alongside the job-* stages. The mounted node re-checks the
+// exact run id before it acts; this is merely the dock's narrow UI eligibility
+// gate, not an authorization boundary.
+const isJobSearchPauseEligible = (request) => (
+  request?.kind !== 'application'
+  && typeof request?.nodeId === 'string' && request.nodeId.length > 0
+  && typeof request?.runId === 'string' && request.runId.length > 0
+  && (
+    request.task === 'career-file-extract'
+    || request.task === 'resume-parse'
+    || (typeof request.task === 'string' && request.task.startsWith('job-'))
+  )
+);
+
 /**
  * Global manual-AI handoff dock. A pending request is deliberately never
  * dismissed: Minimize only collapses this renderer UI, while Cancel task
@@ -300,7 +317,10 @@ const ownerBadgeForNode = (nodeId) => {
 export function NonApiAiDialog() {
   const [requests, setRequests] = useState([]);
   const [selectedRequestId, setSelectedRequestId] = useState(null);
-  const [isExpanded, setIsExpanded] = useState(false);
+  // A new queue must be immediately actionable. Minimize remains an explicit
+  // choice for the current queue, but an empty dock opening again resets that
+  // choice so newly-issued work is never hidden behind the compact control.
+  const [isExpanded, setIsExpanded] = useState(true);
   const [drafts, setDrafts] = useState({});
   const [errors, setErrors] = useState({});
   const [submittingRequestIds, setSubmittingRequestIds] = useState(() => new Set());
@@ -346,6 +366,7 @@ export function NonApiAiDialog() {
   // of Hooks forbids calling it conditionally.
   const bridgeStatus = useHandoffBridgeStatus();
   const dockButtonRef = useRef(null);
+  const hadPendingRequestsRef = useRef(false);
   const copiedTimerRef = useRef(null);
   // The dock's two scrollers: the prompt box, and the panel body around it.
   // Both are reused for every prompt this dock ever shows, so their scroll
@@ -381,7 +402,7 @@ export function NonApiAiDialog() {
   // the queue yet. Remember the job ids and apply one when its item arrives,
   // rather than selecting a requestId that does not exist and falling back to
   // whatever happens to be first. A Set, not one slot: queueing several
-  // bundles in a row is the whole point of the 10-slot dock, and two Generate
+  // bundles in a row is the whole point of the shared-capacity dock, and two Generate
   // presses before either is discovered must not cancel each other out.
   const pendingFocusJobIdsRef = useRef(new Set());
 
@@ -394,6 +415,13 @@ export function NonApiAiDialog() {
       : applicationItems.filter(item => !dismissedBrokenRequestIds.has(item.requestId))
   ), [applicationItems, dismissedBrokenRequestIds]);
   const mergedRequests = useMemo(() => mergeDockQueue(requests, visibleApplicationItems), [requests, visibleApplicationItems]);
+  // Run before paint: after a manual Minimize, a newly populated queue must
+  // not flash its compact button for one frame before reopening.
+  useLayoutEffect(() => {
+    const hasPendingRequests = mergedRequests.length > 0;
+    if (hasPendingRequests && !hadPendingRequestsRef.current) setIsExpanded(true);
+    hadPendingRequestsRef.current = hasPendingRequests;
+  }, [mergedRequests.length]);
   // Publish dismissals where the Generate cap can read them: JobCardNode lives
   // in another tree and must not count a bundle this dock has stopped showing.
   useEffect(() => {
@@ -424,6 +452,55 @@ export function NonApiAiDialog() {
   // main process): Array.isArray guards the .some() below, and optional
   // chaining guards every step reaching it.
   const isBridgeHeldApplication = isApplicationRequest && isBridgeHeldJob(bridgeStatus, activeRequest?.jobId);
+  // Unlike application lanes, push work has no job lane. The random request
+  // claim id provides an exact correlation; task/node matching would hide
+  // sibling paste work and would silently turn application auto-release into
+  // push consent.
+  const isBridgeHeldPushRequest = !isApplicationRequest && isBridgeHeldPush(bridgeStatus, activeRequest?.bridgeClaimId);
+  // Push routes come from the main process at issue time. A stale/absent
+  // status snapshot (disabled, unlinked, paused, no chat, or between claims)
+  // cannot turn reviewed text work back into a paste task. Application
+  // bundles retain their established lane-owned route: only an exact held
+  // application lane hides their local handoff UI.
+  const isMcpRoutedRequest = !isApplicationRequest && activeRequest?.mcpEligible !== false;
+  const isBridgeHeldRequest = isBridgeHeldApplication || isBridgeHeldPushRequest;
+  const canPauseAndSaveJobSearch = isJobSearchPauseEligible(activeRequest);
+  // The dock is deliberately not allowed to call the cancellation IPC: that
+  // path clears the pending request before the Job Search has saved its exact
+  // recovery marker. The mounted owner is the only code that can reuse the
+  // acknowledged pause transaction safely.
+  const requestJobSearchPauseAndSave = useCallback(({ nodeId, runId, requestId } = {}) => {
+    if (!isJobSearchPauseEligible({ kind: 'push', nodeId, runId, task: activeRequest?.task })) {
+      return Promise.resolve({ success: false, error: 'This handoff cannot be paused from the Job Search.' });
+    }
+    return new Promise((resolve) => {
+      let accepted = false;
+      let acknowledged = false;
+      const acknowledge = (result) => {
+        if (acknowledged) return;
+        acknowledged = true;
+        resolve(result);
+      };
+      document.dispatchEvent(new CustomEvent('job-search-pause-and-save', {
+        detail: {
+          nodeId,
+          runId,
+          requestId,
+          // The listener claims synchronously after it verifies exact
+          // node/run ownership; its acknowledgement may arrive only after
+          // the durable main-process pause transaction settles.
+          accept: () => { accepted = true; },
+          acknowledge,
+        },
+      }));
+      if (!accepted) {
+        acknowledge({
+          success: false,
+          error: 'The matching Job Search is no longer active. Its handoff was left unchanged.',
+        });
+      }
+    });
+  }, [activeRequest?.task]);
   // The same fault, whichever way it reached the dock: caught by submit(), or
   // read by a routine discovery pass that published a prompt-less item.
   const brokenApplicationMessage = isApplicationRequest && activeRequestId
@@ -434,11 +511,13 @@ export function NonApiAiDialog() {
   const applicationWorkingState = isApplicationRequest && activeRequest.working
     ? (activeRequest.workingState === 'blocked' ? 'blocked' : 'working')
     : null;
-  // The blocked headline names the card button by its exact label: this panel
-  // is the one place the dock points at an affordance it does not own, and it
-  // is now the only line that can carry it.
+  // A current deterministic PDF comparison is blocked on an app fix, not an
+  // action the card can repeat. Older feedback becomes retryable after the
+  // comparator revision changes before it reaches this renderer.
   const workingHeadline = applicationWorkingState === 'blocked'
-    ? 'Needs a layout retry — press Retry layout check on its card'
+    ? (activeRequest?.retryReproducesFailure
+      ? 'Needs an app update — this layout check must not be retried'
+      : 'Needs a layout retry — press Retry layout check on its card')
     : 'Saving this application bundle…';
   const activeApplicationCorrections = isApplicationRequest ? (activeRequest.corrections || []) : [];
   // A correction round shows ONE prompt BY DEFAULT: the correction. The full
@@ -1085,10 +1164,17 @@ export function NonApiAiDialog() {
     if (!textToCopy) return;
     const requestId = activeRequest.requestId;
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
-      // Whatever is on screen is what gets copied — for an application item
-      // showing corrections, that is the correction prompt, not the original.
-      await navigator.clipboard.writeText(textToCopy);
+      // Manual-only push tasks use an atomic main-process clipboard claim.
+      // MCP-routed work never reaches this function from the render path.
+      if (!isApplicationRequest) {
+        const claim = await window.electronAPI?.claimNonApiAiManual?.(requestId);
+        if (claim?.claimed !== true || claim?.copied !== true) throw new Error('This handoff could not switch to manual copy. Check its ChatGPT status and try again.');
+      } else {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
+        // Whatever is on screen is what gets copied — for an application item
+        // showing corrections, that is the correction prompt, not the original.
+        await navigator.clipboard.writeText(textToCopy);
+      }
       setCopiedRequestId(requestId);
       if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
       copiedTimerRef.current = setTimeout(() => {
@@ -1101,7 +1187,7 @@ export function NonApiAiDialog() {
         [requestId]: error?.message || 'Could not copy the prompt. Select it and copy manually.',
       }));
     }
-  }, [activeRequest, displayedPrompt]);
+  }, [activeRequest, displayedPrompt, isApplicationRequest]);
 
   const revealAttachment = useCallback(async (filePath) => {
     if (!activeRequestId || !filePath) return;
@@ -1493,10 +1579,9 @@ export function NonApiAiDialog() {
     requestAnimationFrame(() => dockButtonRef.current?.focus());
   }, []);
 
-  // Shown at every depth, including one. The chip strip below it is always on
-  // screen now, so a count that blanked itself at one left the header reflowing
-  // for no reason while contradicting the collapsed dock, which says "1 handoff
-  // waiting" for that same state.
+  // Manual/application queues need their visible selector count. Automatic
+  // queues instead show their one worker-plan summary below, so repeating the
+  // same count here adds noise without adding an action.
   const queueLabel = useMemo(() => `${mergedRequests.length} pending`, [mergedRequests.length]);
 
   const multipleHubQueue = useMemo(() => {
@@ -1514,8 +1599,17 @@ export function NonApiAiDialog() {
   // remove, so the collapsed dock names both states.
   const savingCount = mergedRequests.filter(request => request.working).length;
   const waitingCount = mergedRequests.length - savingCount;
+  // A worker plan claims the complete automatic queue, so batch selector chips
+  // only imply that every item needs its own copied prompt. Preserve the chips
+  // for manual/application queues, where selecting a specific item still has a
+  // real purpose.
+  const isAutomaticMcpQueue = mergedRequests.length > 0 && mergedRequests.every(request => (
+    request?.kind !== 'application' && request?.mcpEligible !== false
+  ));
   const dockLabel = savingCount === 0
-    ? (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`)
+    ? (isAutomaticMcpQueue
+      ? (waitingCount === 1 ? '1 handoff released now' : `${waitingCount} handoffs released now`)
+      : (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`))
     : waitingCount === 0
       ? (savingCount === 1 ? '1 bundle saving' : `${savingCount} bundles saving`)
       : `${waitingCount} waiting · ${savingCount} saving`;
@@ -1575,7 +1669,7 @@ export function NonApiAiDialog() {
                 <h2 id="non-api-ai-dialog-title" className="text-sm font-semibold text-white">
                   AI handoffs
                 </h2>
-                {activeRequest?.handoffCode && !isBridgeHeldApplication && (
+                {activeRequest?.handoffCode && !isBridgeHeldRequest && !isMcpRoutedRequest && (
                   <span className="inline-flex rounded border border-violet-400/30 bg-violet-500/15 px-2 py-0.5 font-mono text-xs font-semibold tracking-wider text-violet-200">
                     {activeRequest.handoffCode}
                   </span>
@@ -1591,7 +1685,9 @@ export function NonApiAiDialog() {
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {queueLabel && <span className="text-[11px] text-white/40">{queueLabel}</span>}
+              {isAutomaticMcpQueue ? (
+                <span className="rounded border border-sky-300/20 bg-sky-400/5 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-100/80">Automatic</span>
+              ) : queueLabel && <span className="text-[11px] text-white/40">{queueLabel}</span>}
               <button
                 type="button"
                 onClick={minimize}
@@ -1603,16 +1699,7 @@ export function NonApiAiDialog() {
               </button>
             </div>
           </div>
-          {/*
-            The strip stays on screen at every queue depth, including one. These
-            numbers are how someone keeps up to ten parallel AI chats straight,
-            and a bundle's number appears NOWHERE else in this panel — so hiding
-            the strip once the queue drains to a single prompt would delete the
-            only on-screen answer to "which chat is this prompt from?" at exactly
-            the moment the last chat is being finished. A lone chip also holds
-            the position and size it had in a full strip, so nothing jumps as
-            siblings settle.
-          */}
+          {!isAutomaticMcpQueue && (
           <nav aria-label="Pending AI handoff batches" className="mt-3">
             <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
               {mergedRequests.map((request, index) => {
@@ -1641,7 +1728,7 @@ export function NonApiAiDialog() {
                 const isEscalated = hasActiveEscalation(request.rejectionEscalation);
                 // A full handoff code is already shown in the prompt header.
                 // These controls only select a queued prompt, so one batch
-                // number per button keeps ten concurrent prompts visible. The
+                // number per button keeps the concurrent prompt roster visible. The
                 // rule itself lives in describeQueuedPrompt because a guard
                 // message that names a prompt has to use the same one.
                 const { selectorLabel, label } = describeQueuedPrompt(request, index);
@@ -1654,7 +1741,9 @@ export function NonApiAiDialog() {
                   // this sentence exists at all for someone who cannot see it.
                   isEscalated ? `stuck — ${escalationHeadline(request.rejectionEscalation)}` : null,
                   isBundleSaving
-                    ? (request.workingState === 'blocked' ? 'needs a layout retry' : 'still saving')
+                    ? (request.workingState === 'blocked'
+                      ? (request.retryReproducesFailure ? 'needs an app update' : 'needs a layout retry')
+                      : 'still saving')
                     : null,
                   hasDraft ? 'response pasted' : null,
                   isWorking ? 'action in progress' : null,
@@ -1720,6 +1809,7 @@ export function NonApiAiDialog() {
               })}
             </div>
           </nav>
+          )}
         </header>
 
         <form ref={panelBodyRef} onSubmit={submit} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
@@ -1776,13 +1866,14 @@ export function NonApiAiDialog() {
                 </div>
               </div>
             </div>
-          ) : isBridgeHeldApplication ? (
+          ) : isBridgeHeldRequest ? (
             // The ChatGPT bridge already holds this exact bundle and is
             // working it in its own chat. Offering this dock's copy/paste
             // workflow too would invite a second, disagreeing answer for the
             // same prompt, so none of that working area renders here — only
-            // a calm status line and the one control this dock still owns:
-            // giving the bundle up entirely. BridgeProgress sits OUTSIDE the
+            // a calm status line and the destructive control this dock still
+            // owns: discarding an application or cancelling a push task.
+            // BridgeProgress sits OUTSIDE the
             // status div below: its timers tick every second and must not
             // re-announce through that live region.
             <>
@@ -1796,23 +1887,78 @@ export function NonApiAiDialog() {
                   Handed to ChatGPT
                 </div>
                 <div className="mt-1 text-violet-100/75">
-                  This application goes through the ChatGPT bridge. Its progress is below; Discard bundle takes it back.
+                  {isBridgeHeldApplication
+                    ? 'This application is being handled through the ChatGPT bridge.'
+                    : 'This handoff is being handled through the ChatGPT bridge.'}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={requestApplicationDiscardConfirm}
-                disabled={isDiscarding || !!cancelConfirmTarget}
-                className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Delete this application bundle and its private job folder"
-              >
-                {isDiscarding ? 'Discarding…' : 'Discard bundle'}
-              </button>
+              {isBridgeHeldApplication ? (
+                <button
+                  type="button"
+                  onClick={requestApplicationDiscardConfirm}
+                  disabled={isDiscarding || !!cancelConfirmTarget}
+                  className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Delete this application bundle and its private job folder"
+                >
+                  {isDiscarding ? 'Discarding…' : 'Discard bundle'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={requestCancelConfirm}
+                  disabled={isCancelling || !!cancelConfirmTarget}
+                  className="shrink-0 rounded-md border border-red-400/30 px-3 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Cancel the job operation waiting for this AI response"
+                >
+                  {isCancelling ? 'Cancelling…' : 'Cancel task'}
+                </button>
+              )}
             </div>
-            <BridgeProgress status={bridgeStatus} item={activeRequest} />
+            <BridgeProgress
+              status={bridgeStatus}
+              item={activeRequest}
+              isPush={!isApplicationRequest}
+              canPauseAndSave={canPauseAndSaveJobSearch}
+              onPauseAndSave={requestJobSearchPauseAndSave}
+            />
             </>
           ) : (
             <>
+              {isMcpRoutedRequest && (
+                <>
+                  <BridgeProgress
+                    status={bridgeStatus}
+                    item={activeRequest}
+                    isPush={!isApplicationRequest}
+                    awaitingClaim
+                    canPauseAndSave={canPauseAndSaveJobSearch}
+                    onPauseAndSave={requestJobSearchPauseAndSave}
+                  />
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {isApplicationRequest ? (
+                      <button
+                        type="button"
+                        onClick={requestApplicationDiscardConfirm}
+                        disabled={isDiscarding || !!cancelConfirmTarget}
+                        className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isDiscarding ? 'Discarding…' : 'Discard bundle'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={requestCancelConfirm}
+                        disabled={isCancelling || !!cancelConfirmTarget}
+                        className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isCancelling ? 'Cancelling…' : 'Cancel task'}
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+              {!isMcpRoutedRequest && (
+                <>
               {activeCorrectionsRecovered && (
                 // THE BUG this notice exists for: a restart discards the
                 // in-memory `pasteCorrectionsByJob` entry (electron/ipc/
@@ -2033,7 +2179,7 @@ export function NonApiAiDialog() {
                       the box provably is not this prompt's answer, so clearing
                       it is always the right move; and when the guard knows
                       which queued prompt the text belongs to, the repair is
-                      one press instead of a hunt through ten open chats.
+                      one press instead of a hunt through the open worker chats.
                     */}
                     {responseCrossPasteBlocked && (
                       <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2117,6 +2263,8 @@ export function NonApiAiDialog() {
                   </button>
                 </div>
               </div>
+                </>
+              )}
             </>
           )}
         </form>

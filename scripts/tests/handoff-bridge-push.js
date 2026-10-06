@@ -7,21 +7,29 @@ import { getKnownTaskIds } from '../../electron/ipc/llm.js';
 import { PUSH_TASK_POLICY, assertPushTaskPolicy, createPushSource as createPushSourcePort, normalizePushHandoffCode } from '../../electron/ipc/handoffBridge/sources/push.js';
 import { createHandoffEngine } from '../../electron/ipc/handoffBridge/engine.js';
 import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
+import { TOOLS_LIST } from '../../electron/ipc/handoffBridge/tools.js';
+import { BRIDGE_RAW_RESEARCH_TASKS } from '../../electron/ipc/nonApiAi.js';
 
 const CODE = 'HANDOFF-ABCDEF';
-const entry = Object.freeze({ requestId: 'request-ada', handoffCode: CODE, windowId: 71, nodeId: 'node-ada', runId: 'run-ada', task: 'job-scoring', promptChars: 42, codeEnforced: true });
+const CLAIM = '22222222-2222-4222-8222-222222222222';
+const entry = Object.freeze({ requestId: 'request-ada', bridgeClaimId: CLAIM, handoffCode: CODE, windowId: 71, nodeId: 'node-ada', runId: 'run-ada', task: 'job-scoring', promptChars: 42, codeEnforced: true });
 const testHubKey = (canvasFilePath, nodeId) => createHash('sha256').update(canvasFilePath).update('\n').update(nodeId).digest('hex');
 const codeGuard = createHandoffCodeGuard();
 const createPushSource = (options = {}) => createPushSourcePort({ hubKey: testHubKey, codeGuard, ...options });
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
 
-function makeSource({ entries = [entry], read = null, submit = null, active = () => [], now = () => 1000 } = {}) {
+function makeSource({ entries = [entry], read = null, submit = null, active = () => [], now = () => 1000, autoSelectHubs = false } = {}) {
   const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }], [72, { __canvasFilePath: '/tmp/other.canvas' }]]);
   const seam = {
     list: async () => ({ handoffs: entries, excluded: {}, pending: entries.length }),
-    read: async item => read ? read(item) : ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic Ada scoring prompt', isCorrection: false, correction: '', attempt: 1, validationCode: null, validationDiagnostic: null }),
+    read: async item => read ? read(item) : ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, responseFormat: item.responseFormat, prompt: 'Synthetic Ada scoring prompt', isCorrection: false, correction: '', attempt: 1, validationCode: null, validationDiagnostic: null }),
     submit: async item => submit ? submit(item) : ({ outcome: 'accepted', accepted: true }),
   };
-  const source = createPushSource({ seam, windows, hubKey: testHubKey, activeNodeTasks: active, now, timers: { setTimeout(fn) { fn(); return { unref() {} }; } } });
+  const source = createPushSource({ seam, windows, hubKey: testHubKey, activeNodeTasks: active, now, autoSelectHubs, timers: { setTimeout(fn) { fn(); return { unref() {} }; } } });
   assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'synthetic hub must select');
   return { source, windows };
 }
@@ -49,6 +57,481 @@ async function makeEngine({ pushGet, pushSubmit, appRead, submitBudgetMs = 25_00
 }
 
 export default [
+  { name: 'handoff bridge: push end to end: one chat automatically drains eleven role-screen batches through get and submit', run: async () => {
+    const codeSuffixes = '23456789ABH';
+    const pending = Array.from({ length: 11 }, (_unused, index) => ({
+      ...entry,
+      requestId: `role-screen-${index + 1}`,
+      bridgeClaimId: `${(0x30000000 + index).toString(16)}-3333-4333-8333-333333333333`,
+      handoffCode: `HANDOFF-AAAAA${codeSuffixes[index]}`,
+      task: 'job-role-screen-batch',
+      responseFormat: 'json',
+      batch: index + 1,
+      batchTotal: 11,
+      promptChars: 80,
+    }));
+    let accepted = 0;
+    const push = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: [...pending], excluded: {}, pending: pending.length }),
+        read: async item => {
+          const candidate = pending.find(value => value.requestId === item.requestId);
+          return candidate
+            ? { ok: true, requestId: candidate.requestId, handoffCode: candidate.handoffCode, task: candidate.task, responseFormat: 'json', prompt: `Role-screen batch ${candidate.batch} of 11`, isCorrection: false, correction: '', attempt: 1 }
+            : { ok: false, code: 'NOT_PENDING' };
+        },
+        submit: async item => {
+          const index = pending.findIndex(candidate => candidate.requestId === item.requestId);
+          if (index < 0) return { outcome: 'not_pending' };
+          pending.splice(index, 1);
+          accepted += 1;
+          return { outcome: 'accepted', accepted: true };
+        },
+      },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]),
+      hubKey: testHubKey,
+      activeNodeTasks: () => [],
+      autoSelectHubs: true,
+      graceMs: 0,
+      pollMs: 0,
+    });
+    const application = {
+      read: async () => ({ kind: 'gone' }),
+      status: async () => ({ kind: 'gone' }),
+      submit: async () => ({ kind: 'gone' }),
+    };
+    const engine = createHandoffEngine({
+      sources: { application, push },
+      scope: { applications: false, scoring: true, marketplace: false },
+      random: () => Buffer.alloc(26, 7),
+      holdMs: 0,
+      submitBudgetMs: 1_000,
+    });
+    assert(await engine.refreshPushHubs(), 'the production-style auto-selection refresh must discover the role-screen hub');
+    const before = engine.snapshot();
+    assert(before.chat.state === 'none' && before.queue.push.available.length === 11 && before.queue.push.claimed.length === 0,
+      'without a ChatGPT client call all eleven routes are selected and available, but none is claimed');
+
+    const chat = await engine.newChat({ linkId: LINK });
+    assert(chat.copied === true, 'one starter creates the bridge chat session');
+    let handoff = await engine.get({ session: chat.sessionCode, linkId: LINK });
+    for (let index = 0; index < 11; index += 1) {
+      assert(handoff.status === 'served' && handoff.kind === 'push' && handoff.task === 'job-role-screen-batch'
+        && handoff.batch === index + 1 && handoff.batchTotal === 11 && handoff.responseFormat === 'json',
+      `automatic get must issue role batch ${index + 1} in order (${JSON.stringify(handoff)})`);
+      const submitted = await engine.submit({
+        session: chat.sessionCode,
+        linkId: LINK,
+        handoffCode: handoff.handoffCode,
+        response: JSON.stringify({ handoffCode: handoff.handoffCode, decisions: [] }),
+      });
+      assert(submitted.status === 'accepted', `automatic submit must accept role batch ${index + 1}`);
+      handoff = submitted.next || (index < 10 ? await engine.get({ session: chat.sessionCode, linkId: LINK }) : null);
+    }
+    const after = engine.snapshot();
+    assert(accepted === 11 && pending.length === 0 && after.queue.push.claimed.length === 0 && after.queue.push.available.length === 0,
+      'the same active chat returns all eleven answers through submit_handoff and leaves no manual paste route behind');
+    await engine.close();
+  } },
+  { name: 'handoff bridge: push: selected availability is exact, is consumed by a claim, and clears on unselect', run: async () => {
+    const { source } = makeSource();
+    await source.refreshHubs();
+    assert(JSON.stringify(source.status().available) === JSON.stringify([CLAIM]) && source.status().claimed.length === 0,
+      'a selected eligible handoff exposes only its opaque available claim id before ChatGPT polls');
+    const served = await source.get();
+    assert(served.status === 'served' && source.status().available.length === 0 && JSON.stringify(source.status().claimed) === JSON.stringify([CLAIM]),
+      'serving consumes the available id and promotes only that same id to claimed');
+    assert(source.unselectHubKey(testHubKey('/tmp/ada.canvas', 'node-ada')),
+      'the selected synthetic hub can be explicitly unselected');
+    assert(source.status().available.length === 0 && source.status().claimed.length === 0,
+      'unselect clears both an available/claimed route instead of leaving stale ownership in the dock');
+  } },
+  { name: 'handoff bridge: push: a claimed handoff reports its owning worker only through the bounded claim-worker map', run: async () => {
+    const { source } = makeSource();
+    await source.refreshHubs();
+    const served = await source.get({ epoch: 'answer-silent-owner', worker: 'worker-3' });
+    const status = source.status('answer-silent-owner');
+    assert(served.status === 'served'
+      && JSON.stringify(status.claimWorkers) === JSON.stringify([{ claimId: CLAIM, workerOrdinal: 3 }]),
+    'the active claim has a stable worker ordinal for per-worker silence tracking without exposing a session or prompt');
+    assert(!JSON.stringify(status.claimWorkers).includes('request-ada')
+      && !JSON.stringify(status.claimWorkers).includes('/tmp/ada.canvas'),
+    'claim-worker status never exposes seam request identifiers or canvas paths');
+  } },
+  { name: 'handoff bridge: push: a bounded queued-work forecast de-duplicates an active preference-research wave without disclosing its scope', run: async () => {
+    const scopeId = 'a9e61d1f-2c80-4f12-93ef-260c77e0b821';
+    const entries = Array.from({ length: 5 }, (_unused, index) => ({
+      ...entry,
+      requestId: `preference-forecast-${index + 1}`,
+      bridgeClaimId: `11111111-1111-4111-8111-${String(index + 1).padStart(12, '0')}`,
+      handoffCode: `HANDOFF-AAAAA${index + 2}`,
+      task: 'job-preference-research-batch',
+      queuedWorkForecast: { scopeId, remainingUnits: 209 - index },
+    }));
+    entries.push({
+      ...entry,
+      requestId: 'preference-forecast-invalid',
+      bridgeClaimId: '22222222-2222-4222-8222-000000000099',
+      handoffCode: 'HANDOFF-AAAAA7',
+      task: 'job-scoring',
+      // An injected/sensitive-looking scope and runaway count must be ignored
+      // rather than reaching the planning cache or public status.
+      queuedWorkForecast: { scopeId: 'PRIVATE_LISTING_TEXT_MUST_NOT_SURFACE', remainingUnits: 999999 },
+    });
+    const { source } = makeSource({ entries });
+    await source.refreshHubs();
+    const status = source.status();
+    const task = status.discovered[0]?.tasks.find(item => item.task === 'job-preference-research-batch');
+    assert(status.discovered[0]?.pending === 6 && task?.pending === 5 && task?.forecast === 209
+      && !Object.hasOwn(task || {}, 'scopeId')
+      && !JSON.stringify(status).includes(scopeId)
+      && !JSON.stringify(status).includes('PRIVATE_LISTING_TEXT_MUST_NOT_SURFACE'),
+    `five visible batches from a 209-batch research phase must retain the full forecast without leaking a scope (${JSON.stringify(task)})`);
+  } },
+  { name: 'handoff bridge: push: an injected scope allowlist polls and serves only its consented task family', run: async () => {
+    const marketplace = { ...entry, requestId: 'request-market', handoffCode: 'HANDOFF-BCDEFG', task: 'price-synthesis', bridgeClaimId: '33333333-3333-4333-8333-333333333333' };
+    const calls = [];
+    // Both discovery and get calls prove the exact requested set at the seam.
+    const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]);
+    const scoped = createPushSource({
+      seam: {
+        list: async args => { calls.push(args); return { handoffs: [entry, marketplace], excluded: {} }; },
+        read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }),
+        submit: async () => ({ outcome: 'accepted' }),
+      }, windows, hubKey: testHubKey,
+    });
+    scoped.setAllowedTasks(new Set(['job-scoring']));
+    assert(scoped.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'selected hub is still an explicit per-hub consent');
+    await scoped.refreshHubs();
+    const scoring = await scoped.get();
+    assert(scoring.status === 'served' && JSON.stringify(scoped.status().claimed) === JSON.stringify([CLAIM]), 'scoring-only scope claims only the scoring request');
+    assert([...calls[0].allowTasks].join() === 'job-scoring' && [...calls[1].allowTasks].join() === 'job-scoring', `scoring-only scope requests only scoring tasks (${[...calls[0].allowTasks]} / ${[...calls[1].allowTasks]})`);
+    scoped.setAllowedTasks(new Set(['price-synthesis']));
+    assert(scoped.status().claimed.length === 0, 'scope downgrade releases a previously served out-of-scope claim back to the dock');
+    const marketplaceFrame = await scoped.get();
+    assert(marketplaceFrame.status === 'served' && JSON.stringify(scoped.status().claimed) === JSON.stringify([marketplace.bridgeClaimId]) && [...calls.at(-1).allowTasks].join() === 'price-synthesis', 'marketplace-only scope cannot be starved by an out-of-scope scoring sibling');
+  } },
+  { name: 'handoff bridge: push: an old discovery completion cannot overwrite its replacement owner', run: async () => {
+    const oldList = deferred(); const newList = deferred(); let calls = 0;
+    const old = { ...entry, requestId: 'request-old', nodeId: 'node-old' };
+    const fresh = { ...entry, requestId: 'request-fresh', nodeId: 'node-fresh', handoffCode: 'HANDOFF-BCDEFG', task: 'job-query-generation' };
+    const source = createPushSource({
+      seam: { list: async () => (++calls === 1 ? oldList.promise : newList.promise), read: async () => ({ ok: false }), submit: async () => ({ outcome: 'not_pending' }) },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    const ownerA = {}; const ownerB = {};
+    source.setDiscoveryOwner(ownerA);
+    const stale = source.refreshHubs({ owner: ownerA });
+    source.setDiscoveryOwner(ownerB);
+    const current = source.refreshHubs({ owner: ownerB });
+    newList.resolve({ handoffs: [fresh], excluded: {} });
+    assert(await current, 'the replacement owner may publish its own completed discovery');
+    oldList.resolve({ handoffs: [old], excluded: {} });
+    assert(await stale === false && source.status().discovered[0]?.tasks[0]?.task === 'job-query-generation' && source.status().discovered[0]?.pending === 1, 'the old completion is discarded instead of overwriting replacement discovery');
+  } },
+  { name: 'handoff bridge: push: an old selected read cannot claim after its replacement owner refreshes', run: async () => {
+    const oldList = deferred(); const oldRead = deferred(); let beginRead;
+    const readStarted = new Promise(resolve => { beginRead = resolve; });
+    let listCalls = 0;
+    const old = { ...entry, requestId: 'request-old-read' };
+    const fresh = { ...entry, requestId: 'request-fresh-read', handoffCode: 'HANDOFF-BCDEFG', task: 'job-query-generation' };
+    const source = createPushSource({
+      seam: {
+        list: async () => (++listCalls === 1 ? oldList.promise : { handoffs: [fresh], excluded: {} }),
+        read: async () => { beginRead(); return oldRead.promise; },
+        submit: async () => ({ outcome: 'not_pending' }),
+      },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    const ownerA = {}; const ownerB = {};
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    source.setDiscoveryOwner(ownerA);
+    const stale = source.get({ epoch: 'old-engine', owner: ownerA });
+    oldList.resolve({ handoffs: [old], excluded: {} });
+    await readStarted;
+    source.setDiscoveryOwner(ownerB);
+    assert(await source.refreshHubs({ owner: ownerB }), 'the replacement owner refreshes while the old selected read is pending');
+    oldRead.resolve({ ok: true, requestId: old.requestId, handoffCode: old.handoffCode, task: old.task, prompt: 'stale prompt', attempt: 1 });
+    const staleResult = await stale;
+    assert(staleResult.status === 'retry' && source.status('old-engine').claimed.length === 0, 'the late old read cannot serve or claim a handoff in the replacement lifecycle');
+    assert(source.status().discovered[0]?.tasks[0]?.task === 'job-query-generation', 'the late old read cannot overwrite the replacement discovery cache');
+    const before = listCalls;
+    assert((await source.nextAfterAccept({ epoch: 'old-engine', owner: ownerA, budgetMs: 1 })).status === 'retry' && listCalls === before, 'successor polling propagates the same stale-owner fence without starting a new selected read');
+  } },
+  { name: 'handoff bridge: push: an old-scope refresh cannot mutate newer-scope discovery or claims', run: async () => {
+    const oldList = deferred(); let calls = 0;
+    const marketplace = { ...entry, requestId: 'request-market-scope', handoffCode: 'HANDOFF-BCDEFG', task: 'price-synthesis', bridgeClaimId: '33333333-3333-4333-8333-333333333333' };
+    const source = createPushSource({
+      seam: { list: async () => (++calls === 1 ? oldList.promise : { handoffs: [marketplace], excluded: {} }), read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    source.setAllowedTasks(new Set(['job-scoring']));
+    const stale = source.refreshHubs();
+    source.setAllowedTasks(new Set(['price-synthesis']));
+    assert((await source.get({ epoch: 'scope-race' })).status === 'served', 'the new scope serves its own family before the old refresh returns');
+    oldList.resolve({ handoffs: [], excluded: {} });
+    assert(await stale === false && JSON.stringify(source.status('scope-race').claimed) === JSON.stringify([marketplace.bridgeClaimId]),
+      'the old-scope snapshot is discarded rather than erasing a newer-scope claim');
+  } },
+  { name: 'handoff bridge: push: a scope downgrade during prompt read cannot install a stale dock claim', run: async () => {
+    const pendingRead = deferred(); let beginRead;
+    const readStarted = new Promise(resolve => { beginRead = resolve; });
+    const source = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: [entry], excluded: {} }),
+        read: async () => { beginRead(); return pendingRead.promise; },
+        submit: async () => ({ outcome: 'accepted' }),
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    source.setAllowedTasks(new Set(['job-scoring']));
+    const stale = source.get({ epoch: 'scope-read-race' });
+    await readStarted;
+    source.setAllowedTasks(new Set(['price-synthesis']));
+    pendingRead.resolve({ ok: true, requestId: entry.requestId, handoffCode: entry.handoffCode, task: entry.task, prompt: 'stale scoring prompt', attempt: 1 });
+    const result = await stale;
+    const status = source.status('scope-read-race');
+    assert(result.status === 'retry' && status.served === 0 && status.claimed.length === 0,
+      'a late old-scope prompt read must return control to the dock instead of installing a hidden claim');
+  } },
+  { name: 'handoff bridge: push: an older full refresh cannot clear a claim served after it began', run: async () => {
+    const oldList = deferred(); let calls = 0;
+    const source = createPushSource({
+      seam: { list: async () => (++calls === 1 ? oldList.promise : { handoffs: [entry], excluded: {} }), read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    const stale = source.refreshHubs();
+    await source.get({ epoch: 'later-claim' });
+    oldList.resolve({ handoffs: [], excluded: {} });
+    assert(await stale && JSON.stringify(source.status('later-claim').claimed) === JSON.stringify([CLAIM]),
+      'a complete but older empty refresh only reconciles claims it could have observed at its own start');
+  } },
+  { name: 'handoff bridge: push: an older selected poll cannot clear a concurrent newer claim', run: async () => {
+    const oldList = deferred(); let calls = 0;
+    // The first selected list is delayed while a second one serves the same
+    // request in this epoch.
+    const raced = createPushSource({
+      seam: { list: async () => (++calls === 1 ? oldList.promise : { handoffs: [entry], excluded: {} }), read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    raced.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    const oldGet = raced.get({ epoch: 'concurrent-get' });
+    assert((await raced.get({ epoch: 'concurrent-get' })).status === 'served', 'the later selected poll serves its handoff');
+    oldList.resolve({ handoffs: [], excluded: {} });
+    await oldGet;
+    assert(JSON.stringify(raced.status('concurrent-get').claimed) === JSON.stringify([CLAIM]), 'the old empty selected poll cannot erase the later claim');
+  } },
+  { name: 'handoff bridge: push: same-epoch pool workers synchronously reserve distinct prompt reads', run: async () => {
+    const second = { ...entry, requestId: 'request-pool-two', handoffCode: 'HANDOFF-BCDEFG', bridgeClaimId: '33333333-3333-4333-8333-333333333333' };
+    const readGate = deferred();
+    const reads = [];
+    let bothReadsStarted;
+    const readsStarted = new Promise(resolve => { bothReadsStarted = resolve; });
+    const source = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: [entry, second], excluded: {} }),
+        read: async item => {
+          reads.push(item);
+          if (reads.length === 2) bothReadsStarted();
+          await readGate.promise;
+          return { ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: `Prompt for ${item.handoffCode}`, attempt: 1 };
+        },
+        submit: async () => ({ outcome: 'accepted' }),
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    const first = source.get({ epoch: 'pool-race', worker: 'worker-1' });
+    const next = source.get({ epoch: 'pool-race', worker: 'worker-2' });
+    await readsStarted;
+    const beforeResolve = source.status('pool-race');
+    assert(new Set(reads.map(item => item.requestId)).size === 2
+      && beforeResolve.served === 0
+      && beforeResolve.working === 2
+      && beforeResolve.available.length === 0
+      && new Set(beforeResolve.claimed).size === 2,
+    'two concurrent workers reserve two distinct requests before either prompt read resolves, count as working, and both opaque claims remain dock-hidden');
+    readGate.resolve();
+    const [one, two] = await Promise.all([first, next]);
+    assert(one.status === 'served' && two.status === 'served' && one.handoffCode !== two.handoffCode,
+      'each same-epoch worker receives only its own distinct handoff after the reads complete');
+    assert((await source.submit({ epoch: 'pool-race', worker: 'worker-2', handoffCode: one.handoffCode, response: JSON.stringify({ handoffCode: one.handoffCode }) })).status === 'unknown_handoff',
+      'a worker cannot submit the route leased to its sibling worker');
+  } },
+  { name: 'handoff bridge: push: ten concurrent pool workers drain ten distinct live handoffs and wait behind a replayed forecast wave', run: async () => {
+    const suffixes = '23456789AB';
+    const entries = Array.from({ length: 10 }, (_unused, index) => ({
+      ...entry,
+      requestId: `throughput-${index + 1}`,
+      bridgeClaimId: `40000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      handoffCode: `HANDOFF-THRPT${suffixes[index]}`,
+      promptChars: 80 + index,
+    }));
+    const accepted = [];
+    const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]);
+    const source = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: [...entries], excluded: {}, pending: entries.length }),
+        read: async item => ({
+          ok: true,
+          requestId: item.requestId,
+          handoffCode: item.handoffCode,
+          task: item.task,
+          prompt: `Distinct prompt for ${item.requestId}`,
+          attempt: 1,
+        }),
+        submit: async item => {
+          const index = entries.findIndex(candidate => candidate.requestId === item.requestId);
+          if (index < 0) return { outcome: 'not_pending' };
+          accepted.push({ requestId: item.requestId, code: item.handoffCode });
+          entries.splice(index, 1);
+          return { outcome: 'accepted' };
+        },
+      },
+      windows,
+      hubKey: testHubKey,
+      graceMs: 0,
+      pollMs: 0,
+    });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'the throughput hub must be selected');
+
+    const epoch = 'pool-throughput';
+    const workers = Array.from({ length: 10 }, (_unused, index) => `worker-${index + 1}`);
+    const served = await Promise.all(workers.map(worker => source.get({ epoch, worker, keepWaiting: true })));
+    assert(served.every(item => item.status === 'served')
+      && new Set(served.map(item => item.handoffCode)).size === 10
+      && new Set(served.map(item => item.prompt)).size === 10,
+    `ten simultaneous workers must receive ten distinct live leases (${JSON.stringify(served.map(item => item.status))})`);
+
+    const siblingAttempt = await source.submit({
+      epoch,
+      worker: workers[1],
+      handoffCode: served[0].handoffCode,
+      response: JSON.stringify({ handoffCode: served[0].handoffCode }),
+    });
+    assert(siblingAttempt.status === 'unknown_handoff', 'a worker must never submit a sibling worker\'s lease');
+
+    const settlements = await Promise.all(served.map((handoff, index) => source.submit({
+      epoch,
+      worker: workers[index],
+      handoffCode: handoff.handoffCode,
+      response: JSON.stringify({ handoffCode: handoff.handoffCode, worker: workers[index] }),
+    })));
+    assert(settlements.every(item => item.status === 'accepted')
+      && accepted.length === 10
+      && new Set(accepted.map(item => item.requestId)).size === 10
+      && source.status(epoch).claimed.length === 0,
+    'each owner must settle exactly its own lease, without losing or retaining work');
+
+    const replay = {
+      ...entry,
+      requestId: 'throughput-replay',
+      bridgeClaimId: '40000000-0000-4000-8000-000000000011',
+      handoffCode: 'HANDOFF-THRPTC',
+      queuedWorkForecast: { scopeId: 'a9e61d1f-2c80-4f12-93ef-260c77e0b821', remainingUnits: 999 },
+    };
+    entries.push(replay);
+    const replayOwner = await source.get({ epoch, worker: workers[0], keepWaiting: true });
+    const replayAgain = await source.get({ epoch, worker: workers[0], keepWaiting: true });
+    const waiters = await Promise.all(workers.slice(1).map(worker => source.get({ epoch, worker, keepWaiting: true })));
+    assert(replayOwner.status === 'served' && replayAgain.status === 'served'
+      && replayOwner.handoffCode === replay.handoffCode && replayAgain.handoffCode === replay.handoffCode,
+    'the current owner must be able to replay its one live handoff');
+    assert(waiters.every(item => item.status === 'waiting' && item.remaining?.working === 1),
+      `future forecast work must keep sibling workers waiting behind the current replay, never queue-empty (${JSON.stringify(waiters)})`);
+  } },
+  { name: 'handoff bridge: push: an idle pool worker takes one authoritative snapshot and reports the sibling lease as working', run: async () => {
+    let lists = 0;
+    const source = createPushSource({
+      seam: {
+        list: async () => { lists += 1; return { handoffs: [entry], excluded: {} }; },
+        read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }),
+        submit: async () => ({ outcome: 'accepted' }),
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    const served = await source.get({ epoch: 'pool-wait', worker: 'worker-1' });
+    const idle = await source.get({ epoch: 'pool-wait', worker: 'worker-2', keepWaiting: true });
+    const status = source.status('pool-wait');
+    assert(served.status === 'served' && served.remaining.working === 1,
+      'the worker which receives a handoff must see its own active lease as working');
+    assert(idle.status === 'waiting' && idle.retryAfterSeconds === 3 && idle.remaining.working === 1 && lists === 2,
+      'an idle pool worker must return one structured wait after one registry snapshot, not spin three successor polls');
+    assert(status.working === 1 && status.claimed.length === 1,
+      'the synchronous status projection must retain the active served lease as working');
+  } },
+  { name: 'handoff bridge: push: status projects only an exact opaque claim while ChatGPT owns the request', run: async () => {
+    const { source } = makeSource();
+    const frame = await source.get({ epoch: 'claim-test' });
+    const claimed = source.status('claim-test').claimed;
+    assert(JSON.stringify(claimed) === JSON.stringify([CLAIM]), 'a served request exposes its own opaque bridge claim token');
+    assert(!JSON.stringify(source.status('claim-test')).includes(entry.requestId) && !JSON.stringify(source.status('claim-test')).includes(CODE), 'claim status must not disclose request ids or handoff codes');
+    assert(!JSON.stringify(frame).includes(CLAIM), 'the renderer-only claim token never enters the MCP handoff frame');
+    const result = await source.submit({ epoch: 'claim-test', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' });
+    assert(result.status === 'accepted' && source.status('claim-test').claimed.length === 0, 'accepted work immediately releases its claim projection');
+  } },
+  { name: 'handoff bridge: push: claim follows an exact request, not a same-task sibling', run: async () => {
+    const siblingClaim = '33333333-3333-4333-8333-333333333333';
+    const entries = [entry, { ...entry, requestId: 'request-grace', bridgeClaimId: siblingClaim, handoffCode: 'HANDOFF-BCDEFG' }];
+    const { source } = makeSource({ entries });
+    await source.get({ epoch: 'exact-claim' });
+    assert(JSON.stringify(source.status('exact-claim').claimed) === JSON.stringify([CLAIM]), 'only the served request, not every job-scoring handoff, is held');
+    entries.splice(0, 1);
+    await source.get({ epoch: 'exact-claim' });
+    assert(JSON.stringify(source.status('exact-claim').claimed) === JSON.stringify([siblingClaim]), 'a no-longer-pending request gives its dock controls back while a sibling gets its own claim');
+    source.closeEpoch('exact-claim');
+    assert(source.status('exact-claim').claimed.length === 0, 'chat rotation clears the renderer claim instead of leaving the dock suppressed');
+  } },
+  { name: 'handoff bridge: push: stale canvas paths release the served claim', run: async () => {
+    const { source, windows } = makeSource();
+    await source.get({ epoch: 'save-as-claim' });
+    windows.get(71).__canvasFilePath = '/tmp/after-save-as.canvas';
+    const status = source.status('save-as-claim');
+    assert(status.claimed.length === 0 && status.served === 0,
+      'Save As prunes the now-unservable hub and returns this exact handoff to normal paste controls');
+  } },
+  { name: 'handoff bridge: push: a full registry refresh releases a settled served claim', run: async () => {
+    const entries = [entry];
+    const { source } = makeSource({ entries });
+    await source.get({ epoch: 'registry-settle' });
+    assert(source.status('registry-settle').claimed.length === 1, 'the served request initially owns its exact bridge claim');
+    entries.splice(0, 1);
+    assert(await source.refreshHubs(), 'the registry wake refresh completes from its complete eligible snapshot');
+    const status = source.status('registry-settle');
+    assert(status.served === 0 && status.claimed.length === 0 && status.discovered.length === 0,
+      'a settled or cancelled record is handed back immediately without waiting for another MCP get or epoch close');
+  } },
+  { name: 'handoff bridge: push: a settling registry refresh retains a bridge route for a validation correction', run: async () => {
+    let settling = false; const verdict = deferred(); let submissions = 0;
+    const source = createPushSource({
+      seam: {
+        list: async () => settling
+          ? { handoffs: [], excluded: { settling: 1 }, settlingRequestIds: [entry.requestId] }
+          : { handoffs: [entry], excluded: {}, settlingRequestIds: [] },
+        read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }),
+        submit: async () => { submissions += 1; settling = true; return submissions === 1 ? verdict.promise : { outcome: 'accepted' }; },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    await source.get({ epoch: 'validation-race' });
+    const rejected = source.submit({ epoch: 'validation-race', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","first":true}' });
+    await Promise.resolve();
+    assert(await source.refreshHubs() && source.status('validation-race').claimed.length === 1,
+      'a wake during the bridge submit recognizes the exact settling record as live rather than dropping its route');
+    settling = false;
+    verdict.resolve({ outcome: 'rejected', correction: 'Fix the response.', isCorrection: true });
+    assert((await rejected).status === 'rejected', 'the first response remains a normal validation rejection');
+    assert((await source.submit({ epoch: 'validation-race', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","corrected":true}' })).status === 'accepted' && submissions === 2,
+      'the retained code route accepts the correction after the refresh race');
+  } },
+  { name: 'handoff bridge: push: cancelled settling work still releases its bridge claim', run: async () => {
+    const { source } = makeSource({ submit: async () => ({ outcome: 'cancelled_during_save' }) });
+    await source.get({ epoch: 'cancelled-cleanup' });
+    const outcome = await source.submit({ epoch: 'cancelled-cleanup', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' });
+    assert(outcome.status === 'superseded' && source.status('cancelled-cleanup').claimed.length === 0,
+      'a terminal cancellation releases the exact claim rather than treating it as transient settling');
+  } },
   { name: 'handoff bridge: push: opaque hub keys are path-sensitive and never contain a path or node id', run: () => {
     const one = testHubKey('/tmp/ada.canvas', 'node-ada');
     const copiedCanvas = testHubKey('/tmp/copied.canvas', 'node-ada');
@@ -81,15 +564,89 @@ export default [
     assert(await source.refreshHubs(), 'main-owned discovery must refresh asynchronously');
     const before = source.status();
     assert(before.selectedHubs.length === 0 && before.discovered.length === 2 && !JSON.stringify(before).includes('/tmp') && !JSON.stringify(before).includes('node-ada'), 'sync status must expose only safe cached rows');
+    assert(before.diagnostics.refreshAttempts === 1 && before.diagnostics.refreshFailures === 0
+      && before.diagnostics.lastRefreshOk === true && before.diagnostics.exclusionScope === 'all'
+      && before.diagnostics.exclusions.attachment === 2,
+    'all-hub discovery retains only bounded outcome and exclusion evidence for diagnostics');
     const key = before.discovered.find(hub => hub.key === testHubKey('/tmp/ada.canvas', 'node-ada')).key;
     assert(source.selectHubKey(key), 'known discovered key must select its exact main-owned triple');
     await source.get();
     const afterSelectedGet = source.status();
     assert(afterSelectedGet.discovered.length === 2 && !JSON.stringify(afterSelectedGet).match(/\/tmp|node-ada|request-other/), 'a selection-filtered poll must merge rather than erase other safe discovery rows');
+    assert(afterSelectedGet.diagnostics.selectedPolls === 1 && afterSelectedGet.diagnostics.selectedPollFailures === 0
+      && afterSelectedGet.diagnostics.lastSelectedPollOk === true && afterSelectedGet.diagnostics.exclusionScope === 'selected',
+    'selected MCP polling records refresh evidence without retaining a request or hub identity');
     assert(!source.selectHubKey('f'.repeat(64)), 'forged hub key must fail closed');
     assert(calls[0].allowNodeIds === null, 'discovery must not depend on a renderer-provided node id');
     windows.get(71).__canvasFilePath = '/tmp/after-save-as.canvas';
     assert(!source.unselectHubKey(key) && source.status().selectedHubs.length === 0, 'Save As must prune selection before any later key action');
+  } },
+  { name: 'handoff bridge: push: an explicit hub opt-out survives later discovery refreshes until checked again', run: async () => {
+    const { source } = makeSource({ autoSelectHubs: true });
+    await source.refreshHubs();
+    const key = testHubKey('/tmp/ada.canvas', 'node-ada');
+    assert(source.status().selectedHubs.includes(key), 'discovery selects a new eligible hub by default');
+    assert(source.unselectHubKey(key), 'a selected hub can be explicitly unchecked');
+    await source.refreshHubs();
+    assert(!source.status().selectedHubs.includes(key), 'a later refresh must preserve the explicit opt-out');
+    assert(source.selectHubKey(key), 'checking the hub again restores it');
+    await source.refreshHubs();
+    assert(source.status().selectedHubs.includes(key) && JSON.stringify(source.status().available) === JSON.stringify([CLAIM]),
+      'a renewed selection gets the exact selected availability on refresh without an MCP get or another registry event');
+  } },
+  { name: 'handoff bridge: push: a stale selected poll cannot restore availability after a newer full registry refresh', run: async () => {
+    const selectedList = deferred(); let selectedCalls = 0; let reads = 0; let fullCalls = 0;
+    const source = createPushSource({
+      seam: {
+        list: async args => {
+          if (args.allowNodeIds === null) return fullCalls++ === 0 ? { handoffs: [entry], excluded: {} } : { handoffs: [], excluded: {} };
+          selectedCalls += 1;
+          return selectedCalls === 1 ? selectedList.promise : { handoffs: [], excluded: {} };
+        },
+        read: async () => { reads += 1; return { ok: true }; },
+        submit: async () => ({ outcome: 'accepted' }),
+      },
+      windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey,
+    });
+    assert(source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'fixture selects the scoped hub');
+    await source.refreshHubs();
+    assert(JSON.stringify(source.status().available) === JSON.stringify([CLAIM]), 'the initial full registry snapshot establishes selected availability');
+    const pending = source.get();
+    await Promise.resolve();
+    assert(selectedCalls === 1, 'the old selected poll is in flight');
+    await source.refreshHubs();
+    assert(source.status().available.length === 0, 'the newer full snapshot clears the settled/manual availability before the old poll returns');
+    selectedList.resolve({ handoffs: [entry], excluded: {} });
+    const result = await pending;
+    assert(result.status === 'queue_empty' && reads === 0 && source.status().available.length === 0 && source.status().claimed.length === 0,
+      'the stale selected result is discarded and cannot revive availability or claim a settled/manual handoff');
+  } },
+  { name: 'handoff bridge: push: an explicit unselect survives an empty discovery gap and returns a live claim to the dock', run: async () => {
+    const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]);
+    const rows = [entry]; let reads = 0;
+    const source = createPushSource({
+      seam: {
+        list: async () => ({ handoffs: rows, excluded: {} }),
+        read: async item => { reads += 1; return { ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }; },
+        submit: async () => ({ outcome: 'accepted' }),
+      }, windows, hubKey: testHubKey, autoSelectHubs: true,
+    });
+    const key = testHubKey('/tmp/ada.canvas', 'node-ada');
+    await source.refreshHubs();
+    assert((await source.get({ epoch: 'empty-gap' })).status === 'served' && source.status('empty-gap').claimed.length === 1,
+      'the initially discovered hub auto-selects and its exact request can be claimed');
+    rows.splice(0, rows.length);
+    await source.refreshHubs();
+    assert(source.status('empty-gap').claimed.length === 0 && source.status().selectedHubs.includes(key),
+      'the full empty inventory returns the claim to copy/paste while retaining a selectable hub record');
+    assert(source.unselectHubKey(key) && source.status().optedOutHubs === 1,
+      'unselecting that retained hub records the source-lifetime opt-out even though discovery is currently empty');
+    rows.push(entry);
+    await source.refreshHubs();
+    const fallback = await source.get({ epoch: 'empty-gap' });
+    assert(!source.status().selectedHubs.includes(key) && source.status().optedOutHubs === 1
+      && source.status('empty-gap').claimed.length === 0 && fallback.status === 'needs_user' && reads === 1,
+    'a reappearing handoff remains dock-owned; auto-select cannot restore the explicit unselect or read it for MCP');
   } },
   { name: 'handoff bridge: push: selected polling replaces observed counts without erasing cached peers', run: async () => {
     const windows = new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }], [72, { __canvasFilePath: '/tmp/other.canvas' }]]);
@@ -107,6 +664,7 @@ export default [
     await source.refreshHubs();
     const firstKey = testHubKey('/tmp/ada.canvas', 'node-ada');
     const otherKey = testHubKey('/tmp/other.canvas', 'node-other');
+    source.unselectHubKey(otherKey);
     assert(source.selectHubKey(firstKey), 'a refreshed opaque hub must be selectable');
     await source.get(); await source.get();
     let rows = new Map(source.status().discovered.map(item => [item.key, item]));
@@ -116,14 +674,17 @@ export default [
     rows = new Map(source.status().discovered.map(item => [item.key, item]));
     assert(rows.get(firstKey).pending === 1 && rows.get(otherKey).pending === 1, 'an observed hub must replace N with M while an unselected cached peer survives');
   } },
-  { name: 'handoff bridge: push: policy covers every LLM task and only scoring is release-one', run: () => { const known = getKnownTaskIds(); assert(Object.keys(PUSH_TASK_POLICY).length === known.size, 'policy must contain each known task'); assert(assertPushTaskPolicy(known), 'policy must verify exact known set'); for (const task of known) assert(Object.hasOwn(PUSH_TASK_POLICY, task), `missing ${task}`); const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
+  { name: 'handoff bridge: push: policy covers every LLM task and every reviewed text task is release-one', run: () => { const known = getKnownTaskIds(); assert(Object.keys(PUSH_TASK_POLICY).length === known.size, 'policy must contain each known task'); assert(assertPushTaskPolicy(known), 'policy must verify exact known set'); for (const task of known) assert(Object.hasOwn(PUSH_TASK_POLICY, task), `missing ${task}`); const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
     // The whole job pipeline rides the bridge; what stays behind is what
     // structurally cannot cross, not what merely has not been reviewed.
     for (const task of ['job-scoring', 'job-query-generation', 'job-taxonomy-plan', 'job-role-screen', 'job-preference-evaluation', 'job-compensation-assessment', 'resume-parse', 'job-compensation-research', 'job-preference-research']) {
-      assert(releaseOne.has(task), `${task} sends text and receives a schema, so it must ride the bridge`);
+      assert(releaseOne.has(task), `${task} has a reviewed text response contract, so it must ride the bridge`);
     }
-    // Photos (callLLMVision), the file->text step itself (callLLMDocument) and
-    // grounded research (which needs the browsing the tool framing forbids).
+    for (const task of BRIDGE_RAW_RESEARCH_TASKS) {
+      assert(releaseOne.has(task), `${task} must match the seam's reviewed raw-research exception`);
+    }
+    // Photos (callLLMVision) and the file->text step itself (callLLMDocument)
+    // need attachment bytes that the MCP text surface cannot carry.
     for (const task of ['vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch', 'career-file-extract']) {
       assert(!PUSH_TASK_POLICY[task].bridgeable && PUSH_TASK_POLICY[task].mode === 'never', `${task} cannot cross an MCP text tool`);
     }
@@ -153,6 +714,30 @@ export default [
     for (const task of bridgeable) assert(declared.has(task), `controller TASK_IDS omits bridgeable task ${task}, so its name cannot reach the renderer`);
     for (const task of declared) assert(PUSH_TASK_POLICY[task]?.mode === 'release_one', `controller TASK_IDS names ${task}, which the bridge never serves`);
   } },
+  { name: 'handoff bridge: push: engine and report telemetry vocabularies exactly cover the isolated release-one policy', run: () => {
+    // These modules deliberately do not import sources/push.js: engine accepts
+    // a generic push-shaped port and telemetry must remain a standalone
+    // privacy reducer. Their duplicated closed sets are therefore a drift risk
+    // that this regression makes explicit.
+    const releaseOne = new Set(Object.entries(PUSH_TASK_POLICY).filter(([, row]) => row.mode === 'release_one').map(([task]) => task));
+    const vocabulary = (relativePath, declaration) => {
+      const source = fs.readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+      assert(!/from\s+['"][^'"]*sources\/push\.js/.test(source), `${relativePath} must stay isolated from the concrete push source`);
+      const start = source.indexOf(`const ${declaration} = new Set([`);
+      const end = source.indexOf(']);', start);
+      assert(start >= 0 && end > start, `${relativePath} must declare ${declaration} as a closed vocabulary`);
+      return new Set([...source.slice(start, end).matchAll(/'([a-z0-9-]+)'/g)].map(match => match[1]));
+    };
+    for (const [target, declaration] of [
+      ['../../electron/ipc/handoffBridge/engine.js', 'STATUS_PUSH_TASKS'],
+      ['../../electron/ipc/handoffBridge/telemetry.js', 'QUEUE_PUSH_TASKS'],
+    ]) {
+      const declared = vocabulary(target, declaration);
+      assert(declared.size === releaseOne.size, `${declaration} has ${declared.size} rows but release_one has ${releaseOne.size}`);
+      for (const task of releaseOne) assert(declared.has(task), `${declaration} omits release_one task ${task}`);
+      for (const task of declared) assert(releaseOne.has(task), `${declaration} exposes non-release_one task ${task}`);
+    }
+  } },
   { name: 'handoff bridge: push: normalizes ASCII and curly wrapped valid codes only', run: () => { assert(normalizePushHandoffCode(' `handoff-abcdef` ') === CODE && normalizePushHandoffCode('\u201c`handoff-abcdef`\u201d') === CODE, 'ASCII and curly wrappers canonicalize'); assert(normalizePushHandoffCode('wrong') === 'wrong', 'invalid code stays exact'); } },
   { name: 'handoff bridge: push: digest routing accepts lower-case curly wrappers but rejects a same-prefix code', run: async () => { const lower = makeSource().source; await lower.get(); assert((await lower.submit({ handoffCode: '\u201c`handoff-abcdef`\u201d', response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'accepted', 'push code canonicalization remains case-insensitive with curly wrappers'); const prefix = makeSource().source; await prefix.get(); assert((await prefix.submit({ handoffCode: 'HANDOFF-ABCDEG', response: '{"handoffCode":"HANDOFF-ABCDEG"}' })).status === 'unknown_handoff', 'a matching prefix cannot select a served route'); } },
   { name: 'handoff bridge: push: policy is deeply frozen and drift refuses an unknown task', run: () => { assert(Object.isFrozen(PUSH_TASK_POLICY) && Object.isFrozen(PUSH_TASK_POLICY['job-scoring']), 'policy must not be mutable at runtime'); let rejected = false; try { assertPushTaskPolicy(new Set([...getKnownTaskIds(), 'future-task'])); } catch { rejected = true; } assert(rejected, 'new LLM work must default deny'); } },
@@ -166,27 +751,53 @@ export default [
   { name: 'handoff bridge: push: exact selected window-path-node triple gates serving', run: async () => { const { source } = makeSource(); assert((await source.get()).status === 'served', 'exact hub should serve'); source.clearHubs(); assert((await source.get()).status === 'needs_user', 'no hub must fail closed'); } },
   { name: 'handoff bridge: push: forged selection path is refused before it reaches the seam', run: () => { const { source } = makeSource(); assert(!source.selectHub({ windowId: 71, canvasFilePath: '/tmp/forged.canvas', nodeId: 'node-ada' }), 'renderer path cannot select a hub'); } },
   { name: 'handoff bridge: push: same node id in another window is never served', run: async () => { const other = { ...entry, requestId: 'request-other', windowId: 72 }; const { source } = makeSource({ entries: [other] }); assert((await source.get()).status === 'needs_user', 'window identity must participate'); } },
+  { name: 'handoff bridge: push: same-node windows receive exact selection consent through list read and submit', run: async () => {
+    const other = { ...entry, requestId: 'request-other-window', windowId: 72, handoffCode: 'HANDOFF-BCDEFG', bridgeClaimId: '33333333-3333-4333-8333-333333333333' };
+    const calls = { list: [], read: [], submit: [] };
+    const source = createPushSource({
+      seam: {
+        list: async args => { calls.list.push(args); return { handoffs: [other, entry], excluded: {} }; },
+        read: async args => { calls.read.push(args); return { ok: true, requestId: args.requestId, handoffCode: args.handoffCode, task: 'job-scoring', prompt: 'Synthetic prompt', attempt: 1 }; },
+        submit: async args => { calls.submit.push(args); return { outcome: 'accepted' }; },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }], [72, { __canvasFilePath: '/tmp/other.canvas' }]]), hubKey: testHubKey,
+    });
+    source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+    assert((await source.get({ epoch: 'window-collision' })).handoffCode === CODE, 'only the selected window can serve its same-node handoff');
+    const firstPair = `${71}\u0000node-ada`;
+    assert(calls.list[0].allowWindowNodePairs.size === 1 && calls.list[0].allowWindowNodePairs.has(firstPair)
+      && calls.read[0].allowWindowNodePairs.has(firstPair), 'list and read carry only the selected exact window/node authorization');
+    const raced = source.submit({ epoch: 'window-collision', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' });
+    source.clearHubs();
+    assert((await raced).status === 'held' && calls.submit.length === 0, 'deselection between submit scheduling and seam entry cannot borrow the old hub consent');
+    source.selectHub({ windowId: 72, canvasFilePath: '/tmp/other.canvas', nodeId: 'node-ada' });
+    assert((await source.submit({ epoch: 'window-collision', handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'unknown_handoff', 'reselecting a same-id node in another window cannot revive the old route');
+    assert((await source.get({ epoch: 'window-collision' })).handoffCode === other.handoffCode, 'the newly selected window receives only its own request');
+    assert((await source.submit({ epoch: 'window-collision', handoffCode: other.handoffCode, response: '{"handoffCode":"HANDOFF-BCDEFG"}' })).status === 'accepted'
+      && calls.submit.length === 1 && calls.submit[0].allowWindowNodePairs.has(`${72}\u0000node-ada`), 'submit rechecks and atomically forwards only the replacement window consent');
+  } },
   { name: 'handoff bridge: push: Save As drops a selected hub', run: async () => { const { source, windows } = makeSource(); windows.get(71).__canvasFilePath = '/tmp/changed.canvas'; assert((await source.get()).status === 'needs_user', 'path change must deselect'); assert(source.selectedHubs().size === 0, 'stale hub must be removed'); } },
   { name: 'handoff bridge: push: clearing a destroyed window leaves another selected hub alone', run: () => { const { source, windows } = makeSource(); windows.set(72, { __canvasFilePath: '/tmp/other.canvas' }); assert(source.selectHub({ windowId: 72, canvasFilePath: '/tmp/other.canvas', nodeId: 'node-other' }), 'other hub selected'); source.clearHubs({ windowId: 71 }); assert(!source.selectedHubs().has('node-ada') && source.selectedHubs().has('node-other'), 'cleanup must be window-scoped'); } },
   { name: 'handoff bridge: push: submit uses served request id and tombstones acceptance', run: async () => { const { source } = makeSource(); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'accepted', 'served code commits'); assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'duplicate', 'accepted code is tombstoned'); } },
   { name: 'handoff bridge: push: unknown code and a stale seam record are fixed outcomes', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'not_pending' }) }); assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'unknown_handoff', 'unserved code cannot route live state'); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'superseded', 'cancelled seam record must not be retried'); } },
-  { name: 'handoff bridge: push: submit rechecks a deselected hub without seam access', run: async () => { let calls = 0; const { source } = makeSource({ submit: async () => { calls += 1; return { outcome: 'accepted' }; } }); await source.get(); source.clearHubs(); const value = await source.submit({ handoffCode: CODE, response: '{}' }); assert(value.status === 'held' && value.reason === 'hub_not_selected' && calls === 0, 'selection must be current at submit'); } },
+  { name: 'handoff bridge: push: deselection releases a claim without seam access', run: async () => { let calls = 0; const { source } = makeSource({ submit: async () => { calls += 1; return { outcome: 'accepted' }; } }); await source.get(); source.clearHubs(); const value = await source.submit({ handoffCode: CODE, response: '{}' }); assert(value.status === 'unknown_handoff' && calls === 0 && source.status().claimed.length === 0, 'deselection must return this request to the dock before a submit can reach the seam'); } },
   { name: 'handoff bridge: push: prechecks reject junk, stamps and oversized values without seam', run: async () => { let calls = 0; const { source } = makeSource({ submit: async () => { calls += 1; return { outcome: 'accepted' }; } }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{}' })).status === 'junk', 'empty object is junk'); assert((await source.submit({ handoffCode: CODE, response: 'HANDOFF-BCDEFG' })).status === 'misrouted', 'other stamp is misrouted'); assert((await source.submit({ handoffCode: CODE, response: 'x'.repeat(1_000_001) })).status === 'too_large', 'size is bytes capped'); assert(calls === 0, 'prechecks must not use seam'); } },
   { name: 'handoff bridge: push: legacy non-enforced empty object reaches the seam', run: async () => { let received; const legacy = { ...entry, codeEnforced: false }; const { source } = makeSource({ entries: [legacy], submit: async args => { received = args.response; return { outcome: 'accepted' }; } }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: {} })).status === 'accepted' && received === '{}', 'legacy mode permits JSON object response'); } },
   { name: 'handoff bridge: push: busy maps to a safe retry and status exposes no identifiers', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'busy' }) }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' })).status === 'retry', 'busy must not hold or accept'); const snapshot = JSON.stringify(source.status()); assert(!snapshot.includes('request-ada') && !snapshot.includes('/tmp'), 'source status is metadata-only'); } },
   { name: 'handoff bridge: push: identical retries share and replay a verdict', run: async () => { let calls = 0; let resolve; const pending = new Promise(done => { resolve = done; }); const { source } = makeSource({ submit: async () => { calls += 1; return pending; } }); await source.get(); const a = source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); const b = source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); resolve({ outcome: 'rejected', correction: 'Fix synthetic score.', attempt: 2, validationCode: 'schema' }); const [left, right] = await Promise.all([a, b]); assert(calls === 1 && left.status === 'rejected' && right.status === 'rejected', 'one seam call per response'); } },
   { name: 'handoff bridge: push: quality rejections remain retryable until acceptance', run: async () => { let attempts = 0; const { source } = makeSource({ submit: async () => (++attempts <= 4 ? { outcome: 'rejected', correction: 'Fix synthetic score.', attempt: attempts } : { outcome: 'accepted' }) }); await source.get(); for (let index = 0; index < 4; index += 1) { const rejection = await source.submit({ handoffCode: CODE, response: `{"handoffCode":"${CODE}","n":${index}}` }); assert(rejection.status === 'rejected' && rejection.attempt === index + 1, 'quality feedback remains retryable beyond the former cap'); } assert((await source.submit({ handoffCode: CODE, response: `{"handoffCode":"${CODE}","n":4}` })).status === 'accepted', 'a later corrected response must be accepted'); } },
-  { name: 'handoff bridge: push: commit failure needs attention after the second attempt', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'commit_failed', error: '/private/path' }) }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","x":1}' })).status === 'retry', 'first failure retries'); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","x":2}' })).status === 'needs_user', 'second failure holds'); } },
-  { name: 'handoff bridge: push: person editing remains held', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'ineligible', exclusion: 'person_editing' }) }); await source.get(); const value = await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); assert(value.status === 'held' && value.reason === 'person_editing', 'draft lease must win'); } },
+  { name: 'handoff bridge: push: commit failure needs attention after the second attempt', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'commit_failed', error: '/private/path' }) }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","x":1}' })).status === 'retry', 'first failure retries'); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","x":2}' })).status === 'needs_user' && source.status().claimed.length === 0, 'second failure holds and returns copy/paste ownership to the dock'); } },
+  { name: 'handoff bridge: push: person editing remains held', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'ineligible', exclusion: 'person_editing' }) }); await source.get(); const value = await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); assert(value.status === 'held' && value.reason === 'person_editing' && source.status().claimed.length === 0, 'draft lease must win and restore this request’s paste controls'); } },
   { name: 'handoff bridge: push: disabled seam task remains held with a fixed policy reason', run: async () => { const { source } = makeSource({ submit: async () => ({ outcome: 'ineligible', exclusion: 'task_not_allowed' }) }); await source.get(); const value = await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); assert(value.status === 'held' && value.reason === 'task_disabled', 'policy change must stop the served handoff'); } },
   { name: 'handoff bridge: push: a list fault leaves a later get usable', run: async () => { let lists = 0; const { source } = makeSource(); const original = source.get; assert(typeof original === 'function', 'adapter should expose get'); const faulty = createPushSource({ seam: { list: async () => { lists += 1; if (lists === 1) throw new Error('private'); return { handoffs: [entry], excluded: {} }; }, read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Synthetic prompt', attempt: 1 }), submit: async () => ({ outcome: 'accepted' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); assert(faulty.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }), 'hub selected'); assert((await faulty.get()).status === 'retry' && (await faulty.get()).status === 'served', 'list failure must not poison state'); } },
   { name: 'handoff bridge: push: a submit fault leaves a later unique retry usable', run: async () => { let calls = 0; const { source } = makeSource({ submit: async () => { calls += 1; if (calls === 1) throw new Error('private'); return { outcome: 'accepted' }; } }); await source.get(); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","n":1}' })).status === 'retry', 'throw becomes fixed retry'); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","n":2}' })).status === 'accepted' && calls === 2, 'later response must settle normally'); } },
-  { name: 'handoff bridge: push: a correction first serves full retry text then delta only', run: async () => { const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Original prompt plus correction', isCorrection: true, correction: 'Fix field.', attempt: 2 }) }); const first = await source.get(); const again = await source.get(); assert(first.status === 'served' && first.prompt && first.correction === '' && first.note, 'new epoch correction must retain full prompt'); assert(again.status === 'served' && again.prompt === '' && again.correction === 'Fix field.' && again.correctionOnly, 'same epoch correction must be delta only'); } },
+  { name: 'handoff bridge: push: every owner correction re-get is self-contained and another worker cannot steal it', run: async () => { let submissions = 0; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, prompt: 'Original materialized prompt\n--- CORRECTION REQUIRED ---\nFix field.', isCorrection: true, correction: 'Fix field.', attempt: 2 }), submit: async () => (++submissions === 1 ? { outcome: 'rejected', correction: 'Fix field.', attempt: 2 } : { outcome: 'accepted' }) }); const first = await source.get({ epoch: 'retry-pool', worker: 'worker-1' }); assert(first.status === 'served' && first.prompt.includes('Original materialized prompt') && first.prompt.includes('CORRECTION REQUIRED') && first.correction === '' && first.note, 'first correction delivery must include the full retry prompt'); const rejected = await source.submit({ epoch: 'retry-pool', worker: 'worker-1', handoffCode: CODE, response: `{"handoffCode":"${CODE}","attempt":1}` }); assert(rejected.status === 'rejected', 'the initial invalid answer must remain retryable'); const again = await source.get({ epoch: 'retry-pool', worker: 'worker-1' }); assert(again.status === 'served' && again.prompt.includes('Original materialized prompt') && again.prompt.includes('CORRECTION REQUIRED') && again.correction === '' && !again.correctionOnly, 'same-owner retry must never lose the original prompt or correction context'); const stolen = await source.get({ epoch: 'retry-pool', worker: 'worker-2' }); assert(stolen.status !== 'served', 'a different worker cannot steal the rejected owner\'s handoff'); const accepted = await source.submit({ epoch: 'retry-pool', worker: 'worker-1', handoffCode: CODE, response: `{"handoffCode":"${CODE}","attempt":2}` }); assert(accepted.status === 'accepted' && submissions === 2, 'the owner can submit its corrected complete answer'); } },
+  { name: 'handoff bridge: push engine: rejected re-get keeps the complete prompt, charges it once, and accepts the correction', run: async () => { let submissions = 0; const { source } = makeSource({ read: async item => ({ ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: item.task, responseFormat: 'json', prompt: 'Original engine prompt\n--- CORRECTION REQUIRED ---\nReturn every row.', isCorrection: true, correction: 'Return every row.', attempt: 2 }), submit: async () => (++submissions === 1 ? { outcome: 'rejected', correction: 'Return every row.', attempt: 2 } : { outcome: 'accepted' }) }); const { engine, session } = await makeEngine({ pushSource: source }); const first = await engine.get({ session, linkId: LINK }); const rejected = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: `{"handoffCode":"${CODE}","attempt":1}` }); const retried = await engine.get({ session, linkId: LINK }); assert(first.status === 'served' && rejected.status === 'rejected' && retried.status === 'served' && retried.prompt.includes('Original engine prompt') && retried.prompt.includes('CORRECTION REQUIRED'), 'engine must reframe a rejected handoff with complete recovery context'); assert(engine.snapshot().chat.bytesServed === 42, 'self-contained re-get must not charge the same prompt twice'); const accepted = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: `{"handoffCode":"${CODE}","attempt":2}` }); assert(accepted.status === 'accepted' && submissions === 2, 'corrected retry must settle through the same worker'); } },
   { name: 'handoff bridge: push: a reissued request may reuse a code after an old tombstone', run: async () => { const records = [entry]; const { source } = makeSource({ entries: records, submit: async () => ({ outcome: 'accepted' }) }); await source.get(); await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); records.splice(0, 1, { ...entry, requestId: 'request-reissued' }); assert((await source.get()).status === 'served', 'new record can be served'); assert((await source.submit({ handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","v":2}' })).status === 'accepted', 'old tombstone cannot block a new request id'); } },
-  { name: 'handoff bridge: push: epoch close forgets all served routing state', run: async () => { const { source } = makeSource(); await source.get({ epoch: 'chat-one' }); source.closeEpoch('chat-one'); assert((await source.submit({ epoch: 'chat-one', handoffCode: CODE, response: '{}' })).status === 'unknown_handoff', 'chat rotation must end old route'); } },
+  { name: 'handoff bridge: push: epoch close forgets all served routing state', run: async () => { const { source } = makeSource(); await source.get({ epoch: 'chat-one' }); source.closeEpoch('chat-one'); assert(source.status('chat-one').claimed.length === 0 && (await source.submit({ epoch: 'chat-one', handoffCode: CODE, response: '{}' })).status === 'unknown_handoff', 'chat rotation ends both the old route and its dock-suppressing claim'); } },
   { name: 'handoff bridge: push: read failures retry at most three and retain no item', run: async () => { let reads = 0; const { source } = makeSource({ read: async () => { reads += 1; throw new Error('private'); } }); assert((await source.get()).status === 'waiting' && reads === 3, 'read retries must be bounded'); assert(source.status().served === 0, 'failed read must not retain serving state'); } },
   { name: 'handoff bridge: push: ending-only exclusions do not create a false needs-user card', run: async () => { const { source } = makeSource({ entries: [], read: null }); const empty = createPushSource({ seam: { list: async () => ({ handoffs: [], excluded: { ending: 2 } }), read: async () => ({ ok: false }), submit: async () => ({ outcome: 'not_pending' }) }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), hubKey: testHubKey }); empty.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }); assert((await empty.get()).status === 'queue_empty', 'ending work is not actionable'); assert(source.status().selectedHubs.length === 1, 'unrelated adapter state remains local'); } },
-  { name: 'handoff bridge: push engine: uses push before a fresh application lane and frames exact push fields', run: async () => { const { engine, session } = await makeEngine({ pushGet: async () => ({ status: 'served', handoffCode: CODE, task: 'job-scoring', batch: 2, batchTotal: 3, attempt: 1, prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }) }); const body = await engine.get({ session, linkId: LINK }); assert(body.status === 'served' && body.kind === 'push' && body.task === 'job-scoring' && body.batch === 2 && body.batchTotal === 3 && body.instructions.includes('job-search workflow'), 'push must win at a job boundary with the fixed framing'); assert(!Object.keys(body).some(key => /request|window|node|run|path/i.test(key)), 'push frame must not expose seam identifiers'); } },
+  { name: 'handoff bridge: push engine: uses push before a fresh application lane and frames exact push fields', run: async () => { const { engine, session } = await makeEngine({ pushGet: async () => ({ status: 'served', handoffCode: CODE, task: 'job-scoring', batch: 2, batchTotal: 3, attempt: 1, prompt: 'Synthetic scoring prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }) }); const body = await engine.get({ session, linkId: LINK }); assert(body.status === 'served' && body.kind === 'push' && body.task === 'job-scoring' && body.batch === 2 && body.batchTotal === 3 && body.responseFormat === 'json' && body.instructions.includes('responseFormat json'), 'push must win at a job boundary with the fixed JSON framing'); assert(!Object.keys(body).some(key => /request|window|node|run|path/i.test(key)), 'push frame must not expose seam identifiers'); } },
+  { name: 'handoff bridge: push engine: raw research result framing authoritatively overrides the frozen generic JSON metadata', run: async () => { const { engine, session } = await makeEngine({ pushGet: async () => ({ status: 'served', handoffCode: CODE, task: 'job-compensation-research', responseFormat: 'text', attempt: 1, prompt: `=== ${CODE} ===`, remaining: { ready: 0, working: 0, needsYou: 0 } }) }); const body = await engine.get({ session, linkId: LINK }); const submit = TOOLS_LIST.find(tool => tool.name === 'submit_handoff'); assert(submit?.inputSchema?.properties?.response?.description?.includes('one JSON object'), 'the compatibility test must exercise the intentionally frozen generic metadata'); assert(body.status === 'served' && body.responseFormat === 'text' && body.instructions.includes('override the submit_handoff tool description') && body.instructions.includes('Handoff: immediately followed by a space and the exact handoffCode') && body.instructions.includes('do not add a handoffCode JSON property') && !body.instructions.includes('Handoff: CODE'), 'the served result must unambiguously override generic metadata and describe the exact text header without inviting a literal placeholder'); } },
   { name: 'handoff bridge: push engine: an outstanding application continuation wins over push', run: async () => { let pushReady = false; const { engine, session } = await makeEngine({ pushGet: async () => pushReady ? ({ status: 'served', handoffCode: CODE, task: 'job-scoring', batch: null, batchTotal: null, attempt: 1, prompt: 'score', remaining: { ready: 0, working: 0, needsYou: 0 } }) : ({ status: 'queue_empty', remaining: { ready: 0, working: 0, needsYou: 0 } }) }); const first = await engine.get({ session, linkId: LINK }); pushReady = true; const again = await engine.get({ session, linkId: LINK }); assert(first.kind === 'application' && again.kind === 'application' && again.handoffCode === first.handoffCode, 'an already-served application must never be preempted by push'); } },
   { name: 'handoff bridge: push engine: routes push tombstones before application unknown-code handling', run: async () => { let accepted = false; const { engine, session } = await makeEngine({ pushGet: async () => ({ status: 'served', handoffCode: CODE, task: 'job-scoring', batch: null, batchTotal: null, attempt: 1, prompt: 'score', remaining: { ready: 0, working: 0, needsYou: 0 } }), pushSubmit: async () => accepted ? ({ status: 'duplicate' }) : (accepted = true, { status: 'accepted' }) }); await engine.get({ session, linkId: LINK }); const first = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); const second = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF","retry":2}' }); assert(first.status === 'accepted' && second.status === 'duplicate', 'a push tombstone must win before application unknown-code routing'); } },
   { name: 'handoff bridge: push engine: a timed-out push submit stays single-flight and unattached identifiers never leak', run: async () => { let calls = 0; let settle; const pending = new Promise(resolve => { settle = resolve; }); const { engine, session } = await makeEngine({ submitBudgetMs: 0, pushGet: async () => ({ status: 'served', handoffCode: CODE, task: 'job-scoring', batch: null, batchTotal: null, attempt: 1, prompt: 'score sentinel /private/push', remaining: { ready: 0, working: 0, needsYou: 0 } }), pushSubmit: async () => { calls += 1; return pending; } }); const served = await engine.get({ session, linkId: LINK }); const one = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); const two = await engine.submit({ session, linkId: LINK, handoffCode: CODE, response: '{"handoffCode":"HANDOFF-ABCDEF"}' }); settle({ status: 'accepted' }); assert(one.status === 'retry' && two.status === 'retry' && calls === 1 && !JSON.stringify(engine.snapshot()).includes('/private/push') && !JSON.stringify(served).includes('request-ada'), 'deadline answers retry without aborting or duplicating the push call'); } },

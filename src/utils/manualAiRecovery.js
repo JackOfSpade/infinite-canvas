@@ -136,14 +136,47 @@ export function manualAiPreSearchRecoveryForResume(resume, { runId, nodeId } = {
   return recovery;
 }
 
+// An incomplete staging manifest is stronger recovery evidence than a
+// pre-search renderer marker only when it was created after that marker's
+// frozen pre-search boundary. Without this temporal proof, an older crashed
+// scrape beside a newer accepted handoff could silently retire the newer work.
+// Missing or malformed timestamps deliberately fail closed.
+export function exactStagedOfferSupersedesPreSearchManualAiResume(offer, resume, { nodeId } = {}) {
+  const runId = nonEmptyIdentifier(resume?.runId);
+  const recovery = manualAiPreSearchRecoveryForResume(resume, { runId, nodeId });
+  const offerWindow = normalizeFrozenJobSearchWindow(offer?.searchWindow);
+  if (!recovery || offer?.nodeId !== nodeId || !offerWindow || !validTimestamp(offer?.startedAt)) return false;
+  const updatedAt = resume?.updatedAt;
+  if (updatedAt != null && !validTimestamp(updatedAt)) return false;
+  const markerBoundary = Math.max(recovery.startedAt, updatedAt == null ? recovery.startedAt : updatedAt);
+  return offer.startedAt >= markerBoundary
+    && offerWindow.startTimestamp === recovery.searchWindow.startTimestamp
+    && offerWindow.anchorTimestamp === recovery.searchWindow.anchorTimestamp
+    && offerWindow.completionTimestamp === recovery.searchWindow.completionTimestamp
+    && offerWindow.capped === recovery.searchWindow.capped
+    && offerWindow.capReason === recovery.searchWindow.capReason
+    && offerWindow.providerLookbackDays === recovery.searchWindow.providerLookbackDays;
+}
+
 const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set([
   'resume-saved-scrape',
   'append-scored-jobs',
 ]);
 
+// A saved-job re-analysis is a score-only workflow.  It can issue the same
+// preference/scoring handoffs as a provider search, so its identity must win
+// over the task name (in particular `job-scoring`) when a paused handoff is
+// resumed after restart.
+export const REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE = 'reanalyze-saved-jobs';
+
+export function isSavedJobReanalysisManualAiResume(resume) {
+  return resume?.recoveryMode === REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE;
+}
+
 export function isSavedScrapeManualAiResume(resume) {
-  return resume?.task === 'job-scoring'
-    || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode);
+  return !isSavedJobReanalysisManualAiResume(resume)
+    && (resume?.task === 'job-scoring'
+      || SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES.has(resume?.recoveryMode));
 }
 
 // Board selection returns `{ missingPlan: true }` for an orphan so the caller

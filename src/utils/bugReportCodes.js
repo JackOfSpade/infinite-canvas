@@ -331,6 +331,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  JOBRECOVERY: {
+    label: 'Job Analysis Save & Recovery Lifecycle',
+    description: 'Job-analysis snapshot lifecycle audit — compact cross-restart save, three-generation rotation, fallback selection, and explicit career-data discard receipts. IDs are redacted and no listings, profile data, prompts, or URLs are included. Use when a re-analysis resumed as a scrape, an earlier saved result disappeared, or Pause & Save was not recoverable. Included automatically in FULL.',
+    logFilter: line =>
+      /\[JobSearch\]|\[Jobs\]|job.?analysis|saved (?:AI prompt|scrape)|last-success(?:ful)?|re-?analys|re-?scor|snapshot|career.?data|discard|clear|pause|resume|recovery/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'jobAuditDetail'],
+  },
+
   JOBRESOLVE: {
     label: 'Job Source Solve & Continue',
     description: 'Job Search source-card Solve/Continue/retry audit — the visible resolver launch, current-run description-recovery snapshot ownership/readiness, bounded per-source/run Solve outcomes (including retry/Skip recommendation and checkpoint result), per-source progress, returned-item merge, and relevant task lifecycle. Use when a Job Search source card says Solve/Continue did nothing, reopened repeatedly, or reports that its recovery snapshot belongs to another hub/run. Keeps the compact job pipeline/recovery evidence while dropping heavy canvas, media, session-trace, and per-job audit detail. This is separate from the SellHub-only RESOLVE code.',
@@ -352,9 +360,17 @@ export const CODE_DEFINITIONS = {
 
   BRIDGE: {
     label: 'ChatGPT Bridge & OAuth',
-    description: 'ChatGPT bridge setup, tunnel, pairing, OAuth, and starter/Continue copy diagnostics — including closed cross-origin refusal and copy-interaction receipts in the main-process report. Use after plugin pairing, authorization, tunnel, or starter-copy failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
+    description: 'ChatGPT bridge setup, tunnel, pairing, OAuth, MCP handoff, and starter/Continue copy diagnostics — including discovered push hubs, default selection and explicit exclusions, exact MCP claim/handback, closed cross-origin refusal, and copy-interaction receipts. Use after plugin pairing, authorization, tunnel, discover/claim/release, or starter-copy failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
     logFilter: line =>
       /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  BRIDGEWORKERS: {
+    label: 'ChatGPT Bridge Workers',
+    description: 'Bounded ChatGPT worker-pool and poll-pressure evidence: plan/forecast, auto-expansion, first and last safe call/result timing, aggregate submit verdicts, claim counts, authenticated MCP rate-limit count/latest Retry-After, explicit waiting-then-polling silence, replacement-starter count, and recent pool close receipts. Unanswered work remains active regardless of answer age. Use when a worker stopped after waiting, hit a rate limit, needs replacement, or a completed pool seems to disappear. Included automatically in FULL.',
+    logFilter: line =>
+      /\[HandoffBridge\]|worker_pool|worker_restarted|get-waiting|get-empty|queue-empty|waiting_limit|rate.?limit|epoch_closed|session-ended/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMDocument, callLLMRaw, callLLMText, callLLMVision, checkPromptFits, __durableStepKeysForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
-import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError } from '../../electron/ipc/nonApiAi.js';
+import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../../src/utils/nonApiAiNavigation.js';
-import { MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION, STALE_MANUAL_AI_RESUME_MS, createManualAiPreSearchRecovery, isLiveManualAiRecoveryBoardOwner, isStaleOrdinaryManualAiResume, manualAiPreSearchRecoveryForResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../test-dependencies.js';
+import { MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION, STALE_MANUAL_AI_RESUME_MS, createManualAiPreSearchRecovery, exactStagedOfferSupersedesPreSearchManualAiResume, isLiveManualAiRecoveryBoardOwner, isStaleOrdinaryManualAiResume, manualAiPreSearchRecoveryForResume, staleOrdinaryManualAiResumeBlocksAdmission } from '../test-dependencies.js';
 
 // A handful of representative marketplace tasks used below to prove routing
 // and dispatch are task-agnostic now that every task shares the one manual
@@ -24,6 +24,48 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
 ];
 
 export default [
+  {
+    name: 'handoff scheduler: every multi-item AI phase declares its centralized automatic or manual policy',
+    run: () => {
+      const scheduler = readFileSync(new URL('../../src/utils/handoffScheduler.js', import.meta.url), 'utf8');
+      const sources = {
+        preferences: readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8'),
+        jobs: readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8'),
+        taxonomy: readFileSync(new URL('../../electron/ipc/jobTaxonomy.js', import.meta.url), 'utf8'),
+        marketplace: readFileSync(new URL('../../electron/ipc/marketplace.js', import.meta.url), 'utf8'),
+      };
+      assert(scheduler.includes('export const HANDOFF_CONCURRENCY = 10;')
+        && scheduler.includes('export async function mapAutomaticHandoffs(')
+        && scheduler.includes('export async function mapManualHandoffWaves(')
+        && scheduler.includes('export async function runAutomaticHandoffWorkers('),
+      'the shared scheduler must own the worker cap plus the only automatic, manual-wave, and lazy-worker implementations');
+      assert(!sources.preferences.includes('export async function mapWithConcurrency(')
+        && !sources.preferences.includes('export async function mapWithRollingConcurrency('),
+      'job preferences must re-export compatibility aliases only, never retain a second scheduler implementation');
+      assert(Object.values(sources).every(source => source.includes("from '../../src/utils/handoffScheduler.js';")),
+      'every multi-item AI owner must import the central scheduler directly rather than inherit it through another IPC module');
+      assert(sources.preferences.includes('await mapAutomaticHandoffs(\n      descriptors,\n      HANDOFF_CONCURRENCY,')
+        && sources.preferences.includes('await runAutomaticHandoffWorkers({')
+        && sources.preferences.includes('async function runCompanyResearchPipeline(')
+        && sources.preferences.includes('createDependencyReadyQueue(rawWave.map(')
+        && sources.preferences.includes('const canPipelineFreshResearch = companyResearchPipelineEligible'),
+      'role screens, adaptive listing evaluation, and dependency-ready company research must all use the automatic rolling policy');
+      assert(sources.jobs.includes('mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
+        && sources.jobs.includes('mapAutomaticHandoffs(roleResearchBatches, HANDOFF_CONCURRENCY')
+        && sources.jobs.includes('mapAutomaticHandoffs(assessmentBatchPlans, HANDOFF_CONCURRENCY')
+        && sources.jobs.includes('mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY'),
+      'role-family research, compensation, and scoring must refill the central automatic roster');
+      assert(sources.taxonomy.includes('mapAutomaticHandoffs(\n      descriptors,\n      HANDOFF_CONCURRENCY,')
+        && sources.marketplace.includes('resolved = await mapAutomaticHandoffs(')
+        && sources.marketplace.includes('await mapManualHandoffWaves('),
+      'taxonomy and price synthesis must roll automatically while manual-only marketplace hub scans retain explicit stable waves');
+      assert(sources.jobs.includes('Career-file extraction carries a local document attachment')
+        && sources.jobs.includes('await mapManualHandoffWaves(')
+        && !sources.jobs.includes('wavePromises = wave.map'),
+      'manual attachment extraction must use the central stable-wave policy and its orphan-cleanup contract');
+      return { automaticOwners: 4, manualOwners: 2 };
+    },
+  },
   {
     name: 'non-API AI: delayed next batch keeps focus ahead of an older correction',
     run: () => {
@@ -161,7 +203,10 @@ export default [
         && selectorSource.includes("isWorking ? 'action in progress' : null")
         && selectorSource.includes('<span>{selectorLabel}</span>')
         && !selectorSource.includes('handoffCode')
-        && dialogSource.includes('{activeRequest?.handoffCode && !isBridgeHeldApplication && (')
+        && dialogSource.includes('{activeRequest?.handoffCode && !isBridgeHeldRequest && !isMcpRoutedRequest && (')
+        && dialogSource.includes('isBridgeHeldPush(bridgeStatus, activeRequest?.bridgeClaimId)')
+        && dialogSource.includes('const isBridgeHeldRequest = isBridgeHeldApplication || isBridgeHeldPushRequest')
+        && dialogSource.includes("{isCancelling ? 'Cancelling…' : 'Cancel task'}")
         && dialogSource.includes('{activeRequest.handoffCode}')
         && dialogSource.includes('selectedRequestId')
         && dialogSource.includes('Pending AI handoff batches')
@@ -174,25 +219,24 @@ export default [
         && dialogSource.includes('submittingRequestIds.has(activeRequestId)')
         && dialogSource.includes('actionRequestIdsRef.current.has(activeRequestId)'),
       'the handoff UI exposes every pending batch, tracks each request action independently, and binds cancellation to its captured request');
-      // The strip of numbered prompt buttons is how someone keeps up to ten
-      // parallel AI chats straight, and a bundle's number appears NOWHERE else
-      // in the panel. Hiding the strip once the queue drained to a single
-      // prompt deleted the only on-screen answer to "which chat is this prompt
-      // from?" at exactly the moment the last chat was being finished. So no
-      // count guard may stand between the panel header and the strip, and the
-      // pending count states itself at every depth rather than blanking at one
-      // while the collapsed dock still says "1 handoff waiting".
+      // Manual/application queues still need their numbered selector, but an
+      // all-automatic MCP queue is claimed by one worker plan. In that mode
+      // showing a button for every later batch falsely suggests that every
+      // worker starter must be copied again. The dock instead labels the
+      // automatic context in the header and leaves its one operational
+      // summary to BridgeProgress below.
       const panelHeaderAt = dialogSource.indexOf('<header className="shrink-0 px-5 py-4 border-b border-white/10">');
       const promptStripAt = dialogSource.indexOf('<nav aria-label="Pending AI handoff batches"');
-      const beforeStrip = panelHeaderAt >= 0 && promptStripAt > panelHeaderAt
-        ? dialogSource.slice(panelHeaderAt, promptStripAt)
-        : '';
       assert(panelHeaderAt >= 0 && promptStripAt > panelHeaderAt
-        && !/mergedRequests\.length/.test(beforeStrip)
-        && !/\.length\s*(?:>=|<=|===|!==|==|!=|>|<)\s*\d/.test(beforeStrip)
+        && dialogSource.includes('const isAutomaticMcpQueue = mergedRequests.length > 0')
+        && dialogSource.includes('{isAutomaticMcpQueue ? (')
+        && dialogSource.includes('>Automatic</span>')
+        && !dialogSource.includes('automaticWorkerQueueSummary')
+        && dialogSource.includes(') : queueLabel && <span className="text-[11px] text-white/40">{queueLabel}</span>}')
+        && selectorSource.includes('mergedRequests.map((request, index) => {')
         && /const queueLabel = useMemo\(\(\) => `\$\{mergedRequests\.length\} pending`/.test(dialogSource)
-        && dialogSource.includes('1 handoff waiting'),
-      'the numbered prompt selector and the pending count render at every queue depth, including a queue of one');
+        && dialogSource.includes('1 handoff released now'),
+      'automatic MCP queues replace redundant batch selectors and header telemetry with one worker-plan summary while manual queues retain their selector');
       // Two mis-pastes the HANDOFF- scans above structurally cannot see. An
       // application bundle answered in the wrong chat carries no HANDOFF-
       // stamp to disagree with, so bundle 2's answer dropped into bundle 1
@@ -276,9 +320,9 @@ export default [
       // The chip carries the same fact, and carries it as motion: a static dot
       // would read as one more settled state rather than as work still running.
       assert(dialogSource.includes('const isBundleSaving = Boolean(request.working);')
-        && dialogSource.includes("? 'needs a layout retry' : 'still saving'")
+        && dialogSource.includes("request.retryReproducesFailure ? 'needs an app update' : 'needs a layout retry'")
         && dialogSource.includes('animate-spin text-violet-200'),
-      'the chip shows a spinner while its bundle is still being saved, and says so to a screen reader');
+      'the chip distinguishes an app-fix block from a retryable layout check while preserving its saving state');
       // Focus must still advance. Before this the accepted item VANISHED and
       // activeRequest fell through to whatever was first, so advancing on
       // purpose is what PRESERVES that flow — without it the panel would newly
@@ -320,23 +364,30 @@ export default [
       const prefSource = readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8');
       const jobsIpcSource = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
       assert(jobsIpcSource.includes('hasExactDurableRawHandoff')
+        && jobsIpcSource.includes('durableRunHasAnyTask(manualAiRunId')
+        && jobsIpcSource.includes('legacyResearchMigrationNeeded: await legacyCompanyResearchPresent')
+        && jobsIpcSource.includes('companyResearchPipelineEligible: !(await hasPackedCompanyAssessment)')
         && jobsIpcSource.includes('legacyResearchStepProbe: ({ prompt, task, grounding, hints })')
-        && jobsIpcSource.includes('researchStepStatusProbe: ({ prompt, task, grounding, hints, retryOnTruncation })')
-        && jobsIpcSource.includes('retryOnTruncation,')
         && prefSource.includes('legacyResearchStepProbe({')
         && prefSource.includes('const legacyRequests = [];')
         && prefSource.includes('const freshRequests = [];'),
       'a resumed run keeps only its exact old company handoffs on the legacy contract, while unissued sibling employers enter packed batches');
-      assert(prefSource.includes('export const MANUAL_HANDOFF_CONCURRENCY = 10;')
-        && prefSource.includes('await mapWithConcurrency(roundStarts, LISTING_EVAL_CONCURRENCY, async (start, position) =>')
-        && prefSource.includes('mapWithConcurrency(batches, MANUAL_HANDOFF_CONCURRENCY, async (entries, index) =>')
-        && prefSource.includes('mapWithConcurrency(assessmentBatches, MANUAL_HANDOFF_CONCURRENCY, async (entries, index) =>')
+      assert(prefSource.includes("from '../../src/utils/handoffScheduler.js';")
+        && prefSource.includes('HANDOFF_CONCURRENCY as MANUAL_HANDOFF_CONCURRENCY,')
+        && prefSource.includes('const plannedRootBatches = [];')
+        && prefSource.includes('const nextPlannedRootBatch = async () => {')
+        && prefSource.includes('await runAutomaticHandoffWorkers({')
+        && prefSource.includes('async function runCompanyResearchPipeline(')
+        && prefSource.includes('const canPipelineFreshResearch = companyResearchPipelineEligible')
+        && prefSource.includes('async function assessCompletedCompanyResearch(')
+        && prefSource.includes('const rawWaveResults = await mapAutomaticHandoffs(rawWave, HANDOFF_CONCURRENCY, executeRawDescriptor')
+        && !prefSource.includes('researchStepStatusProbe')
         && !prefSource.includes('RESEARCH_CONCURRENCY'),
-      'listing and company-research batches share the bounded ten-handoff window instead of dispatching serially or three at a time');
+      'listing evaluation and company research use the centralized bounded automatic scheduler; cache/legacy layouts retain their required exact barrier');
       // CONTINUOUSLY adaptive, not calibrate-once: model verbosity drifts, so
       // each round re-derives its size from what the previous responses cost.
       assert(prefSource.includes('const { size: listingBatchSize, observedTokensPerMatch, recalled } = await roundSize(round);')
-        && prefSource.includes('while (cursor < pool.length) {')
+        && prefSource.includes('while (position < LISTING_EVAL_CONCURRENCY && cursor < pool.length) {')
         && prefSource.includes("const observedTokensPerMatch = (await calibration?.observedTokensPerMatch?.(items.length)) ?? null;"),
       'every round re-sizes itself from measured output rather than a fixed estimate');
       assert(transportSource.includes('const sessionCalibration = new Map();')
@@ -384,13 +435,13 @@ export default [
       assert(prefSource.includes('listingAbort.abort(error);')
         && prefSource.includes('AbortSignal.any([signal, listingAbort.signal])'),
       'a failing worker aborts its in-flight siblings, so no orphaned prompt outlives the operation that owns it');
-      // Batch numbers must come from a fixed array position, not a shared
-      // counter: under concurrency a mutable counter races, and the number is
-      // hashed into the durable step key that makes a resumed run skip work the
-      // person already pasted.
-      assert(prefSource.includes('const thisBatchIndex = roundFirstBatch + position + 1;')
+      // Batch numbers must be assigned while a durable descriptor group is
+      // planned, not by whichever worker finishes first: the number is hashed
+      // into the durable step key that makes a resumed run skip work already
+      // accepted by the person.
+      assert(prefSource.includes('thisBatchIndex: roundFirstBatch + position + 1,')
         && !prefSource.includes('batchIndex += 1;'),
-      'each concurrent batch derives its number from its own fixed round offset and array position, keeping durable step keys stable');
+      'each rolling root batch receives a stable planned number rather than a completion-order counter');
       // Progress must count COMPLETED work: with 10 in flight, issue order is no
       // longer completion order.
       assert(prefSource.includes('listingsDone += batch.length;')
@@ -409,7 +460,10 @@ export default [
         && !stepKeyBody.includes('itemsDone') && !stepKeyBody.includes('itemsTotal'),
       'the durable step key must NOT hash the display-only progress counters, or a resumed run re-issues accepted handoffs');
 
-      assert(dialogSource.includes('const [isExpanded, setIsExpanded] = useState(false)')
+      assert(dialogSource.includes('const [isExpanded, setIsExpanded] = useState(true)')
+        && dialogSource.includes('const hadPendingRequestsRef = useRef(false);')
+        && dialogSource.includes('useLayoutEffect(() => {')
+        && dialogSource.includes('if (hasPendingRequests && !hadPendingRequestsRef.current) setIsExpanded(true);')
         && dialogSource.includes('Pending AI handoffs')
         && dialogSource.includes('Expand')
         && dialogSource.includes('Minimize')
@@ -421,7 +475,7 @@ export default [
         && !dialogSource.includes('updateModalCount')
         && !dialogSource.includes('trapFocus')
         && !dialogSource.includes('blockEscape'),
-      'pending handoffs default to a compact non-modal dock: its expanded controls own pointer events, do not point at an unmounted panel, and leave the canvas interactive without trapping keyboard focus');
+      'pending handoffs default to an expanded non-modal dock and reopen when a new queue appears; its controls own pointer events, do not point at an unmounted panel, and leave the canvas interactive without trapping keyboard focus');
       const ownerBadgeStart = dialogSource.indexOf('const ownerBadgeForNode = (nodeId) =>');
       const ownerBadgeEnd = dialogSource.indexOf('\n};', ownerBadgeStart) + 3;
       const ownerBadgeSource = dialogSource.slice(ownerBadgeStart, ownerBadgeEnd);
@@ -442,21 +496,22 @@ export default [
         && mainSource.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true }")
         && mainSource.includes('await flushNonApiAiPersistence()')
         && dialogSource.includes("new CustomEvent('non-api-ai-node-pending'")
-        && jobSearchSource.includes('Auto-resuming manual AI run')
-        && jobSearchSource.includes('isStaleOrdinaryManualAiResume(resume)')
+        && jobSearchSource.includes('backgroundJobResumeRequest(')
+        && jobSearchSource.includes('automaticProviderRequest?.providerPhaseOnly !== true')
+        && jobSearchSource.includes('handleResumeRun({ offer, providerPhaseOnly: true })')
         && jobSearchSource.includes('manualAiExplicitResumeRequest?.runId !== resume.runId')
-        && jobSearchSource.includes('User resumed stale manual AI run'),
-      'a pending handoff auto-saves its canvas restart marker, flushes its draft ledger on close, auto-resumes when recent, and requires an exact user-authorized run id when stale');
-      const staleRecoveryBannerStart = jobSearchSource.indexOf('const pausedManualAiRecovery = staleManualAiRecovery?.pausedByUser === true;');
+        && jobSearchSource.includes('User continued saved manual AI run'),
+      'a pending handoff auto-saves its canvas restart marker and flushes its draft ledger on close; only a provider-only staged recovery resumes automatically, while every semantic manual-AI handoff requires its exact user-authorized run id');
+      const staleRecoveryBannerStart = jobSearchSource.indexOf('const pausedManualAiRecovery = savedManualAiRecovery?.pausedByUser === true;');
       const staleRecoveryBannerEnd = jobSearchSource.indexOf('\n\n  const banner = (', staleRecoveryBannerStart);
       const staleRecoveryBanner = jobSearchSource.slice(staleRecoveryBannerStart, staleRecoveryBannerEnd);
       assert(staleRecoveryBannerStart >= 0 && staleRecoveryBannerEnd > staleRecoveryBannerStart
         && !jobSearchSource.includes("retirementReason: 'discarded-stale-manual-ai-recovery'")
         && !jobSearchSource.includes('handleDiscardStaleManualAiRecovery')
-        && staleRecoveryBanner.includes('const pausedManualAiRecovery = staleManualAiRecovery?.pausedByUser === true;')
+        && staleRecoveryBanner.includes('const pausedManualAiRecovery = savedManualAiRecovery?.pausedByUser === true;')
         && staleRecoveryBanner.includes('This job search was stopped before source scraping began.')
         && staleRecoveryBanner.includes('Clear career data is the only way to remove it.')
-        && staleRecoveryBanner.includes('onClick={handleResumeStaleManualAiRecovery}')
+        && staleRecoveryBanner.includes('onClick={handleContinueManualAiRecovery}')
         && !staleRecoveryBanner.includes('Start fresh'),
       'an aged or user-paused manual-AI recovery retains its exact marker: its banner offers explicit Resume and identifies Clear career data as the only removal action');
       const sliceSource = (start, end) => {
@@ -466,7 +521,7 @@ export default [
       };
       const manualAutoResume = sliceSource(
         'const [manualAiExplicitResumeRequest, setManualAiExplicitResumeRequest] = useState(null);',
-        'const handleResumeStaleManualAiRecovery = useCallback',
+        'const handleContinueManualAiRecovery = useCallback',
       );
       const recoveryNow = 1_800_000_000_000;
       const ordinaryMarker = (updatedAt) => ({ runId: 'manual-recovery', updatedAt });
@@ -478,6 +533,59 @@ export default [
         && !isStaleOrdinaryManualAiResume({ runId: 'saved', updatedAt: recoveryNow - STALE_MANUAL_AI_RESUME_MS, task: 'job-scoring' }, recoveryNow)
         && !isStaleOrdinaryManualAiResume({ runId: 'retiring', updatedAt: recoveryNow - STALE_MANUAL_AI_RESUME_MS, retirementPending: true }, recoveryNow),
       'the executable stale predicate holds exact-24h, missing, malformed, and future ordinary markers while preserving recent, saved-scrape, and retirement recovery semantics');
+      const preSearchRunId = 'accepted-pre-search';
+      const preSearchStartedAt = recoveryNow - 10_000;
+      const acceptedPreSearchMarker = {
+        runId: preSearchRunId,
+        updatedAt: preSearchStartedAt + 500,
+        preSearchRecovery: createManualAiPreSearchRecovery({
+          version: MANUAL_AI_PRE_SEARCH_RECOVERY_VERSION,
+          manualAiRunId: preSearchRunId,
+          nodeId: 'resume-node',
+          startedAt: preSearchStartedAt,
+          searchWindow: {
+            startTimestamp: preSearchStartedAt,
+            anchorTimestamp: preSearchStartedAt,
+            completionTimestamp: null,
+            capped: false,
+            capReason: null,
+            providerLookbackDays: 30,
+          },
+        }),
+      };
+      const matchingStagedOffer = {
+        nodeId: 'resume-node',
+        startedAt: preSearchStartedAt + 501,
+        searchWindow: acceptedPreSearchMarker.preSearchRecovery.searchWindow,
+      };
+      assert(exactStagedOfferSupersedesPreSearchManualAiResume(
+        matchingStagedOffer, acceptedPreSearchMarker, { nodeId: 'resume-node' },
+      )
+        && !exactStagedOfferSupersedesPreSearchManualAiResume(
+          { ...matchingStagedOffer, startedAt: preSearchStartedAt + 499 }, acceptedPreSearchMarker, { nodeId: 'resume-node' },
+        )
+        && !exactStagedOfferSupersedesPreSearchManualAiResume(
+          matchingStagedOffer, { ...acceptedPreSearchMarker, updatedAt: 'unknown' }, { nodeId: 'resume-node' },
+        )
+        && !exactStagedOfferSupersedesPreSearchManualAiResume(
+          matchingStagedOffer, acceptedPreSearchMarker, { nodeId: 'other-node' },
+        )
+        && !exactStagedOfferSupersedesPreSearchManualAiResume(
+          { ...matchingStagedOffer, nodeId: null }, acceptedPreSearchMarker, { nodeId: 'resume-node' },
+        )
+        && !exactStagedOfferSupersedesPreSearchManualAiResume(
+          { ...matchingStagedOffer, searchWindow: { ...matchingStagedOffer.searchWindow, providerLookbackDays: 14 } }, acceptedPreSearchMarker, { nodeId: 'resume-node' },
+        ),
+      'an exact staged recovery may retire only an older accepted pre-search marker with the same frozen window; an older manifest, changed window, malformed marker timestamp, different owner, or owner-unknown offer fails closed');
+      assert(jobSearchSource.includes('offer?.nodeId === nodeId')
+        && jobSearchSource.includes('isExactStagedPreSearchReconciliation')
+        && jobSearchSource.includes('inspectNonApiAiRun(marker.runId)')
+        && jobSearchSource.includes("retirementReason: 'superseded-by-exact-staged-job-run'")
+        && jobSearchSource.includes('let retirementAttempted = false;')
+        && jobSearchSource.includes('marker.preSearchRecovery?.startedAt ?? \'missing\'')
+        && jobSearchSource.includes('const reconciliationLatches = reconciledStagedPreSearchManualRunsRef.current;')
+        && jobSearchSource.includes('if (!retirementAttempted) {\n          reconciliationLatches.delete(reconciliationKey);'),
+      'the Job Search card reconciles an accepted pre-search marker only through the exact staged-run ownership transition');
       const staleMarker = ordinaryMarker(recoveryNow - STALE_MANUAL_AI_RESUME_MS);
       const laneCanStart = (marker, options = {}) => !staleOrdinaryManualAiResumeBlocksAdmission(marker, options);
       assert(!laneCanStart(staleMarker)
@@ -498,7 +606,7 @@ export default [
           > manualAutoResume.indexOf('const attemptToken = Symbol(`manual-ai-auto-resume:${resume.runId}`)'),
       'an explicit stale-recovery authorization is exact-id-bound and consumed when that attempt is admitted, so retries require another click');
       const staleAdmission = sliceSource(
-        'const staleManualAiRecoveryNeedsDecision',
+        'const manualAiRecoveryNeedsDecision',
         '// Why a drop would bounce right now',
       );
       const genericRerun = sliceSource(
@@ -509,8 +617,8 @@ export default [
         'const runPipeline = useCallback',
         'const resumeScoring = useCallback',
       );
-      assert(staleAdmission.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;')
-        && jobSearchSource.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;')
+      assert(staleAdmission.includes('const controlsLocked = baseControlsLocked || manualAiRecoveryAdmissionLocked;')
+        && jobSearchSource.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || manualAiRecoveryAdmissionLocked;')
         && genericRerun.includes('Choose Resume for the saved manual-AI recovery, or use Clear career data to deliberately remove it before another search.')
         && !genericRerun.includes('Start fresh')
         && pipelineAdmission.includes('staleRecoveryBlockedAtLaneStart')
@@ -528,8 +636,8 @@ export default [
       'every standalone continuation rechecks stale admission both before and after its queue turn, so a marker that arrives while scoring, interrupted recovery, saved-scrape recovery, or re-analysis waits cannot mint manual AI');
       assert(jobSearchSource.includes('manualAiStaleRecoveryActionRunIdRef.current')
         && jobSearchSource.includes('className="nodrag px-2 py-0.5')
-        && jobSearchSource.includes('disabled={baseControlsLocked || staleManualAiRecoveryActionBusy || !canvasFilePath}')
-        && jobSearchSource.includes('onClick={handleResumeStaleManualAiRecovery}')
+        && jobSearchSource.includes('disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath}')
+        && jobSearchSource.includes('onClick={handleContinueManualAiRecovery}')
         && !jobSearchSource.includes("cancellationReason: 'discarded-stale-manual-ai-recovery'"),
       'an explicit stale-recovery Resume remains single-action and exact-id-bound; it never exposes a competing discard path that could erase the saved marker');
       assert(mainSource.includes('async function flushNonApiAiPersistenceForLifecycle(win, actionType)')
@@ -1005,10 +1113,11 @@ export default [
         && JSON.stringify(taxonomyMeta.fallbacks?.map(fallback => fallback.stage)) === JSON.stringify(['plan'])
         && taxonomyMeta.fallback?.stage === 'plan',
       'planner-only completion preserves its model diagnostics without fabricating a classifier stage');
-      assert(jobsSource.includes('await mapWithConcurrency(scoringBatches, MANUAL_HANDOFF_CONCURRENCY, async (batch, batchIndex) =>')
+      assert(jobsSource.includes("from '../../src/utils/handoffScheduler.js';")
+        && jobsSource.includes('await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) =>')
         && jobsSource.includes('completedScoringJobCount')
         && jobsSource.includes('scored: signal?.aborted ? completedScoringJobCount : scoredJobs.length'),
-      'scoring starts independent top-level batches together but BOUNDED, preserves separate completion progress, and reports completed work on abort without saving partial results');
+      'scoring uses the centralized automatic rolling scheduler, preserves separate completion progress, and reports completed work on abort without saving partial results');
       return { scoringStable: true, taxonomyBatches: hints.length, peakClassifications };
     },
   },
@@ -1444,7 +1553,7 @@ export default [
       };
       handleSafe('non-api-validator-thread-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return the requested JSON.', {
-          signal, task: 'job-scoring',
+          signal, task: 'test-manual-validation',
           responseSchema: { type: 'object', required: ['index'], properties: { index: { type: 'integer' } } },
           displayOnlyPromptSuffix: 'DISPLAY-ONLY STRUCTURED VALIDATION CHECK',
           responseValidator: (value) => {
@@ -1511,7 +1620,7 @@ export default [
       handleSafe('non-api-private-validation-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return the requested JSON.', {
           signal,
-          task: 'job-scoring',
+          task: 'test-manual-validation',
           responseSchema: { type: 'object', required: ['index'], properties: { index: { type: 'integer' } } },
           responseValidator: () => {
             if (reject) throw new Error(privateSentinel);
@@ -1526,7 +1635,7 @@ export default [
       const recentLogs = getRecentLogs();
       assert(rejected.accepted === false
         && rejected.validationErrors?.[0] === privateSentinel
-        && recentLogs.some(entry => entry.message.includes("[Non-API AI] Rejected response for task 'job-scoring' (code=VALIDATION_FAILED)."))
+        && recentLogs.some(entry => entry.message.includes("[Non-API AI] Rejected response for task 'test-manual-validation' (code=VALIDATION_FAILED)."))
         && !recentLogs.some(entry => entry.message.includes(privateSentinel)),
       'the renderer retains the precise correction detail while report-visible logs retain only a safe validation classification');
       reject = false;
@@ -1733,13 +1842,13 @@ export default [
         const pair = await runRewindableGroundedHandoff({
           research: ({ initialResponse }) => requestNonApiAi({
             prompt: 'RESEARCH STEP',
-            task: 'job-compensation-research',
+            task: 'test-manual-research',
             initialResponse,
             signal,
           }),
           extract: (research, manualHandoff) => requestNonApiAi({
             prompt: `EXTRACTION STEP\n${research}`,
-            task: 'job-compensation-assessment',
+            task: 'test-manual-extraction',
             responseSchema: {
               type: 'object', required: ['answer'], properties: { answer: { type: 'string' } },
             },
@@ -1807,7 +1916,7 @@ export default [
       const senderB = { ...senderA, id: 702, send: () => {} };
       handleSafe('non-api-cancel-node-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
+          signal, task: 'test-manual-replay', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
         }),
@@ -1847,7 +1956,7 @@ export default [
 
       handleSafe('non-api-cancel-ack-ledger-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
+          signal, task: 'test-manual-replay', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
         }),
@@ -1960,7 +2069,7 @@ export default [
       const senderB = { ...senderA, id: 705, send: (channel, payload) => sent.push({ channel, payload, sender: 'B' }) };
       handleSafe('non-api-replay-test', async (_event, args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
+          signal, task: 'test-manual-replay', cachedPrefix: 'STATIC CACHED RUBRIC', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
           hints: { batch: args.batch, batchTotal: args.batchTotal },
@@ -2028,8 +2137,8 @@ export default [
         properties: { answer: { type: 'string' } },
       };
       handleSafe('non-api-durable-resume-test', async (_event, _args, signal) => {
-        const first = await requestNonApiAi({ prompt: 'DURABLE STEP ONE', task: 'job-scoring', responseSchema: schema, signal });
-        const second = await requestNonApiAi({ prompt: `DURABLE STEP TWO\n${first.answer}`, task: 'job-scoring', responseSchema: schema, signal });
+        const first = await requestNonApiAi({ prompt: 'DURABLE STEP ONE', task: 'test-manual-durable', responseSchema: schema, batch: 1, batchTotal: 2, itemCount: 1, signal });
+        const second = await requestNonApiAi({ prompt: `DURABLE STEP TWO\n${first.answer}`, task: 'test-manual-durable', responseSchema: schema, itemCount: 1, signal });
         return { first: first.answer, second: second.answer };
       });
 
@@ -2050,11 +2159,9 @@ export default [
       const firstRun = invoke({ sender: firstSender }, { nodeId: 'durable-node', manualAiRunId: runId });
       const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
       const firstRequest = (await waitForRequestCount(firstSent, 1))[0]?.payload;
-      // This exact hash predates handoff-code injection. Keeping it stable lets
-      // an accepted response from a prior release remain reachable on resume.
-      const historicalStepKey = '492e2bd40d56db2b0bd60555ce345ab88d4aafc159b89a9ae18f8556932e9b31';
-      assert(firstRequest?.stepKey === historicalStepKey,
-        'the fixed durable request keeps its literal pre-handoff-code step key');
+      assert(typeof firstRequest?.stepKey === 'string' && firstRequest.stepKey.length === 64,
+        'a manual-only durable request receives a deterministic pre-handoff-code step key');
+      const firstStepKey = firstRequest.stepKey;
       assert(firstRequest?.handoffCode,
         'the current request still receives a handoff code after its durable key is derived');
       await submit({ sender: firstSender }, { requestId: firstRequest.requestId, response: `{"handoffCode":"${firstRequest.handoffCode}","answer":"first accepted"}` });
@@ -2065,9 +2172,18 @@ export default [
         { sender: firstSender },
         { requestId: secondRequest.requestId, response: '{"answer":"draft survives"}' },
       );
-      assert(await durableRunHasAnyTask(runId, ['job-scoring'])
+      assert(await durableRunHasAnyTask(runId, ['test-manual-durable'])
+        && await durableRunHasAnyTask(runId, ['test-manual-durable'], { batchTotal: 'present' })
+        && await durableRunHasAnyTask(runId, ['test-manual-durable'], { batchTotal: 'absent' })
         && !(await durableRunHasAnyTask(runId, ['job-preference-research'])),
-      'the read-only compatibility probe sees accepted/pending tasks only in their owning durable run');
+      'the read-only compatibility probe sees only its owning live tasks and can distinguish old total-bearing layouts');
+      const pendingSummary = await durableRunSettlementSummary(runId);
+      assert(pendingSummary.found
+        && pendingSummary.accepted === 1
+        && pendingSummary.pending === 1
+        && pendingSummary.other === 0
+        && pendingSummary.acceptedOnly === false,
+      'the recovery settlement probe distinguishes a partly accepted workflow from one safe to retire');
       firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
       const interrupted = await firstRun;
       assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
@@ -2084,7 +2200,7 @@ export default [
         && resumedRequests[0].prompt.includes('DURABLE STEP TWO')
         && resumedRequests[0].initialResponse === '{"answer":"draft survives"}',
         'restart replays the accepted first step silently and restores the exact unfinished-step draft');
-      assert(!resumedRequests.some(request => request.stepKey === historicalStepKey),
+      assert(!resumedRequests.some(request => request.stepKey === firstStepKey),
         'the accepted first response replays without issuing its first handoff again');
       await submit({ sender: resumedSender }, { requestId: resumedRequests[0].requestId, response: `{"handoffCode":"${resumedRequests[0].handoffCode}","answer":"second accepted"}` });
       const completed = await resumedRun;
@@ -2092,8 +2208,15 @@ export default [
         && completed.first === 'first accepted'
         && completed.second === 'second accepted',
       'the restarted workflow continues from the checkpoint and completes with both accepted values');
+      const acceptedSummary = await durableRunSettlementSummary(runId);
+      assert(acceptedSummary.found
+        && acceptedSummary.accepted === 2
+        && acceptedSummary.pending === 0
+        && acceptedSummary.other === 0
+        && acceptedSummary.acceptedOnly === true,
+      'only a fully accepted durable workflow is eligible for exact staged-run reconciliation');
       await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumedSender }, { runId });
-      assert(!(await durableRunHasAnyTask(runId, ['job-scoring'])),
+      assert(!(await durableRunHasAnyTask(runId, ['test-manual-durable'])),
         'the compatibility probe stops selecting a legacy contract after its durable run is explicitly completed');
       return { resumedAt: 'step-two', draftRestored: true };
     },
@@ -2111,7 +2234,7 @@ export default [
       handleSafe('non-api-durable-ten-wide-test', async (_event, _args, signal) => ({
         rows: await Promise.all(Array.from({ length: 10 }, (_, index) => requestNonApiAi({
           prompt: `DURABLE PARALLEL STEP ${index + 1}`,
-          task: 'job-scoring',
+          task: 'test-manual-ten-wide',
           batch: index + 1,
           batchTotal: 10,
           itemCount: 1,
@@ -2198,10 +2321,10 @@ export default [
         return sent.find(item => item.channel === 'non-api-ai-request')?.payload;
       };
       handleSafe('non-api-durable-code-collision-holder', async (_event, _args, signal) => (
-        requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'job-scoring', responseSchema: schema, signal })
+        requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'test-manual-collision', responseSchema: schema, signal })
       ));
       handleSafe('non-api-durable-code-collision-target', async (_event, _args, signal) => ({
-        answer: (await requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'job-scoring', responseSchema: schema, signal })).answer,
+        answer: (await requestNonApiAi({ prompt: 'DURABLE COLLISION STEP', task: 'test-manual-collision', responseSchema: schema, signal })).answer,
       }));
 
       const holderSent = [];
@@ -2282,11 +2405,11 @@ export default [
         if (value?.assessments?.[0]?.listingId !== 'v2-listing-id') throw new Error('v2 listing ID required');
       };
       handleSafe('legacy-replay-seed', async (_event, _args, signal) => requestNonApiAi({
-        prompt: legacyPrompt, task: 'job-preference-evaluation', responseSchema: legacySchema,
+        prompt: legacyPrompt, task: 'test-manual-legacy-replay', responseSchema: legacySchema,
         responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1, signal,
       }));
       handleSafe('legacy-replay-current', async (_event, _args, signal) => requestNonApiAi({
-        prompt: 'CURRENT V2 LISTING PROMPT', task: 'job-preference-evaluation', responseSchema: currentSchema,
+        prompt: 'CURRENT V2 LISTING PROMPT', task: 'test-manual-legacy-replay', responseSchema: currentSchema,
         responseValidator: currentValidator,
         // The historical adaptive handoff explicitly carried no total. Its
         // alias must preserve null even when the current request carries an
@@ -2347,11 +2470,11 @@ export default [
         if (value?.assessments?.[0]?.listingId !== 'v2-listing-id') throw new Error('v2 listing ID required');
       };
       handleSafe('legacy-pending-replay-seed', async (_event, _args, signal) => requestNonApiAi({
-        prompt: legacyPrompt, task: 'job-preference-evaluation', responseSchema: legacySchema,
+        prompt: legacyPrompt, task: 'test-manual-legacy-pending', responseSchema: legacySchema,
         responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1, signal,
       }));
       handleSafe('legacy-pending-replay-current', async (_event, _args, signal) => requestNonApiAi({
-        prompt: 'CURRENT V2 LISTING PROMPT MUST NOT REPLACE THE DRAFT', task: 'job-preference-evaluation', responseSchema: currentSchema,
+        prompt: 'CURRENT V2 LISTING PROMPT MUST NOT REPLACE THE DRAFT', task: 'test-manual-legacy-pending', responseSchema: currentSchema,
         responseValidator: currentValidator,
         legacyReplay: { prompt: legacyPrompt, responseSchema: legacySchema, responseValidator: legacyValidator, batch: 3, batchTotal: null, itemCount: 1 },
         batch: 3, batchTotal: 9, itemCount: 1,
@@ -2531,7 +2654,7 @@ export default [
       const lateGate = new Promise(resolve => { releaseLate = resolve; });
       const request = (batch, itemsDone, signal, itemCount = 12) => requestNonApiAi({
         prompt: `PROGRESS SCOPE BATCH ${batch}`,
-        task: 'job-preference-evaluation', responseSchema: schema,
+        task: 'test-manual-progress', responseSchema: schema,
         batch, batchTotal: 3, itemCount, itemsDone, itemsTotal: 36, signal,
         progressScopeId: 'preference-pass-a', progressUnitId: `batch-${batch}`, progressUnits: itemCount,
       });
@@ -2630,7 +2753,7 @@ export default [
       const handoff = (prompt, {
         scope = 'pass-a', unit, units = 12, itemCount = units, itemsDone, batch, measureProgressUnits,
       }, signal) => requestNonApiAi({
-        prompt, task: 'job-preference-evaluation', responseSchema: schema,
+        prompt, task: 'test-manual-progress', responseSchema: schema,
         batch, batchTotal: 3, itemCount, itemsDone, itemsTotal: 36,
         progressScopeId: scope, progressUnitId: unit, progressUnits: units, measureProgressUnits, signal,
       });
@@ -2704,7 +2827,7 @@ export default [
       const receipts = getNonApiAiHandoffLifecycle({ windowId: sender.id })
         .filter(receipt => receipt.runId === runId);
       assert(completed.success === true && receipts.length === 3
-        && receipts.filter(receipt => receipt.task === 'job-preference-evaluation').every(receipt => receipt.itemsDone === 17 || receipt.itemsDone === 12),
+        && receipts.filter(receipt => receipt.task === 'test-manual-progress').every(receipt => receipt.itemsDone === 17 || receipt.itemsDone === 12),
       'resumed lifecycle receipts reflect capped per-step contributions, without cross-pass or recovery overcounting');
       await ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
       return { durableHole: true, recoveryDeduped: true, isolatedPass: true };
@@ -2730,7 +2853,7 @@ export default [
       let releaseThird;
       const thirdGate = new Promise(resolve => { releaseThird = resolve; });
       const handoff = (label, batch, itemsDone, signal) => requestNonApiAi({
-        prompt: `PROGRESS ATTEMPT ${label}`, task: 'job-preference-evaluation', responseSchema: schema,
+        prompt: `PROGRESS ATTEMPT ${label}`, task: 'test-manual-progress', responseSchema: schema,
         batch, batchTotal: 3, itemCount: 12, itemsDone, itemsTotal: 36,
         progressScopeId: 'attempt-pass', progressUnitId: `unit-${batch}`, progressUnits: 12, signal,
       });
@@ -2806,7 +2929,7 @@ export default [
         return null;
       };
       const handoff = (label, units, signal) => requestNonApiAi({
-        prompt: label, task: 'job-preference-evaluation', responseSchema: schema,
+        prompt: label, task: 'test-manual-progress', responseSchema: schema,
         batch: 1, batchTotal: 1, itemCount: units, itemsDone: 0, itemsTotal: units,
         progressScopeId: label, progressUnitId: 'unit-1', progressUnits: units, signal,
       });
@@ -2862,7 +2985,7 @@ export default [
       };
       handleSafe('non-api-progress-cancel-write', async (_event, _args, signal) => ({
         result: await requestNonApiAi({
-          prompt: 'PROGRESS CANCEL DURING WRITE', task: 'job-preference-evaluation', responseSchema: schema,
+          prompt: 'PROGRESS CANCEL DURING WRITE', task: 'test-manual-progress', responseSchema: schema,
           batch: 1, batchTotal: 1, itemCount: 12, itemsDone: 0, itemsTotal: 12,
           progressScopeId: 'cancel-write-pass', progressUnitId: 'unit-1', progressUnits: 12, signal,
         }),
@@ -2921,6 +3044,56 @@ export default [
     },
   },
   {
+    name: 'non-API AI: failed initial durable admission settles lifecycle accounting instead of leaving a ghost pending handoff',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = {
+        id: 731, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      };
+      const originalWriteFile = fs.promises.writeFile;
+      let forced = false;
+      fs.promises.writeFile = async (...args) => {
+        if (String(args[0]).includes('non-api-ai-handoffs.json')) {
+          forced = true;
+          throw new Error('forced initial durable pending write failure');
+        }
+        return originalWriteFile(...args);
+      };
+      try {
+        handleSafe('non-api-initial-durable-failure', async (_event, _args, signal) => ({
+          result: await requestNonApiAi({
+            prompt: 'TOP_SECRET_INITIAL_DURABLE_FAILURE_PROMPT', task: 'test-manual-initial-durable-failure',
+            responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } },
+            signal,
+          }),
+        }));
+        const manualAiRunId = `initial-durable-failure-${Date.now()}`;
+        const result = await ipcMain.__getInvokeHandler('non-api-initial-durable-failure')(
+          { sender }, { nodeId: 'initial-durable-failure-node', manualAiRunId },
+        );
+        const snapshot = getNonApiAiHandoffLifecycleSnapshot({ windowId: sender.id });
+        const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(['initial-durable-failure-node']), sender.id);
+        const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
+        assert(forced && result.success === false && sent.length === 0 && replay.count === 0
+          && snapshot.aggregate.issued === 1 && snapshot.aggregate.settled === 1
+          && snapshot.aggregate.failed === 1 && snapshot.aggregate.accepted === 0
+          && snapshot.aggregate.pendingAfterRejection === 0 && snapshot.lifecycles.length === 1
+          && snapshot.lifecycles[0].outcome === 'failed' && snapshot.lifecycles[0].settledAt
+          && markdown.includes('Cumulative registry (this process window): 1 issued · 1 settled')
+          && markdown.includes('failed 1') && markdown.includes('workflow run scope present')
+          && !markdown.includes(manualAiRunId) && !markdown.includes('TOP_SECRET_INITIAL_DURABLE_FAILURE_PROMPT'),
+        'a failed initial durable write has one terminal failed receipt, no pending registry entry, and an honest redacted report');
+      } finally {
+        fs.promises.writeFile = originalWriteFile;
+      }
+      return { failedInitialWrites: 1 };
+    },
+  },
+  {
     name: 'non-API AI: bug-report lifecycle is bounded, redacted, and proves reject/replay/accept settlement',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
@@ -2934,7 +3107,7 @@ export default [
       handleSafe('non-api-lifecycle-report-test', async (_event, _args, signal) => ({
         result: await requestNonApiAi({
           prompt: 'TOP_SECRET_PROMPT must never be reported',
-          task: 'job-taxonomy-classify',
+          task: 'test-manual-taxonomy',
           responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
@@ -3016,9 +3189,9 @@ export default [
         && receipt?.replays === 1 && receipt?.outcome === 'accepted' && receipt?.acceptedAt && receipt?.settledAt,
       'the lifecycle records initial delivery, validation rejection/reissue, remount replay, acceptance, and final settlement');
       const boardProgress = pendingReport.match(/Board `#[0-9a-f]{10}` searches · 1 selected · 0 completed · 2 active · 2 awaiting source resolution · this source active · this source awaiting resolution/);
-      assert(matching.get('handoff-report-node')?.[0]?.task === 'job-taxonomy-classify'
+      assert(matching.get('handoff-report-node')?.[0]?.task === 'test-manual-taxonomy'
         && wrongChannel.size === 0 && wrongRun.size === 0 && mixedControllers.size === 0
-        && pendingReport.includes('⏳ awaiting manual response: job-taxonomy-classify')
+        && pendingReport.includes('⏳ awaiting handoff response: test-manual-taxonomy')
         && pendingReport.includes('IPC `non-api-lifecycle-report-test`')
         && boardProgress
         && !pendingReport.includes('handoff-report-board')
@@ -3027,10 +3200,13 @@ export default [
         && !pendingReport.includes('TOP_SECRET_PROMPT'),
       'an active controller is correlated only to the same-node, same-channel pending manual handoff, and FULL keeps Board/source counts behind a one-way digest');
       assert(markdown.includes('Non-API AI Handoff Lifecycle')
+        && markdown.includes('sent to local dock 3 time(s)')
+        && markdown.includes('"Sent to local dock" is renderer delivery only, not')
         && markdown.includes('1 paste rejection(s)')
         && markdown.includes('1 reissued')
         && markdown.includes('1 replayed after dialog remount')
         && markdown.includes('**partial-row recovery** from 24-item root batch')
+        && markdown.includes('workflow run scope missing')
         && markdown.includes('**accepted** in')
         && !markdown.includes(request.handoffCode)
         && !markdown.includes('TOP_SECRET_PROMPT')
@@ -3063,7 +3239,7 @@ export default [
         frontEndState: {}, eventLogs: [],
       }, sender.id).markdown;
       assert(taxonomyReport.includes('## Non-API AI Handoff Lifecycle')
-        && taxonomyReport.includes('job-taxonomy-classify')
+        && taxonomyReport.includes('test-manual-taxonomy')
         && taxonomyReport.includes('**accepted** in')
         && !taxonomyReport.includes('TOP_SECRET_PROMPT')
         && !taxonomyReport.includes('TOP_SECRET_RESPONSE')
@@ -3188,6 +3364,244 @@ export default [
     },
   },
   {
+    name: 'non-API AI: lifecycle aggregates survive detail eviction, retain live corrections, isolate windows, and cap inactive windows',
+    run: async () => {
+      const tick = () => new Promise(resolve => setImmediate(resolve));
+      const schema = {
+        type: 'object', required: ['result'], properties: { result: { type: 'string' } },
+      };
+      const responseFor = request => `{"handoffCode":"${request.handoffCode}","result":"ok"}`;
+      const senderFor = (id, sent) => ({
+        id, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        send: (channel, payload) => sent.push({ channel, payload }),
+      });
+
+      // First prove that an early correction/recovery remains in the
+      // cumulative, content-free accounting after 41 sequential requests push
+      // its detailed row out of the 40-row FIFO.
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const recoverySent = [];
+      const recoverySender = senderFor(732, recoverySent);
+      handleSafe('non-api-lifecycle-aggregate-recovery', async (_event, _args, signal) => {
+        const values = [];
+        for (let index = 0; index < 41; index += 1) {
+          values.push(await requestNonApiAi({
+            prompt: `TOP_SECRET_AGGREGATE_PROMPT_${index}`,
+            task: 'test-manual-aggregate', responseSchema: schema, signal,
+          }));
+        }
+        return { values };
+      });
+      const recoveryRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-recovery')({ sender: recoverySender }, {});
+      const submit = ipcMain.__getInvokeHandler('submit-non-api-ai-response');
+      for (let index = 0; index < 41; index += 1) {
+        await tick();
+        const request = recoverySent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+        assert(request?.requestId, `aggregate recovery request ${index + 1} is delivered`);
+        if (index === 0) {
+          const rejected = await submit({ sender: recoverySender }, {
+            requestId: request.requestId,
+            response: `{"handoffCode":"${request.handoffCode}"}`,
+          });
+          assert(rejected.accepted === false, 'the first aggregate test request records a validation rejection');
+          const correction = recoverySent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+          assert(correction?.requestId === request.requestId, 'the rejected request is reissued before recovery');
+          await submit({ sender: recoverySender }, { requestId: correction.requestId, response: responseFor(correction) });
+        } else {
+          await submit({ sender: recoverySender }, { requestId: request.requestId, response: responseFor(request) });
+        }
+      }
+      await recoveryRun;
+      const recovered = getNonApiAiHandoffLifecycleSnapshot({ windowId: recoverySender.id });
+      const recoveredMarkdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(), recoverySender.id);
+      assert(recovered.sourceRetained === 40 && recovered.sourceEvicted === 1
+        && recovered.lifecycles.length === 20 && recovered.aggregate.issued === 41
+        && recovered.aggregate.settled === 41 && recovered.aggregate.accepted === 41
+        && recovered.aggregate.rejectionAttempts === 1 && recovered.aggregate.requestsEverRejected === 1
+        && recovered.aggregate.acceptedAfterRejection === 1 && recovered.aggregate.pendingAfterRejection === 0
+        && recovered.aggregate.bridgeRejectionAttempts === 0 && recovered.aggregate.requestsEverBridgeRejected === 0
+        && recovered.aggregate.acceptedAfterBridgeRejection === 0 && recovered.aggregate.pendingAfterBridgeRejection === 0
+        && recoveredMarkdown.includes('Detailed receipts: 20 shown')
+        && recoveredMarkdown.includes('1 earlier receipt(s) evicted by the source cap')
+        && recoveredMarkdown.includes('Cumulative registry (this process window): 41 issued')
+        && recoveredMarkdown.includes('Bridge-route reconciliation: 0 bridge validation rejection attempt(s)')
+        && recoveredMarkdown.includes('workflow run scope missing')
+        && !JSON.stringify(recovered.aggregate).includes('TOP_SECRET_AGGREGATE_PROMPT'),
+      'cumulative lifecycle accounting survives FIFO eviction and contains only closed numeric state');
+
+      // An evicted, still-open correction must be promoted from pendingRequests
+      // into the visible snapshot rather than disappearing behind newer work.
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const activeSent = [];
+      const activeSender = senderFor(733, activeSent);
+      handleSafe('non-api-lifecycle-aggregate-active', async (_event, _args, signal) => {
+        const early = requestNonApiAi({ prompt: 'TOP_SECRET_EARLY_PROMPT', task: 'test-manual-aggregate', responseSchema: schema, signal });
+        const later = [];
+        for (let index = 0; index < 40; index += 1) {
+          later.push(await requestNonApiAi({ prompt: `TOP_SECRET_LATER_PROMPT_${index}`, task: 'test-manual-aggregate', responseSchema: schema, signal }));
+        }
+        await early;
+        return { later };
+      });
+      const activeRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-active')({ sender: activeSender }, {});
+      await tick();
+      const early = activeSent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const earlyRejected = await submit({ sender: activeSender }, {
+        requestId: early.requestId, response: `{"handoffCode":"${early.handoffCode}"}`,
+      });
+      assert(earlyRejected.accepted === false, 'the long-lived correction is rejected before later work fills the FIFO');
+      const submittedLater = new Set();
+      for (let index = 0; index < 40; index += 1) {
+        let next = null;
+        for (let attempt = 0; attempt < 20 && !next; attempt += 1) {
+          await tick();
+          next = activeSent
+            .filter(item => item.channel === 'non-api-ai-request')
+            .map(item => item.payload)
+            .find(request => request.requestId !== early.requestId && !submittedLater.has(request.requestId));
+        }
+        assert(next?.requestId, `later request ${index + 1} is delivered while early correction remains pending`);
+        submittedLater.add(next.requestId);
+        await submit({ sender: activeSender }, { requestId: next.requestId, response: responseFor(next) });
+      }
+      const activeSnapshot = getNonApiAiHandoffLifecycleSnapshot({ windowId: activeSender.id });
+      assert(activeSnapshot.sourceRetained === 40 && activeSnapshot.sourceEvicted === 1
+        && activeSnapshot.activeRecoveredFromSourceEviction === 1
+        && activeSnapshot.aggregate.issued === 41 && activeSnapshot.aggregate.settled === 40
+        && activeSnapshot.aggregate.rejectionAttempts === 1 && activeSnapshot.aggregate.requestsEverRejected === 1
+        && activeSnapshot.aggregate.acceptedAfterRejection === 0 && activeSnapshot.aggregate.pendingAfterRejection === 1
+        && activeSnapshot.lifecycles.some(receipt => receipt.requestId === early.requestId.slice(0, 12)),
+      'an active rejected request stays observable and is not falsely described as recovered after FIFO eviction');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: activeSender }, { requestId: early.requestId });
+      await activeRun;
+      const afterCancel = getNonApiAiHandoffLifecycleSnapshot({ windowId: activeSender.id });
+      assert(afterCancel.aggregate.cancelled === 1 && afterCancel.aggregate.pendingAfterRejection === 0,
+        'pending-after-rejection is derived from live ownership and clears only when that request settles');
+
+      // Bridge recovery needs its own route-specific fact. A local dock
+      // correction above must not let the report claim that a bridge rejection
+      // recovered, while a bridge rejection accepted through either route can.
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const bridgeSent = [];
+      const bridgeSender = senderFor(734, bridgeSent);
+      handleSafe('non-api-lifecycle-aggregate-bridge-recovery', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({ prompt: 'TOP_SECRET_BRIDGE_PROMPT', task: 'job-scoring', responseSchema: schema, signal }),
+      }));
+      const bridgeRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-bridge-recovery')({ sender: bridgeSender }, {});
+      await tick();
+      const bridgeRequest = bridgeSent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      const bridgeRejected = await submitNonApiAiResponseForBridge({
+        requestId: bridgeRequest.requestId, handoffCode: bridgeRequest.handoffCode,
+        response: `{"handoffCode":"${bridgeRequest.handoffCode}"}`,
+        allowTasks: new Set(['job-scoring']),
+      });
+      assert(bridgeRejected.outcome === 'rejected', 'a bridge submission records a route-specific validation rejection');
+      const bridgeAccepted = await submitNonApiAiResponseForBridge({
+        requestId: bridgeRequest.requestId, handoffCode: bridgeRequest.handoffCode,
+        response: responseFor(bridgeRequest), allowTasks: new Set(['job-scoring']),
+      });
+      await bridgeRun;
+      const bridgeRecovered = getNonApiAiHandoffLifecycleSnapshot({ windowId: bridgeSender.id });
+      const bridgeRecoveredMarkdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(), bridgeSender.id);
+      assert(bridgeAccepted.outcome === 'accepted'
+        && bridgeRecovered.aggregate.bridgeRejectionAttempts === 1
+        && bridgeRecovered.aggregate.requestsEverBridgeRejected === 1
+        && bridgeRecovered.aggregate.acceptedAfterBridgeRejection === 1
+        && bridgeRecovered.aggregate.pendingAfterBridgeRejection === 0
+        && bridgeRecoveredMarkdown.includes('1 bridge-rejected request(s) later accepted on that same lifecycle'),
+      'only a same-lifecycle bridge rejection followed by acceptance records bridge recovery');
+
+      const bridgePendingSent = [];
+      const bridgePendingSender = senderFor(735, bridgePendingSent);
+      handleSafe('non-api-lifecycle-aggregate-bridge-pending', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({ prompt: 'TOP_SECRET_BRIDGE_PENDING_PROMPT', task: 'job-scoring', responseSchema: schema, signal }),
+      }));
+      const bridgePendingRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-bridge-pending')({ sender: bridgePendingSender }, {});
+      await tick();
+      const bridgePending = bridgePendingSent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      await submitNonApiAiResponseForBridge({
+        requestId: bridgePending.requestId, handoffCode: bridgePending.handoffCode,
+        response: `{"handoffCode":"${bridgePending.handoffCode}"}`,
+        allowTasks: new Set(['job-scoring']),
+      });
+      handleSafe('non-api-lifecycle-aggregate-same-window-dock', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({ prompt: 'TOP_SECRET_SAME_WINDOW_DOCK_PROMPT', task: 'test-manual-aggregate', responseSchema: schema, signal }),
+      }));
+      const dockSameWindowRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-same-window-dock')({ sender: bridgePendingSender }, {});
+      await tick();
+      const dockSameWindow = bridgePendingSent
+        .filter(item => item.channel === 'non-api-ai-request')
+        .map(item => item.payload)
+        .find(request => request.requestId !== bridgePending.requestId);
+      const dockRejected = await submit({ sender: bridgePendingSender }, {
+        requestId: dockSameWindow.requestId, response: `{"handoffCode":"${dockSameWindow.handoffCode}"}`,
+      });
+      assert(dockRejected.accepted === false, 'a local rejection is recorded beside the unrecovered bridge rejection in the same window');
+      await submit({ sender: bridgePendingSender }, { requestId: dockSameWindow.requestId, response: responseFor(dockSameWindow) });
+      await dockSameWindowRun;
+      const bridgeUnrecovered = getNonApiAiHandoffLifecycleSnapshot({ windowId: bridgePendingSender.id });
+      assert(bridgeUnrecovered.aggregate.rejectionAttempts === 2
+        && bridgeUnrecovered.aggregate.acceptedAfterRejection === 1
+        && bridgeUnrecovered.aggregate.bridgeRejectionAttempts === 1
+        && bridgeUnrecovered.aggregate.requestsEverBridgeRejected === 1
+        && bridgeUnrecovered.aggregate.acceptedAfterBridgeRejection === 0
+        && bridgeUnrecovered.aggregate.pendingAfterBridgeRejection === 1,
+      'an unrecovered bridge rejection cannot borrow a same-window dock recovery from another lifecycle');
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: bridgePendingSender }, { requestId: bridgePending.requestId });
+      await bridgePendingRun;
+
+      // The compact per-window aggregate map prunes inactive windows, never
+      // mixes their totals, and reset removes its accounting as well as detail.
+      ipcMain.__clearInvokeHandlers();
+      _resetNonApiAiHandoffLifecycle();
+      registerNonApiAiHandlers();
+      const capSent = [];
+      handleSafe('non-api-lifecycle-aggregate-window-cap', async (_event, _args, signal) => ({
+        result: await requestNonApiAi({ prompt: 'TOP_SECRET_CAP_PROMPT', task: 'test-manual-aggregate', responseSchema: schema, signal }),
+      }));
+      const capRuns = [];
+      const capSenders = [];
+      for (let index = 0; index < 65; index += 1) {
+        const sender = senderFor(8_000 + index, capSent);
+        capSenders.push(sender);
+        capRuns.push(ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-window-cap')({ sender }, {}));
+      }
+      for (let attempt = 0; attempt < 20 && capSent.filter(item => item.channel === 'non-api-ai-request').length < 65; attempt += 1) await tick();
+      const capRequests = capSent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      assert(capRequests.length === 65, 'every isolated-window cap-test request is delivered');
+      await Promise.all(capRequests.map((request, index) => submit({ sender: capSenders[index] }, {
+        requestId: request.requestId, response: responseFor(request),
+      })));
+      await Promise.all(capRuns);
+      const cappedWindows = capSenders.map(sender => getNonApiAiHandoffLifecycleSnapshot({ windowId: sender.id }));
+      const postCapSender = senderFor(8_100, capSent);
+      const postCapRun = ipcMain.__getInvokeHandler('non-api-lifecycle-aggregate-window-cap')({ sender: postCapSender }, {});
+      await tick();
+      const postCapRequest = capSent.filter(item => item.channel === 'non-api-ai-request').at(-1)?.payload;
+      await submit({ sender: postCapSender }, { requestId: postCapRequest.requestId, response: responseFor(postCapRequest) });
+      await postCapRun;
+      const postCapWindow = getNonApiAiHandoffLifecycleSnapshot({ windowId: postCapSender.id });
+      assert(__nonApiAiHandoffLifecycleAggregateCountForTests() <= 64
+        && cappedWindows.some(snapshot => snapshot.aggregate.issued === 0)
+        && cappedWindows.filter(snapshot => snapshot.aggregate.issued > 0)
+          .every(snapshot => snapshot.aggregate.issued === 1 && snapshot.aggregate.accepted === 1)
+        && postCapWindow.aggregate.issued === 1 && postCapWindow.aggregate.accepted === 1,
+      'inactive window aggregates are capped and evicted independently without leaking totals into another window');
+      _resetNonApiAiHandoffLifecycle();
+      const reset = getNonApiAiHandoffLifecycleSnapshot({ windowId: recoverySender.id });
+      assert(reset.sourceRetained === 0 && reset.sourceEvicted === 0 && reset.aggregate.issued === 0
+        && __nonApiAiHandoffLifecycleAggregateCountForTests() === 0,
+      'the test-only lifecycle reset clears both detailed and cumulative accounting');
+      return { sourceCap: recovered.sourceRetained, aggregateCap: 64 };
+    },
+  },
+  {
     name: 'non-API AI: structured research assessment diagnostics produce phase-correct JSON corrections',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
@@ -3210,7 +3624,7 @@ export default [
       handleSafe('non-api-assessment-diagnostic-test', async (_event, _args, signal) => ({
         result: await callLLMText('Assess every supplied research identity.', {
           signal,
-          task: 'job-preference-research-batch-assessment',
+          task: 'test-manual-research-assessment',
           responseSchema: { type: 'object', required: ['assessments'], properties: { assessments: { type: 'array' } } },
           responseValidator: () => {
             const error = new Error(privateMessage);
@@ -3300,7 +3714,7 @@ export default [
       let attempt = 0;
       handleSafe('non-api-compensation-diagnostic-test', async (_event, _args, signal) => ({
         result: await requestNonApiAi({
-          prompt: 'TOP_SECRET_COMPENSATION_PROMPT', task: 'job-compensation-assessment-batch', requestKind: 'raw-text', signal,
+          prompt: 'TOP_SECRET_COMPENSATION_PROMPT', task: 'test-manual-compensation-assessment', requestKind: 'raw-text', signal,
           responseValidator: () => {
             const error = new Error(privateMessage);
             error.code = 'JOB_COMPENSATION_RESPONSE_INVALID';
@@ -3456,7 +3870,7 @@ export default [
       sender.send = (channel, payload) => sent.push({ channel, payload });
       handleSafe('non-api-navigation-abort-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', responseSchema: {
+          signal, task: 'test-manual-retry-delivery', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
         }),
@@ -3513,7 +3927,7 @@ export default [
       };
       handleSafe('non-api-retry-delivery-race-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', responseSchema: {
+          signal, task: 'test-manual-retry-delivery', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
         }),
@@ -3565,16 +3979,16 @@ export default [
       'a defensive scoring split resolves its two dependent children one at a time, so it cannot fan one active top-level slot into two handoffs');
       // Partial recovery is similarly a dependency of the response just
       // accepted for this SAME root batch. Awaiting it before scoreBatch
-      // returns prevents mapWithConcurrency from considering that top-level
-      // slot settled and beginning a fresh independent batch early.
+      // returns keeps the recovery inside its root slot before the automatic
+      // scheduler may claim a fresh independent batch.
       assert(/const recovered = await scoreBatch\(missingJobs, \{ \.\.\.context, partialRecovery: true \}\);/.test(scoreBatchSource),
       'a partial-score recovery stays inside its original top-level batch instead of rotating a new independent batch into the active wave');
-      // Bounded, not unbounded: independent batches still dispatch together so
-      // the person can run several prompts at once, but a large run must not
-      // put every batch on screen simultaneously — that is a backlog, not
-      // parallelism, and it is the same cap the preference-evaluation phase uses.
-      assert(jobsSource.includes('await mapWithConcurrency(scoringBatches, MANUAL_HANDOFF_CONCURRENCY, async (batch, batchIndex) =>'),
-        'top-level batches dispatch together under the shared fixed-wave helper, so a new independent prompt cannot replace one that settles early');
+      // Bounded, not unbounded: the centralized scheduler maintains ten active
+      // root slots and immediately replaces a completed independent batch. A
+      // partial recovery remains inside its root slot, so it cannot fan out and
+      // exceed the cap.
+      assert(jobsSource.includes('await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) =>'),
+        'top-level batches use the shared rolling scheduler, so a completed independent batch refills its slot without exceeding the cap');
 
       // Renderer-side belt and braces: arrival order is not a contract, so the
       // queue sorts itself rather than trusting main to emit in order.
@@ -3846,7 +4260,7 @@ export default [
         validateNonApiAiSubmission({
           response: JSON.stringify({ result: 'code-free answer' }),
           responseSchema: schema,
-          task: 'job-preference-evaluation',
+          task: 'test-manual-code-bound',
           expectedHandoffCode: issuedCode,
         });
       } catch (error) { structuredMissing = error?.code || ''; }
@@ -4024,7 +4438,7 @@ export default [
       handleSafe('test-collision-channel', async (_event, args, signal) => {
         return requestNonApiAi({
           prompt: `PROMPT FOR BATCH ${args.batch}`,
-          task: 'job-preference-evaluation',
+          task: 'test-manual-code-bound',
           batch: args.batch,
           batchTotal: 259,
           itemCount: 8,

@@ -30,6 +30,7 @@ import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
+import { prepareBackgroundBoardChildRequest, validateBackgroundBoardChildRequest } from '../utils/jobBoardBackgroundRecovery';
 import { ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { safeClone } from '../utils/navigationUtils';
 import {
@@ -116,6 +117,49 @@ async function waitForBoardPlanCommit({ getNode, nodeId, boardRunId, matches }) 
     if (typeof matches !== 'function' || matches(plan)) return true;
   }
   return false;
+}
+
+async function claimJobBoardProcessLease({
+  canvasFilePath,
+  nodeId,
+  boardRunId,
+  operation = 'board-orchestration',
+  autoResume = false,
+  waitForRelease = false,
+}) {
+  // Untitled canvases cannot be open as the same durable owner in two windows.
+  // Keep their existing renderer-local queue behavior until the first Save.
+  if (!canvasFilePath) return { localOnly: true };
+  if (!window.electronAPI?.claimJobBoardRun) {
+    return { error: 'This build cannot claim the saved Job Board recovery transaction.' };
+  }
+  const claimed = await window.electronAPI.claimJobBoardRun({
+    canvasFilePath,
+    nodeId,
+    boardRunId,
+    operation,
+    autoResume,
+    waitForRelease,
+  });
+  if (claimed?.success === true && claimed?.ok === true && claimed?.claimToken) return claimed;
+  return {
+    error: claimed?.error || claimed?.reason || 'The saved Job Board recovery transaction is already owned.',
+    busy: claimed?.busy === true || claimed?.attempted === true,
+  };
+}
+
+async function releaseJobBoardProcessLease(canvasFilePath, nodeId, boardRunId, claim) {
+  if (!claim?.claimToken || !window.electronAPI?.releaseJobBoardRun) return;
+  try {
+    await window.electronAPI.releaseJobBoardRun({
+      canvasFilePath,
+      nodeId,
+      boardRunId,
+      claimToken: claim.claimToken,
+    });
+  } catch {
+    // Closing/reloading the renderer releases its sender-owned main lease.
+  }
 }
 
 function isSavedScrapeManualAiResume(resume) {
@@ -3102,6 +3146,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const preflightToken = Symbol(`job-board-preflight:${id}`);
     scanPreflightRef.current = preflightToken;
     setRecoveryError(null);
+    let processBoardClaim = null;
 
     // The click handler receives a React event; only our recovery effect passes
     // this explicit marker. A durable plan lets a Board regain ownership after
@@ -3110,6 +3155,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const resumePlan = request?.resumeBoardScan === true && request.plan && typeof request.plan === 'object'
       ? request.plan
       : null;
+    const explicitRecoveryContinue = request?.explicitRecoveryContinue === true;
     if (resumePlan && !isCurrentBoardScanResume(
       getNode(id)?.data?.boardScanResume,
       resumePlan,
@@ -3119,6 +3165,27 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // scan; the current store is the recovery authority.
       if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
       return { status: 'superseded' };
+    }
+    if (resumePlan) {
+      processBoardClaim = await claimJobBoardProcessLease({
+        canvasFilePath,
+        nodeId: id,
+        boardRunId: resumePlan.boardRunId,
+        operation: 'board-orchestration',
+        autoResume: !explicitRecoveryContinue,
+        // A hidden startup coordinator may be finishing this same Board's safe
+        // provider-only phase. Wait for that distinct operation, then re-inspect
+        // the child manifest inside the ordinary Board lane.
+        waitForRelease: true,
+      });
+      if (processBoardClaim.error) {
+        if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+        EventLogger.log(
+          `[JobBoard] saved recovery not admitted in this window id=${id}`
+          + ` run=${resumePlan.boardRunId} reason=${processBoardClaim.error}`,
+        );
+        return { status: processBoardClaim.busy ? 'busy' : 'failed', error: processBoardClaim.error };
+      }
     }
 
     // Resolve the allow-list from the live graph at admission. The stored list
@@ -3143,6 +3210,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       addToast({ title: 'Choose Job Search sources', description: 'Select at least one connected source to start or continue. Completed connected results are reused when combining.', type: 'info' });
       if (resumePlan) clearExactBoardScanResume(updateGlobal, id, resumePlan.boardRunId);
       if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      await releaseJobBoardProcessLease(canvasFilePath, id, resumePlan?.boardRunId, processBoardClaim);
       return;
     }
 
@@ -3180,6 +3248,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       || !getNode(id)
     ) {
       if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      await releaseJobBoardProcessLease(canvasFilePath, id, resumePlan?.boardRunId, processBoardClaim);
       return { status: 'cancelled' };
     }
     // Disk state can disappear or be replaced without a React Flow data update.
@@ -3327,12 +3396,30 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       });
       clearExactBoardScanResume(updateGlobal, id, resumePlan.boardRunId);
       if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+      await releaseJobBoardProcessLease(canvasFilePath, id, resumePlan.boardRunId, processBoardClaim);
       return { status: 'attention' };
     }
 
     const entropy = globalThis.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const boardRunId = resumePlan?.boardRunId || `job-board-scan:${id}:${entropy}`;
+    if (!processBoardClaim) {
+      processBoardClaim = await claimJobBoardProcessLease({
+        canvasFilePath,
+        nodeId: id,
+        boardRunId,
+        operation: 'board-orchestration',
+        autoResume: false,
+      });
+      if (processBoardClaim.error) {
+        if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
+        EventLogger.log(
+          `[JobBoard] new run not admitted in this window id=${id}`
+          + ` run=${boardRunId} reason=${processBoardClaim.error}`,
+        );
+        return { status: processBoardClaim.busy ? 'busy' : 'failed', error: processBoardClaim.error };
+      }
+    }
     // A plan on an untitled canvas is intentionally not durable across a
     // reload. It is still valid for this Board instance, though: a source-card
     // pause must be able to resume the remaining selected searches and Combine
@@ -3408,6 +3495,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const queuedAwaitingSourceResolution = queuedAwaitingSourceResolutions.find(
       entry => entry.sourceId === queuedRecoverySourceId,
     ) || queuedAwaitingSourceResolutions[0] || null;
+    // Freeze any already-planned, unattended-safe child request in the Board
+    // receipt before the lane starts. If the app stops between serial children,
+    // workspace startup can create that exact child's manifest without mounting
+    // the nested canvas or inventing a fresh search window. Unsafe/native/AI-
+    // planning children simply have no entry and stay mounted/human-gated.
+    const backgroundChildRequests = resumePlan?.backgroundChildRequests || Object.fromEntries(
+      transactionSelectedIds.map((sourceId) => [
+        sourceId,
+        prepareBackgroundBoardChildRequest({
+          node: sourceNodesById.get(sourceId),
+          boardNodeId: id,
+          boardRunId,
+          startedAt: scanStartedAt,
+          canvasFilePath,
+        }),
+      ]).filter(([, prepared]) => !!prepared),
+    );
     let durableScanResume = {
       version: 1,
       boardRunId,
@@ -3416,6 +3520,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       selectedSearchModuleIds: transactionSelectedIds,
       baselineSourceRuns,
       freshImportCapabilities,
+      backgroundChildRequests,
       completedSourceRuns: Object.fromEntries(completedOutcomes),
       incompleteSearches,
       // This exact source/run handoff is the only case where a Board-owned
@@ -4338,6 +4443,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             (edge.source === id && edge.target === sourceId)
             || (edge.target === id && edge.source === sourceId)
           ));
+          const providerPhaseOnlyRecovery = !!resumePlan
+            && !explicitRecoveryContinue
+            && !pausedContinuation
+            && !durableScanResume.recoverableFailure;
+          const backgroundProviderBootstrap = providerPhaseOnlyRecovery
+            ? validateBackgroundBoardChildRequest(
+              durableScanResume.backgroundChildRequests?.[sourceId],
+              turnSourceNode,
+              durableScanResume,
+              canvasFilePath,
+            )
+            : null;
           const result = await jobSearchCoordinator.runSearchModule(sourceId, {
             orchestratorNodeId: id,
             boardRunId,
@@ -4366,6 +4483,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
                 .includes(durableScanResume.recoverableFailure?.kind)
               ? durableScanResume.recoverableFailure
               : null,
+            providerPhaseOnlyRecovery,
+            allowFreshProviderBootstrap: !!backgroundProviderBootstrap,
+            boardRecoveryClaim: processBoardClaim?.claimToken ? {
+              nodeId: id,
+              boardRunId,
+              claimToken: processBoardClaim.claimToken,
+              operation: processBoardClaim.operation || 'board-orchestration',
+            } : null,
           });
           if (cancelled()) return;
           if (result?.transientReason === 'platforms-verifying') {
@@ -4441,6 +4566,29 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             return;
           }
           if (result?.status === 'paused') {
+            if (result.reason === 'awaiting-explicit-ai-continue') {
+              persistScanResume({
+                activeSourceId: sourceId,
+                activeSourceRollback,
+                recoverableFailure: null,
+              });
+              autoResumedBoardScanRef.current = null;
+              setScanProgress({
+                completed: processed,
+                total: totalSelected,
+                currentLabel: label,
+                label: `${label} provider collection is saved and ready to continue.`,
+              });
+              setRecoveryError(
+                result.error
+                || `Saved provider results for ${label} are ready. Continue to run the exact AI handoff.`,
+              );
+              EventLogger.log(
+                `[JobBoard] provider recovery reached explicit AI boundary id=${id}`
+                + ` run=${boardRunId} source=${sourceId} jobRun=${result.runId || 'pending'}`,
+              );
+              return;
+            }
             const pausedJobRunId = result.runId || getNode(sourceId)?.data?.jobRunId || null;
             if (typeof pausedJobRunId !== 'string' || !pausedJobRunId) {
               const error = new Error(`${label} paused without a recoverable search run id.`);
@@ -4832,6 +4980,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       clearExactBoardScanResume(updateGlobal, id, boardRunId);
     } finally {
       lease?.release();
+      await releaseJobBoardProcessLease(canvasFilePath, id, boardRunId, processBoardClaim);
       if (scanPreflightRef.current === preflightToken) scanPreflightRef.current = null;
       if (scanLaneLeaseOwnerRef.current === scanToken) {
         scanLaneLeaseOwnerRef.current = null;
@@ -4976,6 +5125,30 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const clearMatchingPlan = () => {
       clearExactBoardScanResume(updateGlobal, id, plan.boardRunId);
     };
+    const runClaimedRecoveryOperation = (operation, callback) => {
+      void (async () => {
+        const claim = await claimJobBoardProcessLease({
+          canvasFilePath,
+          nodeId: id,
+          boardRunId: plan.boardRunId,
+          operation,
+          autoResume: true,
+          waitForRelease: true,
+        });
+        if (claim.error) {
+          EventLogger.log(
+            `[JobBoard] recovery operation not admitted in this window id=${id}`
+            + ` run=${plan.boardRunId} operation=${operation} reason=${claim.error}`,
+          );
+          return;
+        }
+        try {
+          await callback();
+        } finally {
+          await releaseJobBoardProcessLease(canvasFilePath, id, plan.boardRunId, claim);
+        }
+      })();
+    };
 
     const pendingChildCleanups = plan.cancellationCleanupsBySource || (
       plan.cancellationCleanup?.sourceId ? { [plan.cancellationCleanup.sourceId]: plan.cancellationCleanup } : {}
@@ -4985,7 +5158,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (autoResumedBoardScanRef.current === key) return;
       autoResumedBoardScanRef.current = key;
       EventLogger.log(`[JobBoard] Retrying interrupted child cleanup id=${id} run=${plan.boardRunId}`);
-      void handleCancelRun();
+      runClaimedRecoveryOperation('board-cleanup', () => handleCancelRun());
       return;
     }
 
@@ -4998,17 +5171,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (autoResumedBoardScanRef.current === key) return;
       autoResumedBoardScanRef.current = key;
       EventLogger.log(`[JobBoard] Resuming interrupted combine id=${id} run=${plan.boardRunId}`);
-      void handleCombine({
-        afterSearch: true,
-        recoveryAttempt: true,
-        expectedBoardRunId: plan.boardRunId,
-        manualAiRunId: plan.combineManualAiRunId || undefined,
-        expectedCombineSignature: plan.combineInputSignature || null,
-        expectedSourceRuns: plan.completedSourceRuns || null,
-        expectedCombineSourceRuns: plan.combineSourceRuns || null,
-      }).then((outcome) => {
-        if (!settleRecoveredCombine(outcome, plan.boardRunId)) return;
-        clearMatchingPlan();
+      runClaimedRecoveryOperation('board-combine', async () => {
+        const outcome = await handleCombine({
+          afterSearch: true,
+          recoveryAttempt: true,
+          expectedBoardRunId: plan.boardRunId,
+          manualAiRunId: plan.combineManualAiRunId || undefined,
+          expectedCombineSignature: plan.combineInputSignature || null,
+          expectedSourceRuns: plan.completedSourceRuns || null,
+          expectedCombineSourceRuns: plan.combineSourceRuns || null,
+        });
+        if (settleRecoveredCombine(outcome, plan.boardRunId)) clearMatchingPlan();
       });
       return;
     }
@@ -5661,6 +5834,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
     if (!canvasFilePath) return;
+    if (resume.retirementPending !== true) {
+      const message = 'Saved AI handoff ready. Choose Continue saved AI handoff to resume this exact Board run.';
+      autoResumedManualAiRunRef.current = null;
+      if (recoveryError !== message) setRecoveryError(message);
+      return;
+    }
     if (combineRunRef.current || data.boardCancellation || data.locked || recoveryError) return;
     if (resume.retirementPending) {
       // A failed durable retirement rewrites this marker with a new updatedAt.
@@ -5685,21 +5864,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       });
       return;
     }
-    autoResumedManualAiRunRef.current = resume.runId;
-    EventLogger.log(`[JobBoard] Auto-resuming manual AI run id=${id} task=${resume.task || 'pending step'}`);
-    void handleCombine({
-      manualAiRunId: resume.runId,
-      recoveryAttempt: true,
-      expectedCombineSignature: data.boardScanResume?.combineInputSignature
-        || resume.combineInputSignature
-        || null,
-      expectedSourceRuns: data.boardScanResume?.completedSourceRuns || null,
-      expectedCombineSourceRuns: data.boardScanResume?.combineSourceRuns
-        || resume.combineSourceRuns
-        || null,
-    }).then((outcome) => {
-      settleRecoveredCombine(outcome, data.boardScanResume?.boardRunId || null);
-    });
   }, [canvasFilePath, combining, data.boardCancellation, data.boardScanResume, data.manualAiResume, data.locked, deletionLifecycleRevision, handleCombine, id, readyModules.length, recoveryError, retireBoardCleanupReceipt, settleRecoveredCombine, updateGlobal]);
 
   const handleRetryRecovery = useCallback(() => {
@@ -5758,7 +5922,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     if (!plan?.boardRunId) {
       const manualRunId = liveData.manualAiResume?.runId || null;
       if (!manualRunId) return;
-      autoResumedManualAiRunRef.current = null;
+      autoResumedManualAiRunRef.current = manualRunId;
       void handleCombine({
         manualAiRunId: manualRunId,
         recoveryAttempt: true,
@@ -5773,7 +5937,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
     if (plan.phase === 'combine') {
-      autoResumedManualAiRunRef.current = null;
+      autoResumedManualAiRunRef.current = liveData.manualAiResume?.runId
+        || plan.combineManualAiRunId
+        || null;
       void handleCombine({
         afterSearch: true,
         recoveryAttempt: true,
@@ -5788,7 +5954,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
     autoResumedBoardScanRef.current = null;
-    void handleSearchSelected({ resumeBoardScan: true, plan });
+    void handleSearchSelected({ resumeBoardScan: true, plan, explicitRecoveryContinue: true });
   }, [getNode, handleCancelRun, handleCombine, handleSearchSelected, id, retireBoardCleanupReceipt, settleRecoveredCombine, updateGlobal]);
 
   const durableRecoveryActive = !!data.boardCancellation || !!data.boardScanResume || !!data.manualAiResume;
@@ -5844,6 +6010,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           onCancel={handleCancelRun}
           recoveryError={recoveryError}
           onRetry={handleRetryRecovery}
+          recoveryActionLabel={
+            (data.manualAiResume?.runId && data.manualAiResume.retirementPending !== true)
+              || recoveryError?.includes('AI handoff')
+              ? 'Continue saved AI handoff'
+              : 'Retry recovery'
+          }
           recoveryCanCancel={!cleanupOnlyRecovery && !cancellationCleanupActive && !finalizingCommittedCombine}
           onRuntimeSnapshot={captureSelectorRuntimeSnapshot}
         />

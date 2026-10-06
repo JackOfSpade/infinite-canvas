@@ -1,7 +1,7 @@
 import electronPkg from 'electron';
 import { IPC_CHANNELS, IPC_EVENTS } from './contracts.js';
 import { CONSTANTS } from './constants.js';
-import { buildContinueMessage, buildStarterMessage } from './framing.js';
+import { buildContinueMessage, buildStarterMessage, buildWorkerStarterMessage } from './framing.js';
 import { sanitizeActivityItem } from './log.js';
 import { createUiRestartContext } from './restartContext.js';
 import { recordBridgeChatCopyResult } from './telemetry.js';
@@ -14,6 +14,7 @@ const STATUS_INTERVAL_MS = 250;
 const LIMIT_KEYS = Object.freeze(['releaseTtlHours', 'chatKeyMaxAgeHours', 'idlePauseMinutes', 'jobsPerChat', 'epochSoftBytes', 'epochHardBytes']);
 const HUB_KEY = /^[a-f0-9]{64}$/;
 const ALARM_ID = /^[a-z0-9][a-z0-9_.:-]{0,99}$/i;
+const WORKER_SESSION_CODE = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{26}$/;
 // Alarm kinds are a closed status vocabulary.  The dialog gets only the
 // documented threshold facts, never an alarm id or any remote/renderer text.
 const ANOMALY_ALARM_FACTS = Object.freeze({
@@ -45,7 +46,7 @@ const plain = value => value && typeof value === 'object' && !Array.isArray(valu
 // failures: an optimistic renderer reply would make a failed Disable, revoke,
 // or setup write indistinguishable from success.
 const acknowledged = (value, { allowTrue = false } = {}) => value?.success === true || value?.ok === true || (allowTrue && value === true);
-const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'NOT_READY', 'TUNNEL_NOT_READY', 'TUNNEL_NOT_SERVING', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'CLIPBOARD_FAILED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'INTERNAL']);
+const IPC_CODES = new Set(['UNAVAILABLE', 'SENDER', 'BUSY', 'DECLINED', 'INVALID', 'NO_WINDOW', 'NOT_READY', 'TUNNEL_NOT_READY', 'TUNNEL_NOT_SERVING', 'NOT_LINKED', 'PAUSED', 'NO_CHAT', 'QUEUE_EMPTY', 'POOL_ACTIVE', 'CLIPBOARD_FAILED', 'NOT_FOUND', 'UNKNOWN_JOB', 'LIMIT_REACHED', 'DISABLED', 'LINK_WOULD_BREAK', 'SESSION_STARTED', 'STARTER_COPIED', 'INTERNAL']);
 const INTERNAL_CODES = Object.freeze({
   cancelled: 'DECLINED', declined: 'DECLINED', invalid: 'INVALID', invalid_arguments: 'INVALID',
   unknown_job: 'UNKNOWN_JOB', not_found: 'NOT_FOUND', lane_limit: 'LIMIT_REACHED',
@@ -53,6 +54,7 @@ const INTERNAL_CODES = Object.freeze({
   unlinked: 'NOT_LINKED', not_linked: 'NOT_LINKED', paused: 'PAUSED', no_chat: 'NO_CHAT',
   clipboard_failed: 'CLIPBOARD_FAILED', link_would_break: 'LINK_WOULD_BREAK', unavailable: 'UNAVAILABLE',
   sender: 'SENDER', no_window: 'NO_WINDOW', persist_failed: 'INTERNAL', internal_error: 'INTERNAL',
+  session_started: 'SESSION_STARTED', starter_copied: 'STARTER_COPIED', queue_empty: 'QUEUE_EMPTY', pool_active: 'POOL_ACTIVE',
 });
 const registeredPublishListeners = new WeakMap();
 const REQUIRED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS)
@@ -347,6 +349,11 @@ export function registerHandoffBridgeUi({
         const long = details.long !== false;
         const enableDetails = {
           hostname: isValidHostname(details.hostname) ? details.hostname : status?.config?.hostname,
+          // This opaque structural token is created and verified only by the
+          // main-owned consent port. It is never supplied by the renderer.
+          consentFingerprint: typeof details.consentFingerprint === 'string' && details.consentFingerprint.length <= 2048
+            ? details.consentFingerprint
+            : null,
           idlePauseMinutes: Number.isSafeInteger(details.idlePauseMinutes) ? details.idlePauseMinutes : status?.limits?.idlePauseMinutes,
           items: Array.isArray(details.items) ? details.items : [],
           long,
@@ -363,15 +370,35 @@ export function registerHandoffBridgeUi({
           const answer = await confirm(sender, 'enable', enableDetails);
           if (!answer.ok) return startupEnableFailure(answer);
           if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
-        }
-        const result = await safeCall(controller, 'enable', { confirmed: true, restartConfirmed: long });
-        if (!acknowledged(result)) return startupEnableFailure(result);
-        if (long) {
-          const persisted = await safeCall(enableConsent, 'accept', enableDetails);
-          if (!acknowledged(persisted, { allowTrue: true })) {
-            await safeCall(controller, 'disable');
+          // A second canvas can save a different hostname/scope while this
+          // native sheet is open. Do not start under that new configuration;
+          // make the user retry against a freshly described sheet instead.
+          if (!enableDetails.consentFingerprint
+            || !acknowledged(await safeCall(enableConsent, 'verify', enableDetails), { allowTrue: true })) {
             return fixed('UNAVAILABLE');
           }
+          // Persist the exact sheet's receipt while its fingerprint is still
+          // current, before acquiring either transport owner. The store makes
+          // this conditional inside its config queue, so a concurrent save
+          // cannot let a later config inherit an accepted v2 receipt.
+          if (!acknowledged(await safeCall(enableConsent, 'accept', enableDetails), { allowTrue: true })) {
+            return fixed('UNAVAILABLE');
+          }
+        }
+        const result = await safeCall(controller, 'enable', {
+          confirmed: true,
+          restartConfirmed: long,
+          // Minted only after the main-owned long native sheet succeeds; no
+          // renderer payload field can provide this activation capability.
+          ...(long ? { consentConfirmed: true } : {}),
+          ...(long ? { consentFingerprint: enableDetails.consentFingerprint } : {}),
+        });
+        if (!acknowledged(result)) {
+          // Do not leave a new receipt behind if startup failed. revoke() is
+          // conditional on the same fingerprint, so it cannot clear consent
+          // earned by a later configuration or confirmation.
+          if (long) await safeCall(enableConsent, 'revoke', enableDetails);
+          return startupEnableFailure(result);
         }
         return success({ enabled: true });
       }
@@ -536,6 +563,9 @@ export function registerHandoffBridgeUi({
     }),
     [IPC_CHANNELS.NEW_CHAT]: invoke(async ({ sender, window }) => chatWithClipboard('newChat', window, sender)),
     [IPC_CHANNELS.CONTINUE_CHAT]: invoke(async ({ sender, window }) => chatWithClipboard('continueChat', window, sender)),
+    [IPC_CHANNELS.START_WORKER_POOL]: invoke(async ({ sender, window }, payload) => startWorkerPool(window, sender, payload)),
+    [IPC_CHANNELS.COPY_WORKER_STARTER]: invoke(async ({ sender, window }, payload) => copyWorkerStarter(window, sender, payload)),
+    [IPC_CHANNELS.RESTART_WORKER]: invoke(async ({ sender, window }, payload) => copyWorkerStarter(window, sender, payload, 'restartWorker')),
     [IPC_CHANNELS.PAUSE]: invoke(async () => {
       const result = await safeCall(controller, 'pause'); return acknowledged(result) ? success() : resultFailure(result, 'NOT_READY');
     }),
@@ -635,7 +665,7 @@ export function registerHandoffBridgeUi({
     }
     if (!text) {
       await abandonPrepared();
-      return finish(fixed(fixedCode(result?.code || (result?.status === 'unlinked' ? 'NOT_LINKED' : 'NO_CHAT'), 'NO_CHAT')));
+      return finish(fixed(fixedCode(result?.code || (result?.status === 'unlinked' ? 'NOT_LINKED' : result?.status === 'pool_active' ? 'POOL_ACTIVE' : 'NO_CHAT'), 'NO_CHAT')));
     }
     if (text) {
       try { if (typeof clipboard?.writeText !== 'function') throw new TypeError('clipboard unavailable'); clipboard.writeText(text); }
@@ -659,6 +689,109 @@ export function registerHandoffBridgeUi({
       } catch { /* write succeeded; clear is best effort */ }
     }
     return finish(success({ chatOrdinal: Number.isInteger(result?.chatOrdinal) ? result.chatOrdinal : 0, copied: true, ...(result?.recopied === true ? { recopied: true } : {}) }));
+  }
+  // A pool generation is deliberately only a non-secret UI correlation value.
+  // Session codes and the starter text remain main-process-only: this handler
+  // writes the starter to the OS clipboard and returns metadata, never text.
+  const poolGeneration = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  const poolWorkerCount = value => Number.isSafeInteger(value) && value >= 1 && value <= CONSTANTS.MAX_LANES ? value : null;
+  const poolQueued = value => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 0;
+  const poolWorkerOrdinals = value => Array.isArray(value)
+    ? [...new Set(value.filter(item => poolWorkerCount(item)))].sort((left, right) => left - right)
+    : [];
+  async function startWorkerPool(window, sender, payload = {}) {
+    if (!window || !stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+    if (!plain(payload) || Object.keys(payload).some(key => key !== 'requestedWorkers')) return fixed('INVALID');
+    const requestedWorkers = payload.requestedWorkers;
+    if (requestedWorkers !== undefined
+      && (!Number.isSafeInteger(requestedWorkers) || requestedWorkers < 1 || requestedWorkers > CONSTANTS.MAX_LANES)) return fixed('INVALID');
+    // The controller owns current serving/link readiness. Its state may have
+    // advanced since the last renderer snapshot, so this IPC boundary only
+    // owns sender/window authority and lets the controller make that decision.
+    const result = await safeCall(controller, 'startWorkerPool', requestedWorkers === undefined ? {} : { requestedWorkers });
+    if (!stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+    if (!acknowledged(result) && result?.started !== true) return fixed(fixedCode(result?.code || result?.status, 'NOT_READY'));
+    const generation = poolGeneration(result?.generation);
+    const workerCount = poolWorkerCount(result?.workerCount);
+    // Do not report a partial starter collection as a successful pool. The
+    // controller is the source of the generation and validates all workers.
+    if (!generation || !workerCount) return fixed('INTERNAL');
+    const queued = poolQueued(result?.queued);
+    // Older controllers predate `materialized`. In that compatible shape the
+    // only safe interpretation is that the advertised forecast is current.
+    const materialized = Number.isSafeInteger(result?.materialized) && result.materialized >= 0
+      ? Math.min(queued, poolQueued(result.materialized))
+      : queued;
+    return success({
+      generation,
+      workerCount,
+      recommended: poolWorkerCount(result?.recommended) || workerCount,
+      queued,
+      materialized,
+      newWorkerOrdinals: poolWorkerOrdinals(result?.newWorkerOrdinals),
+      lockedWorkerOrdinals: poolWorkerOrdinals(result?.lockedWorkerOrdinals),
+    });
+  }
+  async function copyWorkerStarter(window, sender, payload, controllerMethod = 'copyWorkerStarter') {
+    if (!window || !stillOwnsWindow(sender, window)) return fixed('NO_WINDOW');
+    const generation = poolGeneration(payload?.generation);
+    const workerOrdinal = poolWorkerCount(payload?.workerOrdinal);
+    if (!generation || !workerOrdinal || !plain(payload) || Object.keys(payload).some(key => key !== 'generation' && key !== 'workerOrdinal')) return fixed('INVALID');
+    // Controller returns the sensitive session code only to this main-process
+    // handler. Build and write the starter here; a stale or malicious renderer
+    // never receives either value in an IPC response, status, event, or audit.
+    const result = await safeCall(controller, controllerMethod, { generation, workerOrdinal });
+    const abandon = () => safeCall(controller, 'abandonWorkerStarter', { generation, workerOrdinal });
+    if (!stillOwnsWindow(sender, window)) {
+      await abandon();
+      return fixed('NO_WINDOW');
+    }
+    if (!acknowledged(result) && result?.copied !== true) return fixed(fixedCode(result?.code || result?.status, 'NOT_READY'));
+    const workerCount = poolWorkerCount(result?.workerCount);
+    const returnedGeneration = poolGeneration(result?.generation);
+    const returnedWorker = poolWorkerCount(result?.workerOrdinal);
+    const sessionCode = typeof result?.sessionCode === 'string' && WORKER_SESSION_CODE.test(result.sessionCode)
+      ? result.sessionCode
+      : null;
+    if (!sessionCode || !workerCount || workerOrdinal > workerCount
+      || returnedGeneration !== generation || returnedWorker !== workerOrdinal) {
+      await abandon();
+      return fixed('INTERNAL');
+    }
+    let starter;
+    try {
+      starter = buildWorkerStarterMessage({
+        pluginName: currentStatus()?.config?.pluginName || 'infinite_canvas',
+        sessionCode,
+        workerNumber: workerOrdinal,
+        workerCount,
+        resuming: controllerMethod === 'restartWorker',
+      });
+    } catch {
+      await abandon();
+      return fixed('INTERNAL');
+    }
+    if (typeof starter !== 'string' || starter.length === 0 || starter.length > 16_384) {
+      await abandon();
+      return fixed('INTERNAL');
+    }
+    try {
+      if (typeof clipboard?.writeText !== 'function') throw new TypeError('clipboard unavailable');
+      clipboard.writeText(starter);
+    } catch {
+      await abandon();
+      return fixed('CLIPBOARD_FAILED');
+    }
+    if (clipboardClearTimer !== null) { try { timers.clearTimeout?.(clipboardClearTimer); } catch { /* optional */ } clipboardClearTimer = null; }
+    try {
+      const timer = timers.setTimeout(() => {
+        if (clipboardClearTimer === timer) clipboardClearTimer = null;
+        try { if (clipboard?.readText?.() === starter) clipboard?.clear?.(); } catch { /* conditional clear only */ }
+      }, CONSTANTS.CLIPBOARD_CLEAR_MS);
+      clipboardClearTimer = timer ?? null;
+      timer?.unref?.();
+    } catch { /* a completed copy is still valid if cleanup is unavailable */ }
+    return success({ generation, workerCount, workerOrdinal, copied: true });
   }
   async function release(sender, window, payload) {
     if (!window || !plain(payload) || !Array.isArray(payload.items) || payload.items.length === 0 || payload.items.length > CONSTANTS.MAX_LANES || new Set(payload.items.map(item => item?.jobId)).size !== payload.items.length || payload.items.some(item => !plain(item) || typeof item.jobId !== 'string' || Object.keys(item).some(key => key !== 'jobId'))) return fixed(window ? 'INVALID' : 'NO_WINDOW');

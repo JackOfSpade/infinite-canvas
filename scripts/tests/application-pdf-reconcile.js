@@ -42,6 +42,10 @@ function resumeWorkspace(body) {
   return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div><p class="role-summary">${body}</p></section><section class="section"><div class="section-head"><h2>Skills</h2></div><dl class="skills"><dt>Languages</dt><dd>Python<span class="sep">·</span>TypeScript</dd><dt>AI &amp; Data</dt><dd>MCP<span class="sep">·</span>ETL</dd></dl></section></main></section></body></html>`;
 }
 
+function wrappedSkillLabelResumeWorkspace() {
+  return `<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page"><h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Skills</h2></div><dl class="skills"><dt>Web Development</dt><dd>React<span class="sep">·</span>TypeScript<span class="sep">·</span>Django</dd><dt>Infrastructure &amp; Integration</dt><dd>Docker Compose<span class="sep">·</span>Kubernetes<span class="sep">·</span>MCP</dd></dl></section><section class="section"><div class="section-head"><h2>Experience</h2></div><p class="role-summary">Shipped stable systems.</p></section></main></section></body></html>`;
+}
+
 function formattingSensitiveResumeWorkspace(body) {
   return `<!doctype html>
 <html data-shell='preserve'>
@@ -917,6 +921,116 @@ export default [
       assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
         `a faithfully rendered résumé PDF must reconcile unchanged, got ${JSON.stringify(unchanged)}`);
       return { skillLines, status: unchanged.status };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: wrapped Skills label case edits remain conflicts',
+    run: async () => {
+      const source = wrappedSkillLabelResumeWorkspace();
+      const blocks = await extractPdfTextBlocks(await textPdf([
+        { text: 'Maya Chen', y: 700 },
+        { text: 'S K I L L S', y: 660 },
+        { text: 'Web Development', x: 56, y: 630 },
+        { text: 'React · TypeScript · Django', x: 180, y: 630.75 },
+        { text: 'infrastructure &', x: 56, y: 595 },
+        { text: 'Docker Compose · Kubernetes · MCP', x: 180, y: 595.75 },
+        { text: 'Integration', x: 56, y: 580 },
+        { text: 'E X P E R I E N C E', y: 540 },
+        { text: '• Shipped stable systems.', y: 510 },
+      ]));
+      const conflict = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(!conflict.success && conflict.status === 'conflict' && conflict.html === source,
+        `a case-only wrapped Skills label edit must not be masked by DOM reconstruction, got ${JSON.stringify(conflict)}`);
+      return { status: conflict.status };
+    },
+  },
+  {
+    // The failing export placed a wrapped second-row <dt> around its <dd> in
+    // PDF reading order: "Infrastructure & Docker Compose … MCP", then
+    // "Integration". The DOM's label remains one semantic unit. Include a
+    // later section too, so Skills parsing cannot consume the rest of a résumé.
+    name: 'Application PDF reconcile: wrapped Skills labels restore DOM order without consuming the next section',
+    run: async () => {
+      const source = wrappedSkillLabelResumeWorkspace();
+      const pdfBytes = await textPdf([
+        { text: 'Maya Chen', y: 700 },
+        { text: 'S K I L L S', y: 660 },
+        { text: 'Web Development', x: 56, y: 630 },
+        { text: 'React · TypeScript · Django', x: 180, y: 630.75 },
+        { text: 'Infrastructure &', x: 56, y: 595 },
+        { text: 'Docker Compose · Kubernetes · MCP', x: 180, y: 595.75 },
+        { text: 'Integration', x: 56, y: 580 },
+        { text: 'E X P E R I E N C E', y: 540 },
+        { text: '• Shipped stable systems.', y: 510 },
+      ]);
+      const blocks = await extractPdfTextBlocks(pdfBytes);
+      const skillLines = blocks
+        .filter(block => /Web Development|Infrastructure|Integration/.test(block.text))
+        .map(block => block.text);
+      assert(skillLines.length === 3
+        && skillLines[1] === 'Infrastructure & Docker Compose · Kubernetes · MCP'
+        && skillLines[2] === 'Integration',
+      `fixture must retain the real wrapped-label extraction order, got ${JSON.stringify(skillLines)}`);
+      const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
+        `a faithfully rendered wrapped Skills label must reconcile unchanged, got ${JSON.stringify(unchanged)}`);
+      return { skillLines, status: unchanged.status };
+    },
+  },
+  {
+    // When the baseline gap exceeds the visual-line tolerance, pdf.js emits a
+    // right-column value block before its own left-column <dt>. This is not a
+    // user edit, but it cannot be repaired by the normal row-line parser.
+    name: 'Application PDF reconcile: separated Skills cells restore only an exact token match',
+    run: async () => {
+      const source = resumeWorkspace('Maya builds systems safely.');
+      const lines = [
+        { text: 'Maya Chen', y: 700 },
+        { text: 'E X P E R I E N C E', y: 670 },
+        { text: '• Maya builds systems safely.', y: 640 },
+        { text: 'S K I L L S', y: 600 },
+        // The 5pt baseline separation is deliberately greater than the
+        // grouping tolerance, leaving each cell as its own PDF text block.
+        { text: 'Python · TypeScript', x: 180, y: 575 },
+        { text: 'Languages', x: 56, y: 570 },
+        { text: 'MCP · ETL', x: 180, y: 545 },
+        { text: 'AI & Data', x: 56, y: 540 },
+      ];
+      const blocks = await extractPdfTextBlocks(await textPdf(lines));
+      const separated = blocks.filter(block => /Languages|Python|AI & Data|MCP/.test(block.text)).map(block => block.text);
+      assert(separated[0] === 'Python · TypeScript' && separated[1] === 'Languages',
+        `fixture must keep the inverted column order, got ${JSON.stringify(separated)}`);
+      const unchanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks });
+      assert(unchanged.success && unchanged.status === 'unchanged' && !unchanged.changed,
+        `an exact separated-cell PDF must reconcile unchanged, got ${JSON.stringify(unchanged)}`);
+
+      const missingBlocks = await extractPdfTextBlocks(await textPdf(lines.map(line => (
+        line.text === 'MCP · ETL' ? { ...line, text: 'ETL' } : line
+      ))));
+      const missing = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: missingBlocks });
+      assert(!missing.success && missing.status === 'conflict' && missing.html === source,
+        `a separated-cell PDF missing one token must remain a conflict, got ${JSON.stringify(missing)}`);
+
+      const caseChangedBlocks = await extractPdfTextBlocks(await textPdf(lines.map(line => (
+        line.text === 'Python · TypeScript' ? { ...line, text: 'python · TypeScript' } : line
+      ))));
+      const caseChanged = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: caseChangedBlocks });
+      assert(!caseChanged.success && caseChanged.status === 'conflict' && caseChanged.html === source,
+        `a separated-cell PDF with a case-only edit must remain a conflict, got ${JSON.stringify(caseChanged)}`);
+
+      const reorderedBlocks = await extractPdfTextBlocks(await textPdf(lines.map(line => (
+        line.text === 'Python · TypeScript' ? { ...line, text: 'TypeScript · Python' } : line
+      ))));
+      const reordered = reconcileApplicationHtmlFromPdfBlocks({ html: source, documentKind: 'resume', blocks: reorderedBlocks });
+      assert(!reordered.success && reordered.status === 'conflict' && reordered.html === source,
+        `a separated-cell PDF with a same-token reorder must remain a conflict, got ${JSON.stringify(reordered)}`);
+      return {
+        separated,
+        unchanged: unchanged.status,
+        missing: missing.status,
+        caseChanged: caseChanged.status,
+        reordered: reordered.status,
+      };
     },
   },
   {

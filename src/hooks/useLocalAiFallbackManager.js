@@ -119,7 +119,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
     // the exact result hash, and re-offer it if the user closes or a later
     // toast evicts the durable notice.
     const offerRenderRetry = ({
-      node, jobId, resultSha256, orphanJob = null, message = '', allowCurrentImport = false,
+      node, jobId, resultSha256, orphanJob = null, message = '', allowCurrentImport = false, retryReproducesFailure = false,
     }) => {
       const exactResultSha256 = String(resultSha256 || '');
       if (!exactResultSha256 || (!allowCurrentImport && importBusyRef.current)) return;
@@ -129,13 +129,14 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       if (now - lastOfferedAt < LOCAL_AI_RETRY_NOTICE_INTERVAL_MS) return;
       retryOfferedAtRef.current.set(retryKey, now);
       ctxRef.current.addToast?.({
-        title: 'Local AI bundle needs a retry',
-        description: message || 'The app consumed this result but could not finish PDF verification or save. The draft does not need another rewrite.',
+        title: retryReproducesFailure ? 'Local AI needs an app fix' : 'Local AI bundle needs a retry',
+        description: message || (retryReproducesFailure
+          ? 'The app has confirmed this PDF comparison will reproduce until it is updated. The draft does not need another rewrite.'
+          : 'The app consumed this result but could not finish PDF verification or save. The draft does not need another rewrite.'),
         type: 'error',
         duration: 0,
         dedupeKey: `local-ai-retry:${jobId}:${exactResultSha256}`,
-        actionLabel: 'Retry layout check',
-        onAction: async () => {
+        ...(retryReproducesFailure ? {} : { actionLabel: 'Retry layout check', onAction: async () => {
           // The toast is removed before its action runs. Re-arm the offer so a
           // busy/no-op click or another retryable failure cannot leave this
           // hidden job without recovery UI for the throttle interval.
@@ -143,7 +144,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           // A retry is a fresh user action after any cancelled quit, so bind it
           // to the generation current at click time rather than the stale toast.
           await importJob(node, jobId, exactResultSha256, orphanJob, currentQuitGeneration());
-        },
+        } }),
       });
     };
 
@@ -220,9 +221,13 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           return;
         }
         if (result.status === 'render-retry-required') {
-          const retryMessage = result.renderMessage || 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.';
+          const retryReproducesFailure = result.retryReproducesFailure === true || result.localJob?.retryReproducesFailure === true;
+          const retryMessage = result.renderMessage || (retryReproducesFailure
+            ? 'This PDF comparison needs an application update; the AI draft does not need another rewrite.'
+            : 'The app could not verify both final page layouts. Retry the render; the AI draft does not need another rewrite.');
           if (!isOrphan) writeImportState({
             ...result.localJob, status: 'render-retry-required',
+            retryReproducesFailure,
             message: retryMessage,
           });
           EventLogger.log(`[LocalAI] fallback render-retry-required job=${jobId} card=${nodeId}`);
@@ -232,6 +237,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
             resultSha256: result.resultSha256 || result.localJob?.resultSha256 || resultSha256,
             orphanJob,
             message: retryMessage,
+            retryReproducesFailure,
             // This is the import currently producing the retry response. Its
             // finally block releases the lock before a rendered action can be
             // clicked, so the durable action can be offered immediately.
@@ -426,6 +432,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
           if (!isOrphan) writeDriveState({ ...next });
           offerRenderRetry({
             node, jobId, resultSha256, orphanJob, message: next.message,
+            retryReproducesFailure: next.retryReproducesFailure === true,
           });
           return;
         }

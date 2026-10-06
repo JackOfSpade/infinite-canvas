@@ -10,7 +10,7 @@ export const LANGUAGE_LABELS = {
   ar: 'العربية', pl: 'Polski', sv: 'Svenska', no: 'Norsk',
   da: 'Dansk', fi: 'Suomi', tr: 'Türkçe', uk: 'Українська',
   cs: 'Čeština', ro: 'Română', hu: 'Magyar', el: 'Ελληνικά',
-  he: 'עברית', hi: 'हिन्दी', vi: 'Tiếng Việt', th: 'ไทย',
+  he: 'עברית', hi: 'हिन्दी', vi: 'Tiếng Việt', tl: 'Tagalog', th: 'ไทย',
   id: 'Bahasa Indonesia',
 };
 

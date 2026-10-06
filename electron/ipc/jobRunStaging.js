@@ -16,13 +16,14 @@
  *     {
  *       version, runId, startedAt, lastUpdated,
  *       stage: 'searching' | 'gathered',
- *       collectionCompletedAt?: number,
+ *       providerGatheredAt?: number, collectionCompletedAt?: number,
  *       collectionDisposition?: 'user-finished-partial',
  *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
  *                 jobPreferencePlan, canonicalLocation, searchWindow,
  *                 maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'skipped'|'blocked',
- *                                queries: { [query]: { lastPage } },
+ *                                recoveryDisposition?: 'manual',
+ *                                queries: { ['#'+queryIndex]: { lastPage } },
  *                                collectionScopeCaveats?: [{ sourceId, code }] } }
  *     }
  *
@@ -32,8 +33,10 @@
  * 'done' stage — a clean finish is signaled by DELETING both sidecars
  * (complete-job-run), so any manifest on disk means an unfinished run.
  *
- * On the next launch, an incomplete + recent manifest is what the renderer
- * detects to offer Resume, Finish with saved listings, or Clear career data.
+ * On the next launch, any incomplete manifest is surfaced. Age is retained as
+ * diagnostic metadata, but is never allowed to silently abandon exact staged
+ * work; automatic recovery is gated only by explicit user/human-required
+ * recovery dispositions.
  *
  * Atomicity: the manifest is written tmp→rename (never half-written). The staging
  * file is append-only — a torn final line after a hard crash is just one
@@ -47,6 +50,7 @@ import { logger } from '../logger.js';
 import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearchDateWindow.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } from './aiSchemas.js';
+import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath, withCanvasRecoveryRead } from './canvasRecoveryPaths.js';
 
 const MANIFEST_VERSION = 2;
 // An explicit user choice to stop collection and carry the durable ledger into
@@ -58,6 +62,16 @@ export const JOB_RUN_COLLECTION_DISPOSITION = Object.freeze({
   USER_FINISHED_PARTIAL: 'user-finished-partial',
 });
 const JOB_RUN_COLLECTION_DISPOSITIONS = new Set(Object.values(JOB_RUN_COLLECTION_DISPOSITION));
+// Recovery starts automatically after an unexpected renderer/app interruption.
+// Root absence means automatic for backwards compatibility. At source level,
+// new blocked outcomes explicitly distinguish safe unattended retry from a
+// human gate; legacy/missing markers are likewise automatic unless a durable
+// explicit manual disposition says otherwise.
+export const JOB_RUN_RECOVERY_DISPOSITION = Object.freeze({
+  AUTOMATIC: 'automatic',
+  MANUAL: 'manual',
+});
+const JOB_RUN_RECOVERY_DISPOSITIONS = new Set(Object.values(JOB_RUN_RECOVERY_DISPOSITION));
 // Unlike the manifest/staging pair, this compact receipt intentionally survives
 // a clean finish. It answers "did the prior-process run complete?" without
 // retaining listings, search queries, career data, URLs, or warning evidence.
@@ -65,8 +79,9 @@ const JOB_RUN_COLLECTION_DISPOSITIONS = new Set(Object.values(JOB_RUN_COLLECTION
 // scoring and safe source-cap coverage. Readers remain compatible because every
 // added field is optional.
 const JOB_RUN_RECEIPT_VERSION = 3;
-// A manifest older than this is "stale" — not auto-offered for resume (the user
-// likely abandoned it). 24h; the renderer can still surface a manual choice.
+// Age remains useful diagnostic/UI metadata. It is deliberately *not* an
+// automatic-recovery gate: an exact staged run must not disappear merely
+// because the app stayed closed for more than a day.
 export const RESUMABLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Sidecar paths for a canvas file, or null when the canvas was never saved. */
@@ -89,9 +104,12 @@ function pathHash(value, length = 24) {
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, length);
 }
 
-function resolvedCanvasPath(canvasFilePath) {
-  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
-  try { return path.resolve(canvasFilePath); } catch { return null; }
+// Long-running IPC handlers keep the canvasFilePath captured when they began.
+// Once a Save As/Finder rename has durably moved the sidecars, route those old
+// arguments to the new owner for the rest of this process. This is intentionally
+// process-local: a fresh launch discovers only the new canonical path/files.
+function resolvedCanvasPath(canvasFilePath, { followRebindAliases = true } = {}) {
+  return followRebindAliases ? resolveCanvasRecoveryPath(canvasFilePath) : rawCanvasRecoveryPath(canvasFilePath);
 }
 
 // A fixed-size full-path canvas hash prevents `project` and `project.json`
@@ -109,6 +127,17 @@ export function jobRunPathScopeForCanvas(canvasFilePath, nodeIdOrOptions = null)
     canvasHash: pathHash(canvasPath),
     nodeId,
     ownerHash: nodeId ? pathHash(nodeId) : null,
+  };
+}
+
+function rawJobRunPathScopeForCanvas(canvasFilePath) {
+  const canvasPath = resolvedCanvasPath(canvasFilePath, { followRebindAliases: false });
+  if (!canvasPath) return null;
+  return {
+    canvasPath,
+    dir: path.dirname(canvasPath),
+    base: path.basename(canvasPath).replace(/\.json$/i, ''),
+    canvasHash: pathHash(canvasPath),
   };
 }
 
@@ -175,13 +204,33 @@ async function atomicWriteJson(filePath, obj) {
   // the per-path mutex below already serializes manifest writers, so this is
   // defense-in-depth for any caller that bypasses the lock.
   const tmp = `${filePath}.${process.pid}.${_tmpSeq++}.tmp`;
+  let handle;
   try {
-    await fs.promises.writeFile(tmp, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 });
+    handle = await fs.promises.open(tmp, 'wx', 0o600);
+    await handle.writeFile(JSON.stringify(obj, null, 2), 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
     await fs.promises.rename(tmp, filePath);
+    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
+    if (directory) {
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   } finally {
     // A failed write/rename must not accumulate sidecars forever. If rename
     // succeeded the temporary no longer exists, so ENOENT is expected here.
+    await handle?.close().catch(() => {});
     await fs.promises.unlink(tmp).catch(() => {});
+  }
+}
+
+async function appendStagingDurably(filePath, text) {
+  const handle = await fs.promises.open(filePath, 'a', 0o600);
+  try {
+    await handle.writeFile(text, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
 }
 
@@ -216,6 +265,208 @@ function withReceiptLock(filePath, fn) {
   return result.finally(() => {
     if (_receiptTails.get(filePath) === tail) _receiptTails.delete(filePath);
   });
+}
+
+// A save/rename changes the full-path hash used in every modern sidecar name.
+// Keep the durable work with the canvas rather than treating a spelling change
+// as a new owner.  The caller performs this before publishing the new canvas
+// path to the renderer.  We deliberately copy all candidates first and delete
+// the old set only after every destination is durable: a failed rebind leaves
+// the old canvas as the sole authoritative owner (and the caller fails closed).
+function jobRecoverySidecarNames(scope) {
+  const prefix = `${scope.base}.jobs-`;
+  const marker = `.${scope.canvasHash}.`;
+  return fs.readdirSync(scope.dir, { withFileTypes: true })
+    // Include lookalike links/directories in validation below. Filtering them
+    // out here would silently leave an ambiguous candidate behind and make a
+    // later rename appear to have completed safely.
+    .filter(entry => entry.name.startsWith(prefix) && entry.name.includes(marker))
+    .map(entry => entry.name)
+    .filter(name => (
+      /^.+\.jobs-(?:staging|run)\.[a-f0-9]{24}\.[a-f0-9]{24}\.(?:jsonl|json)$/.test(name)
+      || /^.+\.jobs-last-run\.[a-f0-9]{24}\.[a-f0-9]{24}\.json$/.test(name)
+    ));
+}
+
+const MAX_REBIND_JSON_SIDECAR_BYTES = 8 * 1024 * 1024;
+// A healthy staged search can contain thousands of raw rows. Keep an explicit
+// cap for hostile/corrupt files, but it must exceed real recovery ledgers (the
+// migration copies bytes exactly; it does not parse listing payloads).
+const MAX_REBIND_STAGING_BYTES = 64 * 1024 * 1024;
+
+async function fsyncDirectory(directory) {
+  const handle = await fs.promises.open(directory, 'r').catch(() => null);
+  if (!handle) return;
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function readSafeRebindSidecar(filePath) {
+  const stat = await fs.promises.lstat(filePath);
+  const maxBytes = filePath.endsWith('.jsonl') ? MAX_REBIND_STAGING_BYTES : MAX_REBIND_JSON_SIDECAR_BYTES;
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) {
+    throw new Error('unsafe-sidecar');
+  }
+  return { stat, bytes: await fs.promises.readFile(filePath) };
+}
+
+// A matching pathname alone is never ownership authority: the parent
+// directory is user controlled and may contain arbitrary lookalikes.  Verify
+// the exact modern owner hash against the signed-in-envelope identity before
+// copying or deleting anything. Staging rows are intentionally migrated only
+// with their verified manifest; a lone JSONL cannot prove which run owns it.
+async function validateJobRecoverySidecars(scope, names, reboundScope = null) {
+  const byOwner = new Map();
+  for (const name of names) {
+    const match = name.match(/^.+\.jobs-(staging|run)\.([a-f0-9]{24})\.([a-f0-9]{24})\.(jsonl|json)$/)
+      || name.match(/^.+\.jobs-(last-run)\.([a-f0-9]{24})\.([a-f0-9]{24})\.(json)$/);
+    if (!match || match[2] !== scope.canvasHash) throw new Error('unsafe-sidecar-name');
+    const type = match[1];
+    const ownerHash = match[3];
+    const entry = byOwner.get(ownerHash) || {};
+    if (entry[type]) throw new Error('ambiguous-sidecar');
+    entry[type] = name;
+    byOwner.set(ownerHash, entry);
+  }
+  const verified = [];
+  for (const [ownerHash, entry] of byOwner) {
+    if (entry.run) {
+      const manifestFile = path.join(scope.dir, entry.run);
+      const { bytes } = await readSafeRebindSidecar(manifestFile);
+      let manifest;
+      try { manifest = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('malformed-manifest'); }
+      const ownerId = normalizeNodeId(manifest?.inputs?.nodeId);
+      if (!ownerId || pathHash(ownerId) !== ownerHash || typeof manifest.runId !== 'string' || !manifest.runId.trim()) {
+        throw new Error('manifest-ownership-mismatch');
+      }
+      verified.push(entry.run);
+      if (entry.staging) {
+        await readSafeRebindSidecar(path.join(scope.dir, entry.staging));
+        verified.push(entry.staging);
+      }
+    } else if (entry.staging) {
+      // A crash may have copied the verified pair and then unlinked only the
+      // old manifest.  It is safe to converge that one remaining JSONL only
+      // when the exact destination manifest and destination bytes prove the
+      // pair already migrated; otherwise an orphan remains ambiguous.
+      if (!reboundScope) throw new Error('orphaned-staging-sidecar');
+      const oldManifestName = entry.staging.replace('.jobs-staging.', '.jobs-run.').replace(/\.jsonl$/, '.json');
+      const destinationManifest = path.join(reboundScope.dir, reboundJobRecoveryName(oldManifestName, scope, reboundScope));
+      const destinationStaging = path.join(reboundScope.dir, reboundJobRecoveryName(entry.staging, scope, reboundScope));
+      const { bytes: manifestBytes } = await readSafeRebindSidecar(destinationManifest);
+      const { bytes: oldStaging } = await readSafeRebindSidecar(path.join(scope.dir, entry.staging));
+      const { bytes: newStaging } = await readSafeRebindSidecar(destinationStaging);
+      let manifest;
+      try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { throw new Error('orphaned-staging-manifest-invalid'); }
+      const ownerId = normalizeNodeId(manifest?.inputs?.nodeId);
+      if (!ownerId || pathHash(ownerId) !== ownerHash || typeof manifest.runId !== 'string' || !manifest.runId.trim()
+          || !oldStaging.equals(newStaging)) {
+        throw new Error('orphaned-staging-sidecar');
+      }
+      verified.push(entry.staging);
+    }
+    if (entry['last-run']) {
+      const receiptFile = path.join(scope.dir, entry['last-run']);
+      const { bytes } = await readSafeRebindSidecar(receiptFile);
+      let receipt;
+      try { receipt = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('malformed-receipt'); }
+      const ownerId = normalizeNodeId(receipt?.nodeId);
+      if (!ownerId || pathHash(ownerId) !== ownerHash || typeof receipt.runId !== 'string' || !receipt.runId.trim()) {
+        throw new Error('receipt-ownership-mismatch');
+      }
+      verified.push(entry['last-run']);
+    }
+  }
+  return verified;
+}
+
+function reboundJobRecoveryName(name, oldScope, newScope) {
+  const prefix = `${oldScope.base}.`;
+  if (!name.startsWith(prefix)) return null;
+  const replaced = `${newScope.base}.${name.slice(prefix.length)}`;
+  return replaced.replace(`.${oldScope.canvasHash}.`, `.${newScope.canvasHash}.`);
+}
+
+async function copySidecarExclusively(source, destination) {
+  const { stat: sourceStat, bytes: sourceBytes } = await readSafeRebindSidecar(source);
+  try {
+    const { bytes: existingBytes } = await readSafeRebindSidecar(destination);
+    if (!sourceBytes.equals(existingBytes)) throw new Error('destination-sidecar-conflict');
+    return false;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  let handle;
+  let created = false;
+  try {
+    handle = await fs.promises.open(destination, 'wx', sourceStat.mode & 0o777);
+    created = true;
+    await handle.writeFile(sourceBytes);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fsyncDirectory(path.dirname(destination));
+    return true;
+  } catch (error) {
+    // O_EXCL is the no-clobber commit primitive. A competing new-canvas owner
+    // therefore cannot be overwritten by an old-path migration.
+    if (error?.code === 'EEXIST') {
+      const { bytes: existingBytes } = await readSafeRebindSidecar(destination);
+      if (sourceBytes.equals(existingBytes)) return false;
+      throw new Error('destination-sidecar-conflict');
+    }
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+    if (created && handle) await fs.promises.unlink(destination).catch(() => {});
+  }
+}
+
+/** Move modern manifest/staging/receipt sidecars to a newly-adopted canvas path. */
+export async function rebindJobRunRecoveryOwners(oldCanvasFilePath, newCanvasFilePath) {
+  const oldScope = rawJobRunPathScopeForCanvas(oldCanvasFilePath);
+  const newScope = rawJobRunPathScopeForCanvas(newCanvasFilePath);
+  if (!oldScope || !newScope) return { success: false, reason: 'invalid-canvas-path' };
+  if (oldScope.canvasPath === newScope.canvasPath) return { success: true, migratedCount: 0 };
+  let names;
+  try { names = jobRecoverySidecarNames(oldScope); } catch (error) {
+    if (error?.code === 'ENOENT') return { success: true, migratedCount: 0 };
+    return { success: false, reason: 'scan-failed' };
+  }
+  let verifiedNames;
+  try {
+    verifiedNames = await validateJobRecoverySidecars(oldScope, names, newScope);
+  } catch (error) {
+    logger.warn(`[JobRunStaging] refusing unsafe recovery rebind candidate: ${error?.message || error}`);
+    return { success: false, reason: 'invalid-sidecar' };
+  }
+  const pairs = verifiedNames.map(name => ({
+    source: path.join(oldScope.dir, name),
+    destination: path.join(newScope.dir, reboundJobRecoveryName(name, oldScope, newScope)),
+  }));
+  const created = [];
+  let sourceDeletionStarted = false;
+  try {
+    for (const pair of pairs) {
+      if (await copySidecarExclusively(pair.source, pair.destination)) created.push(pair.destination);
+    }
+    // Keep deletion last. Existing per-file mutexes serialize normal writers;
+    // callers must not publish the new path unless this whole transaction wins.
+    for (const pair of pairs) {
+      sourceDeletionStarted = true;
+      await fs.promises.unlink(pair.source);
+    }
+    await fsyncDirectory(oldScope.dir);
+    return { success: true, migratedCount: pairs.length };
+  } catch (error) {
+    // No source is removed before all new files are copied. Best-effort cleanup
+    // avoids a failed transaction becoming visible under the new canvas path.
+    // A late unlink/directory-fsync failure occurs after the destination has
+    // become the sole exact copy for at least one sidecar. Preserve it for the
+    // journal's idempotent replay rather than rolling user work back into loss.
+    if (!sourceDeletionStarted) await Promise.all(created.map(filePath => fs.promises.unlink(filePath).catch(() => {})));
+    logger.warn(`[JobRunStaging] recovery owner rebind failed: ${error?.message || error}`);
+    return { success: false, reason: error?.message === 'destination-sidecar-conflict' ? 'destination-conflict' : 'migration-failed' };
+  }
 }
 
 function receiptNumber(value, fallback = 0) {
@@ -433,8 +684,21 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   const funnel = receipt.funnel && typeof receipt.funnel === 'object' ? {
     raw: receiptNumber(receipt.funnel.raw),
     relevanceDropped: receiptNumber(receipt.funnel.relevanceDropped),
+    countryScopeDropped: receiptNumber(receipt.funnel.countryScopeDropped),
     ...(receipt.funnel.windowEligible != null
       ? { windowEligible: receiptNumber(receipt.funnel.windowEligible) }
+      : {}),
+    ...(receipt.funnel.platformDuplicateDropped != null
+      ? { platformDuplicateDropped: receiptNumber(receipt.funnel.platformDuplicateDropped) }
+      : {}),
+    ...(receipt.funnel.platformCapDropped != null
+      ? { platformCapDropped: receiptNumber(receipt.funnel.platformCapDropped) }
+      : {}),
+    ...(receipt.funnel.platformUnique != null
+      ? { platformUnique: receiptNumber(receipt.funnel.platformUnique) }
+      : {}),
+    ...(receipt.funnel.platformCapped != null
+      ? { platformCapped: receiptNumber(receipt.funnel.platformCapped) }
       : {}),
     deduped: receiptNumber(receipt.funnel.deduped),
     ageDropped: receiptNumber(receipt.funnel.ageDropped),
@@ -524,7 +788,7 @@ function readLegacyReceiptForNodeSync(canvasFilePath, nodeId) {
   }
 }
 
-export async function readLastRunReceipt(canvasFilePath, nodeIdOrOptions = null) {
+async function readLastRunReceiptRaw(canvasFilePath, nodeIdOrOptions = null) {
   const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions);
   if (!filePath) return null;
   try {
@@ -592,7 +856,7 @@ export function readLastRunReceiptSync(canvasFilePath, nodeIdOrOptions = null) {
 }
 
 /** Direct, token-guarded receipt write for focused tests/support tooling. */
-export async function writeLastRunReceipt(canvasFilePath, receipt, { expectedRunId = null, nodeId = null } = {}) {
+async function writeLastRunReceiptRaw(canvasFilePath, receipt, { expectedRunId = null, nodeId = null } = {}) {
   const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeId || receipt?.nodeId || null);
   if (!filePath) return { written: false, receipt: null };
   return withReceiptLock(filePath, async () => {
@@ -627,16 +891,19 @@ async function readManifestFromFiles(files) {
     const {
       collectionCompletedAt: rawCollectionCompletedAt,
       collectionDisposition: rawCollectionDisposition,
+      recoveryDisposition: rawRecoveryDisposition,
       ...otherManifest
     } = manifest;
     const collectionCompletedAt = manifestTimestamp(rawCollectionCompletedAt);
     const collectionDisposition = normalizeJobRunCollectionDisposition(rawCollectionDisposition);
+    const recoveryDisposition = normalizeJobRunRecoveryDisposition(rawRecoveryDisposition);
     const { searchWindow: rawSearchWindow, ...otherInputs } = inputs;
     const searchWindow = sanitizeJobSearchWindow(rawSearchWindow);
     return {
       ...otherManifest,
       ...(collectionCompletedAt != null ? { collectionCompletedAt } : {}),
       ...(collectionDisposition ? { collectionDisposition } : {}),
+      ...(recoveryDisposition ? { recoveryDisposition } : {}),
       inputs: {
         ...otherInputs,
         jobPreferences: sanitizeJobPreferences(inputs.jobPreferences),
@@ -828,6 +1095,27 @@ export function normalizeJobRunCollectionDisposition(value) {
     : null;
 }
 
+/** Keep the restart policy to the single explicit, user-controlled state. */
+export function normalizeJobRunRecoveryDisposition(value) {
+  return typeof value === 'string' && JOB_RUN_RECOVERY_DISPOSITIONS.has(value)
+    ? value
+    : null;
+}
+
+/** Legacy/missing disposition is the automatic crash-recovery default. */
+export function isJobRunAutomaticRecoveryEligible(manifest) {
+  if (normalizeJobRunRecoveryDisposition(manifest?.recoveryDisposition)
+      === JOB_RUN_RECOVERY_DISPOSITION.MANUAL) return false;
+  return !Object.values(manifest?.sources || {}).some((source) => {
+    if (source?.status === 'done' || source?.status === 'skipped') return false;
+    const disposition = normalizeJobRunRecoveryDisposition(source?.recoveryDisposition);
+    if (disposition === JOB_RUN_RECOVERY_DISPOSITION.MANUAL) return true;
+    // Missing/legacy disposition remains automatic. Only an explicit durable
+    // manual gate is allowed to suppress restart recovery.
+    return false;
+  });
+}
+
 /**
  * True only when this exact ledger was deliberately ended with its saved rows.
  * Callers still validate run ownership, query identity, and profile identity;
@@ -850,6 +1138,24 @@ export function collectionCompletedAtForManifest(manifest) {
   return manifest?.stage === 'gathered'
     ? manifestTimestamp(manifest?.lastUpdated)
     : null;
+}
+
+/**
+ * Provider collection is a narrower boundary than `stage: 'gathered'`.
+ * The main process can still be waiting on semantic/manual-AI processing after
+ * every provider has terminally checkpointed its rows. It admits a renderer
+ * click to the shared job-work queue; source mutation and crash recovery still
+ * require the existing post-filter `gathered` stage.
+ */
+export function providerGatheredAtForManifest(manifest) {
+  return manifestTimestamp(manifest?.providerGatheredAt);
+}
+
+// Keep diagnostics and renderer-facing callers on the same explicit-only
+// contract. A legacy all-terminal source ledger is collection evidence, not a
+// recovery checkpoint, so it must never be inferred as this boundary.
+export function hasProviderGatheredBoundary(manifest) {
+  return providerGatheredAtForManifest(manifest) != null;
 }
 
 /**
@@ -894,7 +1200,7 @@ export function sanitizeJobSearchWindow(value) {
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
+async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
   const ownerNodeId = normalizeNodeId(nodeId);
   const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
@@ -1021,7 +1327,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
  * a cancelled predecessor a no-op after a fresh run has replaced the manifest.
  * No-op when there is no canvas/manifest.
  */
-export async function recordSourcePage(canvasFilePath, { sourceId, query = '', page = 0, jobs = [], now, expectedRunId = null, nodeId = null }) {
+async function recordSourcePageRaw(canvasFilePath, { sourceId, query = '', queryIndex = null, page = 0, jobs = [], terminal = false, now, expectedRunId = null, nodeId = null }) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
   if (!files) return;
@@ -1034,28 +1340,43 @@ export async function recordSourcePage(canvasFilePath, { sourceId, query = '', p
       if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
       if (Array.isArray(jobs) && jobs.length > 0) {
         const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
-        await fs.promises.appendFile(files.staging, lines, { encoding: 'utf8', mode: 0o600 });
+        // Never advance the manifest page cursor until the staged rows have
+        // reached the filesystem. A crash may leave extra rows (dedup handles
+        // that), but it must not claim a page whose rows were never durable.
+        await appendStagingDurably(files.staging, lines);
       }
       const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
-      const q = src.queries[query] || (src.queries[query] = { lastPage: -1 });
+      // Persist by query position, not query text: duplicated role phrases are
+      // separate planned work and must not steal each other's resume cursor.
+      // Read compatibility remains in computeResumeStartPagesByQuery below.
+      const queryKey = Number.isSafeInteger(queryIndex) && queryIndex >= 0 ? `#${queryIndex}` : query;
+      const q = src.queries[queryKey] || (src.queries[queryKey] = { lastPage: -1 });
       q.lastPage = Math.max(q.lastPage ?? -1, page);
+      if (terminal === true) q.terminal = true;
       manifest.lastUpdated = now ?? manifest.lastUpdated;
       await atomicWriteJson(files.manifest, manifest);
       return true;
     } catch (e) {
-      // Staging is best-effort recovery scaffolding — never let it break a scrape.
+      // The caller treats this falsey result as a source failure.  Do not throw
+      // here because this boundary is also used by best-effort enrichment paths.
       logger.warn(`[JobRunStaging] recordSourcePage(${sourceId}) failed: ${e?.message || e}`);
     }
   });
 }
 
 /** Set a source's terminal status ('done' | 'skipped' | 'blocked') for the expected run. */
-export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
+async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   expectedRunId = null,
   nodeId = null,
   // Omitted preserves older/source-only status writes. A supplied value is
   // normalized at this durable boundary so recovery never trusts provider data.
   collectionScopeCaveats = undefined,
+  // `manual` means this unfinished source needs a human action (login/CAPTCHA/
+  // native challenge) and must not open a visible browser during app startup.
+  // `automatic` positively identifies a safe unattended retry. Explicit null
+  // clears an earlier gate after a terminal transition; omission preserves a
+  // legacy blocked row, which automatic eligibility treats as manual/fail-safe.
+  recoveryDisposition = undefined,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
@@ -1065,6 +1386,13 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
     if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
+    if (status === 'done' || status === 'skipped') {
+      delete src.recoveryDisposition;
+    } else if (recoveryDisposition !== undefined) {
+      const normalizedRecovery = normalizeJobRunRecoveryDisposition(recoveryDisposition);
+      if (normalizedRecovery) src.recoveryDisposition = normalizedRecovery;
+      else delete src.recoveryDisposition;
+    }
     if (collectionScopeCaveats !== undefined) {
       src.collectionScopeCaveats = normalizeCollectionScopeCaveats(collectionScopeCaveats);
     }
@@ -1075,7 +1403,7 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now, {
 }
 
 /** Advance the pipeline stage ('searching'→'gathered'; see the header). */
-export async function setStage(canvasFilePath, stage, now, {
+async function setStageRaw(canvasFilePath, stage, now, {
   expectedRunId = null,
   nodeId = null,
   collectionCompletedAt = null,
@@ -1112,6 +1440,129 @@ export async function setStage(canvasFilePath, stage, now, {
   });
 }
 
+/** Mark the one-way provider-I/O boundary without claiming semantic processing is complete. */
+async function markProviderGatheredRaw(canvasFilePath, now, {
+  expectedRunId = null,
+  nodeId = null,
+  requiredSourceIds = [],
+} = {}) {
+  const located = await locateRun(canvasFilePath, nodeId);
+  const { files } = located;
+  if (!files) return false;
+  return withManifestLock(files.manifest, async () => {
+    const manifest = await readManifestFromFiles(files);
+    if (!manifest || (expectedRunId != null && manifest.runId !== expectedRunId)) return false;
+    if (nodeId && normalizeNodeId(manifest.inputs?.nodeId) !== normalizeNodeId(nodeId)) return false;
+    const terminal = new Set(['done', 'skipped', 'blocked']);
+    const sourceIds = Array.isArray(requiredSourceIds)
+      ? requiredSourceIds.filter(id => typeof id === 'string' && id)
+      : [];
+    if (!sourceIds.every(id => terminal.has(manifest.sources?.[id]?.status))) return false;
+    if (providerGatheredAtForManifest(manifest) == null) {
+      const timestamp = manifestTimestamp(now);
+      if (timestamp == null) return false;
+      manifest.providerGatheredAt = timestamp;
+    }
+    manifest.lastUpdated = now ?? manifest.lastUpdated;
+    try { await atomicWriteJson(files.manifest, manifest); return true; }
+    catch (error) { logger.warn(`[JobRunStaging] markProviderGathered failed: ${error?.message || error}`); return false; }
+  });
+}
+
+/**
+ * Persist an explicit Stop without discarding this run's staged rows.  Both
+ * coordinates are mandatory and compared under the manifest mutex, so a late
+ * cancellation acknowledgement can never pause a replacement generation.
+ */
+async function pauseRunForManualResumeRaw(canvasFilePath, {
+  expectedRunId = null,
+  nodeId = null,
+  now = null,
+} = {}) {
+  const expectedRunToken = typeof expectedRunId === 'string' && expectedRunId.trim()
+    ? expectedRunId.trim()
+    : null;
+  const expectedNodeId = normalizeNodeId(nodeId);
+  if (!expectedRunToken || !expectedNodeId || manifestTimestamp(now) == null) {
+    return { ok: false, paused: false, reason: 'missing-ownership' };
+  }
+  const located = await locateRun(canvasFilePath, expectedNodeId);
+  const { files } = located;
+  if (!files) return { ok: false, paused: false, absent: true, reason: 'missing-canvas' };
+  return withManifestLock(files.manifest, async () => {
+    const manifest = await readManifestFromFiles(files);
+    if (!manifest) return { ok: false, paused: false, absent: true, reason: 'run-absent' };
+    if (
+      manifest.runId !== expectedRunToken
+      || normalizeNodeId(manifest.inputs?.nodeId) !== expectedNodeId
+    ) {
+      return { ok: false, paused: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+    }
+    manifest.recoveryDisposition = JOB_RUN_RECOVERY_DISPOSITION.MANUAL;
+    manifest.lastUpdated = now;
+    try {
+      await atomicWriteJson(files.manifest, manifest);
+      return { ok: true, paused: true, runId: manifest.runId };
+    } catch (error) {
+      logger.warn(`[JobRunStaging] pauseRunForManualResume failed: ${error?.message || error}`);
+      return { ok: false, paused: false, reason: 'write-failed' };
+    }
+  });
+}
+
+/**
+ * An exact Resume click/auto-claim re-arms crash recovery before any provider
+ * or scoring work begins.  If that continuation is interrupted again, its
+ * unchanged manifest will therefore launch automatically on the next start.
+ */
+async function activateRunForResumeRaw(canvasFilePath, {
+  expectedRunId = null,
+  nodeId = null,
+  now = null,
+} = {}) {
+  const expectedRunToken = typeof expectedRunId === 'string' && expectedRunId.trim()
+    ? expectedRunId.trim()
+    : null;
+  const expectedNodeId = normalizeNodeId(nodeId);
+  if (!expectedRunToken || !expectedNodeId || manifestTimestamp(now) == null) {
+    return { ok: false, activated: false, reason: 'missing-ownership' };
+  }
+  const located = await locateRun(canvasFilePath, expectedNodeId);
+  const { files } = located;
+  if (!files) return { ok: false, activated: false, absent: true, reason: 'missing-canvas' };
+  return withManifestLock(files.manifest, async () => {
+    const manifest = await readManifestFromFiles(files);
+    if (!manifest) return { ok: false, activated: false, absent: true, reason: 'run-absent' };
+    if (
+      manifest.runId !== expectedRunToken
+      || normalizeNodeId(manifest.inputs?.nodeId) !== expectedNodeId
+    ) {
+      return { ok: false, activated: false, tokenMismatch: true, reason: 'ownership-mismatch' };
+    }
+    delete manifest.recoveryDisposition;
+    // A click on this exact Resume control is the user's consent to retry any
+    // human-gated source in the run. Re-arm crash recovery before dispatch;
+    // if it reaches the same gate again, markSourceStatus writes it manual
+    // again, so a later restart still never auto-opens an interactive window.
+    for (const source of Object.values(manifest.sources || {})) {
+      if (!source || typeof source !== 'object') continue;
+      if (source.status === 'blocked') {
+        source.recoveryDisposition = JOB_RUN_RECOVERY_DISPOSITION.AUTOMATIC;
+      } else {
+        delete source.recoveryDisposition;
+      }
+    }
+    manifest.lastUpdated = now;
+    try {
+      await atomicWriteJson(files.manifest, manifest);
+      return { ok: true, activated: true, runId: manifest.runId };
+    } catch (error) {
+      logger.warn(`[JobRunStaging] activateRunForResume failed: ${error?.message || error}`);
+      return { ok: false, activated: false, reason: 'write-failed' };
+    }
+  });
+}
+
 /**
  * Durably record the user's explicit choice to stop provider collection and
  * continue only with the rows already staged.  This is deliberately a single
@@ -1123,7 +1574,7 @@ export async function setStage(canvasFilePath, stage, now, {
  * truthful record of work that was not completed, while the fixed disposition
  * tells exact recovery to process the saved ledger without dispatching it.
  */
-export async function finishRunWithSavedListings(canvasFilePath, {
+async function finishRunWithSavedListingsRaw(canvasFilePath, {
   expectedRunId = null,
   nodeId = null,
   now = null,
@@ -1218,17 +1669,18 @@ async function readStagedJobsFromFiles(files) {
 }
 
 /** Parse the staging JSONL, skipping any torn/garbage lines. Returns [] on miss. */
-export async function readStagedJobs(canvasFilePath, nodeIdOrOptions = null) {
+async function readStagedJobsRaw(canvasFilePath, nodeIdOrOptions = null) {
   const { files } = await locateRun(canvasFilePath, nodeIdOrOptions);
   return readStagedJobsFromFiles(files);
 }
 
 /**
  * Read the full run state for resume detection. Returns null when there is no
- * (parseable) manifest. `resumable` is true when the run did not finish AND is
- * recent enough to auto-offer (within RESUMABLE_MAX_AGE_MS of `now`).
+ * (parseable) manifest. `resumable` is the historical <=24h freshness signal
+ * retained for diagnostics/UI only; callers must surface and recover older
+ * exact manifests too.
  */
-export async function readRunState(canvasFilePath, now = null, nodeIdOrOptions = null) {
+async function readRunStateRaw(canvasFilePath, now = null, nodeIdOrOptions = null) {
   const located = await locateRun(canvasFilePath, nodeIdOrOptions);
   const { manifest } = located;
   if (!manifest) return null;
@@ -1270,6 +1722,33 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
 }
 
 /**
+ * Return an index-aligned resume plan for every exact query. `durable` is
+ * intentionally separate from `startPage`: an unstarted query falls back to
+ * page 1, while a Google one-view query whose page 1 is durable must be
+ * skipped. Older manifests used text keys; use those only as a read fallback.
+ */
+export function computeResumeStartPagesByQuery(sourceLedger, queries) {
+  const queryList = Array.isArray(queries) ? queries : [];
+  const stored = sourceLedger?.queries && typeof sourceLedger.queries === 'object'
+    ? sourceLedger.queries
+    : {};
+  const occurrences = new Map();
+  for (const query of queryList) {
+    if (typeof query === 'string' && query) occurrences.set(query, (occurrences.get(query) || 0) + 1);
+  }
+  return queryList.map((query, index) => {
+    const indexed = stored[`#${index}`];
+    // A legacy text key cannot distinguish repeated query slots. Treat it as
+    // absent in that case: replay is safe; skipping an unstarted duplicate is
+    // not. Indexed records above remain exact.
+    const legacy = typeof query === 'string' && query && occurrences.get(query) === 1 ? stored[query] : null;
+    const lastPage = Number((indexed || legacy)?.lastPage);
+    const durable = Number.isSafeInteger(lastPage) && lastPage >= 1;
+    return { startPage: durable ? lastPage + 1 : 1, durable, terminal: (indexed || legacy)?.terminal === true };
+  });
+}
+
+/**
  * Remove both sidecars.
  *
  * @param {string} canvasFilePath
@@ -1282,7 +1761,7 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
  *   function is INJECTED, not imported, so this module stays electron-free and
  *   unit-testable in the plain-node runner.
  */
-export async function clearRunWithResult(canvasFilePath, { trashItem = null, expectedRunId = null, expectedNodeId = null, expectedOwnerUnknown = false } = {}) {
+async function clearRunWithResultRaw(canvasFilePath, { trashItem = null, expectedRunId = null, expectedNodeId = null, expectedOwnerUnknown = false } = {}) {
   const located = await locateRun(canvasFilePath, expectedNodeId);
   const { files } = located;
   if (!files) return { ok: true, cleared: false, absent: true, reason: 'missing-canvas' };
@@ -1308,7 +1787,7 @@ export async function clearRunWithResult(canvasFilePath, { trashItem = null, exp
   });
 }
 
-export async function clearRun(canvasFilePath, options = {}) {
+async function clearRunRaw(canvasFilePath, options = {}) {
   const result = await clearRunWithResult(canvasFilePath, options);
   return result.cleared === true;
 }
@@ -1370,7 +1849,7 @@ async function clearRunFiles(files, trashItem = null) {
  * checked under the same lock as startRun/clearRun, so a delayed completion from
  * an older hub run cannot overwrite a newer run's receipt or delete its files.
  */
-export async function completeRunWithReceipt(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null } = {}) {
+async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null } = {}) {
   const located = await locateRun(canvasFilePath, expectedNodeId || receipt?.nodeId || null);
   const { files } = located;
   const receiptPath = lastRunReceiptPathForCanvas(canvasFilePath, files?.nodeId);
@@ -1446,3 +1925,31 @@ export async function completeRunWithReceipt(canvasFilePath, receipt, { trashIte
     }
   }));
 }
+
+// Every public async store operation participates in the canvas-path reader
+// gate. Rebind owns the exclusive gate; these wrappers resolve an old captured
+// path under a lease and hold it through the full read/modify/write operation.
+// Function declarations stay above for local readability and unit seams; their
+// exported live bindings are replaced once, after module initialization.
+function recoveryBound(operation) {
+  return async (canvasFilePath, ...args) => withCanvasRecoveryRead(
+    canvasFilePath,
+    ownerCanvasPath => operation(ownerCanvasPath, ...args),
+  );
+}
+
+export const readLastRunReceipt = recoveryBound(readLastRunReceiptRaw);
+export const writeLastRunReceipt = recoveryBound(writeLastRunReceiptRaw);
+export const startRun = recoveryBound(startRunRaw);
+export const recordSourcePage = recoveryBound(recordSourcePageRaw);
+export const markSourceStatus = recoveryBound(markSourceStatusRaw);
+export const setStage = recoveryBound(setStageRaw);
+export const markProviderGathered = recoveryBound(markProviderGatheredRaw);
+export const pauseRunForManualResume = recoveryBound(pauseRunForManualResumeRaw);
+export const activateRunForResume = recoveryBound(activateRunForResumeRaw);
+export const finishRunWithSavedListings = recoveryBound(finishRunWithSavedListingsRaw);
+export const readStagedJobs = recoveryBound(readStagedJobsRaw);
+export const readRunState = recoveryBound(readRunStateRaw);
+export const clearRunWithResult = recoveryBound(clearRunWithResultRaw);
+export const clearRun = recoveryBound(clearRunRaw);
+export const completeRunWithReceipt = recoveryBound(completeRunWithReceiptRaw);

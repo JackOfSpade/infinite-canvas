@@ -185,7 +185,10 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile }) {
               const freshStatus = result.localJob?.status || local.status;
               const workingState = applicationDockItemState(freshStatus);
               if (workingState === 'working' || workingState === 'blocked') {
-                return [local.id, workingApplicationDockRequest({ node, canvasFilePath, status: freshStatus })];
+                return [local.id, workingApplicationDockRequest({
+                  node, canvasFilePath, status: freshStatus,
+                  retryReproducesFailure: result.localJob?.retryReproducesFailure === true,
+                })];
               }
               // Past the paste phase with no prompt, and a status that has
               // not caught up even in the manifest: the paste machine has

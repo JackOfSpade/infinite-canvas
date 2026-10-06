@@ -70,6 +70,7 @@ import { useDragCorrections } from './hooks/useDragCorrections';
 import { useNestedCanvasDrag } from './hooks/useNestedCanvasDrag';
 import { useCanvasKeyboardShortcuts } from './hooks/useCanvasKeyboardShortcuts';
 import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
+import { useWorkspaceStartupRecovery } from './hooks/useWorkspaceStartupRecovery';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
@@ -375,6 +376,13 @@ export function Canvas() {
     saveOperationRef,
   });
 
+  const startupRecoveryPlan = useWorkspaceStartupRecovery({
+    canvasFilePath: currentFile,
+    rootNodes: nodes,
+    hydrated: !loadState.active,
+    updateNodeDataGlobally: navigation.updateNodeDataGlobally,
+  });
+
   // Queued work may outlive an individual card view (for example while a job
   // branch is collapsed). Expose a stable accessor so that work resumes beside
   // the canvas's *current* file after Save As, rather than a stale closure.
@@ -387,8 +395,8 @@ export function Canvas() {
   // Exposes currentFile to descendants (e.g. JobSearchNode) alongside the
   // navigation helpers via the same context, avoiding a second provider.
   const navContextValue = React.useMemo(
-    () => ({ ...navigation, currentFile, getCurrentFile }),
-    [navigation, currentFile, getCurrentFile]
+    () => ({ ...navigation, currentFile, getCurrentFile, startupRecoveryPlan }),
+    [navigation, currentFile, getCurrentFile, startupRecoveryPlan]
   );
 
   // Keeps pending Local AI application handoffs alive when their JobCardNode
@@ -457,7 +465,7 @@ export function Canvas() {
   // right file immediately, without waiting for the next save.
   useEffect(() => {
     if (!window.electronAPI?.onCanvasFileRenamed) return;
-    return window.electronAPI.onCanvasFileRenamed((newPath) => {
+    const unlistenRenamed = window.electronAPI.onCanvasFileRenamed((newPath) => {
       if (quitGateRef.current.frozen) return;
       if (!newPath) return;
       setCurrentFile(newPath);
@@ -465,6 +473,18 @@ export function Canvas() {
       const name = newPath.split(/[/\\]/).pop();
       addToast({ title: 'Canvas file renamed', description: `Now saving to “${name}”.`, type: 'info' });
     });
+    const unlistenFailure = window.electronAPI.onCanvasFileRenameRecoveryFailed?.(() => {
+      if (quitGateRef.current.frozen) return;
+      addToast({
+        title: 'Recovery data needs attention',
+        description: 'The canvas was renamed, but its recovery data could not be moved safely. Retry Save before continuing work.',
+        type: 'error',
+      });
+    });
+    return () => {
+      unlistenRenamed?.();
+      unlistenFailure?.();
+    };
   }, [setCurrentFile, updateSetting, addToast]);
 
   // ── Document Title Manager ───────────────────────────────────────────────

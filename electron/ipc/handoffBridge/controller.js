@@ -39,6 +39,7 @@ const PROBE_REASONS = new Set(['wrong-origin', 'unexpected-redirect', 'tunnel-no
 const TUNNEL_EXIT_CODES = new Set(['spawn-failed', 'flag-rejected', 'tunnel-auth-rejected', 'credentials-invalid', 'network-unreachable', 'metrics-port-in-use', 'exited-unrequested', 'exited', 'exited-early', 'unrequested-exit-loop', 'crash-loop', 'hostname-not-public', 'config-rejected', 'owned-elsewhere', 'binary-untrusted', 'binary-not-found', 'binary-changed']);
 const LINK_STATES = new Set(['unlinked', 'pairing', 'linked', 'needs-renewal', 'unknown']);
 const CHAT_STATES = new Set(['none', 'awaiting-first-call', 'reached', 'working', 'idle', 'full', 'ended']);
+const POOL_WORKER_STATES = new Set(['available', 'ready', 'working', 'quiet', 'waiting', 'idle']);
 const LANE_PHASES = new Set(['unread', 'awaiting', 'host', 'needs_user', 'held', 'done', 'gone']);
 const APPLICATION_STAGES = new Set(['evidence-plan', 'resume', 'cover-letter', 'review']);
 // The closed vocabulary of task names that may reach the renderer. It was
@@ -56,7 +57,7 @@ const TASK_IDS = new Set([
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
 ]);
-const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
+const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);
 const PAUSE_CAUSES = new Set(['user', 'idle', 'anomaly', 'revoked', 'quit']);
 const FAULT_CODES = new Set(['socket_unavailable', 'tunnel_failed', 'state_unreadable', 'persist_failed', 'internal_error']);
@@ -149,8 +150,8 @@ function statusOf(port) {
 
 function defaultConfig() {
   return {
-    hostname: null, pluginName: 'infinite_canvas', autoStart: false, autoRelease: false,
-    scope: { applications: true, scoring: false, marketplace: false },
+    hostname: null, pluginName: 'infinite_canvas', autoStart: true, autoRelease: true,
+    scope: { applications: true, scoring: true, marketplace: true },
     limits: {
       releaseTtlHours: CONSTANTS.RELEASE_TTL_HOURS,
       chatKeyMaxAgeHours: CONSTANTS.CHAT_KEY_MAX_AGE_HOURS,
@@ -172,12 +173,12 @@ function cleanConfig(value) {
   return {
     hostname: typeof value.hostname === 'string' ? value.hostname : null,
     pluginName: typeof value.pluginName === 'string' && value.pluginName ? value.pluginName : fallback.pluginName,
-    autoStart: value.autoStart === true,
-    autoRelease: value.autoRelease === true,
+    autoStart: value.autoStart !== false,
+    autoRelease: value.autoRelease !== false,
     scope: {
       applications: value.scope?.applications !== false,
-      scoring: value.scope?.scoring === true,
-      marketplace: value.scope?.marketplace === true,
+      scoring: value.scope?.scoring !== false,
+      marketplace: value.scope?.marketplace !== false,
     },
     limits: {
       releaseTtlHours: Number.isFinite(limits.releaseTtlHours) ? Math.max(0, limits.releaseTtlHours) : fallback.limits.releaseTtlHours,
@@ -192,6 +193,9 @@ function cleanConfig(value) {
       pairingNetworkCheck: prefs.pairingNetworkCheck !== false,
     },
     telemetryInBugReports: value.telemetryInBugReports === true,
+    // This is compared only to the app-owned current consent revision before
+    // it becomes the closed boolean in the renderer status.
+    consentVersion: Number.isSafeInteger(value.consentVersion) && value.consentVersion >= 0 ? value.consentVersion : 0,
   };
 }
 
@@ -247,6 +251,10 @@ export function createHandoffBridgeController(options = {}) {
   const alarms = [];
   const preparedChats = new Map();
   let preparedChatOrdinal = 0;
+  let pushDiscoveryRefresh = null;
+  // A registry wake-up while list() is in flight may describe work that the
+  // in-flight snapshot cannot contain. Remember it for one trailing read.
+  let pushDiscoveryRefreshDirty = false;
 
   function servingGeneration(generation) {
     return generation === lifecycleGeneration && enabled === true && ['live', 'paused'].includes(serving);
@@ -415,9 +423,14 @@ export function createHandoffBridgeController(options = {}) {
     const stamp = safeNow(now);
     const pending = releaseDeadlines(stamp, generation);
     const age = stamp - lastHumanActionAt;
+    // A worker pool is an explicit durable-drain choice. It must not be
+    // paused merely because the person has not clicked the app during a long
+    // run; its workers still prove active bridge work. Other pause causes and
+    // ordinary single-chat idle protection remain unchanged.
+    const poolActive = snapshotOf(engine)?.chat?.pool?.active === true;
     if (enabled && serving !== 'off') {
       const idleMs = config.limits.idlePauseMinutes * 60_000;
-      if (idleMs > 0 && age >= idleMs && serving !== 'paused') pauseInternal('idle');
+      if (!poolActive && idleMs > 0 && age >= idleMs && serving !== 'paused') pauseInternal('idle');
     }
     return { stamp, pending };
   }
@@ -461,6 +474,8 @@ export function createHandoffBridgeController(options = {}) {
         awaitingAnswer: item.awaitingAnswer === true,
         stalled: item.stalled === true,
         stalledSince: finite(item.stalledSince),
+        workerOrdinal: Number.isInteger(item.workerOrdinal) && item.workerOrdinal >= 1 && item.workerOrdinal <= CONSTANTS.MAX_LANES
+          ? item.workerOrdinal : null,
       }];
     }).filter(item => item.jobId !== null);
   }
@@ -521,6 +536,12 @@ export function createHandoffBridgeController(options = {}) {
     base.setup.hostnameOk = Boolean(config.hostname);
     base.setup.binaryApproved = bool(tunnelStatus.binary?.approved ?? tunnelStatus.binaryApproved);
     base.setup.credentialsOk = bool(tunnelStatus.credentialsOk);
+    // Direct controller harnesses deliberately omit a consent policy. In the
+    // composed application a known revision is supplied, which makes an old
+    // durable receipt visibly actionable before a skipped auto-start can look
+    // like a broken tunnel.
+    base.setup.consentCurrent = !Number.isSafeInteger(options.enableConsentVersion)
+      || config.consentVersion === options.enableConsentVersion;
     base.setup.toolsListed = bool(engineStatus.setup?.toolsListed ?? engineStatus.link?.toolsListed);
     base.setup.firstCallSeen = bool(engineStatus.setup?.firstCallSeen ?? engineStatus.chat?.firstCallAt);
     // Do not spread a supervisor diagnostic into the renderer payload.  In
@@ -566,6 +587,64 @@ export function createHandoffBridgeController(options = {}) {
     base.tunnel.certPemPresent = bool(tunnelStatus.certPemPresent);
     safeLink(links, pairingStatus, stamp, base);
     const rawChat = isObject(engineStatus.chat) ? engineStatus.chat : {};
+    // Pool identity is a bounded, non-secret renderer correlation value. The
+    // controller validates it independently so a generic engine port cannot
+    // make stale local worker controls look live.
+    const rawPool = isObject(rawChat.pool) ? rawChat.pool : {};
+    const poolGeneration = Number.isSafeInteger(rawPool.generation) && rawPool.generation > 0
+      ? rawPool.generation
+      : null;
+    const poolWorkerCount = Number.isSafeInteger(rawPool.workerCount) && rawPool.workerCount >= 1 && rawPool.workerCount <= CONSTANTS.MAX_LANES
+      ? rawPool.workerCount
+      : 0;
+    const poolActive = rawPool.active === true && poolGeneration !== null && poolWorkerCount > 0;
+    const poolPlan = (rawPlan, active = poolActive, fallbackWorkers = poolWorkerCount) => {
+      rawPlan = isObject(rawPlan) ? rawPlan : {};
+      const recommended = Number.isSafeInteger(rawPlan.recommended) && rawPlan.recommended >= 0 && rawPlan.recommended <= CONSTANTS.MAX_LANES
+        ? rawPlan.recommended : fallbackWorkers;
+      const queued = Number.isSafeInteger(rawPlan.queued) && rawPlan.queued >= 0 && rawPlan.queued <= 10_000
+        ? rawPlan.queued : 0;
+      const materialized = Number.isSafeInteger(rawPlan.materialized) && rawPlan.materialized >= 0 && rawPlan.materialized <= 10_000
+        ? Math.min(queued, rawPlan.materialized) : queued;
+      const expandBy = Number.isSafeInteger(rawPlan.expandBy) && rawPlan.expandBy >= 0 && rawPlan.expandBy <= CONSTANTS.MAX_LANES
+        ? rawPlan.expandBy : 0;
+      const reason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(rawPlan.reason)
+        ? rawPlan.reason : 'empty';
+      const expansionCount = Number.isInteger(rawPlan.expansionCount) && rawPlan.expansionCount >= 0 && rawPlan.expansionCount <= 999
+        ? rawPlan.expansionCount : 0;
+      const lastExpansionAt = finite(rawPlan.lastExpansionAt);
+      const lastExpansionAdded = Number.isInteger(rawPlan.lastExpansionAdded) && rawPlan.lastExpansionAdded >= 0 && rawPlan.lastExpansionAdded <= CONSTANTS.MAX_LANES
+        ? rawPlan.lastExpansionAdded : 0;
+      return { recommended: active ? recommended : 0, queued: active ? queued : 0, materialized: active ? materialized : 0, expandBy: active ? expandBy : 0, reason, expansionCount, lastExpansionAt, lastExpansionAdded };
+    };
+    const safePoolWorker = (rawWorker, maxOrdinal) => {
+      if (!isObject(rawWorker)) return null;
+      const ordinal = rawWorker.ordinal;
+      const state = oneOf(rawWorker.state, POOL_WORKER_STATES, null);
+      if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > maxOrdinal || !state) return null;
+      return {
+        ordinal, state,
+        completed: Number.isSafeInteger(rawWorker.completed) && rawWorker.completed >= 0 ? Math.min(999_999, rawWorker.completed) : 0,
+        firstCallAt: finite(rawWorker.firstCallAt), lastCallAt: finite(rawWorker.lastCallAt),
+        lastCallKind: oneOf(rawWorker.lastCallKind, new Set(['get', 'submit']), null),
+        lastOutcome: oneOf(rawWorker.lastOutcome, new Set(['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended']), null),
+        lastOutcomeAt: finite(rawWorker.lastOutcomeAt),
+        quietReason: oneOf(rawWorker.quietReason, new Set(['polling_stopped', 'answer_silent']), null),
+        restarts: Number.isSafeInteger(rawWorker.restarts) && rawWorker.restarts >= 0 ? Math.min(999_999, rawWorker.restarts) : 0,
+      };
+    };
+    const poolWorkers = [];
+    const seenPoolOrdinals = new Set();
+    if (poolActive) {
+      for (const rawWorker of arrayOf(rawPool.workers, poolWorkerCount)) {
+        if (!isObject(rawWorker)) continue;
+        const worker = safePoolWorker(rawWorker, poolWorkerCount);
+        if (!worker || seenPoolOrdinals.has(worker.ordinal)) continue;
+        seenPoolOrdinals.add(worker.ordinal);
+        poolWorkers.push(worker);
+      }
+      poolWorkers.sort((left, right) => left.ordinal - right.ordinal);
+    }
     base.chat = {
       ...base.chat,
       ordinal: Math.max(0, finite(rawChat.ordinal, base.chat.ordinal)),
@@ -573,8 +652,26 @@ export function createHandoffBridgeController(options = {}) {
       lastCallKind: oneOf(rawChat.lastCallKind, new Set(['get', 'submit']), null), calls: Math.max(0, finite(rawChat.calls, 0)),
       state: oneOf(rawChat.state, CHAT_STATES, base.chat.state), jobsAssigned: Math.max(0, finite(rawChat.jobsAssigned, 0)),
       jobsCap: Math.max(0, finite(rawChat.jobsCap, config.limits.jobsPerChat)), expiresInMs: finite(rawChat.expiresInMs),
+      pool: {
+        active: poolActive,
+        generation: poolActive ? poolGeneration : null,
+        workerCount: poolActive ? poolWorkerCount : 0,
+        workers: poolWorkers,
+        plan: poolPlan(rawPool.plan),
+        history: arrayOf(rawPool.history, 3).flatMap(item => {
+          if (!isObject(item) || !['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled', 'other'].includes(item.reason)
+            || !Number.isSafeInteger(item.workerCount) || item.workerCount < 1 || item.workerCount > CONSTANTS.MAX_LANES) return [];
+          const seen = new Set();
+          const workers = arrayOf(item.workers, item.workerCount).flatMap(rawWorker => {
+            const worker = safePoolWorker(rawWorker, item.workerCount);
+            if (!worker || seen.has(worker.ordinal)) return [];
+            seen.add(worker.ordinal); return [worker];
+          }).sort((left, right) => left.ordinal - right.ordinal);
+          return [{ endedAt: finite(item.endedAt), reason: item.reason, workerCount: item.workerCount, workers, plan: poolPlan(item.plan, true, item.workerCount) }];
+        }),
+      },
       outstanding: null, servedTwice: bool(rawChat.servedTwice),
-      previous: arrayOf(rawChat.previous, 5).flatMap(item => isObject(item) ? [{ ordinal: Math.max(0, finite(item.ordinal, 0)), endedAt: finite(item.endedAt), reason: oneOf(item.reason, new Set(['replaced', 'link_changed', 'queue_empty', 'disabled']), null) }] : []),
+      previous: arrayOf(rawChat.previous, 5).flatMap(item => isObject(item) ? [{ ordinal: Math.max(0, finite(item.ordinal, 0)), endedAt: finite(item.endedAt), reason: oneOf(item.reason, new Set(['replaced', 'link_changed', 'queue_empty', 'source_ended', 'disabled']), null) }] : []),
     };
     if (isObject(rawChat.outstanding)) base.chat.outstanding = {
       servedAt: finite(rawChat.outstanding.servedAt), kind: oneOf(rawChat.outstanding.kind, new Set(['application', 'push']), null),
@@ -593,7 +690,22 @@ export function createHandoffBridgeController(options = {}) {
       base.push.selectedHubs = arrayOf(rawPush.selectedHubs, 20).map(value => typeof value === 'string' && HUB_KEY.test(value) ? value : null).filter(Boolean);
       base.push.discovered = arrayOf(rawPush.discovered, 20).flatMap(item => isObject(item) && typeof item.key === 'string'
         && HUB_KEY.test(item.key)
-        ? [{ key: item.key, pending: Math.max(0, finite(item.pending, 0)), tasks: safeTasks(item.tasks), excluded: Object.fromEntries(['ending', 'settling', 'attachment', 'grounded', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'].map(reason => [reason, Math.max(0, finite(item.excluded?.[reason], 0))])) }] : []);
+        ? [{ key: item.key, pending: Math.max(0, finite(item.pending, 0)), tasks: safeTasks(item.tasks), excluded: Object.fromEntries(['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'].map(reason => [reason, Math.max(0, finite(item.excluded?.[reason], 0))])) }] : []);
+      // Claim IDs are random UUIDs minted with each renderer request. They
+      // provide exact UI correlation only; request ids/codes stay private.
+      base.push.claimed = arrayOf(rawPush.claimed, 100).filter(value => typeof value === 'string' && UUID.test(value));
+      base.push.claimWorkers = arrayOf(rawPush.claimWorkers, 100).flatMap(item => isObject(item)
+        && typeof item.claimId === 'string' && UUID.test(item.claimId)
+        && Number.isInteger(item.workerOrdinal) && item.workerOrdinal >= 1 && item.workerOrdinal <= CONSTANTS.MAX_LANES
+        ? [{ claimId: item.claimId, workerOrdinal: item.workerOrdinal }]
+        : []);
+      // Selected, eligible but not-yet-served push handoffs use the same
+      // opaque renderer-only token. This is not a task/node inference and it
+      // never crosses into reports or MCP tool output.
+      base.push.available = arrayOf(rawPush.available, 100).filter(value => typeof value === 'string' && UUID.test(value));
+      // A closed aggregate only: never project the opaque hub keys that make
+      // up a person's source-lifetime opt-out set.
+      base.push.optedOutHubs = Math.max(0, finite(rawPush.optedOutHubs, 0));
     }
     base.alarms = arrayOf([...alarms, ...arrayOf(engineStatus.alarms, 5)], 5).flatMap(item => isObject(item) && typeof item.id === 'string'
       && SAFE_KEY.test(item.id) && ALARM_KINDS.has(item.kind)
@@ -861,12 +973,31 @@ export function createHandoffBridgeController(options = {}) {
     if (!teardown) await cleanup({ clearVolatile: false });
     return { success: false, code: 'CANCELLED', status: snapshot(false) };
   }
+  // `consentConfirmed` is a short-lived, main-minted capability from the
+  // native sheet. It must still name the exact config at each point where an
+  // Enable can acquire a transport owner. `currentEnableConsentMatches` is a
+  // synchronous authoritative read (normally config.json), so no config save
+  // can interleave between this check and the immediately following start.
+  function hasCurrentEnableConsent(args) {
+    if (args?.consentConfirmed !== true) return true;
+    if (typeof args.consentFingerprint !== 'string' || args.consentFingerprint.length === 0 || args.consentFingerprint.length > 2048) return false;
+    try {
+      if (typeof options.matchesEnableConsent !== 'function' || options.matchesEnableConsent(config, args.consentFingerprint) !== true) return false;
+      return typeof options.currentEnableConsentMatches !== 'function'
+        || options.currentEnableConsentMatches(args.consentFingerprint) === true;
+    } catch { return false; }
+  }
   async function runEnable(args = {}, generation) {
     const startedAt = safeNow(now);
     let startupPhase = 'listener-start';
     try {
       await loadConfig();
       if (!startCurrent(generation)) return cancelledStart(generation);
+      // A long native consent sheet is minted against a closed fingerprint of
+      // the bridge configuration.  Recheck the config the controller actually
+      // loaded before opening a listener: another canvas must not turn an
+      // approval for one hostname/scope into an activation of another.
+      if (!hasCurrentEnableConsent(args)) return { success: false, code: 'CONSENT_STALE', status: snapshot(false) };
       const refusal = refusalForStart
         ? await Promise.resolve(refusalForStart({ ...(options.startContext || {}), ...(args.startContext || {}), enabled: true, config, reason: args.reason }))
         : null;
@@ -888,6 +1019,11 @@ export function createHandoffBridgeController(options = {}) {
       // only an ordering/test port; config.json has no enabled field.
       if (typeof store.setEnabled === 'function' && await call(store, 'setEnabled', true) === false) throw failure('persist_failed');
       if (!startCurrent(generation)) return cancelledStart(generation);
+      // `refusalForStart`, confirmation, and the ordering hook above may all
+      // await. Revalidate immediately before listener.start: this synchronous
+      // boundary is deliberately adjacent to the acquisition call so a SAVE
+      // CONFIG/reload cannot briefly bind the listener for a changed scope.
+      if (!hasCurrentEnableConsent(args)) throw failure('CONSENT_STALE');
       const bound = await boundedCall(listener, 'start', [], { timers, code: 'socket_unavailable' });
       if (!startCurrent(generation)) return cancelledStart(generation);
       if (bound === false || bound?.ok === false) throw failure('socket_unavailable', { phase: 'listener-start', cause: 'socket-unavailable' });
@@ -898,6 +1034,10 @@ export function createHandoffBridgeController(options = {}) {
         if (local === false || local?.ok === false) throw failure('socket_unavailable', { phase: 'listener-probe', cause: 'socket-unavailable' });
       }
       startupPhase = 'tunnel-start';
+      // The listener may already be running while a local probe awaits. Do
+      // not let the subsequent tunnel owner start if that await observed a
+      // config mutation; the failure cleanup closes the listener too.
+      if (!hasCurrentEnableConsent(args)) throw failure('CONSENT_STALE');
       const started = await boundedCall(tunnel, 'start', [], { timers, code: 'tunnel_failed' });
       if (!startCurrent(generation)) return cancelledStart(generation);
       if (started?.ok === false || started === false) throw failure('tunnel_failed', {
@@ -920,6 +1060,7 @@ export function createHandoffBridgeController(options = {}) {
       serving = 'live'; startTicks();
       record('listener_started', { state: 'live' });
       change();
+      void refreshPushDiscovery({ dirty: true });
       return { success: true, status: snapshot(false) };
     } catch (error) {
       if (!startCurrent(generation)) return cancelledStart(generation);
@@ -1034,6 +1175,12 @@ export function createHandoffBridgeController(options = {}) {
       const signature = JSON.stringify([
         inner.chat?.outstanding?.stalled === true,
         jobs.map(job => [job?.jobId, job?.phase, job?.stalled === true]),
+        // A waiting worker that stops polling can cross its recovery threshold
+        // without another MCP request, so include the closed roster state in
+        // the tick-driven publication signature.
+        Array.isArray(inner.chat?.pool?.workers)
+          ? inner.chat.pool.workers.map(worker => [worker?.ordinal, worker?.state])
+          : [],
       ]);
       // The first tick of a run publishes once: the engine may already have
       // dropped a stranded lane (or changed anything else) since the last push.
@@ -1054,10 +1201,10 @@ export function createHandoffBridgeController(options = {}) {
       await call(engine, 'tick', stamp);
       if (!servingGeneration(generation)) return { success: false, code: 'cancelled', status: snapshot(false) };
       pruneReleasedEvidence();
-      // A lane can cross the "ChatGPT has been quiet" threshold, or be dropped
-      // because its bundle was found gone, with no request or user action to
-      // announce it. Republish only when that closed picture actually changed,
-      // so an idle bridge stays silent (no per-tick IPC).
+      // A waiting worker can cross its polling-silence threshold, or a lane
+      // can be dropped because its bundle was found gone, with no request or
+      // user action to announce it. Republish only when that closed picture
+      // actually changed, so an idle bridge stays silent (no per-tick IPC).
       publishIfQuietStateChanged();
       return { success: true, status: snapshot(false) };
     } catch { return { success: false, code: 'internal_error', status: snapshot(false) }; }
@@ -1253,7 +1400,9 @@ export function createHandoffBridgeController(options = {}) {
       if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE', status: snapshot(false) };
       await call(activeEngine, 'resume');
       if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE', status: snapshot(false) };
-      serving = 'live'; pauseCause = null; humanAction(); change(); return { success: true, status: snapshot(false) };
+      serving = 'live'; pauseCause = null; humanAction(); change();
+      void refreshPushDiscovery({ dirty: true });
+      return { success: true, status: snapshot(false) };
     } catch { return { success: false, code: 'internal_error', status: snapshot(false) }; }
   }
   async function revokeAll(ticket = null) {
@@ -1363,9 +1512,9 @@ export function createHandoffBridgeController(options = {}) {
       return result || { ok: false, code: 'invalid_arguments' };
     } catch { return { ok: false, code: 'internal_error' }; }
   }
-  // The app removed a bundle (discard/prune). Frees the lane and its
-  // bookkeeping without counting as a person's action. A missing lane is the
-  // normal case (the job was never released) and stays silent.
+  // The app closed a bundle (discard/prune or completed save). Frees the lane
+  // and its bookkeeping without counting as a person's action. A missing lane
+  // is normal (the job was never released) and stays silent.
   async function onBundleDiscarded(event) {
     const jobId = event?.jobId;
     if (typeof jobId !== 'string' || !UUID.test(jobId)) return { ok: false, code: 'invalid_arguments' };
@@ -1428,7 +1577,25 @@ export function createHandoffBridgeController(options = {}) {
         }
         selected.push(key);
       }
+      // The first poll established that these opaque keys still exist, but it
+      // ran before they were selected and therefore could not populate their
+      // selected-only available claim ids. Poll once more after the complete
+      // selection so the dock can immediately distinguish an awaiting
+      // ChatGPT claim from ordinary copy/paste. A transient second-poll fault
+      // must not undo a successful explicit consent; one ordinary discovery
+      // retry is scheduled below if this immediate poll does not succeed.
+      let availabilityRefreshed = false;
+      try { availabilityRefreshed = await call(activeEngine, 'refreshPushHubs') === true; } catch { /* best-effort availability refresh */ }
+      if (!servingGeneration(generation) || activeEngine !== engine) {
+        await rollback(selected);
+        return { ok: false, code: 'NOT_READY' };
+      }
       humanAction(); change();
+      // Publish the selected state even when the immediate selected-hub poll
+      // failed, then schedule exactly one ordinary single-flight retry. This
+      // preserves explicit consent without indefinitely showing a stale empty
+      // availability cache when no unrelated registry event follows.
+      if (!availabilityRefreshed) void refreshPushDiscovery({ dirty: true });
       return { ok: true, released: selected.length };
     } catch {
       await rollback(selected);
@@ -1446,6 +1613,38 @@ export function createHandoffBridgeController(options = {}) {
       if (removed !== true) return { ok: false, code: 'not_found' };
       humanAction(); change(); return { ok: true };
     } catch { return { ok: false, code: 'internal_error' }; }
+  }
+  // The bridge source's discovery cache is asynchronous so its synchronous
+  // renderer status never contains a canvas path, node id, or prompt. Pending
+  // handoffs wake this single-flight refresh; eligible hubs auto-select on
+  // discovery unless the person explicitly unchecked that hub this session.
+  async function refreshPushDiscovery({ dirty = false } = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!servingGeneration(generation) || (!config.scope.scoring && !config.scope.marketplace)) return false;
+    if (pushDiscoveryRefresh) {
+      if (dirty) pushDiscoveryRefreshDirty = true;
+      return pushDiscoveryRefresh;
+    }
+    let operation;
+    operation = Promise.resolve().then(() => call(activeEngine, 'refreshPushHubs')).then(value => {
+      if (currentRuntime(generation, activeEngine) && value === true) {
+        change();
+        return true;
+      }
+      return false;
+    }, () => false).finally(() => {
+      if (pushDiscoveryRefresh !== operation) return;
+      pushDiscoveryRefresh = null;
+      if (!pushDiscoveryRefreshDirty) return;
+      pushDiscoveryRefreshDirty = false;
+      // Do not await from this finally: callers correctly receive the
+      // in-flight refresh they joined, while the remembered registry mutation
+      // gets its own current-lifecycle read immediately afterwards.
+      void refreshPushDiscovery();
+    });
+    pushDiscoveryRefresh = operation;
+    return operation;
   }
   function currentLinkId(candidate) {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate;
@@ -1495,7 +1694,11 @@ export function createHandoffBridgeController(options = {}) {
       const prepared = await call(activeEngine, 'prepareChat', { linkId, kind });
       if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'app_unavailable' };
       if (!prepared?.copied || typeof prepared.commit !== 'function' || typeof prepared.sessionCode !== 'string') {
-        return { copied: false, status: prepared?.status === 'unlinked' ? 'unlinked' : 'paused', reason: prepared?.reason };
+        return {
+          copied: false,
+          status: prepared?.status === 'unlinked' || prepared?.status === 'pool_active' ? prepared.status : 'paused',
+          reason: prepared?.reason,
+        };
       }
       const commitToken = makeCommitToken();
       preparedChats.set(commitToken, { commit: prepared.commit, kind, at: safeNow(now), generation, engine: activeEngine });
@@ -1528,6 +1731,127 @@ export function createHandoffBridgeController(options = {}) {
     const committed = await commitChat(prepared.commitToken);
     // Never leak the session code from this compatibility path.
     return committed.success ? { copied: true, chatOrdinal: prepared.chatOrdinal } : { copied: false, status: 'app_unavailable' };
+  }
+  // Starts an automatically sized, explicitly manual worker pool. The pool
+  // itself is main-process state; this controller path returns a session code
+  // only to ui.js, which immediately turns it into a clipboard starter and
+  // never sends it across the renderer boundary.
+  async function startWorkerPool(args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE' };
+    if (serving === 'paused') {
+      if (pauseCause !== 'idle') return { success: false, code: 'PAUSED' };
+      try { await call(activeEngine, 'resume'); } catch { return { success: false, code: 'PAUSED' }; }
+      if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE' };
+      serving = 'live'; pauseCause = null;
+    }
+    if (serving !== 'live') return { success: false, code: 'NOT_READY' };
+    // Refresh before asking the planner. This is deliberately best-effort:
+    // application lanes can still form a useful pool when a push discovery
+    // request temporarily fails.
+    await refreshPushDiscovery({ dirty: true });
+    if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE' };
+    const requestedWorkers = Number.isSafeInteger(args?.requestedWorkers)
+      && args.requestedWorkers >= 1 && args.requestedWorkers <= CONSTANTS.MAX_LANES
+      ? args.requestedWorkers
+      : null;
+    // The IPC boundary rejects malformed values.  Keep this second guard so
+    // an internal caller cannot accidentally turn a bad value into an
+    // unbounded/ambiguous worker target.
+    if (args?.requestedWorkers !== undefined && requestedWorkers === null) return { success: false, code: 'INVALID' };
+    const linkId = currentLinkId();
+    try {
+      const result = await call(activeEngine, 'startWorkerPool', {
+        linkId,
+        ...(requestedWorkers !== null ? { requestedWorkers } : {}),
+      });
+      if (!currentRuntime(generation, activeEngine)) return { success: false, code: 'UNAVAILABLE' };
+      if (result?.started !== true) {
+        const code = result?.status === 'unlinked'
+          ? 'NOT_LINKED'
+          : result?.status === 'paused'
+            ? 'PAUSED'
+            : result?.status === 'queue_empty'
+              ? 'QUEUE_EMPTY'
+              : 'NOT_READY';
+        return { success: false, code };
+      }
+      humanAction();
+      change();
+      return {
+        success: true,
+        started: true,
+        existing: result.existing === true,
+        generation: result.generation,
+        workerCount: result.workerCount,
+        recommended: result.recommended,
+        queued: result.queued,
+        newWorkerOrdinals: Array.isArray(result.newWorkerOrdinals)
+          ? result.newWorkerOrdinals.filter(value => Number.isInteger(value) && value >= 1 && value <= CONSTANTS.MAX_LANES)
+          : [],
+        lockedWorkerOrdinals: Array.isArray(result.lockedWorkerOrdinals)
+          ? result.lockedWorkerOrdinals.filter(value => Number.isInteger(value) && value >= 1 && value <= CONSTANTS.MAX_LANES)
+          : [],
+      };
+    } catch { return { success: false, code: 'INTERNAL' }; }
+  }
+  async function copyWorkerStarter(args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine) || serving !== 'live') return { copied: false, status: 'paused' };
+    const poolGeneration = args?.generation;
+    const workerOrdinal = args?.workerOrdinal;
+    if (!Number.isInteger(poolGeneration) || poolGeneration < 1 || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > CONSTANTS.MAX_LANES) {
+      return { copied: false, status: 'session_ended' };
+    }
+    const linkId = currentLinkId();
+    try {
+      const result = await call(activeEngine, 'copyWorkerStarter', { linkId, generation: poolGeneration, workerOrdinal });
+      if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'session_ended' };
+      if (result?.copied === true) {
+        humanAction();
+        change();
+      }
+      return result && typeof result === 'object' ? result : { copied: false, status: 'session_ended' };
+    } catch { return { copied: false, status: 'session_ended' }; }
+  }
+  // ui.js uses this only if it could not write an engine-reserved starter to
+  // the clipboard. The renderer never receives this recovery path or a key.
+  async function abandonWorkerStarter(args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine)) return false;
+    const poolGeneration = args?.generation;
+    const workerOrdinal = args?.workerOrdinal;
+    if (!Number.isInteger(poolGeneration) || poolGeneration < 1 || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > CONSTANTS.MAX_LANES) return false;
+    try {
+      const released = await call(activeEngine, 'abandonWorkerStarter', {
+        linkId: currentLinkId(), generation: poolGeneration, workerOrdinal,
+      });
+      const current = currentRuntime(generation, activeEngine) && released === true;
+      if (current) change();
+      return current;
+    } catch { return false; }
+  }
+  async function restartWorker(args = {}) {
+    const generation = lifecycleGeneration;
+    const activeEngine = engine;
+    if (!currentRuntime(generation, activeEngine) || serving !== 'live') return { copied: false, status: 'paused' };
+    const poolGeneration = args?.generation;
+    const workerOrdinal = args?.workerOrdinal;
+    if (!Number.isInteger(poolGeneration) || poolGeneration < 1 || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > CONSTANTS.MAX_LANES) {
+      return { copied: false, status: 'session_ended' };
+    }
+    try {
+      const result = await call(activeEngine, 'restartWorker', { linkId: currentLinkId(), generation: poolGeneration, workerOrdinal });
+      if (!currentRuntime(generation, activeEngine)) return { copied: false, status: 'session_ended' };
+      if (result?.copied === true) {
+        humanAction();
+        change();
+      }
+      return result && typeof result === 'object' ? result : { copied: false, status: 'session_ended' };
+    } catch { return { copied: false, status: 'session_ended' }; }
   }
   async function holdForQuit() {
     try { if (serving === 'off' || pauseCause === 'quit') return { success: true, status: snapshot(false) }; stateBeforeQuit = { serving, pauseCause }; pauseInternal('quit'); return { success: true, status: snapshot(false) }; }
@@ -1616,7 +1940,12 @@ export function createHandoffBridgeController(options = {}) {
     try {
       const loaded = await loadConfig({ isCurrent: current, activeEngine });
       if (!loaded || !current()) return { success: false, code: 'NOT_READY', status: snapshot(false) };
-      change(); return { success: true, status: snapshot(false) };
+      change();
+      // Turning scoring/marketplace scope on must discover handoffs already
+      // pending now; waiting for another registry event recreates the empty
+      // hub-selector deadlock this refresh path exists to avoid.
+      void refreshPushDiscovery({ dirty: true });
+      return { success: true, status: snapshot(false) };
     }
     catch (error) { markFault(error?.code || 'state_unreadable'); change(); return { success: false, code: error?.code || 'state_unreadable', status: snapshot(false) }; }
   }
@@ -1629,9 +1958,9 @@ export function createHandoffBridgeController(options = {}) {
   return Object.freeze({
     snapshot, status: snapshot, getState: snapshot, subscribe, tick, gate, get, submit,
     enable, disable, shutdownForQuit, pause, resume, revokeAll, forget, release, unrelease, onBundleDiscarded, releasePushHubs, unreleasePushHub,
-    newChat: args => chat('new', args), continueChat: args => chat('continue', args),
+    newChat: args => chat('new', args), continueChat: args => chat('continue', args), startWorkerPool, copyWorkerStarter, abandonWorkerStarter, restartWorker,
     prepareChat, commitChat, abandonChat, confirmRestart, getActivity,
-    holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, onLinkChanged, reloadConfig, ackAlarm,
+    holdForQuit, resumeAfterQuitCancel, notePairingAction, onPairingState, onAnonymous, onReconnectHint, onTransportCount, onSecurityEvent, onLinkChanged, reloadConfig, ackAlarm, refreshPushDiscovery,
   });
 }
 

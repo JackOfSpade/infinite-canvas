@@ -11,11 +11,18 @@ import { BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS } from '../electron/utils/background
 // `applicationPdfReconcile` must leave pdf.js to Electron main's Node resolver.
 // If Vite inlines it, pdf.js selects the browser worker path and PDF import
 // fails at runtime with a fake-worker `window is not defined` error.
-const mainBundle = await fs.readFile(path.resolve('dist-electron/main.cjs'), 'utf8');
-assert.match(mainBundle, /pdfjs-dist\/legacy\/build\/pdf\.mjs/,
-  'the Electron main bundle must retain the native pdf.js runtime specifier');
-assert.doesNotMatch(mainBundle, /Setting up fake worker/,
-  'the Electron main bundle must not inline pdf.js browser-worker implementation');
+const electronBundleDir = path.resolve('dist-electron');
+const electronBundleNames = (await fs.readdir(electronBundleDir))
+  .filter(name => name.endsWith('.cjs'));
+const electronBundles = await Promise.all(electronBundleNames.map(async name => ({
+  name,
+  source: await fs.readFile(path.join(electronBundleDir, name), 'utf8'),
+})));
+const electronBundleSource = electronBundles.map(bundle => bundle.source).join('\n');
+assert.match(electronBundleSource, /pdfjs-dist\/legacy\/build\/pdf\.mjs/,
+  'the Electron bundle set must retain the native pdf.js runtime specifier');
+assert.doesNotMatch(electronBundleSource, /Setting up fake worker/,
+  'the Electron bundle set must not inline pdf.js browser-worker implementation');
 
 const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-e2e-'));
 const previewFixtureRoot = await fs.mkdtemp(path.join(
@@ -29,7 +36,8 @@ const BRIDGE_PRELOAD_KEYS = [
   'handoffBridgeGetStatus', 'handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary',
   'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeStopOrphan',
   'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat',
-  'handoffBridgeContinueChat', 'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
+  'handoffBridgeContinueChat', 'handoffBridgeStartWorkerPool', 'handoffBridgeCopyWorkerStarter', 'handoffBridgeRestartWorker',
+  'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
   'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
   'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
   'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeOpenPanel',
@@ -1309,7 +1317,11 @@ try {
   await expectVisible(page, 'Erase by Object');
   await clickPane(page, 800, 500);
 
-  await clickToolbar(page, 'Settings');
+  // This deliberately uses Playwright's real pointer sequence instead of the
+  // helper's programmatic .click(). React Flow observes pointer gestures in a
+  // native capture handler; a toolbar missing nodrag/nopan can look clickable
+  // to DOM tests while the canvas consumes a physical press as a pan.
+  await page.getByTestId('canvas-settings-button').click();
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
   await page.waitForFunction(() => {
     const panel = document.querySelector('.onboarding-panel');

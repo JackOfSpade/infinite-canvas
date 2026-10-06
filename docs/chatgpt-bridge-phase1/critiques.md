@@ -1,5 +1,7 @@
 # Critiques of the Phase 1 plan (2026-09-26)
 
+> Historical scheduling note (2026-10-05): fixed-wave statements below describe the pre-refactor implementation reviewed by this document. Current automatic handoffs use the shared work-conserving scheduler in `src/utils/handoffScheduler.js`; stable waves remain only for manual/attachment docks.
+
 Two adversarial reviews. Every required edit below must be folded into `addendum.md` and `build-plan.md` before stage B0.
 
 ## Implementer's check of the Phase 1 plan against the actual repo: code anchors, source-pinned tests, gates, task dependencies and shared files, bridge-OFF behaviour, packaging, preload, Settings persistence, React Compiler lint, Linux CI and conventions.
@@ -216,4 +218,3 @@ Two adversarial reviews. Every required edit below must be folded into `addendum
 - The design's Phase 0 caveats remain: warm-up reset by URL or tool edits, renderer throttling, sleep and wake, and one ChatGPT-side block after a reconnect are unmeasured; a hostname change (edit 19) resets warm-up, another reason to decide it before S7.
 - Unverified from my side (read-only, offline): whether Cloudflare's free plan allows the suggested custom rules and rate limit, cloudflared's actual default keepAliveConnections (I recalled 100; keys are present), whether a copied ad-hoc binary runs under the app's local signing identity, and whether Cloudflare overwrites a client-sent Cf-Connecting-Ip in every case. Each is a measurement item, not a claim.
 - Second-order integrity: even with every control above, a poisoned but validator-passing answer from a steered model is written into Jack's application files and scoring; the plan's mitigation is Jack's review of the finished output, which unattended draining reduces.
-

@@ -307,7 +307,7 @@ export default [
       const fnSource = accountsSource.slice(start, end);
 
       const before = fnSource.indexOf('const stealthBefore = getStealthBrowserInfo();');
-      const workers = fnSource.indexOf('await Promise.all(workers);');
+      const workers = fnSource.indexOf('await runRollingWorkers({');
       const after = fnSource.indexOf('const stealthAfter = getStealthBrowserInfo();');
       const blocker = fnSource.indexOf('await getBrowserSessionResetBlocker();', after);
       const close = fnSource.indexOf('await closeStealthBrowser(false);', blocker);

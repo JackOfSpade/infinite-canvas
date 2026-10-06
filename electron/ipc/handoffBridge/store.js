@@ -11,8 +11,8 @@ const DEFAULT_LIMITS = Object.freeze({
   chatKeyMaxAgeHours: 0,
   idlePauseMinutes: 1440,
   jobsPerChat: 2,
-  epochSoftBytes: 500_000,
-  epochHardBytes: 900_000,
+  epochSoftBytes: 0,
+  epochHardBytes: 0,
 });
 const LIMIT_KEYS = Object.freeze(Object.keys(DEFAULT_LIMITS));
 const SOURCE_POLICIES = new Set(['enforce', 'alert', 'off']);
@@ -44,16 +44,12 @@ export function emptyConfig() {
     v: CONFIG_VERSION,
     hostname: null,
     pluginName: 'infinite_canvas',
-    // marketplace is a consent boundary distinct from scoring: it carries
-    // listing/pricing data rather than job-scoring prompts. It must never
-    // default on, exactly like scoring.
-    scope: { applications: true, scoring: false, marketplace: false },
-    autoStart: false,
-    // Handing an application to ChatGPT is the point of enabling the bridge;
-    // requiring a per-job Release afterwards left every bundle sitting in the
-    // dock behind a button people had to go find. Turning the bridge on is
-    // still the explicit, disclosed decision -- this only stops asking again
-    // for each job it was turned on to carry.
+    // A fresh bridge is ready for every reviewed, text-only handoff family.
+    // Existing persisted `false` values remain explicit opt-outs when read.
+    scope: { applications: true, scoring: true, marketplace: true },
+    autoStart: true,
+    // This controls newly created application bundles only. Reviewed push hubs
+    // have a separate main-owned auto-selection policy and explicit opt-outs.
     autoRelease: true,
     limits: { ...DEFAULT_LIMITS },
     prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true },
@@ -76,6 +72,14 @@ function normalizeLimits(value) {
     if (!Number.isSafeInteger(item) || item < 0) return null;
     limits[key] = item;
   }
+  // These two exact values were historical invisible defaults: there was no
+  // settings control that let a person choose them. Treat an existing pair as
+  // a migration to the new opt-in rollover policy, while preserving any
+  // deliberately different positive safety budget.
+  if (limits.epochSoftBytes === 500_000 && limits.epochHardBytes === 900_000) {
+    limits.epochSoftBytes = DEFAULT_LIMITS.epochSoftBytes;
+    limits.epochHardBytes = DEFAULT_LIMITS.epochHardBytes;
+  }
   if (!Number.isInteger(limits.jobsPerChat) || limits.jobsPerChat < CONSTANTS.JOBS_PER_CHAT_MIN || limits.jobsPerChat > CONSTANTS.JOBS_PER_CHAT_MAX) return null;
   if (limits.epochSoftBytes > limits.epochHardBytes) return null;
   return limits;
@@ -95,7 +99,9 @@ function normalizeConfig(value) {
   // marketplace is not malformed, it is a legacy shape. Fill each missing
   // sub-field from the default here, the same way every top-level field above
   // does, so a two-key {applications, scoring} scope survives instead of
-  // rejecting the whole config.
+  // rejecting the whole config. Such a legacy config cannot auto-start until
+  // the current consent version is accepted, so the newly disclosed default
+  // cannot expose marketplace work under an old receipt.
   const scope = isPlainObject(rawScope) ? {
     applications: Object.hasOwn(rawScope, 'applications') ? rawScope.applications : defaults.scope.applications,
     scoring: Object.hasOwn(rawScope, 'scoring') ? rawScope.scoring : defaults.scope.scoring,
@@ -359,6 +365,15 @@ export function writeConfig(userDataPath, patch, {
   fsImpl = fs,
   linked = false,
   isLinked = null,
+  // A caller may need its write to be conditional on the exact config which
+  // earned a native confirmation.  Run the predicate inside this serialized
+  // mutation, immediately after the authoritative read, so a queued hostname
+  // change cannot have an earlier sheet bless its replacement configuration.
+  isCurrentConfig = null,
+  // The composition layer owns the closed definition of disclosure-relevant
+  // config. Compare it in this queue so a changed configuration and the
+  // retirement of an old receipt are one atomic durable mutation.
+  isConsentConfigChanged = null,
   confirmHostnameChange = async () => false,
   randomBytes = crypto.randomBytes,
 } = {}) {
@@ -366,10 +381,27 @@ export function writeConfig(userDataPath, patch, {
   return enqueueConfigMutation(filePath, async () => {
     const loaded = readConfig(userDataPath, { fsImpl });
     if (loaded.state === 'unreadable') return { ok: false, code: 'STATE_UNREADABLE' };
+    if (typeof isCurrentConfig === 'function') {
+      let current = false;
+      try { current = isCurrentConfig(loaded.config) === true; } catch { current = false; }
+      if (!current) return { ok: false, code: 'CONSENT_STALE' };
+    }
     const merged = mergePatch(loaded.config, patch);
     if (merged.fieldErrors) return { ok: false, code: 'INVALID', fieldErrors: merged.fieldErrors };
 
-    const hostnameChanged = merged.config.hostname !== loaded.config.hostname;
+    let consentConfigChanged = false;
+    if (typeof isConsentConfigChanged === 'function') {
+      try { consentConfigChanged = isConsentConfigChanged(loaded.config, merged.config) === true; }
+      catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
+    }
+    // A v2 receipt never survives a change to the disclosure fingerprint.
+    // The UI cannot patch consentVersion, but the cleared receipt is still
+    // persisted here rather than in a later, separately queued write.
+    const nextConfig = consentConfigChanged && merged.config.consentVersion !== 0
+      ? freezeConfig({ ...merged.config, consentVersion: 0 })
+      : merged.config;
+
+    const hostnameChanged = nextConfig.hostname !== loaded.config.hostname;
     // The linked fact is security-sensitive and this callback is serialized.
     // Resolve an injected synchronous checker here, not before a caller waits
     // behind another config mutation. A checker failure is fail-closed.
@@ -393,8 +425,8 @@ export function writeConfig(userDataPath, patch, {
       if (hostnameChanged && linkedNow() && patch.confirmBreak !== true) {
         return { ok: false, code: 'LINK_WOULD_BREAK' };
       }
-      atomicWriteConfig(filePath, merged.config, { fsImpl, randomBytes });
-      return { ok: true, config: merged.config };
+      atomicWriteConfig(filePath, nextConfig, { fsImpl, randomBytes });
+      return { ok: true, config: nextConfig, consentConfigChanged };
     } catch {
       return { ok: false, code: 'STATE_UNREADABLE' };
     }

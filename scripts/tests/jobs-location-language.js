@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
@@ -268,6 +268,14 @@ export default [
       assert(deriveLocationParam({ city: 'Denver', stateCode: 'Colorado', country: 'USA' }) === 'Denver, CO', 'full US state + country alias → USPS board-ready format');
       assert(deriveLocationParam({ region: 'Colorado', country: 'USA' }) === 'Colorado, United States', 'state-only scope stays human-readable and country-qualified');
       assert(deriveLocationParam({ city: 'Toronto', stateCode: 'ON', country: 'Canada' }) === 'Toronto, Ontario, Canada', 'Canadian province code expands with country');
+      assert(deriveLocationParam({ city: 'Toronto', stateCode: 'Ontario', country: 'United States' }) === '',
+        'a Canadian province paired with the United States fails closed instead of leaking the rejected raw province into a board filter');
+      assert(deriveLocationParam({ city: 'Denver', stateCode: 'Colorado', country: 'Canada' }) === '',
+        'a US state paired with Canada fails closed in the opposite direction too');
+      assert(deriveLocationParam({ region: 'Ontario', country: 'United States' }) === '',
+        'a contradictory subdivision-only target is rejected just like a city/subdivision target');
+      assert(deriveLocationParam({ city: 'Leeds', stateCode: 'West Yorkshire', country: 'United Kingdom' }) === 'Leeds, West Yorkshire, United Kingdom',
+        'an unknown free-form foreign subdivision remains usable rather than being mistaken for a US/Canada conflict');
       // city+state is built deterministically, NOT trusted from a possibly-prose display.
       assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', display: 'around the Denver metro area' }) === 'Denver, CO', 'city+state wins over prose display');
       assert(deriveLocationParam({ city: 'Austin', stateCode: '', region: '', display: 'Austin' }) === 'Austin', 'city-only falls through to city');
@@ -419,6 +427,39 @@ export default [
       assert(a.unclear === 1 && /Newmarket/.test(a.unclearSamples[0] || ''),
         'country-only target leaves an unqualified city as unclear instead of falsely off-target');
       return { ok: true, adherence: a };
+    },
+  },
+{
+    name: 'country scope admission: drops only affirmative foreign-country listings before scoring',
+    run: () => {
+      const input = [
+        { title: 'Canadian', location: 'Toronto, ON', source: 'indeed' },
+        { title: 'Foreign', location: 'Houston, TX', source: 'indeed' },
+        { title: 'Ambiguous', location: 'Newmarket', source: 'google' },
+        { title: 'Remote location', location: 'Remote, United States', source: 'google' },
+        { title: 'Remote board', location: 'Austin, TX', source: 'remoteok' },
+        { title: 'No location', location: '', source: 'linkedin' },
+      ];
+      const filtered = filterProvablyOutsideCountryScope(input, 'Canada');
+      assert(filtered.dropped === 1 && filtered.droppedBySource.indeed === 1,
+        `only the confirmed US listing should be excluded, got ${JSON.stringify(filtered)}`);
+      assert(filtered.jobs.length === 5 && filtered.jobs.some(job => job.title === 'Ambiguous')
+        && filtered.jobs.some(job => job.title === 'Remote location')
+        && filtered.jobs.some(job => job.title === 'Remote board')
+        && filtered.jobs.some(job => job.title === 'No location'),
+      'ambiguous, remote, remote-board, and no-location rows must remain eligible');
+      const cityTarget = filterProvablyOutsideCountryScope(input, 'Toronto, ON, Canada');
+      assert(cityTarget.dropped === 0 && cityTarget.jobs.length === input.length,
+        'the narrow country gate must not override city/province search behavior');
+      const usTarget = filterProvablyOutsideCountryScope([
+        { title: 'US', location: 'Austin, TX', source: 'indeed' },
+        { title: 'Canadian province code', location: 'Toronto, ON', source: 'linkedin' },
+        { title: 'Canadian province name', location: 'Halifax, Nova Scotia', source: 'glassdoor' },
+        { title: 'Ambiguous', location: 'Newmarket', source: 'google' },
+      ], 'United States');
+      assert(usTarget.dropped === 2 && usTarget.jobs.length === 2,
+        `a United States target must exclude every explicitly Canadian row, got ${JSON.stringify(usTarget)}`);
+      return { dropped: filtered.dropped, retained: filtered.jobs.length };
     },
   },
 {

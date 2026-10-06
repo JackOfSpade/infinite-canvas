@@ -15,7 +15,7 @@ import { PDFDocument } from 'pdf-lib';
 import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
 import { embedApplicationSyncConfig, extractVariantAttrs, isDualMode } from './resumeHtml.js';
-import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
+import { APPLICATION_PDF_RECONCILE_REVISION, reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
 import { applyDualPdf, pdfHasDualModeBackground, renderPdf } from './resumeRender.js';
 import { LEDGER_VERSION, MINING_TARGET } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
@@ -120,6 +120,15 @@ export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }
 // exactly. Exported so the Local AI job folder's response can say so instead
 // of prescribing a retry that is already known to reach the same answer.
 export const APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC = 'APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC';
+// The paper-treatment/dual-mode check is independent of text reconciliation.
+// Keep its revision separate so a text-comparator repair cannot accidentally
+// make a still-deterministic variant mismatch retryable.
+export const APPLICATION_PDF_VARIANT_REVISION = 1;
+// A deterministic comparison failure is only non-retryable while the exact
+// reconciliation logic that proved it remains in the running app.  Local AI
+// jobs deliberately survive upgrades, so expose this revision to their
+// feedback writer rather than stranding a result behind a defect we fixed.
+export { APPLICATION_PDF_RECONCILE_REVISION };
 
 async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
   if (pdf == null) return null;
@@ -157,7 +166,21 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
     // written back into the job folder — otherwise has to re-derive it by
     // matching on this message, and the one that mattered went on telling the
     // candidate to retry while the message beside it said a retry reproduces.
-    if (unchangedByRerender) error.code = APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC;
+    if (unchangedByRerender) {
+      error.code = APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC;
+      // A regenerated PDF can fail both independent checks. Keep every
+      // failed dimension: retry becomes safe only after all of the exact
+      // comparison semantics which rejected it have changed.
+      error.pdfMismatchDimensions = [
+        ...(!repairedInspection.textMatches ? [{ kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION }] : []),
+        ...(!repairedInspection.variantMatches ? [{ kind: 'variant', revision: APPLICATION_PDF_VARIANT_REVISION }] : []),
+      ];
+      // Singular fields remain for consumers of pre-dimensions envelopes.
+      [error.pdfMismatchKind, error.pdfMismatchRevision] = [
+        error.pdfMismatchDimensions[0]?.kind || null,
+        error.pdfMismatchDimensions[0]?.revision || null,
+      ];
+    }
     throw error;
   }
   return Buffer.from(repaired);
@@ -218,7 +241,7 @@ export function registerPendingApplicationWorkspace({
   generationLogPath = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
   artifactData = {}, cleanupOnSaveFailure = true, onBeforeSave = null, onBeforeDiscard = null,
-  onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onSaveFailure = null,
+  onSuccessfulSave = null, onBeforeSuccessfulCleanup = null, onAfterSuccessfulCleanup = null, onSaveFailure = null,
 } = {}) {
   if (typeof workDir !== 'string' || !workDir.trim()
     || typeof resumeHtmlPath !== 'string' || !resumeHtmlPath.trim()
@@ -282,9 +305,11 @@ export function registerPendingApplicationWorkspace({
   // is still actively consuming the existing capability: doing so would let
   // both handlers promote the same bundle and race each other's callbacks.
   const existing = pendingApplicationArtifacts.get(resolvedWorkDir);
-  if (existing?.saveInFlight) {
-    const error = new Error('This generated application workspace is already being saved.');
-    error.code = 'APPLICATION_SAVE_IN_FLIGHT';
+  if (existing?.saveInFlight || existing?.cleanupInFlight) {
+    const error = new Error(existing?.cleanupInFlight
+      ? 'This generated application workspace is currently being cleaned up.'
+      : 'This generated application workspace is already being saved.');
+    error.code = existing?.cleanupInFlight ? 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT' : 'APPLICATION_SAVE_IN_FLIGHT';
     throw error;
   }
   if (applicationWorkspacePruneClaims.has(resolvedWorkDir)) {
@@ -307,8 +332,12 @@ export function registerPendingApplicationWorkspace({
     onBeforeSuccessfulCleanup: typeof onBeforeSuccessfulCleanup === 'function'
       ? onBeforeSuccessfulCleanup
       : null,
+    onAfterSuccessfulCleanup: typeof onAfterSuccessfulCleanup === 'function'
+      ? onAfterSuccessfulCleanup
+      : null,
     onSaveFailure: typeof onSaveFailure === 'function' ? onSaveFailure : null,
     saveInFlight: false,
+    cleanupInFlight: false,
     workspaceIdentity,
     artifactSha256,
     // Only trusted main-process generation/import code can register this
@@ -400,8 +429,88 @@ function restoreRelocatedApplicationWorkspace(cleanupWorkDir, resolvedWorkDir, p
   }
 }
 
-async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
+// A failed older capability must never revoke a newer one that claimed the
+// same lexical workspace path while an awaited cleanup step was in progress.
+// Keep this identity check at every release point rather than assuming the
+// caller still owns the Map entry.
+function releasePendingApplicationWorkspace(resolvedWorkDir, pending) {
   if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
+  pendingApplicationArtifacts.delete(resolvedWorkDir);
+  return true;
+}
+
+function applicationWorkspaceCleanupStateError(message, code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function cleanupRetirementPath(workDir) {
+  const resolved = path.resolve(workDir);
+  const parent = path.dirname(resolved);
+  const basename = path.basename(resolved);
+  let retired;
+  do {
+    retired = path.join(parent, `.${basename}.cleanup-${crypto.randomUUID()}`);
+  } while (fs.existsSync(retired));
+  return retired;
+}
+
+function assertTrustedApplicationWorkspace(workDir, pending) {
+  const current = fs.lstatSync(workDir);
+  const currentRealPath = fs.realpathSync(workDir);
+  const expected = pending.workspaceIdentity;
+  if (!current.isDirectory() || current.isSymbolicLink()
+    || currentRealPath !== workDir
+    || (expected && (current.dev !== expected.dev || current.ino !== expected.ino))) {
+    throw new Error('Application cleanup workspace did not match its registered identity.');
+  }
+}
+
+function assertWorkspacePathAbsentForCleanup(workDir) {
+  try {
+    fs.lstatSync(workDir);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  throw new Error('The original application workspace path was recreated during cleanup.');
+}
+
+// Recursive removal is path based. Retire to an unpredictable sibling first,
+// then prove the moved inode before touching it, so a replacement at the
+// writer-visible path cannot be removed by an older save. If the proof fails,
+// restore only the same registered inode and otherwise leave the tombstone in
+// place for explicit recovery.
+function retireTrustedApplicationWorkspaceForCleanup(workDir, pending) {
+  const resolvedWorkDir = path.resolve(workDir);
+  const retiredWorkDir = cleanupRetirementPath(resolvedWorkDir);
+  try {
+    fs.renameSync(resolvedWorkDir, retiredWorkDir);
+    assertTrustedApplicationWorkspace(retiredWorkDir, pending);
+    return retiredWorkDir;
+  } catch (error) {
+    const recovery = restoreRelocatedApplicationWorkspace(retiredWorkDir, resolvedWorkDir, pending);
+    const cleanupError = new Error(recovery.restored
+      ? 'Could not verify the retired application workspace; its original path was restored for recovery.'
+      : 'Could not verify or restore the retired application workspace.');
+    cleanupError.code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+    cleanupError.cause = error;
+    cleanupError.workspaceRestored = recovery.restored;
+    if (recovery.error) cleanupError.restoreError = recovery.error;
+    throw cleanupError;
+  }
+}
+
+async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
+  if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) {
+    throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership before cleanup could begin.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+  }
+  if (pending.cleanupInFlight) {
+    throw applicationWorkspaceCleanupStateError('This generated application workspace is already being cleaned up.', 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT');
+  }
+  pending.cleanupInFlight = true;
+  try {
   let cleanupWorkDir = resolvedWorkDir;
   const shouldDeleteWorkspace = pending.cleanupOnDiscard !== false;
   const cleanupGuard = reason === 'successful save'
@@ -432,31 +541,47 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
         }
         cleanupWorkDir = candidate;
       }
-      if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
+      if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) {
+        throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership during cleanup preparation.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
+      }
     } catch (error) {
       if (error?.code === 'LOCAL_AI_RESULT_CHANGED') {
         // The guard restored the newer writer-visible job. Revoke only the
         // stale one-shot capability so that exact new bytes can import again.
-        pendingApplicationArtifacts.delete(resolvedWorkDir);
+        releasePendingApplicationWorkspace(resolvedWorkDir, pending);
+      }
+      if (error?.code !== 'LOCAL_AI_RESULT_CHANGED'
+        && error?.code !== 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
+        && error?.code !== 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT'
+        && error?.code !== 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED') {
+        const cleanupError = applicationWorkspaceCleanupStateError(
+          `Could not prepare the generated application workspace for cleanup after ${reason}.`,
+        );
+        cleanupError.cause = error;
+        throw cleanupError;
       }
       throw error;
     }
   }
-  pendingApplicationArtifacts.delete(resolvedWorkDir);
-  if (!shouldDeleteWorkspace) return true;
-  try {
-    const current = await fs.promises.lstat(cleanupWorkDir);
-    const currentRealPath = await fs.promises.realpath(cleanupWorkDir);
-    const expected = pending.workspaceIdentity;
-    if (!current.isDirectory() || current.isSymbolicLink()
-      || (expected && (current.dev !== expected.dev || current.ino !== expected.ino))
-      || currentRealPath !== cleanupWorkDir) {
-      logger.warn(`[JobApplication] Refused to remove a replaced application workspace after ${reason}`);
-      return false;
+  if (!shouldDeleteWorkspace) {
+    if (!releasePendingApplicationWorkspace(resolvedWorkDir, pending)) {
+      throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership before cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
     }
+    return true;
+  }
+  try {
+    cleanupWorkDir = retireTrustedApplicationWorkspaceForCleanup(cleanupWorkDir, pending);
+    // The registered pathname remains the writer-facing boundary. A new
+    // folder there after Local AI moved the old inode is newer state, not a
+    // cleanup target; leave it untouched and preserve the retired inode.
+    assertWorkspacePathAbsentForCleanup(resolvedWorkDir);
+    // Retire once more after the first proof. This closes the ordinary
+    // verify-then-rm substitution window: a swap at the first tombstone is
+    // moved and re-proved before any recursive removal is attempted.
+    cleanupWorkDir = retireTrustedApplicationWorkspaceForCleanup(cleanupWorkDir, pending);
+    assertWorkspacePathAbsentForCleanup(resolvedWorkDir);
     await fs.promises.rm(cleanupWorkDir, { recursive: true, force: true });
   } catch (error) {
-    if (error?.code === 'ENOENT') return true;
     if (cleanupWorkDir !== resolvedWorkDir) {
       const recovery = restoreRelocatedApplicationWorkspace(cleanupWorkDir, resolvedWorkDir, pending);
       const cleanupError = new Error(recovery.restored
@@ -469,10 +594,27 @@ async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reas
       logger.warn(`[JobApplication] ${cleanupError.message}${recovery.error ? ` Restore error: ${recovery.error?.message || recovery.error}` : ''}`);
       throw cleanupError;
     }
-    logger.warn(`[JobApplication] Could not clean temporary application workspace after ${reason}: ${error?.message || error}`);
-    return false;
+    // This is just as terminal to the save operation as a relocated cleanup
+    // failure.  The source workspace remains at its registered path for an
+    // explicit recovery, but the caller must never tell the renderer that the
+    // full save lifecycle succeeded while required cleanup did not.
+    const cleanupError = new Error(`Could not clean the generated application workspace after ${reason}.`);
+    cleanupError.code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+    cleanupError.cause = error;
+    cleanupError.workspaceRestored = false;
+    logger.warn(`[JobApplication] ${cleanupError.message}`);
+    throw cleanupError;
+  }
+  if (!releasePendingApplicationWorkspace(resolvedWorkDir, pending)) {
+    throw applicationWorkspaceCleanupStateError('The generated application workspace changed ownership after cleanup completed.', 'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED');
   }
   return true;
+  } finally {
+    // A failed renderer discard keeps its capability for an explicit retry.
+    // Do not leave that still-owned record permanently locked; a successful
+    // cleanup has already removed it, and a replacement must never be touched.
+    if (pendingApplicationArtifacts.get(resolvedWorkDir) === pending) pending.cleanupInFlight = false;
+  }
 }
 
 /**
@@ -1980,6 +2122,11 @@ export function registerJobApplicationHandlers() {
     const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
       workDir, pendingApplicationArtifacts, event.sender.id,
     );
+    if (pending.cleanupInFlight) {
+      const error = new Error('This generated application workspace is currently being cleaned up.');
+      error.code = 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT';
+      throw error;
+    }
     if (pending.saveInFlight) {
       const error = new Error('This generated application workspace is currently being saved.');
       error.code = 'APPLICATION_SAVE_IN_FLIGHT';
@@ -2011,6 +2158,11 @@ export function registerJobApplicationHandlers() {
     // Claim synchronously, before the first await below. Electron can dispatch
     // two invokes in the same turn; without this flag both resolve the same
     // one-shot Map entry and independently save/callback before cleanup runs.
+    if (pending.cleanupInFlight) {
+      const error = new Error('This generated application workspace is currently being cleaned up.');
+      error.code = 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT';
+      throw error;
+    }
     if (pending.saveInFlight) {
       const error = new Error('This generated application workspace is already being saved.');
       error.code = 'APPLICATION_SAVE_IN_FLIGHT';
@@ -2099,7 +2251,7 @@ export function registerJobApplicationHandlers() {
     // write there, and the later writer would silently overwrite the
     // earlier one's already-saved bundle — exactly the collision this whole
     // mechanism exists to close (see resolveApplicationExportDirectory's own
-    // header). The dock runs up to 10 handoffs concurrently, so that window
+    // header). The dock runs up to the shared handoff capacity concurrently, so that window
     // is reachable, not theoretical. Locking only the final write (below, as
     // before) closed nothing: both savers would already have committed to
     // the same `dir` before either one ever reached it.
@@ -2305,7 +2457,20 @@ export function registerJobApplicationHandlers() {
     // Clean up the temporary output dir only after the terminal callback had
     // its chance to publish durable handoff evidence.
     exportPhase = 'cleaning generated source workspace';
-    await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
+    const cleaned = await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
+    if (!cleaned) {
+      const cleanupError = new Error('The generated application workspace changed ownership before cleanup could complete.');
+      cleanupError.code = 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+      throw cleanupError;
+    }
+    // A cleanup guard is the final result-hash fence. Notify observers only
+    // after it has succeeded; otherwise a newer retained result could lose
+    // its active handoff. Observer failure is never allowed to undo a durable
+    // saved bundle.
+    if (cleaned && pending.onAfterSuccessfulCleanup) {
+      try { await pending.onAfterSuccessfulCleanup({ dir, manifest }); }
+      catch (error) { logger.warn(`[JobApplication] Post-cleanup save observer failed: ${error?.message || error}`); }
+    }
 
     // A visible card save reveals its destination as a convenience.  An
     // orphaned Local AI handoff has no card (and may finish while the user is
@@ -2366,7 +2531,11 @@ export function registerJobApplicationHandlers() {
       // otherwise the same hash becomes importable again when the short save
       // window lapses and silently repeats the full render/save cycle forever.
       const localAiResultChanged = error?.code === 'LOCAL_AI_RESULT_CHANGED';
-      const sourceCleanupFailed = error?.code === 'APPLICATION_WORKSPACE_CLEANUP_FAILED';
+      const sourceCleanupFailed = [
+        'APPLICATION_WORKSPACE_CLEANUP_FAILED',
+        'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT',
+        'APPLICATION_WORKSPACE_OWNERSHIP_CHANGED',
+      ].includes(error?.code);
       if (!localAiResultChanged && !sourceCleanupFailed && pending.onSaveFailure) {
         try { await pending.onSaveFailure({ phase: exportPhase, error }); }
         catch (callbackError) {
@@ -2386,7 +2555,7 @@ export function registerJobApplicationHandlers() {
         // Release the one-shot capability without deleting the Local-AI job.
         // A retry revalidates and registers a new capability for these exact
         // result bytes; automatic status polling remains parked.
-        pendingApplicationArtifacts.delete(resolvedWorkDir);
+        releasePendingApplicationWorkspace(resolvedWorkDir, pending);
         logger.warn(`[JobApplication] Preserved retryable Local AI workspace after ${
           localAiResultChanged ? 'its result changed' : sourceCleanupFailed ? 'source cleanup failure' : 'save failure'
         }`);

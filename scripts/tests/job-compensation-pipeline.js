@@ -1,6 +1,7 @@
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
 import { compensationContextForSalary, researchCompensationAssessments } from '../../electron/ipc/jobs.js';
+import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import {
   classifyCompensationFitEligibility,
   parseGuaranteedCashOffer,
@@ -24,6 +25,85 @@ import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
+  name: 'Automatic handoff scheduler refills a compensation worker slot before a slow sibling settles',
+  run: async () => {
+    let releaseSlow;
+    const slow = new Promise(resolve => { releaseSlow = resolve; });
+    const started = [];
+    let active = 0;
+    let peak = 0;
+    const run = mapAutomaticHandoffs(Array.from({ length: 11 }, (_, index) => index), 10, async (index) => {
+      started.push(index);
+      active += 1;
+      peak = Math.max(peak, active);
+      if (index === 0) await slow;
+      active -= 1;
+      return index;
+    });
+    for (let attempt = 0; attempt < 20 && !started.includes(10); attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert(started.slice(0, 10).join(',') === '0,1,2,3,4,5,6,7,8,9'
+      && started.includes(10) && active === 1 && peak <= 10,
+    `a completed automatic handoff slot must start descriptor 11 before slow descriptor 1 settles: ${JSON.stringify({ started, active, peak })}`);
+    releaseSlow();
+    const output = await run;
+    assert(output.join(',') === '0,1,2,3,4,5,6,7,8,9,10' && active === 0,
+      'the rolling scheduler preserves descriptor-order output after refilling an early slot');
+    return { startedBeforeSlowSettlement: started.length, peak };
+  },
+}, {
+  name: 'Role-family and compensation dependency queues prioritize ready assessments ahead of a slow raw tail',
+  run: async () => {
+    const exercise = async (name, rawCount, unlockAfter) => {
+      const queue = createDependencyReadyQueue(Array.from({ length: rawCount }, (_unused, index) => ({ kind: 'raw', index })));
+      const started = [];
+      const releases = new Map();
+      const settledRaw = new Set();
+      let completedRaw = 0;
+      const run = runAutomaticHandoffWorkers({
+        workerCount: 10,
+        claim: context => queue.claim(context),
+        work: async descriptor => {
+          started.push(descriptor);
+          if (descriptor.kind === 'assessment') {
+            queue.complete();
+            return;
+          }
+          await new Promise(resolve => releases.set(descriptor.index, () => {
+            settledRaw.add(descriptor.index);
+            resolve();
+          }));
+          completedRaw++;
+          if (completedRaw === unlockAfter) queue.add({ kind: 'assessment', index: 1 }, { front: true });
+          queue.complete();
+        },
+      });
+      for (let attempt = 0; attempt < 100 && releases.size < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(releases.size === 10, `${name} must initially occupy the ten shared raw slots`);
+      for (let index = 0; index < unlockAfter; index++) releases.get(index)();
+      for (let attempt = 0; attempt < 100 && !started.some(item => item.kind === 'assessment'); attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(started.some(item => item.kind === 'assessment') && !settledRaw.has(9),
+        `${name} must start its ready assessment before unrelated slow raw descriptor 10 settles`);
+      for (const release of releases.values()) release();
+      await run;
+      return started.findIndex(item => item.kind === 'assessment');
+    };
+    const roleAssessmentAt = await exercise('role-family', 11, 3);
+    const compensationAssessmentAt = await exercise('compensation', 12, 2);
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    assert(source.includes('async function runFreshRoleFamilyPipeline')
+      && source.includes('async function runFreshCompensationPipeline')
+      && source.match(/queue\.add\(\{ kind: 'assessment', assessmentBatch \}, \{ front: true \}\)/g)?.length === 2,
+    'both production fresh pipelines use the centralized ready queue with assessment priority');
+    assert(source.includes('const hasLegacyCompensationSteps =')
+      && source.includes("await durableRunHasAnyTask(manualAiRunId, [")
+      && source.includes("'job-compensation-research',")
+      && source.includes('legacyResearchStepProbe: activeLegacyResearchStepProbe'),
+    'fresh durable runs gate legacy prompt reconstruction once at run scope before either role or compensation work begins');
+    return { roleAssessmentAt, compensationAssessmentAt };
+  },
+}, {
   name: 'Compensation batch contracts bind every role/cohort to an opaque raw-research section',
   run: () => {
     const roleId = 'a'.repeat(24);
@@ -289,14 +369,14 @@ export default [{
       && source.includes("const rawDescriptors = [")
       && source.includes("...legacyRawCandidates.map(candidate => ({ kind: 'legacy', ...candidate }))")
       && source.includes("...freshRawPlans.map(rawBatch => ({ kind: 'fresh', rawBatch }))")
-      && source.includes('const rawPhase = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
+      && source.includes('const rawPhase = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
       && source.includes('const legacyAssessmentCandidates = []')
-      && source.includes('await mapWithConcurrency(legacyAssessmentCandidates, MANUAL_HANDOFF_CONCURRENCY')
-      && source.includes('const completedRawDescriptors = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
+      && source.includes('await mapAutomaticHandoffs(legacyAssessmentCandidates, HANDOFF_CONCURRENCY')
+      && source.includes('const completedRawDescriptors = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
       && source.includes('const legacyAssessmentDescriptors = completedRawDescriptors')
       && !source.includes('getExperienceBandsForRoleFamily(')
       && !source.includes('useLegacyIndividualCompensation'),
-    'exact legacy and fresh raw prompts are collected into mixed fixed waves, then their dependent legacy/current extractions run in separate fixed-wave phases');
+    'exact legacy and fresh raw prompts share the rolling automatic scheduler, while their dependent legacy/current extractions remain later phases');
     assert(source.includes('MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT')
       && source.includes('compensationCohortAssessmentFits(nextCohorts, nextRows)')
       && source.includes('const rawFirstParts = []')
@@ -304,10 +384,10 @@ export default [{
       && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(freshAll)')
       && source.includes('propagate its exact section to later parts below'),
     'boundary-size and oversized cohorts must use the shared 15,360 assessment formula and reuse their completed raw research');
-    assert(source.includes('mapWithConcurrency(roleResearchBatches, MANUAL_HANDOFF_CONCURRENCY,')
-      && source.includes('mapWithConcurrency(roleAssessmentBatches, MANUAL_HANDOFF_CONCURRENCY,')
-      && source.includes('mapWithConcurrency(assessmentBatchPlans, MANUAL_HANDOFF_CONCURRENCY,'),
-    'independent role-family, salary-research, and salary-assessment batches fill fixed ten-handoff waves while later row parts reuse their first market lookup');
+    assert(source.includes('mapAutomaticHandoffs(roleResearchBatches, HANDOFF_CONCURRENCY,')
+      && source.includes('mapAutomaticHandoffs(roleAssessmentBatches, HANDOFF_CONCURRENCY,')
+      && source.includes('mapAutomaticHandoffs(assessmentBatchPlans, HANDOFF_CONCURRENCY,'),
+    'independent role-family, salary-research, and salary-assessment batches refill the automatic worker pool while later row parts reuse their first market lookup');
     assert(compensationCohortAssessmentMaxTokens(4, 13) === 15074
       && compensationCohortAssessmentFits(4, 13)
       && !compensationCohortAssessmentFits(4, 14),
@@ -536,8 +616,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(/callLLMRaw\([\s\S]*?grounding:\s*true/.test(resolver),
       'experience-band research must use the raw grounded path; structured calls cannot activate Claude web search');
     assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA/.test(resolver)
-      && resolver.includes('const rawPhase = await mapWithConcurrency(rawDescriptors, MANUAL_HANDOFF_CONCURRENCY')
-      && resolver.includes('await mapWithConcurrency(legacyAssessmentCandidates, MANUAL_HANDOFF_CONCURRENCY'),
+      && resolver.includes('const rawPhase = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
+      && resolver.includes('await mapAutomaticHandoffs(legacyAssessmentCandidates, HANDOFF_CONCURRENCY'),
       'grounded role-family prose must still go through schema-constrained extraction before persistence');
     return { grounded: true };
   },

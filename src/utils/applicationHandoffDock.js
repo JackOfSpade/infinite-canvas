@@ -1,3 +1,5 @@
+import { HANDOFF_CONCURRENCY } from './handoffScheduler.js';
+
 /**
  * Application-bundle handoffs, expressed as items of the global AI handoff
  * dock (NonApiAiDialog).
@@ -5,7 +7,7 @@
  * Why this module exists: two copy/paste handoff protocols grew up
  * independently. Job scoring uses the PUSH transport in electron/ipc/nonApiAi.js
  * — the main process sends 'non-api-ai-request' the moment a prompt exists,
- * and the dock queues up to MANUAL_HANDOFF_CONCURRENCY of them side by side.
+ * and the dock queues up to HANDOFF_CONCURRENCY of them side by side.
  * Application bundles use the PULL transport in electron/ipc/localAiApplication.js
  * — nothing is ever pushed; a surface asks getLocalApplicationHandoff for the
  * job's current stage prompt, and the durable state machine lives in the job
@@ -25,12 +27,10 @@
  * discovery needs canvas node data from inside it.
  */
 
-// How many application bundles may await a pasted response at once. Matches
-// MANUAL_HANDOFF_CONCURRENCY (electron/ipc/jobPreferences.js) so the dock caps
-// application prompts exactly where it caps scoring prompts: this is a limit on
-// how many prompts one person can juggle in their AI chat, not a resource
-// quota. The chip strip is laid out `sm:grid-cols-10` for the same reason.
-export const APPLICATION_HANDOFF_LIMIT = 10;
+// How many application bundles may await a pasted response at once. The shared
+// handoff scheduler owns this value so automatic workers, manual application
+// prompts, and the dock cannot drift to different capacities.
+export const APPLICATION_HANDOFF_LIMIT = HANDOFF_CONCURRENCY;
 
 // Application statuses that are genuinely FINISHED: nothing is still driving
 // this bundle toward another state, so it is safe to give up both its dock
@@ -303,7 +303,7 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
  * shape and in its defensive checks, minus the message: there is no fault to
  * explain here, only progress to show.
  */
-export function workingApplicationDockRequest({ node, canvasFilePath = null, status }) {
+export function workingApplicationDockRequest({ node, canvasFilePath = null, status, retryReproducesFailure = false }) {
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id) return null;
   const company = typeof node.data?.company === 'string' ? node.data.company.trim() : '';
@@ -328,6 +328,7 @@ export function workingApplicationDockRequest({ node, canvasFilePath = null, sta
     correctionsRecovered: null,
     working: true,
     workingState: applicationDockItemState(status),
+    retryReproducesFailure: retryReproducesFailure === true,
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
   };
@@ -341,7 +342,7 @@ export function workingApplicationDockRequest({ node, canvasFilePath = null, sta
  * no bundle currently in the queue is using.
  *
  * Why numbers cannot simply be positions: these chips are how someone keeps up
- * to ten parallel AI chats straight. Position renumbers everything below any
+ * to the shared parallel AI-chat capacity. Position renumbers everything below any
  * change — a scoring handoff arriving, or bundle 2 of 5 finishing — so the chat
  * a person has open as "4" silently becomes someone else's "3" mid-paste. A
  * number is therefore assigned ONCE and never recomputed while its bundle

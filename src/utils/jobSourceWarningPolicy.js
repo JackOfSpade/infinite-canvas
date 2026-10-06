@@ -278,8 +278,21 @@ export function reconcileJobSourceWarnings(warnings, sourceWarningOverrides) {
 /**
  * Source-card resolves mutate a run-owned recovery snapshot. They are safe only
  * after the hub has finished gathering/checkpointing its current search.
+ *
+ * The renderer keeps the hub in `searching` while it performs downstream work
+ * (notably manual-AI role screening). `searching` alone is therefore not proof
+ * that provider gathering is still touching the recovery snapshot. A card may
+ * proceed in that state only after `peek-job-run` observed the *same* run at
+ * its durable provider-gathered boundary. Every other state, and a missing/stale peek,
+ * remains fail-closed.
  */
-export function isJobSourceResolveBusyHubState(hubState) {
+export function isJobSourceResolveBusyHubState(hubState, {
+  jobRunId = null,
+  providerGatheredRunId = null,
+} = {}) {
+  if (hubState === 'searching' && jobRunId && jobRunId === providerGatheredRunId) {
+    return false;
+  }
   return [
     'queued',
     'parsing',

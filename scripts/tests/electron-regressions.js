@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
+import { getRecentLogs } from '../../electron/logger.js';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
 import {
   abortNodeTasks,
   abortNodeTasksAndWait,
+  __recoveryRebindJournalForTests,
   assert,
   assertDeleteTargetNotRepresented,
   atomicWriteFile,
@@ -51,6 +53,95 @@ const waitFor = async (predicate, description, timeoutMs = 3000) => {
 };
 
 export default [
+  {
+    name: 'recovery rebind journals reject unsafe slots and reconcile old/new launch paths deterministically',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-rebind-journal-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const finderCanvas = path.join(root, 'finder.json');
+      const saveAsCanvas = path.join(root, 'save-as.json');
+      const crossDirectory = path.join(root, 'other');
+      const crossCanvas = path.join(crossDirectory, 'moved.json');
+      const staleLaunchCanvas = path.join(root, 'last-opened.json');
+      const adoptedLaunchCanvas = path.join(root, 'adopted.json');
+      const oldBytes = Buffer.from('{"version":1}\n');
+      const nextBytes = Buffer.from('{"version":2}\n');
+      const digest = async (bytes) => (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex');
+      try {
+        await fs.promises.writeFile(finderCanvas, oldBytes);
+        const finderStat = await fs.promises.lstat(finderCanvas);
+        const finderJournals = __recoveryRebindJournalForTests.recoveryRebindJournalPaths(oldCanvas, finderCanvas);
+        for (const journalPath of finderJournals) await __recoveryRebindJournalForTests.writeRecoveryRebindJournal(journalPath, {
+          version: 1, oldCanvasPath: oldCanvas, newCanvasPath: finderCanvas, phase: 'prepared',
+          canvasDigest: await digest(nextBytes), previousTargetDigest: await digest(oldBytes),
+          renameAttestation: { dev: finderStat.dev, ino: finderStat.ino },
+        });
+        const finder = await __recoveryRebindJournalForTests.reconcileRecoveryRebindJournalForCanvas(finderCanvas);
+        assert(finder.reconciled === true && finder.finderRename === true
+          && !(await Promise.all(finderJournals.map(file => fs.promises.access(file).then(() => true, () => false)))).some(Boolean),
+          'an attested Finder rename recovers sidecar ownership even when a crash occurred before the updated canvas snapshot published');
+
+        await fs.promises.mkdir(crossDirectory);
+        await fs.promises.writeFile(oldCanvas, oldBytes);
+        await fs.promises.writeFile(crossCanvas, nextBytes);
+        const crossJournals = __recoveryRebindJournalForTests.recoveryRebindJournalPaths(oldCanvas, crossCanvas);
+        // A crash can leave only the source-directory copy. Opening the old
+        // spelling must still discover and finish the exact target migration.
+        await __recoveryRebindJournalForTests.writeRecoveryRebindJournal(crossJournals[1], {
+          version: 1, oldCanvasPath: oldCanvas, newCanvasPath: crossCanvas, phase: 'canvas-written',
+          canvasDigest: await digest(nextBytes), previousTargetDigest: null,
+        });
+        const cross = await __recoveryRebindJournalForTests.reconcileRecoveryRebindJournalForCanvas(oldCanvas);
+        assert(cross.reconciled === true && !(await fs.promises.access(crossJournals[1]).then(() => true, () => false)),
+          'the source-path app launch must reconcile a cross-directory journal whose target snapshot was already published');
+
+        const workspaceBytes = Buffer.from('{"nodes":[]}\n');
+        await fs.promises.writeFile(staleLaunchCanvas, workspaceBytes);
+        const staleStat = await fs.promises.lstat(staleLaunchCanvas);
+        await fs.promises.rename(staleLaunchCanvas, adoptedLaunchCanvas);
+        const loadJournals = __recoveryRebindJournalForTests.recoveryRebindJournalPaths(staleLaunchCanvas, adoptedLaunchCanvas);
+        for (const journalPath of loadJournals) await __recoveryRebindJournalForTests.writeRecoveryRebindJournal(journalPath, {
+          version: 1, oldCanvasPath: staleLaunchCanvas, newCanvasPath: adoptedLaunchCanvas, phase: 'prepared',
+          canvasDigest: await digest(workspaceBytes), previousTargetDigest: null,
+          renameAttestation: { dev: staleStat.dev, ino: staleStat.ino },
+        });
+        electronPkg.ipcMain.__clearInvokeHandlers();
+        registerFilesystemHandlers();
+        const loadWorkspace = electronPkg.ipcMain.__getInvokeHandler('load-workspace');
+        const loaded = await loadWorkspace(senderEvent(), { filePath: staleLaunchCanvas });
+        assert(loaded?.filePath === adoptedLaunchCanvas && Array.isArray(loaded?.data?.nodes),
+          'opening a stale last-opened spelling must adopt only the journal-attested new canvas before reading it');
+
+        const unsafeJournal = __recoveryRebindJournalForTests.recoveryRebindJournalPath(oldCanvas, finderCanvas);
+        const symlinkTarget = path.join(root, 'journal-target.txt');
+        await fs.promises.writeFile(symlinkTarget, 'keep');
+        await fs.promises.symlink(symlinkTarget, unsafeJournal);
+        let unsafeRejected = false;
+        try {
+          await __recoveryRebindJournalForTests.writeRecoveryRebindJournal(unsafeJournal, {
+            version: 1, oldCanvasPath: oldCanvas, newCanvasPath: finderCanvas, phase: 'prepared',
+            canvasDigest: await digest(nextBytes), previousTargetDigest: null,
+          });
+        } catch { unsafeRejected = true; }
+        assert(unsafeRejected && (await fs.promises.readFile(symlinkTarget, 'utf8')) === 'keep',
+          'journal publication must reject a deterministic symlink slot without following or replacing it');
+        await fs.promises.unlink(unsafeJournal);
+
+        await fs.promises.writeFile(saveAsCanvas, oldBytes);
+        const saveAsJournals = __recoveryRebindJournalForTests.recoveryRebindJournalPaths(oldCanvas, saveAsCanvas);
+        for (const journalPath of saveAsJournals) await __recoveryRebindJournalForTests.writeRecoveryRebindJournal(journalPath, {
+          version: 1, oldCanvasPath: oldCanvas, newCanvasPath: saveAsCanvas, phase: 'prepared',
+          canvasDigest: await digest(nextBytes), previousTargetDigest: await digest(oldBytes),
+        });
+        const saveAs = await __recoveryRebindJournalForTests.reconcileRecoveryRebindJournalForCanvas(saveAsCanvas);
+        assert(saveAs.rolledBack === true && (await fs.promises.readFile(saveAsCanvas, 'utf8')) === oldBytes.toString('utf8'),
+          'a preexisting unrelated Save As target only clears its prepared journal and is never adopted as another canvas');
+        return { finderReconciled: finder.finderRename, sourceLaunchReconciled: cross.reconciled, staleLaunchAdopted: loaded.filePath === adoptedLaunchCanvas, unsafeRejected, saveAsRolledBack: saveAs.rolledBack };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'global quit deferred behind a window close resumes once, but cancel or save failure consumes it',
     run: () => {
@@ -911,6 +1002,45 @@ export default [
         && snapshotActiveNodeTasks(event.sender.id).length === 0,
       `acknowledgement must follow handleSafe finally and leave no retained task, got ${JSON.stringify({ acknowledgement, result })}`);
       return { acknowledgedAfterFinally: true };
+    },
+  },
+  {
+    name: 'IPC safe handler: quiet registration remains cancelable while suppressing only its routine INFO line',
+    run: async () => {
+      electronPkg.ipcMain.__clearInvokeHandlers();
+      const channel = 'test:quiet-registration-remains-visible';
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      handleSafe(channel, async () => {
+        await gate;
+        return { quiet: true };
+      }, { logTaskRegistration: false });
+
+      const event = senderEvent();
+      const pending = electronPkg.ipcMain.__getInvokeHandler(channel)(event, { nodeId: 'quiet-probe-node' });
+      await Promise.resolve();
+      const [active] = snapshotActiveNodeTasks(event.sender.id);
+      const registrationLogs = getRecentLogs().filter(entry => (
+        entry.level === 'info' && entry.message.includes(`channel ${channel}`)
+      ));
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const peekStart = jobs.indexOf("handleSafe('peek-job-run'");
+      const peekEnd = jobs.indexOf("handleSafe('pause-job-run'", peekStart);
+      const peekHandler = jobs.slice(peekStart, peekEnd);
+
+      assert(active?.nodeId === 'quiet-probe-node'
+        && active.taskCount === 1
+        && active.channels.includes(channel)
+        && registrationLogs.length === 0
+        && peekStart >= 0 && peekEnd > peekStart
+        && peekHandler.includes('}, { logTaskRegistration: false });'),
+      `quiet probes must remain registered for cancellation/reporting without routine registration INFO output, got ${JSON.stringify({ active, registrationLogs })}`);
+
+      release();
+      const result = await pending;
+      assert(result.success === true && snapshotActiveNodeTasks(event.sender.id).length === 0,
+        'a quiet registered probe must settle and clean up exactly like every other node task');
+      return { registered: active.taskCount, registrationLogs: registrationLogs.length };
     },
   },
   {

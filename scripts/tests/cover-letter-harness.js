@@ -2317,6 +2317,19 @@ This specific position within AWS Identity Center team represents an opportunity
       'every need must be mapped or dropped, while a non-top honestly dropped credential remains visible but non-retryable on its own');
       const envelope = authorCoverLetterEnvelope({ job: { company: 'Acme', title: 'Incident Lead' }, evidence, today: formatCoverLetterDate(new Date('2026-08-14T12:00:00Z')) });
       assert(envelope.recipient === '' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields use the salutation rather than a redundant recipient block');
+      const acronymCompany = 'Sony Interactive Entertainment (SIE)';
+      const acronymJob = { company: acronymCompany };
+      const acronymEnvelope = authorCoverLetterEnvelope({ job: acronymJob, evidence });
+      assert(acronymEnvelope.recipient === ''
+        && acronymEnvelope.salutation === 'Dear Sony Interactive Entertainment Hiring Team,'
+        && acronymJob.company === acronymCompany,
+      'a trailing parenthesized acronym is omitted only from the salutation, without changing the job company value used elsewhere');
+      const qualifiedEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (Canada)' }, evidence });
+      assert(qualifiedEnvelope.salutation === 'Dear Acme (Canada) Hiring Team,',
+        'a descriptive parenthetical qualifier is not mistaken for an acronym in the salutation');
+      const numericQualifierEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (2024)' }, evidence });
+      assert(numericQualifierEnvelope.salutation === 'Dear Acme (2024) Hiring Team,',
+        'a numeric parenthetical qualifier is not mistaken for an acronym in the salutation');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Sincerely,', 'code-authored closing omits an implied target title');
       assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
       assert(envelope.subtitleRole === 'Operations leader' && envelope.credential === 'B.S. Operations, Example University',

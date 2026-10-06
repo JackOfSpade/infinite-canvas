@@ -9,6 +9,9 @@ import { restoreTrustedReceiptDerivations, sanitizeDocumentMainHtml } from './re
 
 const PDF_TEXT_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’.-]*|[^\s]/gu;
 const MAX_RECONCILE_TOKENS = 4_000;
+// Bump when trusted HTML ↔ PDF comparison semantics change so a previously
+// deterministic retry verdict is not reused against a repaired comparator.
+export const APPLICATION_PDF_RECONCILE_REVISION = 2;
 // pdfjs-dist chooses its Node implementation (including the adjacent worker)
 // only when Node loads its native ESM file. A static import lets Vite inline its
 // browser build into Electron's CJS main bundle, where worker setup falls back
@@ -527,6 +530,77 @@ function skillRows(main) {
   return rows.filter(row => row.label && row.value);
 }
 
+function labelPrefixLength(tokens, labelTokens) {
+  let length = 0;
+  while (length < tokens.length && length < labelTokens.length
+    // Labels prove the boundary that lets us reconstruct a wrapped <dt>.
+    // Unlike headings, they are content, not presentation: accepting a
+    // case-only PDF edit here would replace the observed text with the DOM
+    // label and incorrectly report the document unchanged.
+    && normalizeReconcileText(tokens[length]) === normalizeReconcileText(labelTokens[length])) length += 1;
+  return length;
+}
+
+function sameSkillLabelColumn(line, labelX) {
+  // A value can legitimately begin with the same word as a later label. Do
+  // not turn that coincidence into a structural boundary: a Skills <dt> is
+  // drawn in the left column while a wrapped <dd> stays on the right.
+  return Number.isFinite(line?.x) && Number.isFinite(labelX) && Math.abs(line.x - labelX) <= 12;
+}
+
+function tokensText(tokens) {
+  return normalizeReconcileText(tokens.join(' '));
+}
+
+function sameTokenSequence(left, right) {
+  if (left.length !== right.length) return false;
+  return left.every((token, index) => normalizeReconcileText(token) === normalizeReconcileText(right[index]));
+}
+
+function hasInvertedSkillColumns(lines) {
+  const left = Math.min(...lines.map(line => Number(line?.x)).filter(Number.isFinite));
+  if (!Number.isFinite(left)) return false;
+  // pdf.js normally groups a row's cells into one line. This signature is
+  // reserved for the known baseline split: a right-column text block sorts
+  // before a later left-column label block, so ordinary value wraps cannot
+  // enter the fallback merely because they use the right column.
+  return lines.some((line, index) => Number(line?.x) > left + 12
+    && lines.slice(index + 1).some(candidate => sameSkillLabelColumn(candidate, left)));
+}
+
+function exactSeparatedSkillColumns(lines, rows) {
+  if (!hasInvertedSkillColumns(lines)) return null;
+  const labelX = Math.min(...lines.map(line => Number(line?.x)).filter(Number.isFinite));
+  const labels = [];
+  const values = [];
+  for (const line of lines) {
+    const items = Array.isArray(line.items) ? line.items : [];
+    if (sameSkillLabelColumn(line, labelX)) {
+      // A line containing both cells has already lost its column boundary at
+      // this stage. The regular semantic parser handles that normal shape; do
+      // not use this fallback unless every line can be assigned to one column.
+      if (items.some(item => Number(item?.x) > labelX + 12)) return null;
+      labels.push(...textTokens(line.text));
+    } else if (Number.isFinite(line?.x) && line.x > labelX + 12) {
+      if (items.some(item => Number(item?.x) <= labelX + 12)) return null;
+      values.push(...textTokens(line.text));
+    } else {
+      return null;
+    }
+  }
+  const expectedLabels = rows.flatMap(row => textTokens(row.label));
+  const expectedValues = rows.flatMap(row => textTokens(row.value));
+  // The inverted geometry proves why the two columns were interleaved; exact
+  // case-sensitive sequence equality for EACH column proves it was not a PDF
+  // edit. An insertion, deletion, case change, or same-token reorder remains
+  // a normal reconciliation conflict.
+  if (!sameTokenSequence(labels, expectedLabels) || !sameTokenSequence(values, expectedValues)) return null;
+  return rows.flatMap(row => [
+    { ...lines[0], text: row.label },
+    { ...lines[0], text: row.value },
+  ]);
+}
+
 /**
  * Split the Skills grid's visual lines back into one line per `dt`/`dd`.
  *
@@ -536,29 +610,70 @@ function skillRows(main) {
  * restores the element boundary that the join erased, so a row's value cannot
  * absorb the next row's label.
  *
- * Every label must sit exactly where the previous row's value ended.  A label
- * that is missing, out of order, or preceded by text belonging to no row
- * leaves the section unmapped rather than guessing an individual skill
- * boundary — the caller then keeps the extracted lines untouched.
+ * A <dt> can itself wrap. Chromium may then emit the row as a left-label
+ * prefix, the right-hand <dd>, and a left-label continuation on the next
+ * visual line. That is geometrically faithful, but not DOM reading order.
+ * Rebuild a row only when every trusted DOM label is proved in the PDF's left
+ * column; a missing, reordered, or ambiguous label stays unmapped.
  */
 function semanticSkillLines(lines, rows) {
-  const source = normalizeReconcileText(lines.map(line => line.text).join(' '));
-  const folded = foldedText(source);
   const split = [];
-  let offset = 0;
+  let cursor = 0;
+  let labelX = null;
   for (let index = 0; index < rows.length; index += 1) {
     const { label } = rows[index];
-    if (folded.indexOf(foldedText(label), offset) !== offset) return null;
-    const valueStart = offset + label.length;
-    const next = rows[index + 1];
-    const valueEnd = next ? folded.indexOf(foldedText(next.label), valueStart) : source.length;
-    if (valueEnd < valueStart) return null;
-    const value = normalizeReconcileText(source.slice(valueStart, valueEnd));
+    const labelTokens = textTokens(label);
+    const first = lines[cursor];
+    const firstTokens = textTokens(first?.text);
+    const matched = labelPrefixLength(firstTokens, labelTokens);
+    if (!matched || (labelX != null && !sameSkillLabelColumn(first, labelX))) return null;
+    if (labelX == null) labelX = first.x;
+
+    const valueTokens = firstTokens.slice(matched);
+    let labelOffset = matched;
+    cursor += 1;
+
+    // A long <dt> can continue below the first row line after its paired <dd>
+    // was painted. The continuation must be the next left-column visual line
+    // and complete exactly the remaining trusted label tokens.
+    while (labelOffset < labelTokens.length) {
+      const continuation = lines[cursor];
+      const continuationTokens = textTokens(continuation?.text);
+      const remaining = labelTokens.slice(labelOffset);
+      const continuationLength = labelPrefixLength(continuationTokens, remaining);
+      if (!continuationLength || !sameSkillLabelColumn(continuation, labelX)) return null;
+      labelOffset += continuationLength;
+      valueTokens.push(...continuationTokens.slice(continuationLength));
+      cursor += 1;
+    }
+
+    const nextLabelTokens = textTokens(rows[index + 1]?.label);
+    // Wrapped <dd> lines remain in this row until the next trusted label
+    // begins in the same left column. Their observed order is preserved so the
+    // global reconciler still rejects real inserts, deletes, and reorders.
+    while (cursor < lines.length) {
+      const candidate = lines[cursor];
+      const candidateTokens = textTokens(candidate.text);
+      if (nextLabelTokens.length
+        && sameSkillLabelColumn(candidate, labelX)
+        && labelPrefixLength(candidateTokens, nextLabelTokens) > 0) break;
+      valueTokens.push(...candidateTokens);
+      cursor += 1;
+    }
+    const value = tokensText(valueTokens);
     if (!value) return null;
-    split.push({ ...lines[0], text: label }, { ...lines[0], text: value });
-    offset = valueEnd;
+    split.push({ ...first, text: label }, { ...first, text: value });
   }
-  return offset === source.length ? split : null;
+  // Any remaining line means a row boundary was not proved, so do not infer it.
+  return cursor === lines.length ? split : null;
+}
+
+function nextResumeSectionIndex(lines, start, headings, skillsHeading) {
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (headings.some(heading => foldedText(heading) !== foldedText(skillsHeading)
+      && foldedText(lines[index].text) === foldedText(heading))) return index;
+  }
+  return lines.length;
 }
 
 /**
@@ -578,8 +693,12 @@ function canonicalizeResumePdfLines(lines, main) {
   const skillsIndex = normalized.findIndex(line => skillsHeading && foldedText(line.text) === foldedText(skillsHeading));
   const rows = skillRows(main);
   if (skillsIndex < 0 || !rows.length) return normalized;
-  const reordered = semanticSkillLines(normalized.slice(skillsIndex + 1), rows);
-  return reordered ? [...normalized.slice(0, skillsIndex + 1), ...reordered] : normalized;
+  const nextSection = nextResumeSectionIndex(normalized, skillsIndex, knownHeadings, skillsHeading);
+  const skillLines = normalized.slice(skillsIndex + 1, nextSection);
+  const reordered = semanticSkillLines(skillLines, rows) || exactSeparatedSkillColumns(skillLines, rows);
+  return reordered
+    ? [...normalized.slice(0, skillsIndex + 1), ...reordered, ...normalized.slice(nextSection)]
+    : normalized;
 }
 
 function isPresentationalToken(token) {

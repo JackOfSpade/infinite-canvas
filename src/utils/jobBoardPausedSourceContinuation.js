@@ -1,6 +1,10 @@
 import { isJobSourceWarningGating } from './jobSourceWarningPolicy.js';
 import { moduleCombineFingerprint } from '../nodes/jobboard/mergeJobs.js';
 
+function nonEmptyReceiptToken(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 // `awaitingSourceResolution` is more than display state: it is the durable
 // proof that a Board owns one *specific* paused Search generation. Once that
 // Search has no gating warnings, it must finish its already-collected rows
@@ -44,14 +48,20 @@ export function exactPausedSourceContinuation(plan, sourceId, sourceData) {
 // test shared by fast lane-turn adoption and reload recovery.
 export function terminalJobSearchOutcome(source) {
   const sourceData = source?.data || {};
-  const runId = sourceData.jobRunId || null;
-  const resultDisposition = sourceData.resultDisposition || null;
-  const hasRunProvenance = sourceData.jobRunId !== null
-    && sourceData.jobRunId !== undefined
-    && sourceData.jobRunId !== '';
-  const hasDispositionProvenance = sourceData.resultDisposition !== null
-    && sourceData.resultDisposition !== undefined
-    && sourceData.resultDisposition !== '';
+  const runId = nonEmptyReceiptToken(sourceData.jobRunId);
+  const resultDisposition = nonEmptyReceiptToken(sourceData.resultDisposition);
+  const hasRunProvenance = runId !== null;
+  const hasDispositionProvenance = resultDisposition !== null;
+  // Absent receipt fields identify a genuine pre-receipt legacy canvas. A
+  // present-but-malformed field is different: treating whitespace/non-string
+  // values as "absent" would silently upgrade a damaged modern receipt into a
+  // reusable legacy result and could let a Board replace its current output.
+  const malformedRunProvenance = sourceData.jobRunId != null
+    && sourceData.jobRunId !== ''
+    && !hasRunProvenance;
+  const malformedDispositionProvenance = sourceData.resultDisposition != null
+    && sourceData.resultDisposition !== ''
+    && !hasDispositionProvenance;
   const scoredCount = Array.isArray(sourceData.scoredJobs) ? sourceData.scoredJobs.length : 0;
   // Older canvases stored completed positive scored rows before run receipts
   // were introduced.  They are valid display inputs, never authoritative
@@ -64,8 +74,10 @@ export function terminalJobSearchOutcome(source) {
     source?.type !== 'jobhub'
     || sourceData.hubState !== 'done'
     || !!sourceData.errorMessage
-    || (!legacyPositiveResult && (typeof runId !== 'string' || !runId))
-    || (!legacyPositiveResult && (typeof resultDisposition !== 'string' || !resultDisposition))
+    || malformedRunProvenance
+    || malformedDispositionProvenance
+    || (!legacyPositiveResult && !runId)
+    || (!legacyPositiveResult && !resultDisposition)
     || resultDisposition === 'incomplete'
   ) return null;
   return {

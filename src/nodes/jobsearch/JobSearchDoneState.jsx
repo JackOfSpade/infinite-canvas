@@ -440,7 +440,7 @@ export function JobSearchDoneState({
           onPointerDown={(e) => e.stopPropagation()}
         >
           <summary className="cursor-pointer text-[9px] text-white/45">
-            Search setup{settingsFrozen ? ' · locked' : ''}
+            Search setup{settingsFrozen ? ' · brief editable' : ''}
           </summary>
           <div className="mt-1.5 flex flex-col items-stretch gap-1.5">
           <label className="flex flex-col gap-1 text-[10px] text-white/40">
@@ -453,31 +453,20 @@ export function JobSearchDoneState({
               maxLength={4000}
               placeholder="E.g. Senior Product Manager roles — or: help me pivot away from web development; large established companies only."
               aria-describedby={preferencesHelpId}
-              // settingsFrozen is PERMANENT (see the prop comment above) —
-              // reusing `disabled` (not just readOnly) borrows the same
-              // disabled-control look this module already uses elsewhere, so
-              // a locked brief reads as intentional rather than a stray bug.
-              disabled={settingsFrozen}
               className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25 leading-snug disabled:cursor-not-allowed disabled:opacity-50"
             />
             <span id={preferencesHelpId} className="text-[9px] leading-snug text-white/25">
               {settingsFrozen
-                ? 'All settings are locked after your first search so every re-scan is reproducible. Clear career data to unlock them and start over.'
+                ? 'You can revise this brief, then re-evaluate saved jobs to regenerate roles and assessments without scraping again. Other search settings stay fixed for re-scan consistency.'
                 : 'Describe roles, priorities, and deal-breakers. Use “must”, “only”, and “no” for strict requirements.'}
             </span>
-            {/* Trusting one AI decision for every future scan deserves to be
-                visible, not just implied by the disabled textarea. */}
-            {/* A lock with ZERO roles is real, not a bug: an empty brief
-                short-circuits before any AI call and still locks (that is the
-                whole point of keying the sentinel on resolvedRolesMeta rather
-                than resolvedRoles.length). Rendering the label anyway would
-                print a dangling "Locked roles:" with nothing after the colon,
-                which reads as a load failure. Say what actually happened. */}
+            {/* A role list is refreshed when saved jobs are re-evaluated. An
+                empty brief intentionally produces no search titles. */}
             {settingsFrozen && (
               <p className="text-[9px] leading-snug text-emerald-300/55">
                 {resolvedRoles.length > 0
-                  ? `Locked roles: ${resolvedRoles.join(', ')}`
-                  : 'No specific roles were saved, so searches are not narrowed to a role list.'}
+                  ? `Current roles: ${resolvedRoles.join(', ')}`
+                  : 'No specific roles are saved, so searches are not narrowed to a role list.'}
               </p>
             )}
             <SearchBriefAdvisories searchBriefPlan={searchBriefPlan} completedLocked={settingsFrozen} />

@@ -2,13 +2,104 @@ import { __analysisPathsForCurrentRequestForTests, __createDescriptionRecoveryCh
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers } from '../../electron/ipc/jobs.js';
+import { __extractCareerFileSectionsForTests, __recordJobSourceResumeAttemptForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers } from '../../electron/ipc/jobs.js';
 import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, markSourceStatus, recordSourcePage } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
 import { __canPerformJobSourceActionForTests, __canWriteJobResolveTelemetryForTests, __consumeRecoveryBlockedUrlForTests, __getJobsTelemetryForReportForTests, __recordResumeAttemptForTests, __resetJobsTelemetryForTests, __restoreJobsTelemetryIfCurrentRunForTests, getJobsTelemetry, nativeChallengeTerminalDisposition, orderedBlockedManualSourceUrls, recordLinkedinResolveAttempt, recordResolveMergeOutcome } from '../test-dependencies.js';
+import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLifecycle, recordJobAnalysisRecoveryLifecycle } from '../../electron/ipc/jobAnalysisRecoveryLifecycle.js';
+import { CODE_DEFINITIONS } from '../../src/utils/bugReportCodes.js';
 
 export default [
+  {
+    name: 'job analysis snapshot publication flushes both replacement and directory before recovery acknowledges',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const start = source.indexOf('async function writeJobAnalysisFileAtomically');
+      const end = source.indexOf('// A snapshot is a three-file logical record', start);
+      const writer = source.slice(start, end);
+      assert(start >= 0 && end > start
+        && writer.includes("fs.promises.open(tmpPath, 'w', mode)")
+        && writer.includes('await handle.sync();')
+        && writer.includes('await fs.promises.rename(tmpPath, filePath);')
+        && writer.includes("fs.promises.open(path.dirname(filePath), 'r')")
+        && writer.includes('await directory.sync();'),
+      'a snapshot generation must fsync its temporary contents and parent directory around atomic rename, rather than acknowledging a cache-only recovery write');
+      return { durablePublication: true };
+    },
+  },
+  {
+    name: 'job analysis recovery lifecycle is bounded, privacy-safe, and survives a snapshot discard',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-analysis-lifecycle-'));
+      const journal = path.join(dir, 'analysis-recovery-lifecycle.json');
+      const secret = 'PRIVATE_LISTING_AND_PROFILE_EVIDENCE';
+      try {
+        await recordJobAnalysisRecoveryLifecycle(journal, {
+          operation: 'snapshot-save', result: 'saved', reason: 'reanalysis-save',
+          canvasFilePath: '/private/canvas.json', ownerId: 'hub-private', runId: 'run-private',
+          recoveryMode: 'manual', gatheredJobCount: 4, candidatePoolJobCount: 5, secret,
+        });
+        const initialMode = fs.statSync(journal).mode & 0o777;
+        assert(fs.existsSync(journal) && (initialMode & 0o077) === 0,
+          'awaiting a lifecycle write publishes its durable private journal before the recovery operation can acknowledge');
+        await recordJobAnalysisRecoveryLifecycle(journal, {
+          operation: 'generation-rotate', result: 'rotated', reason: 'normal-save',
+          canvasFilePath: '/private/canvas.json', ownerId: 'hub-private', runId: 'run-private',
+          generation: 1, retainedGenerations: 3,
+        });
+        await recordJobAnalysisRecoveryLifecycle(journal, {
+          operation: 'discard', result: 'discarded', reason: 'career-data-clear',
+          canvasFilePath: '/private/canvas.json', ownerId: 'hub-private', runId: 'run-private',
+          discardedArtifacts: 5,
+        });
+        const scoredAt = Date.now();
+        await recordJobAnalysisRecoveryLifecycle(journal, {
+          operation: 'reanalysis-score-complete', result: 'completed', reason: 'reanalysis-score-complete',
+          canvasFilePath: '/private/canvas.json', ownerId: 'hub-private', recoveryMode: 'reanalyze-saved-jobs',
+          analysisRevisionId: 'private-saved-job-revision', snapshotCreatedAtMs: scoredAt,
+          candidatePoolJobCount: 96, scoringInputCount: 96, scoredJobCount: 96,
+          placeholderCount: 0, unscoredJobCount: 0, failedBatchCount: 0,
+        });
+        const snapshot = readJobAnalysisRecoveryLifecycle(journal, {
+          canvasFilePath: '/private/canvas.json', ownerIds: new Set(['hub-private']),
+        });
+        const markdown = formatJobAnalysisRecoveryLifecycleMarkdown(snapshot);
+        const raw = fs.readFileSync(journal, 'utf8');
+        assert(snapshot.events.length === 4 && markdown.includes('career-data-clear')
+          && markdown.includes('generation 1') && markdown.includes('5 artifacts removed')
+          && markdown.includes('96 scoring input') && markdown.includes('96 scored')
+          && !markdown.includes('hub-private') && !markdown.includes('run-private')
+          && !markdown.includes('/private/canvas.json') && !markdown.includes(secret) && !markdown.includes('private-saved-job-revision')
+          && !raw.includes(secret) && raw.includes('career-data-clear'),
+        'the independent lifecycle journal retains only bounded opaque recovery facts after every analysis generation is gone');
+        for (let index = 0; index < 60; index += 1) {
+          await recordJobAnalysisRecoveryLifecycle(journal, {
+            operation: 'snapshot-save', result: 'saved', reason: 'normal-save',
+            canvasFilePath: '/private/canvas.json', ownerId: 'hub-private', runId: `run-${index}`,
+          });
+        }
+        const bounded = readJobAnalysisRecoveryLifecycle(journal, { canvasFilePath: '/private/canvas.json', ownerIds: new Set(['hub-private']) });
+        assert(bounded.retained === 48 && bounded.events.length === 16,
+          'the persisted journal and rendered lifecycle both enforce independent bounded retention');
+        fs.writeFileSync(journal, JSON.stringify({
+          schemaVersion: 1,
+          events: [{ at: 'not-a-timestamp', operation: 'snapshot-save', result: 'saved', reason: 'normal-save' }],
+        }), 'utf8');
+        const malformedPersistedAt = readJobAnalysisRecoveryLifecycle(journal, {
+          canvasFilePath: '/private/canvas.json', ownerIds: new Set(['hub-private']),
+        });
+        assert(malformedPersistedAt.events.length === 0,
+          'a malformed persisted lifecycle timestamp is dropped rather than normalized to Date.now and treated as fresh evidence');
+        assert(CODE_DEFINITIONS.JOBRECOVERY?.logFilter?.('[Jobs] Saved AI prompt snapshot') === true
+          && CODE_DEFINITIONS.FULL?.preset === 'full',
+        'the focused JOBRECOVERY filter targets recovery evidence while FULL remains unfiltered');
+        return { retained: bounded.retained, rendered: bounded.events.length };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'career-file extraction uses fixed ten-handoff waves, joins in drop order, and aborts siblings atomically',
     run: async () => {
@@ -279,7 +370,10 @@ export default [
 
       const source = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       assert(source.includes('const cache = skipProviderCollection ? {} : await preflight')
-        && source.includes('skipProviderCollection\n        ? [{ manualResults: [], indeedResult: null }, []]')
+        && source.includes('if (skipProviderCollection) {')
+        && source.includes('[browserOut, httpResults] = [{ manualResults: [], indeedResult: null }, []];')
+        && source.includes('gatherBranches = [')
+        && source.includes('[browserOut, httpResults] = await Promise.all(gatherBranches);')
         && source.includes('if (!skipProviderCollection && diceKept.length > 0)')
         && source.includes('if (!skipProviderCollection && linkedinKept.length > 0)'),
       'direct gathered recovery skips session preflight, browser/HTTP tasks, and post-gather network enrichment while the later evidence gate remains intact');
@@ -299,10 +393,18 @@ export default [
       assert(source.includes('const markGatheredSourceTerminal = async (sourceId, results)')
         && source.includes('await markGatheredSourceTerminal(sid, r);')
         && source.includes("await markGatheredSourceTerminal('indeed', indeedResult ? [indeedResult] : []);")
-        && source.includes('await markGatheredSourceTerminal(sourceId, [{ jobs, warning }]);'),
+        && source.includes('await markGatheredSourceTerminal(sourceId, [{ jobs, warning, retryablePartial }]);'),
       'every source records its terminal manifest status as it finishes, so resume after a mid-gather crash reuses staged rows instead of re-scraping them');
-      assert(source.includes("if (!blocked && produced === 0) return; // nothing proven yet — leave it pending"),
-        'the in-gather mark is conservative: only a source that demonstrably produced rows or blocked is written, so a wrong guess costs a re-scrape and never staged results');
+      assert(source.includes("if (combinedSignal.aborted || rows.some(row => row?.cancelled === true || row?.stopReason === 'aborted')) return;")
+        && source.includes("blocked ? 'blocked' : 'done'")
+        && source.includes('if (stageSource) {')
+        && source.includes("const retryablePartial = warning?.code === 'query-error'")
+        && source.includes('await stageSource({ sourceId, jobs, warning, retryablePartial });')
+        && source.includes('r?.retryablePartial === true'),
+      'a clean zero-result completion is terminal, while interrupted work, partial query coverage, and failed durable staging remain unfinished for a later exact resume');
+      assert(source.includes('if (!signal?.aborted && !pipelineAbort.signal.aborted) pipelineAbort.abort(error);')
+        && source.includes('if (gatherBranches) await Promise.allSettled(gatherBranches);'),
+      'a fatal gather branch aborts and drains its sibling before the IPC returns, preventing late staging after failure');
       assert(source.includes("['block', 'throttle'].includes(r?.warning?.severity)")
         && source.includes('const retryablePartialProviderFailure = sourceId === \'remoteok\'')
         && source.includes('entry?.fanoutStopped === true')
@@ -603,6 +705,51 @@ export default [
     },
   },
   {
+    name: 'zero-match candidate snapshots remain readable across restart for saved-job re-evaluation',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-zero-match-candidate-snapshot-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'zero-match-hub';
+      const runId = 'zero-match-run';
+      const candidates = [
+        { title: 'Role One', company: 'Example A', url: 'https://example.test/one' },
+        { title: 'Role Two', company: 'Example B', url: 'https://example.test/two' },
+      ];
+      try {
+        await fs.promises.mkdir(dir, { recursive: true });
+        // This is the exact durable boundary used before preference filtering:
+        // score-ready results can be empty, but the raw candidate universe is
+        // still the only valid input for a later brief edit.
+        await __saveJobAnalysisSnapshotForTests({
+          version: 2,
+          canvasFilePath: canvas,
+          sourceHubId: hubId,
+          nodeId: hubId,
+          runId,
+          createdAt: '2026-10-05T08:00:00.000Z',
+          gatheredJobCount: 1693,
+          sourceGatheredCount: 1693,
+          selectedJobCount: 0,
+          jobs: candidates,
+          preferenceCandidatePool: candidates,
+          preferenceEvaluation: { counts: { input: 1693, accepted: 0, filtered: 1693 } },
+        });
+        // A fresh load models an app restart; it must retrieve the exact hub
+        // and run, not an unrelated last-success artifact.
+        const restarted = await __loadJobAnalysisSnapshotForTests(canvas, hubId, runId);
+        assert(restarted.snapshot.jobs.length === 2
+          && restarted.snapshot.preferenceCandidatePool.length === 2
+          && restarted.snapshot.preferenceEvaluation.counts.accepted === 0
+          && restarted.snapshot.gatheredJobCount === 1693
+          && restarted.snapshot.jobs.map(job => job.title).join(',') === 'Role One,Role Two',
+        'a zero-match completion retains its raw candidates and preference pool across restart so saved-job re-evaluation can run without re-scraping');
+        return { candidates: restarted.snapshot.preferenceCandidatePool.length, gathered: restarted.snapshot.gatheredJobCount };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'owner-scoped snapshot recovery reads only its hub then migrates safely through both legacy bundles',
     run: async () => {
       const root = path.join('/tmp', `ic-owner-snapshot-recovery-${process.pid}-${Date.now()}`);
@@ -676,6 +823,182 @@ export default [
         && a.legacyCanvasPromptPath === null && b.legacyCanvasPromptPath === null,
       'a sender-scoped unsaved bundle cannot fall back to the historical shared recovery/prompt files');
       return { distinct: true };
+    },
+  },
+  {
+    name: 'successful analysis snapshots retain three owner-scoped generations and recover newest valid generation',
+    run: async () => {
+      const root = path.join('/tmp', `ic-analysis-generations-${process.pid}-${Date.now()}`);
+      const canvas = path.join(root, 'canvas.json');
+      const fallback = path.join(root, 'unsaved');
+      const hubA = 'generation-hub-a';
+      const hubB = 'generation-hub-b';
+      const pathsA = getJobAnalysisPaths(canvas, fallback, hubA);
+      const pathsB = getJobAnalysisPaths(canvas, fallback, hubB);
+      const snapshot = (owner, run, title, snapshotContext = null) => ({
+        canvasFilePath: canvas,
+        sourceHubId: owner,
+        nodeId: owner,
+        runId: run,
+        createdAt: `2026-10-05T10:0${String(run || '0').slice(-1)}:00.000Z`,
+        gatheredJobCount: 1,
+        jobs: [{ title }],
+        cachedPrefix: `evidence ${title}`,
+        previewBatches: [],
+        ...(snapshotContext ? { snapshotContext } : {}),
+      });
+      const exists = async filePath => fs.promises.access(filePath).then(() => true, () => false);
+      try {
+        await fs.promises.mkdir(root, { recursive: true });
+        assert(pathsA.lastSuccessJsonPaths.length === 3
+          && pathsA.lastSuccessJsonPaths[0] === pathsA.lastSuccessJsonPath
+          && new Set(pathsA.lastSuccessJsonPaths).size === 3,
+        'the historical last-success path remains generation 1 while each hub receives two additional private recovery generations');
+        for (const index of [1, 2, 3, 4]) {
+          await __saveJobAnalysisSnapshotForTests(snapshot(hubA, `run-a-${index}`, `A ${index}`));
+        }
+        await __saveJobAnalysisSnapshotForTests(snapshot(hubB, 'run-b-1', 'B 1'));
+        await fs.promises.unlink(pathsA.jsonPath);
+        let recovered = await __loadJobAnalysisSnapshotForTests(canvas, hubA);
+        assert(recovered.origin === 'last-success' && recovered.snapshot.runId === 'run-a-4'
+          && (await Promise.all(pathsA.lastSuccessJsonPaths.map(exists))).every(Boolean),
+        'four successful saves retain only the newest three owner-scoped generations and recover the newest after current is absent');
+
+        await fs.promises.writeFile(pathsA.lastSuccessJsonPaths[0], '{broken newest generation');
+        recovered = await __loadJobAnalysisSnapshotForTests(canvas, hubA);
+        assert(recovered.origin === 'last-success-2' && recovered.snapshot.runId === 'run-a-3',
+          'a corrupt newest generation falls through to the next exact owned populated generation');
+
+        await fs.promises.unlink(pathsA.lastSuccessJsonPaths[1]);
+        recovered = await __loadJobAnalysisSnapshotForTests(canvas, hubA);
+        assert(recovered.origin === 'last-success-3' && recovered.snapshot.runId === 'run-a-2',
+          'a missing middle generation falls through to the oldest valid retained generation');
+
+        await fs.promises.unlink(pathsB.jsonPath);
+        const isolated = await __loadJobAnalysisSnapshotForTests(canvas, hubB);
+        assert(isolated.snapshot.runId === 'run-b-1' && isolated.paths.jsonPath === pathsB.lastSuccessJsonPath,
+          'a hub can never recover another hub’s three-generation bundle on the same canvas');
+
+        const revisionCanvas = path.join(root, 'revision-canvas.json');
+        const revisionPaths = getJobAnalysisPaths(revisionCanvas, fallback, hubA);
+        const revisionContext = analysisRevisionId => ({
+          recoveryMode: 'reanalyze-saved-jobs',
+          analysisRevisionId,
+        });
+        for (const [index, revision] of ['analysis-revision-1', 'analysis-revision-2', 'analysis-revision-3'].entries()) {
+          await __saveJobAnalysisSnapshotForTests({
+            ...snapshot(hubA, 'shared-source-run', `Revision ${index + 1}`, revisionContext(revision)),
+            canvasFilePath: revisionCanvas,
+            createdAt: `2026-10-05T11:0${index + 1}:00.000Z`,
+          });
+        }
+        let revisions = await Promise.all(revisionPaths.lastSuccessJsonPaths.map(async filePath => (
+          JSON.parse(await fs.promises.readFile(filePath, 'utf8'))
+        )));
+        assert(revisions.map(record => record.snapshotContext?.analysisRevisionId).join(',')
+          === 'analysis-revision-3,analysis-revision-2,analysis-revision-1',
+        'three re-analyses of one source scrape rotate three distinct private analysis revisions instead of collapsing by source runId');
+        await __saveJobAnalysisSnapshotForTests({
+          ...snapshot(hubA, 'shared-source-run', 'Revision 3 resumed', revisionContext('analysis-revision-3')),
+          canvasFilePath: revisionCanvas,
+          createdAt: '2026-10-05T11:04:00.000Z',
+        });
+        revisions = await Promise.all(revisionPaths.lastSuccessJsonPaths.map(async filePath => (
+          JSON.parse(await fs.promises.readFile(filePath, 'utf8'))
+        )));
+        assert(revisions[0].jobs[0].title === 'Revision 3 resumed'
+          && revisions.map(record => record.snapshotContext?.analysisRevisionId).join(',')
+            === 'analysis-revision-3,analysis-revision-2,analysis-revision-1',
+        'resume/retry of the same saved-job re-analysis revision refreshes its newest backup without consuming an older generation');
+
+        const legacyRevisionCanvas = path.join(root, 'legacy-revision-canvas.json');
+        const legacyRevisionPaths = getJobAnalysisPaths(legacyRevisionCanvas, fallback, hubA);
+        for (const [index, revision] of ['legacy-revision-1', 'legacy-revision-2', 'legacy-revision-3'].entries()) {
+          await __saveJobAnalysisSnapshotForTests({
+            ...snapshot(hubA, null, `Legacy revision ${index + 1}`, revisionContext(revision)),
+            canvasFilePath: legacyRevisionCanvas,
+            createdAt: `2026-10-05T12:0${index + 1}:00.000Z`,
+          });
+        }
+        await __saveJobAnalysisSnapshotForTests({
+          ...snapshot(hubA, null, 'Legacy revision 3 resumed', revisionContext('legacy-revision-3')),
+          canvasFilePath: legacyRevisionCanvas,
+          createdAt: '2026-10-05T12:04:00.000Z',
+        });
+        const legacyRevisions = await Promise.all(legacyRevisionPaths.lastSuccessJsonPaths.map(async filePath => (
+          JSON.parse(await fs.promises.readFile(filePath, 'utf8'))
+        )));
+        assert(legacyRevisions[0].jobs[0].title === 'Legacy revision 3 resumed'
+          && legacyRevisions.map(record => record.snapshotContext?.analysisRevisionId).join(',')
+            === 'legacy-revision-3,legacy-revision-2,legacy-revision-1',
+        'a legacy saved corpus without a source run token still rotates distinct re-analysis revisions and deduplicates a retry of the same revision');
+
+        const allFilteredCanvas = path.join(root, 'all-filtered-revision-canvas.json');
+        const allFilteredPaths = getJobAnalysisPaths(allFilteredCanvas, fallback, hubA);
+        const allFilteredSnapshot = (revision, index) => {
+          const { snapshot: built } = buildJobAnalysisSnapshot({
+            // A strict new brief can reject every saved row. Its score-ready
+            // input must stay empty while the retained pool remains available
+            // for the next brief; no fake scoring prompt may be written.
+            jobs: [],
+            preferenceCandidatePool: [{ title: `Retained ${revision}`, company: 'Example' }],
+            preferenceEvaluation: { counts: { accepted: 0, filtered: 1 } },
+            profile: { summary: 'Saved profile' },
+            careerData: 'Saved career evidence',
+            nodeId: hubA,
+            jobPreferences: `Brief ${revision}`,
+            snapshotContext: {
+              sourceHubId: hubA,
+              runId: 'shared-source-run',
+              canvasFilePath: allFilteredCanvas,
+              sourceGatheredCount: 9,
+              recoveryMode: 'reanalyze-saved-jobs',
+              analysisRevisionId: revision,
+            },
+          });
+          return { ...built, createdAt: `2026-10-05T13:0${index}:00.000Z` };
+        };
+        for (const [index, revision] of ['all-filtered-1', 'all-filtered-2', 'all-filtered-3'].entries()) {
+          await __saveJobAnalysisSnapshotForTests(allFilteredSnapshot(revision, index + 1));
+        }
+        const allFilteredRevisions = await Promise.all(allFilteredPaths.lastSuccessJsonPaths.map(async filePath => (
+          JSON.parse(await fs.promises.readFile(filePath, 'utf8'))
+        )));
+        assert(allFilteredRevisions.map(record => record.snapshotContext?.analysisRevisionId).join(',')
+          === 'all-filtered-3,all-filtered-2,all-filtered-1'
+          && allFilteredRevisions.every(record => record.gatheredJobCount === 0
+            && record.selectedJobCount === 0
+            && record.previewBatches.length === 0
+            && record.jobs.length === 1
+            && record.sourceGatheredCount === 9
+            && record.preferenceEvaluation?.counts?.filtered === 1),
+        'all-filtered saved-job re-analyses rotate three recovery generations while accurately retaining a nonempty candidate pool, zero score-ready/selected counts, no prompt batches, and preference-evaluation evidence');
+
+        const ordinaryEmptyCanvas = path.join(root, 'ordinary-empty-revision-canvas.json');
+        const ordinaryEmptyPaths = getJobAnalysisPaths(ordinaryEmptyCanvas, fallback, hubA);
+        const { snapshot: ordinaryEmpty } = buildJobAnalysisSnapshot({
+          jobs: [], preferenceCandidatePool: [], profile: { summary: 'Saved profile' }, careerData: 'Saved career evidence', nodeId: hubA,
+          snapshotContext: { sourceHubId: hubA, runId: 'ordinary-empty-run', canvasFilePath: ordinaryEmptyCanvas, sourceGatheredCount: 9 },
+        });
+        await __saveJobAnalysisSnapshotForTests(ordinaryEmpty);
+        assert(!(await Promise.all(ordinaryEmptyPaths.lastSuccessJsonPaths.map(exists))).some(Boolean),
+          'an ordinary empty run is never promoted into successful-generation recovery merely because a source gathered count exists');
+
+        const clearCanvas = path.join(root, 'clear-canvas.json');
+        const clearPaths = getJobAnalysisPaths(clearCanvas, fallback, hubA);
+        for (const index of [1, 2, 3]) {
+          await __saveJobAnalysisSnapshotForTests({ ...snapshot(hubA, `run-clear-${index}`, `Clear ${index}`), canvasFilePath: clearCanvas });
+        }
+        const cleared = await __discardJobAnalysisSnapshotForTests(clearCanvas, hubA);
+        assert(cleared.ok && cleared.artifacts.lastSuccess.cleared
+          && cleared.artifacts.lastSuccessGeneration2.cleared
+          && cleared.artifacts.lastSuccessGeneration3.cleared
+          && !(await Promise.all(clearPaths.lastSuccessJsonPaths.map(exists))).some(Boolean),
+        'explicit career-data discard removes every valid successful generation for only its exact hub');
+        return { retained: 3, fallback: recovered.origin, ownerIsolated: isolated.snapshot.runId };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -1218,7 +1541,46 @@ export default [
         'the update-only description-recovery writer replaces both populated snapshot generations after its ownership checkpoint succeeds');
         assertMetadata(rewrittenCurrent, rewritten);
         assertMetadata(rewrittenLastSuccess, rewritten);
-        return { currentAndLastSuccess: true, recoveryRewrite: true };
+        const reanalysis = {
+          ...initial,
+          runId: null,
+          createdAt: '2026-09-13T08:02:00.000Z',
+          gatheredJobCount: 2,
+          jobs: [{ title: 'Reanalyzed saved job A' }, { title: 'Reanalyzed saved job B' }],
+          snapshotContext: { recoveryMode: 'reanalyze-saved-jobs', analysisRevisionId: 'saved-brief-revision-2' },
+          marker: 'saved-job-reanalysis',
+        };
+        await __saveJobAnalysisSnapshotForTests(reanalysis);
+        const reanalysisRaw = await fs.promises.readFile(paths.jsonPath, 'utf8');
+        const reanalysisStored = JSON.parse(reanalysisRaw);
+        assert(/^\{\n\x20{2}"reportMetadata":/.test(reanalysisRaw)
+          && reanalysisStored.reportMetadata?.schemaVersion === 2
+          && reanalysisStored.reportMetadata?.runId === null
+          && reanalysisStored.reportMetadata?.recoveryMode === 'reanalyze-saved-jobs'
+          && reanalysisStored.reportMetadata?.analysisRevisionId === 'saved-brief-revision-2'
+          && reanalysisStored.reportMetadata?.candidatePoolJobCount === 2,
+        'a saved-job reanalysis with no source run writes the strictly-scoped v2 metadata envelope physically first');
+        const invalidRunToken = { ...reanalysis, runId: 42, marker: 'invalid-run-token' };
+        await __saveJobAnalysisSnapshotForTests(invalidRunToken);
+        const invalidRunStored = await read(paths.jsonPath);
+        assert(!Object.hasOwn(invalidRunStored, 'reportMetadata') && invalidRunStored.runId === 42,
+          'a non-null malformed source run is preserved for normal resume handling but never coerced into the v2 null-run diagnostic exception');
+        for (const [label, malformed] of [
+          ['null canvas', { ...initial, canvasFilePath: null }],
+          ['absent canvas', (() => { const value = { ...initial }; delete value.canvasFilePath; return value; })()],
+          ['undefined run', { ...initial, runId: undefined }],
+          ['absent run', (() => { const value = { ...initial }; delete value.runId; return value; })()],
+          ['revisionless saved-job reanalysis', {
+            ...initial,
+            snapshotContext: { recoveryMode: 'reanalyze-saved-jobs' },
+          }],
+        ]) {
+          const saved = await __saveJobAnalysisSnapshotForTests(malformed);
+          const stored = await read(saved.jsonPath);
+          assert(!Object.hasOwn(stored, 'reportMetadata'),
+            `${label} preserves recovery payload compatibility without emitting an envelope the bounded reader must reject`);
+        }
+        return { currentAndLastSuccess: true, recoveryRewrite: true, reanalysisMetadataV2: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }
@@ -1747,8 +2109,8 @@ export default [
         const generic = jobsSource.slice(genericStart, resumeStart);
         const resume = jobsSource.slice(resumeStart, mergeStart);
         const renderer = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-        assert(generic.indexOf('if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId)))') >= 0
-          && generic.indexOf('if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId)))') < generic.indexOf('const runGenericResolve')
+        assert(generic.indexOf('const sourceActionAuthorization = await jobSourceActionAuthorization(canvasFilePath, nodeId, jobRunId);') >= 0
+          && generic.indexOf('const sourceActionAuthorization = await jobSourceActionAuthorization(canvasFilePath, nodeId, jobRunId);') < generic.indexOf('const runGenericResolve')
           && resume.indexOf('if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId)))') >= 0
           && resume.indexOf('if (!(await canPerformJobSourceAction(canvasFilePath, nodeId, jobRunId)))') < resume.indexOf('const normalizedCollectionLimits')
           && !generic.includes('const telemetryWritable') && !resume.includes('const telemetryWritable')

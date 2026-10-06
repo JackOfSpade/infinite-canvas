@@ -12,7 +12,7 @@ import { JOB_TAXONOMY_PLAN_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_RO
 import crypto from 'node:crypto';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { wrapUntrustedText } from './promptSafety.js';
-import { MANUAL_HANDOFF_CONCURRENCY, mapWithConcurrency } from './jobPreferences.js';
+import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
 
 const LEGACY_JOB_TAXONOMY_CHUNK_SIZE = 24;
 // One terse integer role index per compact row. The shared output estimator is
@@ -497,18 +497,16 @@ export async function runBoundedJobTaxonomy(jobs, {
       return { chunk, freshBatch, progressBatch: legacyDescriptors.length + freshBatch };
     });
     // Exact v1 replays and untouched v2 chunks classify disjoint rows. Their
-    // task identities differ, but there is no data dependency, so combine
-    // them in one stable fixed work set of up to ten instead of forcing fresh
-    // work to wait behind the resumed prompts. Do not drain a worker pool:
-    // replacing a solved prompt while the other nine are still open makes the
-    // copy/paste dock churn underneath the person doing the work.
+    // task identities differ, but there is no data dependency, so they share
+    // one bounded automatic roster. A freed slot immediately claims the next
+    // descriptor while output remains in this original descriptor order.
     const descriptors = [
       ...legacyDescriptors.map((descriptor, progressBatch) => ({ ...descriptor, legacy: true, progressBatch })),
       ...freshDescriptors,
     ];
-    const output = await mapWithConcurrency(
+    const output = await mapAutomaticHandoffs(
       descriptors,
-      MANUAL_HANDOFF_CONCURRENCY,
+      HANDOFF_CONCURRENCY,
       descriptor => classifyChunk(descriptor),
     );
     classifiedChunks.push(...output);

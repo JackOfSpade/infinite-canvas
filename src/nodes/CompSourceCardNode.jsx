@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
@@ -9,6 +9,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useToast } from '../components/ToastProvider';
 import { isSolveIpcCancellation, isSolveIpcFailure, solveIpcFailureMessage, warningForSolveIpcFailure } from '../utils/solveIpcFailure';
 import { EventLogger } from '../utils/EventLogger';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * CompSourceCardNode — ephemeral card spawned by SellHubNode during price
@@ -57,6 +58,8 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
   const resolveInFlightRef = useRef(false);
   const { deleteElements, updateNodeData } = useReactFlow();
   const { addToast } = useToast();
+  const navigation = useContext(CanvasNavigationContext);
+  const canvasFilePath = navigation?.getCurrentFile?.() || navigation?.currentFile || null;
 
   // The card can be dismissed by the hub's grace timer while a Solve/Retry IPC
   // is still in flight; guard the finally setState so it doesn't run after
@@ -74,6 +77,9 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
       const hubData = s.nodeLookup.get(data.hubId)?.data;
       return !!hubData?.locked || hubData?.hubState === 'queued';
     }, [data.hubId])
+  );
+  const hubRecovery = useStore(
+    useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.marketplaceRunResume || null, [data.hubId])
   );
 
   useEffect(() => {
@@ -211,6 +217,9 @@ export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, d
         url: progress.url,
         sourceId: data.sourceId,
         nodeId: data.hubId,
+        canvasFilePath,
+        manualAiRunId: hubRecovery?.runId || undefined,
+        recovery: hubRecovery || undefined,
       });
       // `handleSafe` resolves failures rather than rejecting. Treat a failed
       // launch/navigation as a failed Solve, not an ordinary unresolved result.

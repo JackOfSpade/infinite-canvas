@@ -12,6 +12,7 @@ import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import {
   closeBridgeSetup,
   getBridgeUiState,
+  openBridgePopover,
   openBridgeSetup,
   subscribeBridgeUi,
 } from '../utils/handoffBridgeUiStore';
@@ -378,6 +379,21 @@ export function HandoffBridgeSetupDialog() {
     return result;
   }, []);
 
+  const prepareFirstWorkerPlan = useCallback(async () => {
+    const result = await invoke(bridgeApi(), 'handoffBridgeStartWorkerPool');
+    if (!mountedRef.current) return result;
+    if (result?.success === false) {
+      setNotice(ipcErrorMessage(result.code));
+      return result;
+    }
+    // The panel owns the one-at-a-time clipboard controls for every unique
+    // starter, including the one-worker plan. Close setup rather than leaving
+    // a plan hidden behind this modal.
+    closeBridgeSetup();
+    openBridgePopover();
+    return result;
+  }, []);
+
   const mutateSetup = useCallback(async (method, payload) => {
     clearEnableFeedback();
     return call(method, payload);
@@ -527,6 +543,8 @@ export function HandoffBridgeSetupDialog() {
   ].filter(Boolean);
   const tunnelProgressMessage = missingTunnelPrerequisites.length > 0
     ? missingTunnelPrerequisites.join(' ')
+    : !status.enabled && status.autoStart && !status.setup.consentCurrent
+      ? BRIDGE_UI_COPY.renewConsentToStart
     : !status.enabled
       ? copy.turnOnBridgeFirst
       : !tunnelReady
@@ -656,7 +674,7 @@ export function HandoffBridgeSetupDialog() {
   const firstChat = (
     <div className="space-y-3">
       <p>{copy.firstChat}</p>
-      <button type="button" disabled={!canStartChat} className="bridge-button-primary" onClick={() => void call('handoffBridgeNewChat')}>{BRIDGE_UI_COPY.startChat}</button>
+      <button type="button" disabled={!canStartChat} className="bridge-button-primary" onClick={() => void prepareFirstWorkerPlan()}>{BRIDGE_UI_COPY.startWorkerPool}</button>
       {!canStartChat && <p className="text-[11px] text-amber-200">{linkReady ? copy.bridgeMustBeReady : copy.completeLinkFirst}</p>}
     </div>
   );

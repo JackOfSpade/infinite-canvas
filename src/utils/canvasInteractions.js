@@ -81,6 +81,49 @@ export function cancelNodeTasksRecursively(nodes, skipIds) {
 }
 
 /**
+ * Return every Marketplace recovery owner in a removed node tree. Group nodes
+ * persist their children under `canvasData.nodes` (with `data.nodes` retained
+ * as a legacy fallback), so lifecycle cleanup must recurse just like generic
+ * task cancellation does. The durable sidecar itself is authoritative for the
+ * run id; `runId` here is only the renderer-marker fallback for the autosave
+ * gap where a peek reports no active receipt.
+ */
+export function collectMarketplaceRecoveryOwners(nodes) {
+  if (!Array.isArray(nodes)) return [];
+  const owners = [];
+  const seen = new Set();
+  const visit = (items) => {
+    for (const node of items || []) {
+      const kind = node?.type === 'sellhub'
+        ? 'sellhub'
+        : node?.type === 'marketplacestatus'
+          ? 'marketplace-status'
+          : null;
+      if (kind && node?.id) {
+        const key = `${kind}\u0000${node.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          owners.push({
+            nodeId: node.id,
+            kind,
+            runId: kind === 'sellhub'
+              ? node.data?.marketplaceRunResume?.runId || null
+              : node.data?.marketplaceStatusRunResume?.runId || null,
+            inputKey: kind === 'sellhub'
+              ? node.data?.marketplaceRunResume?.inputKey ?? null
+              : node.data?.marketplaceStatusRunResume?.inputKey ?? null,
+          });
+        }
+      }
+      visit(node?.data?.canvasData?.nodes);
+      visit(node?.data?.nodes);
+    }
+  };
+  visit(nodes);
+  return owners;
+}
+
+/**
  * Return exact durable manual-AI workflow ids owned by deleted Job Search or
  * Job Board nodes, including nodes nested inside removed canvas groups.
  */

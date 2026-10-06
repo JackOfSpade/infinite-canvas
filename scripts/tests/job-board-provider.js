@@ -220,6 +220,12 @@ export default [
           scoredJobs: [{ title: 'Partial Receipt', company: 'Example', url: 'https://jobs.example.test/partial', matchScore: 72 }],
         },
       };
+      const malformedModernReceipts = [
+        { ...terminal, data: { ...terminal.data, jobRunId: '   ' } },
+        { ...terminal, data: { ...terminal.data, resultDisposition: '\t' } },
+        { ...terminal, data: { ...terminal.data, jobRunId: ' ', resultDisposition: ' ' } },
+        { ...terminal, data: { ...terminal.data, jobRunId: 123, resultDisposition: 'scored' } },
+      ].map(classifyJobBoardSourceAdmission);
       const expected = terminalAdmission.outcome;
       const legacyAdmission = classifyJobBoardSourceAdmission(legacyPositive);
       const preservedAdmission = classifyJobBoardSourceAdmission(reanalysisPreserved);
@@ -252,6 +258,7 @@ export default [
         && tokenlessPaused.kind === 'continuation-requires-run-token'
         && terminalWithoutMergeableResults.kind === 'terminal-requires-fresh-input'
         && partialAdmission.kind === 'terminal-requires-fresh-input'
+        && malformedModernReceipts.every(admission => admission.kind === 'terminal-requires-fresh-input')
         && terminalWithoutMergeableResults.reason.includes('Re-scan it on the Job Search card')
         && partialAdmission.reason.includes('Re-scan it on the Job Search card'),
       'terminal Job Searches must be reusable rather than fresh-scanned; non-mergeable terminals direct users to the card re-scan; only a cleared and re-imported empty hub is Board fresh-scan eligible; a paused source requires its exact run token to continue');
@@ -2880,7 +2887,7 @@ export default [
         && !savedPanel.includes('Resume saved scrape')
         && savedPanel.includes('onClick={handleOpenSavedPrompt}')
         && resumeBanner.includes("boardRecoveryOwnsActions && resumeRunActionable\n          ? ' Continue from the connected Job Board with Search selected & combine. Clear career data is the only way to deliberately remove this checkpoint.'")
-        && resumeBanner.includes('Resume continues only the remaining sources from their saved pages')
+        && resumeBanner.includes('Resume continues only remaining sources from their per-query checkpoints; an interrupted load-more query may replay from its first view')
         && resumeBanner.includes('Finish with saved listings skips the remaining sources and moves the retained listings to preferences and scoring.')
         && resumeBanner.includes('Clear career data is the only way to deliberately remove this checkpoint.')
         && !resumeBanner.includes('Start fresh')
@@ -3170,6 +3177,57 @@ export default [
       ]) && queue.getSnapshot().lanes['job-search'] == null,
       `the live lane must follow priority/FIFO order and fully drain, got ${JSON.stringify({ starts, snapshot: queue.getSnapshot() })}`);
       return { starts, finalPositions: Object.fromEntries(positions) };
+    },
+  },
+  {
+    name: 'Crash-resume clears its queued receipt after lane admission and queue callbacks cannot repaint it',
+    run: async () => {
+      // The reported failure had a live `search-jobs` IPC task while the card
+      // still rendered "Resuming job search is queued".  A lane entry must
+      // receive all of its own queued-position notifications before onStart;
+      // once active, only the remaining waiters are renumbered.
+      const queue = createModuleRunQueue();
+      const events = [];
+      const active = await queue.acquireModuleRun({
+        nodeId: 'existing-search', lane: 'job-search', onStart: () => events.push('active:start'),
+      });
+      const resumePromise = queue.acquireModuleRun({
+        nodeId: 'crash-resume',
+        lane: 'job-search',
+        onQueued: () => events.push('resume:queued'),
+        onQueueUpdate: () => events.push('resume:update'),
+        onStart: () => events.push('resume:start'),
+      });
+      active.release();
+      const resumeLease = await resumePromise;
+      const resumeStart = events.indexOf('resume:start');
+      assert(resumeStart > events.indexOf('resume:queued')
+        && !events.slice(resumeStart + 1).some(event => event === 'resume:queued' || event === 'resume:update'),
+      `a started crash-resume cannot receive a later queued receipt, got ${JSON.stringify(events)}`);
+      resumeLease.release();
+
+      // UI writes can be batched independently of the queue callbacks.  The
+      // renderer therefore needs its own post-await acknowledgement clear,
+      // rather than relying only on onStart's earlier callback.
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const handlerStart = search.indexOf('const handleResumeRun = useCallback');
+      const handlerEnd = search.indexOf('resumeInterruptedRunRef.current = handleResumeRun;', handlerStart);
+      const handler = search.slice(handlerStart, handlerEnd);
+      const acquireAt = handler.indexOf('lease = await moduleRunQueue.acquireModuleRun');
+      const queuedCallbackAt = handler.indexOf("queuedModuleRun: { label: 'Resuming job search', position }", acquireAt);
+      const queueCallbackStartAt = handler.indexOf('onStart: () => {', queuedCallbackAt);
+      const acquireBlockEndAt = handler.indexOf('\n        });', queueCallbackStartAt);
+      const admissionSettledAt = handler.indexOf('if (standaloneBecameBoardManaged)', queueCallbackStartAt);
+      const postAdmission = handler.slice(acquireBlockEndAt, admissionSettledAt);
+      const livePeekAt = handler.indexOf('const currentOffer = await window.electronAPI?.peekJobRun', admissionSettledAt);
+      const searchingStateAt = handler.indexOf("hubState: 'searching'", livePeekAt);
+      assert(handlerStart >= 0 && handlerEnd > handlerStart
+        && acquireAt >= 0 && queuedCallbackAt > acquireAt && queueCallbackStartAt > queuedCallbackAt
+        && acquireBlockEndAt > queueCallbackStartAt && admissionSettledAt > acquireBlockEndAt
+        && postAdmission.includes('queuedModuleRun: null')
+        && livePeekAt > admissionSettledAt && searchingStateAt > livePeekAt,
+      'a crash-resume must explicitly clear its own queued receipt after acquireModuleRun resolves and before it reads the durable offer or publishes searching');
+      return { queueEvents: events, explicitPostAdmissionClear: true };
     },
   },
   {
@@ -3494,7 +3552,7 @@ export default [
       const interruptedRecoveryAt = childRunner.indexOf('} else if (recoverInterruptedJobRun || window.electronAPI?.peekJobRun)', savedRecoveryInvokeAt);
       const interruptedRecoveryInvokeAt = childRunner.indexOf('outcome = await resumeInterruptedRunRef.current?.({', interruptedRecoveryAt);
       const missingLedgerFallbackAt = childRunner.indexOf("if (outcome?.status === 'not-found')", interruptedRecoveryInvokeAt);
-      const freshRunAt = childRunner.indexOf('outcome = await runFreshBoardImport();', missingLedgerFallbackAt);
+      const freshRunAt = childRunner.indexOf(': await runFreshBoardImport();', missingLedgerFallbackAt);
       const terminalGateAt = childRunner.indexOf("if (!outcome || outcome.status !== 'completed')", freshRunAt);
       const committedWaitAt = childRunner.indexOf('const committed = await waitForCommittedSearchOutcome({', terminalGateAt);
       assert(childRunner.includes('const manualAiRunId = effectiveManualAiResume?.runId || createManualAiRunId(id);')
@@ -3503,6 +3561,8 @@ export default [
         && interruptedRecoveryInvokeAt > interruptedRecoveryAt
         && missingLedgerFallbackAt > interruptedRecoveryInvokeAt && freshRunAt > missingLedgerFallbackAt
         && terminalGateAt > freshRunAt && committedWaitAt > terminalGateAt
+        && childRunner.includes("reason: 'awaiting-explicit-ai-continue'")
+        && childRunner.includes('providerPhaseOnlyRecovery && !allowFreshProviderBootstrap')
         && childRunner.includes('jobCareerImportBoardAdmission(getNode(id)?.data, {')
         && childRunner.includes('outcome,')
         && !childRunner.includes('const liveAfter = getNode'),
@@ -3970,7 +4030,7 @@ export default [
       const sourceSkip = sourceCard.slice(sourceSkipStart, sourceSkipEnd);
       const sourceSkipDispatchEnd = sourceCard.indexOf('}));', sourceSkipEnd) + 4;
       const sourceSkipDispatch = sourceCard.slice(sourceSkipEnd, sourceSkipDispatchEnd);
-      const solveStart = sourceCard.indexOf('const handleSolve = async () =>');
+      const solveStart = sourceCard.indexOf('const handleSolve = async (');
       const solveEnd = sourceCard.indexOf('// Hub state via reactive store selectors', solveStart);
       const solve = sourceCard.slice(solveStart, solveEnd);
       const solveLeaseAt = solve.indexOf('lease = await acquireModuleRun({');

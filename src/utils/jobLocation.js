@@ -85,7 +85,25 @@ export function deriveLocationParam(struct, rawFallback = '') {
   // `stateCode` instruction. Fold it here, at the boundary where a board-ready
   // parameter is built, so "Denver, Colorado, USA" cannot become an ambiguous
   // mixed-format location on one source and a correct one on another.
-  const normalizedState = normalizeSubdivision(state || region, country);
+  const subdivisionInput = state || region;
+  const normalizedState = normalizeSubdivision(subdivisionInput, country);
+  // `normalizeSubdivision(value, country)` intentionally returns an empty
+  // result when a known US/Canadian subdivision contradicts the explicit
+  // country. Do not then fall back to the raw value below: that used to turn
+  // e.g. `{ stateCode: 'Ontario', country: 'United States' }` into the very
+  // `Ontario` filter the normalizer rejected. Resolve the same token once
+  // without the country solely to distinguish a real contradiction from a
+  // legitimate free-form region such as "West Yorkshire".
+  const subdivisionWithoutCountry = normalizedState.code
+    ? normalizedState
+    : normalizeSubdivision(subdivisionInput);
+  if (
+    country
+    && subdivisionWithoutCountry.code
+    && subdivisionWithoutCountry.country !== country
+  ) {
+    return '';
+  }
 
   // Append the country for a NON-US place so an international city isn't ambiguous
   // on a board (bare "Whitby" could be Whitby, England → "Whitby, Ontario, Canada"
@@ -97,7 +115,7 @@ export function deriveLocationParam(struct, rawFallback = '') {
     // Subdivision: US state code or a non-US province/region. city+sub+(country)
     // yields "Denver, CO" (US) or "Whitby, Ontario, Canada" (non-US). Without a
     // sub we still append the country for non-US → "Whitby, Canada".
-    const sub = normalizedState.label || state || region;
+    const sub = normalizedState.label || subdivisionInput;
     return withCountry(sub ? `${city}, ${sub}` : city);
   }
   if (region || (state && normalizedState.code)) {
@@ -543,6 +561,42 @@ function buildForeignRegexes(targetCountry) {
     out.push({ country, re: buildCountryRegex(country) });
   }
   return out;
+}
+
+/**
+ * Exclude only listings that positively identify as belonging to another
+ * country when the target is a whole country. Bare cities, unknown country
+ * vocabulary, remote listings, and missing locations intentionally stay in
+ * the pool; city/province targets remain provider-filtered and diagnostic.
+ */
+export function filterProvablyOutsideCountryScope(jobs, canonical) {
+  const loc = String(canonical || '').trim();
+  const segments = loc.split(',').map(s => s.trim()).filter(Boolean);
+  let targetCountry = null;
+  for (const segment of segments) {
+    const country = detectCountryTarget(segment);
+    if (country) { targetCountry = country; break; }
+  }
+  const countryOnly = !!targetCountry && segments.length === 1;
+  if (!countryOnly) return { jobs: Array.isArray(jobs) ? jobs : [], dropped: 0, droppedBySource: {} };
+
+  const foreignRes = buildForeignRegexes(targetCountry);
+  const kept = [];
+  const droppedBySource = {};
+  for (const job of (Array.isArray(jobs) ? jobs : [])) {
+    const source = String(job?.source || '?');
+    const location = String(job?.location || '').trim().toLowerCase();
+    if (REMOTE_BOARD_SOURCES.has(source) || !location || /\b(remote|anywhere|work from home|wfh|distributed)\b/.test(location)) {
+      kept.push(job);
+      continue;
+    }
+    if (!foreignRes.some(entry => entry.re.test(location))) {
+      kept.push(job);
+      continue;
+    }
+    droppedBySource[source] = (droppedBySource[source] || 0) + 1;
+  }
+  return { jobs: kept, dropped: (Array.isArray(jobs) ? jobs.length : 0) - kept.length, droppedBySource };
 }
 
 /**

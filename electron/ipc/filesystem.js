@@ -7,7 +7,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   rememberMissingPreviewSearchRoot,
   resolveMissingPreviewPath,
@@ -15,6 +15,11 @@ import {
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
 import { isWithinDirectory, isExistingFileAsync, isSensitivePath } from '../utils/pathSafety.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
+import { rebindJobRunRecoveryOwners } from './jobRunStaging.js';
+import { rebindJobContinuationOwners } from './jobContinuation.js';
+import { rebindJobAnalysisRecoveryOwners } from './jobAnalysisPaths.js';
+import { withCanvasRecoveryRebind } from './canvasRecoveryPaths.js';
+import { prepareCanvasRecoveryRebind } from './marketplaceRecoveryStore.js';
 
 // Extensions the 'open-file' handler will hand to the OS shell. Covers the
 // image/document/media/archive types this app's own drop/preview handling
@@ -734,8 +739,18 @@ export async function atomicWriteFile(targetPath, data) {
   catch { /* New files default to owner-only; existing files keep their mode. */ }
   activeOwnedTempPaths.add(tmpPath);
   try {
-    await fs.promises.writeFile(tmpPath, data, { encoding: 'utf8', mode });
+    const handle = await fs.promises.open(tmpPath, 'w', mode);
+    try {
+      await handle.writeFile(data, { encoding: 'utf8' });
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await fs.promises.rename(tmpPath, finalPath);
+    const directory = await fs.promises.open(path.dirname(finalPath), 'r').catch(() => null);
+    if (directory) {
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   } catch (err) {
     // Clean up tmp file if write succeeded but rename failed
     try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
@@ -743,6 +758,99 @@ export async function atomicWriteFile(targetPath, data) {
   } finally {
     activeOwnedTempPaths.delete(tmpPath);
   }
+}
+
+const RECOVERY_REBIND_JOURNAL_VERSION = 1;
+function recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, journalDirectory = path.dirname(newCanvasPath)) {
+  const digest = createHash('sha256').update(`${path.resolve(oldCanvasPath)}\u0000${path.resolve(newCanvasPath)}`).digest('hex').slice(0, 24);
+  return path.join(journalDirectory, `.ic-recovery-rebind-${digest}.json`);
+}
+
+function recoveryRebindJournalPaths(oldCanvasPath, newCanvasPath) {
+  const targetJournal = recoveryRebindJournalPath(oldCanvasPath, newCanvasPath);
+  const sourceDirectory = path.dirname(oldCanvasPath);
+  return sourceDirectory === path.dirname(newCanvasPath)
+    ? [targetJournal]
+    : [targetJournal, recoveryRebindJournalPath(oldCanvasPath, newCanvasPath, sourceDirectory)];
+}
+
+async function writeRecoveryRebindJournal(journalPath, journal) {
+  const existing = await fs.promises.lstat(journalPath).catch(error => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (existing && (!existing.isFile() || existing.isSymbolicLink())) {
+    throw new Error('Recovery rebind journal path is unsafe.');
+  }
+  if (existing) {
+    // The deterministic journal name is an ownership slot, not an invitation
+    // to overwrite a user-created regular JSON file or a stale transaction.
+    // Only this exact transaction may advance its own prepared record to the
+    // canvas-written phase (or rewrite the same phase after a retry).
+    const prior = await readRecoveryRebindJournal(journalPath);
+    const sameOwner = prior
+      && path.resolve(prior.oldCanvasPath) === path.resolve(journal.oldCanvasPath)
+      && path.resolve(prior.newCanvasPath) === path.resolve(journal.newCanvasPath)
+      && prior.canvasDigest === journal.canvasDigest
+      && prior.previousTargetDigest === journal.previousTargetDigest
+      && JSON.stringify(prior.renameAttestation || null) === JSON.stringify(journal.renameAttestation || null);
+    const allowedPhase = sameOwner
+      && ((prior.phase === journal.phase) || (prior.phase === 'prepared' && journal.phase === 'canvas-written'));
+    if (!allowedPhase) throw new Error('Recovery rebind journal path conflicts with another transaction.');
+  }
+  const temp = `${journalPath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle;
+  try {
+    handle = await fs.promises.open(temp, 'wx', 0o600);
+    await handle.writeFile(`${JSON.stringify(journal)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    // rename replaces only the journal directory entry; unlike atomicWriteFile
+    // it never follows a pre-existing journal symlink.
+    await fs.promises.rename(temp, journalPath);
+    const directory = await fs.promises.open(path.dirname(journalPath), 'r').catch(() => null);
+    if (directory) {
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+  } finally {
+    await handle?.close().catch(() => {});
+    await fs.promises.unlink(temp).catch(() => {});
+  }
+}
+
+async function readRecoveryRebindJournal(journalPath) {
+  try {
+    const stat = await fs.promises.lstat(journalPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return null;
+    const parsed = JSON.parse(await fs.promises.readFile(journalPath, 'utf8'));
+    if (parsed?.version !== RECOVERY_REBIND_JOURNAL_VERSION
+      || typeof parsed.oldCanvasPath !== 'string' || typeof parsed.newCanvasPath !== 'string'
+      || !/^[a-f0-9]{64}$/.test(parsed.canvasDigest || '')
+      || !(parsed.previousTargetDigest == null || /^[a-f0-9]{64}$/.test(parsed.previousTargetDigest))
+      || !(parsed.renameAttestation == null
+        || (Number.isSafeInteger(parsed.renameAttestation.dev) && Number.isSafeInteger(parsed.renameAttestation.ino)
+          && parsed.renameAttestation.ino > 0))) return null;
+    const oldPath = path.resolve(parsed.oldCanvasPath);
+    const newPath = path.resolve(parsed.newCanvasPath);
+    if (!recoveryRebindJournalPaths(oldPath, newPath).includes(journalPath)
+      || !['prepared', 'canvas-written'].includes(parsed.phase)) return null;
+    return parsed;
+  } catch { return null; }
+}
+
+async function fsyncDirectory(directory) {
+  const handle = await fs.promises.open(directory, 'r').catch(() => null);
+  if (!handle) return;
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function clearRecoveryRebindJournals(oldCanvasPath, newCanvasPath) {
+  const journalPaths = recoveryRebindJournalPaths(oldCanvasPath, newCanvasPath);
+  await Promise.all(journalPaths.map(journalPath => fs.promises.unlink(journalPath).catch(error => {
+    if (error?.code !== 'ENOENT') throw error;
+  })));
+  await Promise.all([...new Set(journalPaths.map(journalPath => path.dirname(journalPath)))].map(fsyncDirectory));
 }
 
 /**
@@ -1205,6 +1313,107 @@ function getSidecarPath(filePath) {
   return filePath.endsWith('.json') ? filePath.slice(0, -5) + '.progress.json' : filePath + '.progress.json';
 }
 
+// Recovery sidecars deliberately use a full canonical canvas path in their
+// filename. A Save As or Finder rename therefore needs a main-process
+// transaction, before this IPC reports the adopted path to the renderer. The
+// individual stores preserve their own owner/run/input proof and fail closed on
+// any conflict rather than allowing a stale path to overwrite new work.
+async function rebindJobRecoveryOwnersForCanvasPath(oldPath, newPath) {
+  if (!oldPath || path.resolve(oldPath) === path.resolve(newPath)) return { success: true };
+  return withCanvasRecoveryRebind(oldPath, newPath, async ({ oldPath: oldOwner, newPath: newOwner, installAlias }) => {
+    const marketplace = await prepareCanvasRecoveryRebind(oldOwner, newOwner);
+    if (!marketplace?.success) return { success: false, reason: marketplace?.reason || 'marketplace-migration-prepare-failed' };
+    const analysis = await rebindJobAnalysisRecoveryOwners(oldOwner, newOwner);
+    if (!analysis?.success) {
+      await marketplace.rollback?.();
+      return { success: false, reason: analysis?.reason || 'analysis-migration-failed' };
+    }
+    const continuation = await rebindJobContinuationOwners(oldOwner, newOwner);
+    if (!continuation?.success) {
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await marketplace.rollback?.();
+      return { success: false, reason: continuation?.reason || 'continuation-migration-failed' };
+    }
+    const staging = await rebindJobRunRecoveryOwners(oldOwner, newOwner);
+    if (!staging?.success) {
+      await rebindJobContinuationOwners(newOwner, oldOwner);
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await marketplace.rollback?.();
+      return { success: false, reason: staging.reason || 'staging-migration-failed' };
+    }
+    const marketplaceCommit = await marketplace.commit?.();
+    if (!marketplaceCommit?.success) {
+      await rebindJobRunRecoveryOwners(newOwner, oldOwner);
+      await rebindJobContinuationOwners(newOwner, oldOwner);
+      await rebindJobAnalysisRecoveryOwners(newOwner, oldOwner);
+      await marketplace.rollback?.();
+      return { success: false, reason: marketplaceCommit?.reason || 'marketplace-migration-commit-failed' };
+    }
+    installAlias();
+    return { success: true, migratedCount: (analysis.migratedCount || 0) + (continuation.migratedCount || 0) + (staging.migratedCount || 0) + (marketplaceCommit.migratedCount || marketplace.migratedCount || 0) };
+  });
+}
+
+async function reconcileRecoveryRebindJournalForCanvas(targetPath) {
+  const directory = path.dirname(targetPath);
+  let entries;
+  try { entries = await fs.promises.readdir(directory); } catch { return { reconciled: false }; }
+  const journals = entries.filter(name => name.startsWith('.ic-recovery-rebind-') && name.endsWith('.json'));
+  for (const name of journals) {
+    const journalPath = path.join(directory, name);
+    const journal = await readRecoveryRebindJournal(journalPath);
+    if (!journal || (path.resolve(journal.newCanvasPath) !== path.resolve(targetPath)
+      && path.resolve(journal.oldCanvasPath) !== path.resolve(targetPath))) continue;
+    const targetBytes = await fs.promises.readFile(journal.newCanvasPath).catch(() => null);
+    const targetDigest = targetBytes
+      ? createHash('sha256').update(targetBytes).digest('hex')
+      : null;
+    if (targetDigest !== journal.canvasDigest) {
+      const targetStat = await fs.promises.lstat(journal.newCanvasPath).catch(() => null);
+      const finderRenameAttested = journal.phase === 'prepared'
+        && journal.renameAttestation
+        && targetStat?.isFile()
+        && !targetStat.isSymbolicLink()
+        && targetStat.dev === journal.renameAttestation.dev
+        && targetStat.ino === journal.renameAttestation.ino;
+      if (finderRenameAttested) {
+        const rebind = await rebindJobRecoveryOwnersForCanvasPath(journal.oldCanvasPath, journal.newCanvasPath);
+        if (!rebind.success) return { reconciled: false, pending: true, reason: rebind.reason || 'recovery-migration-failed' };
+        await clearRecoveryRebindJournals(journal.oldCanvasPath, journal.newCanvasPath);
+        return {
+          reconciled: true,
+          migratedCount: rebind.migratedCount || 0,
+          finderRename: true,
+          adoptedCanvasPath: journal.newCanvasPath,
+        };
+      }
+      // A crash before target publication leaves only a prepared journal; it
+      // must never cause an unrelated later JSON file at the same name to
+      // inherit another canvas's recovery state.
+      if (journal.phase === 'prepared'
+        && ((!targetBytes && journal.previousTargetDigest == null)
+          || (targetDigest && targetDigest === journal.previousTargetDigest))) {
+        await clearRecoveryRebindJournals(journal.oldCanvasPath, journal.newCanvasPath);
+        return { reconciled: false, rolledBack: true };
+      }
+      return { reconciled: false, pending: true, reason: 'canvas-digest-mismatch' };
+    }
+    const rebind = await rebindJobRecoveryOwnersForCanvasPath(journal.oldCanvasPath, journal.newCanvasPath);
+    if (!rebind.success) return { reconciled: false, pending: true, reason: rebind.reason || 'recovery-migration-failed' };
+    await clearRecoveryRebindJournals(journal.oldCanvasPath, journal.newCanvasPath);
+    return { reconciled: true, migratedCount: rebind.migratedCount || 0, adoptedCanvasPath: journal.newCanvasPath };
+  }
+  return { reconciled: false };
+}
+
+export const __recoveryRebindJournalForTests = {
+  recoveryRebindJournalPath,
+  recoveryRebindJournalPaths,
+  writeRecoveryRebindJournal,
+  readRecoveryRebindJournal,
+  reconcileRecoveryRebindJournalForCanvas,
+};
+
 /**
  * Record the canvas file's identity (inode + device) on the renderer's
  * WebContents after a load or save. A rename preserves the inode, so this is the
@@ -1325,6 +1534,57 @@ async function handleCanvasDirChange(sender) {
   if (!knownPath) return;
   const resolved = await reconcileRenamedCanvas(sender, knownPath);
   if (resolved === knownPath) return; // unchanged, or the rename couldn't be located — nothing to do
+  const journalRecovery = await reconcileRecoveryRebindJournalForCanvas(resolved);
+  if (journalRecovery.pending) {
+    logger.error(`[FileSystem] Finder-rename recovery journal remains pending: ${journalRecovery.reason || 'unknown'}`);
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
+  // A Finder rename has already published the same canvas inode at `resolved`.
+  // Still journal it before touching any recovery sidecar: a process death in
+  // the migration then has an exact, dual-directory restart transaction rather
+  // than stranding the old path hash. The inode attestation prevents an
+  // unrelated same-name JSON from inheriting this owner on recovery.
+  const renamedStat = await fs.promises.lstat(resolved).catch(() => null);
+  if (!renamedStat?.isFile() || renamedStat.isSymbolicLink()) {
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
+  const renamedBytes = await fs.promises.readFile(resolved).catch(() => null);
+  if (!renamedBytes) {
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
+  const digest = createHash('sha256').update(renamedBytes).digest('hex');
+  const journalPaths = recoveryRebindJournalPaths(knownPath, resolved);
+  try {
+    await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
+      version: RECOVERY_REBIND_JOURNAL_VERSION,
+      oldCanvasPath: path.resolve(knownPath),
+      newCanvasPath: path.resolve(resolved),
+      phase: 'canvas-written',
+      canvasDigest: digest,
+      previousTargetDigest: digest,
+      renameAttestation: { dev: renamedStat.dev, ino: renamedStat.ino },
+    })));
+  } catch (error) {
+    logger.error(`[FileSystem] Could not publish Finder-rename recovery journal: ${error?.message || error}`);
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
+  const recoveryRebind = await rebindJobRecoveryOwnersForCanvasPath(knownPath, resolved);
+  if (!recoveryRebind.success) {
+    logger.error(`[FileSystem] Refused Finder-rename path adoption after recovery rebind failure: ${recoveryRebind.reason}`);
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
+  try { await clearRecoveryRebindJournals(knownPath, resolved); } catch (error) {
+    // Recovery was committed, so keep the journal as an idempotent startup
+    // replay rather than falsely exposing an unjournaled rename.
+    logger.error(`[FileSystem] Could not durably clear Finder-rename journal: ${error?.message || error}`);
+    if (!sender.isDestroyed()) sender.send('canvas:file-rename-recovery-failed');
+    return;
+  }
   rememberCanvasInode(sender, resolved); // re-fingerprint at the new name (same dir → watcher unchanged)
   if (!sender.isDestroyed()) sender.send('canvas:file-renamed', resolved);
   logger.info(`[FileSystem] Canvas followed on-disk rename, notified renderer → ${resolved}`);
@@ -1633,6 +1893,18 @@ export function registerFilesystemHandlers() {
   handleSafe('save-workspace', async (event, args) => {
     const { data, filePath } = args;
     let targetPath = filePath;
+    // Keep the renderer-provided owner spelling until the recovery rebind has
+    // committed. `reconcileRenamedCanvas` may replace targetPath with a Finder
+    // rename, and a future Save As may supply another absolute target.
+    let priorCanvasPath = typeof filePath === 'string' && filePath.trim() ? filePath : null;
+    const pendingRebind = event.sender.__pendingCanvasRecoveryRebind || null;
+    if (pendingRebind?.newCanvasPath) {
+      // A prior Save wrote the new canvas but intentionally withheld renderer
+      // adoption until recovery ownership could commit. Retry the same durable
+      // transaction rather than resurrecting the stale old spelling.
+      targetPath = pendingRebind.newCanvasPath;
+      priorCanvasPath = pendingRebind.oldCanvasPath;
+    }
     if (!targetPath) {
       if (isBackgroundE2E()) return { canceled: true };
       const { canceled, filePath: dialogPath } = await dialog.showSaveDialog({
@@ -1656,6 +1928,7 @@ export function registerFilesystemHandlers() {
     // but stop generating fresh embedded progress on save.
     delete data.transientProgress;
     annotatePortableFilePaths(data, targetPath);
+    const serializedCanvas = JSON.stringify(data);
 
     // Delete legacy separate sidecar progress file if present
     try {
@@ -1666,8 +1939,74 @@ export function registerFilesystemHandlers() {
       }
     } catch { /* ignore */ }
 
-    // Production Hardening: Use atomic write to prevent data corruption
-    await atomicWriteFile(targetPath, JSON.stringify(data));
+    const needsRecoveryRebind = !!priorCanvasPath
+      && path.resolve(priorCanvasPath) !== path.resolve(targetPath);
+    const journalPaths = needsRecoveryRebind
+      ? recoveryRebindJournalPaths(priorCanvasPath, targetPath)
+      : null;
+    const priorTargetBytes = journalPaths
+      ? await fs.promises.readFile(targetPath).catch(() => null)
+      : null;
+    const previousTargetDigest = priorTargetBytes
+      ? createHash('sha256').update(priorTargetBytes).digest('hex')
+      : null;
+    const [oldTargetStat, newTargetStat] = journalPaths
+      ? await Promise.all([
+        fs.promises.lstat(priorCanvasPath).catch(() => null),
+        fs.promises.lstat(targetPath).catch(() => null),
+      ])
+      : [null, null];
+    const trackedInode = event.sender.__canvasInode;
+    const renameAttestation = journalPaths
+      && !oldTargetStat
+      && newTargetStat?.isFile()
+      && !newTargetStat.isSymbolicLink()
+      && trackedInode?.ino === newTargetStat.ino
+      && trackedInode?.dev === newTargetStat.dev
+      ? { dev: newTargetStat.dev, ino: newTargetStat.ino }
+      : null;
+    if (journalPaths) {
+      await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
+        version: RECOVERY_REBIND_JOURNAL_VERSION,
+        oldCanvasPath: path.resolve(priorCanvasPath),
+        newCanvasPath: path.resolve(targetPath),
+        phase: 'prepared',
+        canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
+        previousTargetDigest,
+        ...(renameAttestation ? { renameAttestation } : {}),
+      })));
+    }
+
+    // Production Hardening: Use atomic write to prevent data corruption. The
+    // prepared journal makes a crash after this point deterministic: opening
+    // the target completes the exact sidecar rebind before exposing recovery.
+    await atomicWriteFile(targetPath, serializedCanvas);
+    if (journalPaths) {
+      await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
+        version: RECOVERY_REBIND_JOURNAL_VERSION,
+        oldCanvasPath: path.resolve(priorCanvasPath),
+        newCanvasPath: path.resolve(targetPath),
+        phase: 'canvas-written',
+        canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
+        previousTargetDigest,
+        ...(renameAttestation ? { renameAttestation } : {}),
+      })));
+    }
+
+    const recoveryRebind = await rebindJobRecoveryOwnersForCanvasPath(priorCanvasPath, targetPath);
+    if (!recoveryRebind.success) {
+      // The canvas bytes are safely written, but do not tell the renderer to
+      // adopt a path whose recovery ownership could not be proven. A retry
+      // reconciling the still-recorded inode can finish the rebind; meanwhile
+      // no new external work is admitted by the recovery ownership gates.
+      event.sender.__pendingCanvasRecoveryRebind = journalPaths
+        ? { oldCanvasPath: priorCanvasPath, newCanvasPath: targetPath, journalPaths }
+        : null;
+      logger.error(`[FileSystem] Refused canvas-path adoption after recovery rebind failure: ${recoveryRebind.reason}`);
+      return { error: 'Could not safely move recovery data to the renamed canvas. Please retry Save before continuing work.' };
+    }
+    if (journalPaths) await clearRecoveryRebindJournals(priorCanvasPath, targetPath);
+    event.sender.__pendingCanvasRecoveryRebind = null;
 
     // Re-fingerprint: the atomic rename gave the canvas a fresh inode, so record
     // it now to recognise this exact file if it's renamed before the next save.
@@ -1692,6 +2031,16 @@ export function registerFilesystemHandlers() {
       if (canceled || filePaths.length === 0) return { canceled: true };
       targetPath = filePaths[0];
     }
+
+    const journalRecovery = await reconcileRecoveryRebindJournalForCanvas(targetPath);
+    if (journalRecovery.pending) {
+      throw new Error('Recovery ownership migration is still pending for this canvas. Retry opening it after resolving the filesystem error.');
+    }
+    // A last-opened old spelling can be gone after a Finder rename. Successful
+    // journal reconciliation proves the exact new canvas digest/attestation,
+    // so adopt only that recorded target before any existence/read/fingerprint
+    // check. This never follows an arbitrary directory JSON.
+    if (journalRecovery.adoptedCanvasPath) targetPath = journalRecovery.adoptedCanvasPath;
 
     if (!fs.existsSync(targetPath)) throw new Error('File does not exist');
     

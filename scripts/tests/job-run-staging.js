@@ -1,4 +1,4 @@
-import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
 // above stays untouched while other sessions edit it.
@@ -15,12 +15,359 @@ import { interpretJobPreferences } from '../test-dependencies.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
-import { authoritativeFreshJobSearchWindow, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
-import { collectionCompletedAtForManifest, markSourceStatus, sanitizeJobSearchWindow, setStage } from '../../electron/ipc/jobRunStaging.js';
+import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, registerJobsHandlers, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
+import { collectionCompletedAtForManifest, markProviderGathered, markSourceStatus, providerGatheredAtForManifest, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow, setStage } from '../../electron/ipc/jobRunStaging.js';
+import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
+import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
+import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../electron/ipc/jobBoardRunLease.js';
+import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, rebindJobAnalysisRecoveryOwners } from '../../electron/ipc/jobAnalysisPaths.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
+import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
+import electronPkg from 'electron';
 
 export default [
+  {
+    name: 'provider-gather boundary queues same-run Source Solve before downstream manual-AI processing finishes',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-provider-gather-boundary-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const runId = 'provider-boundary-run';
+      const nodeId = 'provider-boundary-hub';
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt: 1_700_000_000_000,
+          nodeId,
+          profileFingerprint: 'a'.repeat(64),
+          sourceIds: ['google', 'glassdoor'],
+        });
+        const beforeTerminal = await markProviderGathered(canvasPath, 1_700_000_000_100, {
+          expectedRunId: runId,
+          nodeId,
+          requiredSourceIds: ['google', 'glassdoor'],
+        });
+        assert(beforeTerminal === false
+          && !(await __canPerformJobSourceActionForTests(canvasPath, nodeId, runId)),
+        'a searching manifest with pending providers cannot authorize Source Solve');
+
+        await recordSourcePage(canvasPath, {
+          sourceId: 'google', query: '', page: 0,
+          jobs: [{ source: 'google', title: 'Platform Engineer', company: 'Example', description: 'x'.repeat(600) }],
+          now: 1_700_000_000_150,
+          expectedRunId: runId,
+          nodeId,
+        });
+        await markSourceStatus(canvasPath, 'google', 'blocked', 1_700_000_000_200, { expectedRunId: runId, nodeId });
+        await markSourceStatus(canvasPath, 'glassdoor', 'done', 1_700_000_000_300, { expectedRunId: runId, nodeId });
+        const marked = await markProviderGathered(canvasPath, 1_700_000_000_400, {
+          expectedRunId: runId,
+          nodeId,
+          requiredSourceIds: ['google', 'glassdoor'],
+        });
+        const state = await readRunState(canvasPath, 1_700_000_000_401, { nodeId });
+        assert(marked === true
+          && state?.manifest?.stage === 'searching'
+          && providerGatheredAtForManifest(state?.manifest) === 1_700_000_000_400
+          && !(await __canPerformJobSourceActionForTests(canvasPath, nodeId, runId)),
+        'the atomically terminal-checked provider boundary permits renderer queue admission, but never authorizes a source mutation before the post-filter gathered checkpoint');
+        const awaitingFinalCheckpoint = await __jobSourceActionAuthorizationForTests(canvasPath, nodeId, runId);
+        assert(awaitingFinalCheckpoint.authorized === false
+          && awaitingFinalCheckpoint.reason === 'provider-boundary-awaiting-final-checkpoint',
+        'an abnormal exit after provider collection has an explicit final-checkpoint-not-ready reason instead of silently treating the run as stale');
+        const scope = jobRunPathScopeForCanvas(canvasPath, nodeId);
+        const manifestPath = path.join(scope.dir, `${scope.base}.jobs-run.${scope.canvasHash}.${scope.ownerHash}.json`);
+        const storedLegacyManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        delete storedLegacyManifest.providerGatheredAt;
+        await fs.promises.writeFile(manifestPath, JSON.stringify(storedLegacyManifest), 'utf8');
+        assert(!(await __canPerformJobSourceActionForTests(canvasPath, nodeId, runId)),
+          'a legacy searching manifest without the explicit provider boundary remains fenced rather than exposing a strict source with no exact recovery checkpoint');
+        await setStage(canvasPath, 'gathered', 1_700_000_000_450, { expectedRunId: runId, nodeId });
+        assert(await __canPerformJobSourceActionForTests(canvasPath, nodeId, runId),
+          'the queued Source Solve becomes authorized once the normal post-filter gathered checkpoint commits');
+        return { pendingFenced: true, searchingBoundaryMutationFenced: true, legacyWithoutCheckpointFenced: true, gatheredAuthorized: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'canvas recovery gate permits same-owner nested reads past a queued writer but blocks other owners',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-recovery-reentrant-gate-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      const ownerA = { owner: 'A' };
+      const ownerB = { owner: 'B' };
+      try {
+        const outer = await acquireCanvasRecoveryRead(oldCanvas, { owner: ownerA });
+        let writerEntered = false;
+        const writer = withCanvasRecoveryRebind(oldCanvas, newCanvas, async () => {
+          writerEntered = true;
+          return { success: true };
+        });
+        await Promise.resolve();
+        const nested = await acquireCanvasRecoveryRead(oldCanvas, { owner: ownerA });
+        let otherSettled = false;
+        const other = acquireCanvasRecoveryRead(oldCanvas, { owner: ownerB }).then(lease => {
+          otherSettled = true;
+          return lease;
+        });
+        await Promise.resolve();
+        assert(writerEntered === false && otherSettled === false,
+          'a queued writer waits for both nested same-owner leases, while a different owner cannot enter after its barrier');
+        outer.release();
+        await Promise.resolve();
+        assert(writerEntered === false,
+          'releasing the outer lease alone cannot let a writer pass while the nested lease remains live');
+        nested.release();
+        await writer;
+        const otherLease = await other;
+        assert(writerEntered === true && otherLease.canvasFilePath === oldCanvas,
+          'the writer completes once all owner-A references release and owner-B enters only afterward');
+        otherLease.release();
+        const gate = __canvasRecoveryPathsForTests.gates.get(oldCanvas);
+        assert(gate?.readers === 0 && gate?.readerOwners?.size === 0,
+          'all owner refcounts are removed after release, preventing sender/owner leaks');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { nestedOwnerBypassesQueuedWriter: true, otherOwnerBlocked: true, refcountsReleased: true };
+    },
+  },
+  {
+    name: 'a live Job Board claim fences both path spellings before recovery rebind',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-rebind-gate-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      const senderA = { once() {} };
+      const senderB = { once() {} };
+      const args = { canvasFilePath: oldCanvas, nodeId: 'board-hub', boardRunId: 'board-run', operation: 'board-orchestration' };
+      try {
+        const first = await claimJobBoardRunExecution(args, { sender: senderA });
+        assert(first.ok === true, 'the initial Board execution owns a long-lived recovery reader lease');
+        let entered = false;
+        const migration = withCanvasRecoveryRebind(oldCanvas, newCanvas, async ({ installAlias }) => {
+          entered = true;
+          installAlias();
+          return { success: true };
+        });
+        await Promise.resolve();
+        assert(entered === false,
+          'reserving both exclusive path gates blocks a new-path transaction while the old Board claim is still live');
+        const nestedStaging = await withCanvasRecoveryOwner(senderA, () => startRun(oldCanvas, {
+          runId: 'board-nested-run', startedAt: 100, nodeId: 'board-hub', sourceIds: ['remoteok'],
+        }));
+        assert(nestedStaging?.runId === 'board-nested-run',
+          'a Board-owned nested staging write bypasses its queued writer barrier without releasing the Board reader');
+        assert(releaseJobBoardRunExecution({ ...args, claimToken: first.claimToken }, { sender: senderA }) === true,
+          'only the exact sender/token Board owner can release the recovery lease');
+        await migration;
+        const second = await claimJobBoardRunExecution({ ...args, canvasFilePath: newCanvas }, { sender: senderB });
+        assert(second.ok === true && releaseJobBoardRunExecution({ ...args, canvasFilePath: newCanvas, claimToken: second.claimToken }, { sender: senderB }) === true,
+          'the adopted spelling becomes claimable only after exclusive migration completes');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { boardLeaseDrained: true, crossPathFence: true };
+    },
+  },
+  {
+    name: 'destroying a Board sender releases its recovery reader and cannot leak a queued rebind',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-sender-gate-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      let onDestroyed = null;
+      const sender = { once(event, callback) { if (event === 'destroyed') onDestroyed = callback; } };
+      const args = { canvasFilePath: oldCanvas, nodeId: 'board-sender-hub', boardRunId: 'board-sender-run' };
+      try {
+        const claim = await claimJobBoardRunExecution(args, { sender });
+        assert(claim.ok === true && typeof onDestroyed === 'function',
+          'a Board sender owns a releasable long-lived recovery reader');
+        let entered = false;
+        const writer = withCanvasRecoveryRebind(oldCanvas, newCanvas, async () => { entered = true; return { success: true }; });
+        await Promise.resolve();
+        assert(entered === false, 'the queued writer observes the active sender lease');
+        onDestroyed();
+        await writer;
+        const gate = __canvasRecoveryPathsForTests.gates.get(oldCanvas);
+        assert(entered === true && gate?.readers === 0 && gate?.readerOwners?.size === 0,
+          'sender destruction releases the exact reader refcount so rebind cannot leak indefinitely');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { senderCleanupReleasedGate: true };
+    },
+  },
+  {
+    name: 'recovery path adoption moves exact job ledgers and continuations without releasing a live cross-window lease',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-rebind-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      const nodeId = 'rebind-hub';
+      const runId = 'rebind-run';
+      const continuationArgs = {
+        nodeId,
+        parentRunId: runId,
+        profileFingerprint: 'a'.repeat(64),
+        kind: 'source-recovery',
+        operation: 'resume-job-source',
+        sourceId: 'indeed',
+        searchWindow: { startTimestamp: 100, anchorTimestamp: 100, completionTimestamp: 100, providerLookbackDays: 1 },
+        canonicalLocation: 'Toronto, Ontario, Canada',
+        generationFingerprint: 'generation-1',
+        now: 100,
+      };
+      const senderA = { once() {} };
+      const senderB = { once() {} };
+      try {
+        await fs.promises.writeFile(oldCanvas, '{}');
+        await fs.promises.writeFile(newCanvas, '{}');
+        await startRun(oldCanvas, { runId, startedAt: 100, queries: ['engineer'], nodeId, sourceIds: ['indeed'] });
+        await recordSourcePage(oldCanvas, { nodeId, expectedRunId: runId, sourceId: 'indeed', query: 'engineer', page: 1, jobs: [{ id: 'exact-staged-row' }], now: 101 });
+        const begun = await beginJobContinuation(oldCanvas, continuationArgs);
+        assert(begun.ok, 'the exact continuation is durable before the path adoption');
+        const claimed = await claimJobContinuation(oldCanvas, { ...continuationArgs, intentId: begun.intent.intentId }, { sender: senderA });
+        assert(claimed.ok && claimed.leaseToken, 'the first window owns the live continuation lease');
+
+        let migrationEntered = false;
+        const migration = withCanvasRecoveryRebind(oldCanvas, newCanvas, async ({ oldPath, newPath, installAlias }) => {
+          migrationEntered = true;
+          const continuationMove = await rebindJobContinuationOwners(oldPath, newPath);
+          const runMove = await rebindJobRunRecoveryOwners(oldPath, newPath);
+          if (!runMove.success || !continuationMove.success) return { success: false, runMove, continuationMove };
+          installAlias();
+          return { success: true, runMove, continuationMove };
+        });
+        await Promise.resolve();
+        assert(migrationEntered === false,
+          'an active continuation read lease fences path migration until its exact owner releases');
+        assert(releaseJobContinuationExecution(begun.intent.intentId, claimed.leaseToken, senderA) === true,
+          'the original live lease can release before exclusive path migration proceeds');
+        const moved = await migration;
+        assert(moved.success,
+          `path adoption must move every durable job sidecar: ${JSON.stringify(moved)}`);
+        const recovered = await readRunState(newCanvas, 102, { nodeId });
+        const rows = await readStagedJobs(newCanvas, { nodeId });
+        assert(recovered?.manifest?.runId === runId && recovered.manifest.inputs?.nodeId === nodeId
+          && rows.length === 1 && rows[0]?.job?.id === 'exact-staged-row',
+        'new path retains the exact run/node and staged JSONL rows');
+        assert((await readRunState(oldCanvas, 102, { nodeId }))?.manifest?.runId === runId,
+          'the shared adoption gate resolves a captured old spelling to the moved exact owner only after every store commits');
+        const secondClaim = await claimJobContinuation(newCanvas, { ...continuationArgs, intentId: begun.intent.intentId }, { sender: senderB });
+        assert(secondClaim.ok === true
+          && releaseJobContinuationExecution(begun.intent.intentId, secondClaim.leaseToken, senderB) === true,
+          'after a drained migration, the adopted path can claim the exact continuation without retaining a stale process lock');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { stagedIdentityPreserved: true, liveLeaseDrainedBeforeMigration: true };
+    },
+  },
+  {
+    name: 'recovery path adoption fails closed on a conflicting destination sidecar',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-rebind-conflict-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      const nodeId = 'conflict-hub';
+      try {
+        await fs.promises.writeFile(oldCanvas, '{}');
+        await fs.promises.writeFile(newCanvas, '{}');
+        await startRun(oldCanvas, { runId: 'old-run', startedAt: 100, queries: ['engineer'], nodeId, sourceIds: ['indeed'] });
+        const newScope = jobRunPathScopeForCanvas(newCanvas, nodeId);
+        const conflictingManifest = path.join(newScope.dir, `${newScope.base}.jobs-run.${newScope.canvasHash}.${newScope.ownerHash}.json`);
+        await fs.promises.writeFile(conflictingManifest, JSON.stringify({ foreign: true }));
+        const moved = await rebindJobRunRecoveryOwners(oldCanvas, newCanvas);
+        assert(moved.success === false && moved.reason === 'destination-conflict'
+          && (await readRunState(oldCanvas, 101, { nodeId }))?.manifest?.runId === 'old-run',
+        'a target collision rejects path adoption without deleting or aliasing the old exact recovery owner');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { collisionFailClosed: true };
+    },
+  },
+  {
+    name: 'recovery path adoption preserves a large staged JSONL and converges a partial-unlink replay',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-rebind-large-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      const nodeId = 'large-ledger-hub';
+      try {
+        await fs.promises.writeFile(oldCanvas, '{}');
+        await fs.promises.writeFile(newCanvas, '{}');
+        await startRun(oldCanvas, { runId: 'large-ledger-run', startedAt: 100, queries: ['engineer'], nodeId, sourceIds: ['indeed'] });
+        const oldScope = jobRunPathScopeForCanvas(oldCanvas, nodeId);
+        const newScope = jobRunPathScopeForCanvas(newCanvas, nodeId);
+        const oldStaging = path.join(oldScope.dir, `${oldScope.base}.jobs-staging.${oldScope.canvasHash}.${oldScope.ownerHash}.jsonl`);
+        const newStaging = path.join(newScope.dir, `${newScope.base}.jobs-staging.${newScope.canvasHash}.${newScope.ownerHash}.jsonl`);
+        const stagedBytes = Buffer.alloc(13 * 1024 * 1024 + 4096, 0x61);
+        await fs.promises.writeFile(oldStaging, stagedBytes);
+        const firstMove = await rebindJobRunRecoveryOwners(oldCanvas, newCanvas);
+        assert(firstMove.success && (await fs.promises.readFile(newStaging)).equals(stagedBytes),
+          'a real-size staged JSONL must migrate byte-for-byte instead of tripping a small JSON sidecar cap');
+
+        // Simulate a process death after old manifest deletion but before old
+        // staging deletion: restart replay may delete only the remaining old
+        // JSONL when the exact destination manifest+bytes prove it was copied.
+        const oldManifest = path.join(oldScope.dir, `${oldScope.base}.jobs-run.${oldScope.canvasHash}.${oldScope.ownerHash}.json`);
+        const newManifest = path.join(newScope.dir, `${newScope.base}.jobs-run.${newScope.canvasHash}.${newScope.ownerHash}.json`);
+        await fs.promises.copyFile(newManifest, oldManifest);
+        await fs.promises.copyFile(newStaging, oldStaging);
+        await fs.promises.unlink(oldManifest);
+        const replay = await rebindJobRunRecoveryOwners(oldCanvas, newCanvas);
+        assert(replay.success && !(await fs.promises.access(oldStaging).then(() => true, () => false))
+          && (await fs.promises.readFile(newStaging)).equals(stagedBytes),
+        'a partial unlink replay converges without discarding the large exact ledger');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { largeLedgerPreserved: true, partialUnlinkConverged: true };
+    },
+  },
+  {
+    name: 'analysis rebind converges an orphan prompt only when its rewritten destination snapshot proves ownership',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-analysis-rebind-prompt-'));
+      const oldCanvas = path.join(root, 'before.json');
+      const newCanvas = path.join(root, 'after.json');
+      try {
+        await fs.promises.writeFile(oldCanvas, '{}');
+        await fs.promises.writeFile(newCanvas, '{}');
+        const oldPaths = getJobAnalysisPaths(oldCanvas, null);
+        const newPaths = getJobAnalysisPaths(newCanvas, null);
+        const snapshot = { canvasFilePath: oldCanvas, runId: 'analysis-run', createdAt: 100, jobs: [] };
+        await fs.promises.writeFile(oldPaths.jsonPath, JSON.stringify(snapshot));
+        await fs.promises.writeFile(oldPaths.lastSuccessJsonPaths[1], JSON.stringify({
+          ...snapshot,
+          runId: 'analysis-run-generation-2',
+          jobs: [{ title: 'retained recovery generation' }],
+          gatheredJobCount: 1,
+          // Proves analysis rebind accepts a valid populated payload above the
+          // old 32 MiB ceiling (real recovery data has reached 59.5 MiB).
+          recoveryPayload: 'x'.repeat((33 * 1024 * 1024) + 1024),
+        }));
+        await fs.promises.writeFile(oldPaths.promptPath, 'redacted prompt');
+        const first = await rebindJobAnalysisRecoveryOwners(oldCanvas, newCanvas);
+        assert(first.success && (await fs.promises.readFile(newPaths.promptPath, 'utf8')) === 'redacted prompt'
+          && (await fs.promises.readFile(newPaths.lastSuccessJsonPaths[1], 'utf8')).includes('retained recovery generation'),
+        'the initial artifact rebind rewrites the exact snapshot, preserves its paired prompt, and carries a valid numbered recovery generation above the former 32 MiB cap');
+        // Crash simulation after old JSON unlink and before old prompt unlink.
+        await fs.promises.writeFile(oldPaths.promptPath, 'redacted prompt');
+        const replay = await rebindJobAnalysisRecoveryOwners(oldCanvas, newCanvas);
+        assert(replay.success && !(await fs.promises.access(oldPaths.promptPath).then(() => true, () => false)),
+          'a replay may remove the sole old prompt only because the rewritten target snapshot proves its exact canvas owner');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+      return { orphanPromptConverged: true };
+    },
+  },
   {
     name: 'manual-AI pre-search recovery: preserves its original window and rejects an altered checkpoint',
     run: async () => {
@@ -184,12 +531,122 @@ export default [
         && jobs.includes("'job-source-card-removed'")
         && jobs.includes('CHECKPOINT_PRESERVING_ABORT_CAUSES.has(reason?.cancelCause)')
         && preserveStart >= 0 && preserveEnd > preserveStart
-        && savedStop.includes('cancelNodeTaskAndWait(')
+        && savedStop.includes('pauseJobRunAndCancel({')
+        && savedStop.includes('runId: jobRunIdRef.current || null')
+        && !savedStop.includes('cancelNodeTaskAndWait(')
         && savedStop.includes('setResumeOffer(stoppedOffer)')
         && !savedStop.includes('discardJobRun')
-        && stop.includes('resetHandler(e, { preserveRecovery: true })'),
-      'the visible Stop waits for the backend acknowledgement, retains the verified offer, and routes its checkpoint-preserving abort through the non-discarding backend policy');
+        && savedStop.includes("Pause & save acknowledged (cause=${cancellationReason || 'user-stopped'}); manual recovery saved and backend work settled")
+        && savedStop.includes('Pause & save was not acknowledged; saved checkpoint left unchanged')
+        && stop.includes('stopHandler(null);')
+        && stop.includes('Pause & save requested from AI handoff (cause=user-stopped); awaiting durable manual recovery acknowledgement')
+        && !stop.includes('handoffBridgePause')
+        && stop.includes("document.addEventListener('job-search-pause-and-save'")
+        && stop.includes('const liveRunId = activeManualAiRunIdRef.current')
+        && stop.includes('liveRunId !== detail.runId || standaloneCancellationRef.current')
+        && stop.includes('accept();')
+        && stop.includes('void Promise.resolve(pauseAndSaveHandler()).then((result) => {')
+        && stop.includes('if (result?.success === true) {')
+        && stop.includes("The Job Search stop could not be verified. Its saved checkpoint was left untouched."),
+      'the visible Stop records its request and closed acknowledgement outcome, retains the verified offer, and defers dock success until its checkpoint-preserving backend transaction settles');
       return { stoppedCheckpointRetained: true, destructiveCancelsDiscard: true };
+    },
+  },
+  {
+    name: 'paused saved-job re-analysis is labeled as score-only recovery, never as a pre-scrape stop',
+    run: () => {
+      const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const bannerStart = search.indexOf('const pausedManualAiRecovery = savedManualAiRecovery?.pausedByUser === true;');
+      const bannerEnd = search.indexOf('  const banner = (', bannerStart);
+      const banner = search.slice(bannerStart, bannerEnd);
+      assert(bannerStart >= 0 && bannerEnd > bannerStart
+        && banner.includes('const savedReanalysisManualAiRecovery = isSavedJobReanalysisManualAiResume(savedManualAiRecovery);')
+        && banner.includes("savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused'")
+        && banner.includes('Continue re-evaluates those saved jobs only; it never starts a new scrape.')
+        && banner.indexOf("savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused'")
+          < banner.indexOf("pausedManualAiRecovery ? 'Job search paused'"),
+      'a paused re-analysis must visibly preserve its saved listings/brief and must not be described as a pre-scrape search pause');
+      return { scoreOnlyPauseLabel: true };
+    },
+  },
+  {
+    name: 'interrupted scrape auto-resume is durable, exact, and explicit Stop remains manual',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-auto-resume-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'auto-resume-hub';
+      const runId = 'auto-resume-run';
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt: 100,
+          queries: ['platform engineer'],
+          canonicalLocation: 'Toronto, Ontario, Canada',
+          nodeId,
+          sourceIds: ['indeed', 'usajobs'],
+        });
+        let state = await readRunState(canvasPath, 101, { nodeId });
+        assert(isJobRunAutomaticRecoveryEligible(state?.manifest) === true,
+          'a fresh/legacy manifest must default to automatic restart recovery');
+
+        const wrongPause = await pauseRunForManualResume(canvasPath, {
+          expectedRunId: 'replacement-run', nodeId, now: 102,
+        });
+        state = await readRunState(canvasPath, 103, { nodeId });
+        assert(wrongPause?.tokenMismatch === true
+          && isJobRunAutomaticRecoveryEligible(state?.manifest) === true,
+        'a late Stop acknowledgement cannot pause a replacement run');
+
+        const pause = await pauseRunForManualResume(canvasPath, {
+          expectedRunId: runId, nodeId, now: 104,
+        });
+        state = await readRunState(canvasPath, 105, { nodeId });
+        assert(pause?.ok === true
+          && pause?.paused === true
+          && state?.manifest?.recoveryDisposition === 'manual'
+          && isJobRunAutomaticRecoveryEligible(state?.manifest) === false,
+        'an explicit Stop must durably retain the checkpoint while suppressing startup auto-resume');
+
+        const wrongActivation = await activateRunForResume(canvasPath, {
+          expectedRunId: 'replacement-run', nodeId, now: 106,
+        });
+        state = await readRunState(canvasPath, 107, { nodeId });
+        assert(wrongActivation?.tokenMismatch === true
+          && state?.manifest?.recoveryDisposition === 'manual',
+        'a stale Resume cannot re-arm a different paused generation');
+
+        const activation = await activateRunForResume(canvasPath, {
+          expectedRunId: runId, nodeId, now: 108,
+        });
+        state = await readRunState(canvasPath, 109, { nodeId });
+        assert(activation?.ok === true
+          && activation?.activated === true
+          && isJobRunAutomaticRecoveryEligible(state?.manifest) === true,
+        'an exact Resume must re-arm automatic recovery before continued work');
+
+        const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+        const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+        const effectStart = search.indexOf('// Unexpected app/window interruption resumes without another click.');
+        const effectEnd = search.indexOf('const handleFinishWithSavedListings', effectStart);
+        const effect = search.slice(effectStart, effectEnd);
+        assert(effectStart >= 0 && effectEnd > effectStart
+          && effect.includes('offer?.autoResumeEligible === false')
+          && effect.includes('resumeRunActionable')
+          && effect.includes('isJobSearchConnectedToBoard(id, getNodes(), getEdges())')
+          && effect.includes('automaticProviderRequest?.providerPhaseOnly !== true')
+          && effect.includes('handleResumeRun({ offer, providerPhaseOnly: true })')
+          && effect.includes('autoResumedInterruptedRunRef.current === recoveryKey'),
+        'startup recovery must be exact, one-shot, provider-only, and excluded whenever a Job Board owns admission');
+        assert(jobs.includes("handleSafe('pause-job-run'")
+          && jobs.includes("preflight('activate exact recovery'")
+          && jobs.includes('pauseRunForManualResume(canvasFilePath, {')
+          && preload.includes("pauseJobRun:    (args) => ipcRenderer.invoke('pause-job-run', args)"),
+        'Stop must persist before acknowledgement and every exact continuation must re-arm future crash recovery');
+        return { startupAutoResume: true, explicitStopManual: true, exactGenerationFenced: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -588,7 +1045,7 @@ export default [
         // Post-lease liveness fence. It now also stamps the outcome the finally
         // reports, so a "Solve all" driver awaiting this card cannot hang on a
         // card that unmounted while its lease was queued.
-        && sourceCard.includes("if (!resolverAlive()) { solveOutcome = 'fenced'; return; }"),
+        && sourceCard.includes("if (!resolverAlive()) { solveOutcome = 'interrupted'; return; }"),
       'a removed gating source card must cancel its exact paused Board generation without a raw hub abort, while standalone resolvers retain their queued/active cancellation boundary despite provider snapshot rerenders');
       return { sharedLane: true, queuedCancellation: true, ownedResetPreservesParentAlias: true, sameHubActiveSiblingProtected: true, sourceCardLifecycleCancellation: true, exactBoardSourceCardCancellation: true, snapshotRerenderSafe: true };
     },
@@ -668,12 +1125,13 @@ export default [
         'an omitted row is accepted by the relaxed validator so it can be re-requested on its own');
 
       // The adaptive sizer, driven end to end through the injected seam.
-      // One round issues up to MANUAL_HANDOFF_CONCURRENCY (10) batches, so the
+      // One planned group issues up to HANDOFF_CONCURRENCY (10) batches, so the
       // pool has to exceed 10 x the initial size before a second round exists.
       // Round 1 uses the conservative static size; later rounds re-size from
       // what the previous responses actually cost — here, a model that turned
       // sharply more verbose, which must shrink the next round.
       const sizedRounds = [];
+      const queuedWorkForecasts = [];
       let observed = null;
       const remembered = new Map();
       const manyJobs = Array.from({ length: 150 }, (_, i) => ({
@@ -689,7 +1147,8 @@ export default [
           recallRoundSize: (round) => remembered.get(round) ?? null,
           rememberRoundSize: (round, size, passKey, rate) => { remembered.set(round, { size, rate }); sizedRounds.push(size); },
         },
-        callText: async (prompt) => {
+        callText: async (prompt, options) => {
+          queuedWorkForecasts.push(options.hints.queuedWorkForecast);
           // Count the listings this prompt actually carried.
           const carried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
           // After the first response, report a verbose model: cost per match
@@ -707,6 +1166,189 @@ export default [
         `the run must re-size at least once rather than fixing a size up front, got ${sizedRounds.length} round(s)`);
       assert(sizedRounds[1] < sizedRounds[0],
         `a model that became more verbose must shrink the next round (${sizedRounds[0]} -> ${sizedRounds[1]})`);
+      const initialForecast = queuedWorkForecasts[0];
+      const initialUnits = Math.ceil(manyJobs.length / sizedRounds[0]);
+      assert(queuedWorkForecasts.length >= 10
+        && typeof initialForecast?.scopeId === 'string'
+        && initialForecast.remainingUnits === initialUnits
+        && queuedWorkForecasts.slice(0, 10).every(forecast => forecast?.scopeId === initialForecast.scopeId)
+        && initialUnits > 10,
+      `the first ten visible preference handoffs must share one private forecast for all ${initialUnits} remaining root batches, got ${JSON.stringify(queuedWorkForecasts.slice(0, 10))}`);
+
+      // A single slow response must not strand the other nine worker chats.
+      // Preserve the ten-descriptor durable group, but replenish a completed
+      // root slot from the next group immediately.  The held first call is
+      // deliberately left unresolved while calls 2–10 finish.
+      const rollingJobs = Array.from({ length: 11 }, (_, index) => ({
+        title: `Rolling Engineer ${index + 1}`,
+        url: `https://jobs.example.test/rolling-${index + 1}`,
+        snippet: 'Engineer role.',
+      }));
+      const rollingCalls = [];
+      let rollingActive = 0;
+      let rollingPeak = 0;
+      const rollingResult = evaluateJobPreferences({
+        jobs: rollingJobs,
+        jobPreferences: 'I want to pivot away from web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        calibration: {
+          // One listing per root makes the ten live slots and the eleventh
+          // replacement unambiguous, while recalled sizes keep this test on
+          // the durable-layout path rather than a calculated coincidence.
+          recallRoundSize: () => ({ size: 1, rate: 1200 }),
+          observedTokensPerMatch: () => { throw new Error('recalled rolling layout must not re-size'); },
+          rememberRoundSize: () => { throw new Error('recalled rolling layout must not be re-recorded'); },
+        },
+        callText: async (_prompt, options) => new Promise(resolve => {
+          rollingActive += 1;
+          rollingPeak = Math.max(rollingPeak, rollingActive);
+          const call = {
+            batch: options.hints.batch,
+            released: false,
+            release() {
+              if (call.released) return;
+              call.released = true;
+              rollingActive -= 1;
+              resolve({ assessments: [{
+                index: 0,
+                matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
+              }] });
+            },
+          };
+          rollingCalls.push(call);
+        }),
+      });
+      for (let attempt = 0; attempt < 100 && rollingCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(rollingCalls.length === 10 && rollingPeak === 10,
+        `the initial listing-evaluation roster must fill exactly ten root slots, got ${JSON.stringify({ calls: rollingCalls.length, rollingPeak })}`);
+      rollingCalls.slice(1, 10).forEach(call => call.release());
+      for (let attempt = 0; attempt < 100 && rollingCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(rollingCalls.length === 11
+        && rollingCalls[0].released === false
+        && rollingCalls[10].batch === 11
+        && rollingPeak <= 10,
+      `a settled root slot must launch batch 11 before a slow sibling finishes, without exceeding ten active roots: ${JSON.stringify({ batches: rollingCalls.map(call => call.batch), rollingPeak })}`);
+      rollingCalls[0].release();
+      rollingCalls[10].release();
+      const rolled = await rollingResult;
+      assert(rolled.candidatePool.length === rollingJobs.length && rollingActive === 0,
+        `rolling listing evaluation must finish every row after replacing idle slots, got ${JSON.stringify({ jobs: rolled.candidatePool.length, rollingActive })}`);
+
+      // A worker failure must abort every sibling before any of their completed
+      // slots can claim a replacement descriptor.  Keep all ten initial
+      // prompts deferred so the test observes the shared signal directly.
+      const failureJobs = Array.from({ length: 11 }, (_, index) => ({
+        title: `Failure Engineer ${index + 1}`,
+        url: `https://jobs.example.test/failure-${index + 1}`,
+        snippet: 'Engineer role.',
+      }));
+      const failureCalls = [];
+      const failureRun = evaluateJobPreferences({
+        jobs: failureJobs,
+        jobPreferences: 'I want to pivot away from web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        calibration: {
+          recallRoundSize: () => ({ size: 1, rate: 1200 }),
+          observedTokensPerMatch: () => { throw new Error('failed rolling layout must not re-size'); },
+          rememberRoundSize: () => { throw new Error('failed rolling layout must not be re-recorded'); },
+        },
+        callText: async (_prompt, options) => new Promise((resolve, reject) => {
+          failureCalls.push({ signal: options.signal, resolve, reject });
+        }),
+      });
+      for (let attempt = 0; attempt < 100 && failureCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const firstError = new Error('first root failed');
+      failureCalls[0].reject(firstError);
+      for (let attempt = 0; attempt < 100 && !failureCalls.slice(1).every(call => call.signal.aborted); attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(failureCalls.length === 10
+        && failureCalls.slice(1).every(call => call.signal.aborted),
+      `the first failed root must synchronously abort all ten-worker siblings before refilling, got ${JSON.stringify({ calls: failureCalls.length, aborted: failureCalls.slice(1).filter(call => call.signal.aborted).length })}`);
+      failureCalls.slice(1).forEach(call => call.resolve({ assessments: [{
+        index: 0,
+        matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
+      }] }));
+      const failureOutcome = await failureRun.then(() => null, error => error);
+      assert(failureOutcome === firstError,
+        'the automatic roster preserves its first failure after aborted siblings drain');
+      for (let attempt = 0; attempt < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(failureCalls.length === 10,
+        `settling aborted sibling promises must not materialize batch 11, got ${failureCalls.length} calls`);
+
+      // A partial-row follow-up is part of its root slot.  With twelve roots,
+      // prove batch 11 can fill a different completed slot while batch 12 must
+      // wait for the first root's follow-up instead of treating its initial
+      // permissive response as completion.
+      const recoveryJobs = Array.from({ length: 12 }, (_, index) => ({
+        title: `Recovery Engineer ${index + 1}`,
+        url: `https://jobs.example.test/recovery-${index + 1}`,
+        snippet: 'Engineer role.',
+      }));
+      const recoveryCalls = [];
+      const activeRootSlots = new Set();
+      let peakRootSlots = 0;
+      const recoveryRun = evaluateJobPreferences({
+        jobs: recoveryJobs,
+        jobPreferences: 'I want to pivot away from web development.',
+        preferencePlan: valid,
+        callRaw: () => { throw new Error('a soft role preference must not need web research'); },
+        calibration: {
+          recallRoundSize: () => ({ size: 1, rate: 1200 }),
+          observedTokensPerMatch: () => { throw new Error('partial-recovery layout must not re-size'); },
+          rememberRoundSize: () => { throw new Error('partial-recovery layout must not be re-recorded'); },
+        },
+        callText: async (_prompt, options) => new Promise(resolve => {
+          const rootId = options.hints.progressUnitId;
+          if (!activeRootSlots.has(rootId)) activeRootSlots.add(rootId);
+          peakRootSlots = Math.max(peakRootSlots, activeRootSlots.size);
+          const call = {
+            batch: options.hints.batch,
+            rootId,
+            partialRecovery: options.hints.attemptKind === 'partial-recovery',
+            released: false,
+            release({ incomplete = false } = {}) {
+              if (call.released) return;
+              call.released = true;
+              // An incomplete first pass retains its root slot for the
+              // targeted follow-up. Every complete root/follow-up frees it.
+              if (!incomplete) activeRootSlots.delete(rootId);
+              resolve(incomplete
+                ? { assessments: [] }
+                : { assessments: [{
+                  index: 0,
+                  matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
+                }] });
+            },
+          };
+          recoveryCalls.push(call);
+        }),
+      });
+      for (let attempt = 0; attempt < 100 && recoveryCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const rootOne = recoveryCalls.find(call => call.batch === 1 && !call.partialRecovery);
+      const rootTwo = recoveryCalls.find(call => call.batch === 2 && !call.partialRecovery);
+      rootOne.release({ incomplete: true });
+      for (let attempt = 0; attempt < 100 && recoveryCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const followUp = recoveryCalls.find(call => call.batch === 1 && call.partialRecovery);
+      assert(Boolean(followUp) && !recoveryCalls.some(call => call.batch === 11)
+        && activeRootSlots.size === 10 && peakRootSlots <= 10,
+      `a partial response must retain its root slot while its follow-up is pending, got ${JSON.stringify({ calls: recoveryCalls.map(call => [call.batch, call.partialRecovery]), slots: activeRootSlots.size, peakRootSlots })}`);
+      rootTwo.release();
+      for (let attempt = 0; attempt < 100 && !recoveryCalls.some(call => call.batch === 11); attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(recoveryCalls.filter(call => call.batch === 11).length === 1
+        && !recoveryCalls.some(call => call.batch === 12)
+        && followUp.released === false && activeRootSlots.size === 10 && peakRootSlots <= 10,
+      `a different completed root may launch batch 11, but batch 12 must still await root 1's follow-up: ${JSON.stringify({ calls: recoveryCalls.map(call => [call.batch, call.partialRecovery]), slots: activeRootSlots.size, peakRootSlots })}`);
+      followUp.release();
+      for (let attempt = 0; attempt < 100 && !recoveryCalls.some(call => call.batch === 12); attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(recoveryCalls.filter(call => call.batch === 12).length === 1
+        && activeRootSlots.size === 10 && peakRootSlots <= 10,
+      `only settling the targeted follow-up may refill its root slot with batch 12, got ${JSON.stringify({ calls: recoveryCalls.map(call => [call.batch, call.partialRecovery]), slots: activeRootSlots.size, peakRootSlots })}`);
+      recoveryCalls.filter(call => !call.released).forEach(call => call.release());
+      const recoveredRolling = await recoveryRun;
+      assert(recoveredRolling.candidatePool.length === recoveryJobs.length && activeRootSlots.size === 0,
+        `partial-recovery rolling evaluation must complete every row and release every root slot, got ${JSON.stringify({ jobs: recoveredRolling.candidatePool.length, slots: activeRootSlots.size })}`);
+
       // Replay determinism: a recorded size wins over recomputation, because by
       // replay time the calibration has evidence the first pass did not.
       const replayRounds = [];
@@ -1494,14 +2136,16 @@ export default [
         && rawProgressHints.every(hints => hints.itemsTotal === 13 && hints.progressUnits > 0)
         && typeof rawProgressHints[0]?.progressScopeId === 'string'
         && rawProgressHints.every(hints => hints.progressScopeId === rawProgressHints[0].progressScopeId)
+        && rawProgressHints.every(hints => hints.queuedWorkForecast?.scopeId === rawProgressHints[0].progressScopeId)
+        && JSON.stringify(rawProgressHints.map(hints => hints.queuedWorkForecast?.remainingUnits)) === JSON.stringify([2, 1])
         && JSON.stringify(rawProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(['company-research-raw-1', 'company-research-raw-2'])
         && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([12, 1])
         && assessmentProgressHints.length === 1
-        && assessmentProgressHints[0].itemsDone === 0 && assessmentProgressHints[0].itemsTotal === 13
-        && assessmentProgressHints[0].progressUnitId === 'company-research-assessment-1'
-        && assessmentProgressHints[0].progressUnits === 13
-        && typeof assessmentProgressHints[0].progressScopeId === 'string'
-        && assessmentProgressHints[0].progressScopeId !== rawProgressHints[0].progressScopeId
+        && assessmentProgressHints[0].itemCount === 13
+        && !Object.hasOwn(assessmentProgressHints[0], 'itemsDone')
+        && !Object.hasOwn(assessmentProgressHints[0], 'itemsTotal')
+        && !Object.hasOwn(assessmentProgressHints[0], 'progressUnitId')
+        && !Object.hasOwn(assessmentProgressHints[0], 'progressScopeId')
         && rejectedRawContracts === invalidRawSections.length
         && batchRawCalls.every(call => call.prompt.includes('BEGIN RESEARCH <researchId>') && !call.prompt.includes('COPY-READY RESEARCH OUTPUT SKELETON'))
         && batchRawCalls.every(call => call.options.displayOnlyPromptSuffix
@@ -1599,7 +2243,7 @@ export default [
     },
   },
   {
-    name: 'job preferences: restored role screens fill a stable ten-prompt wave with fresh screens',
+    name: 'job preferences: automatic role screens refill a ten-worker roster while a sibling remains slow',
     run: async () => {
       const jobs = Array.from({ length: 3_000 }, (_, index) => ({
         title: `Wave Target ${index}`,
@@ -1614,8 +2258,8 @@ export default [
         jobs,
         titles: ['Wave Target'],
         // The first original v1 chunk has a durable prompt; every remaining
-        // row is fresh v2 work. Their row sets are disjoint, so the exact
-        // replay must share the same fixed ten-prompt work set.
+        // row is fresh v2 work. Their row sets are disjoint, so a completed
+        // automatic slot can immediately take another stable descriptor.
         legacyRoleScreenStepProbe: async ({ hints }) => {
           probeCount += 1;
           return hints.itemCount === 200 && probeCount === 1;
@@ -1623,6 +2267,7 @@ export default [
         callText: async (_prompt, options) => new Promise(resolve => {
           const call = { task: options.task, resolve, released: false };
           calls.push(call);
+          call.activeAtStart = calls.filter(entry => !entry.released).length;
           releases.set(call, () => {
             if (call.released) return;
             call.released = true;
@@ -1635,16 +2280,14 @@ export default [
       assert(calls.length === 10
         && calls.filter(call => call.task === 'job-role-screen').length === 1
         && calls.filter(call => call.task === 'job-role-screen-batch').length === 9,
-      `one restored role screen plus nine fresh screens must fill the first fixed wave, got ${JSON.stringify(calls.map(call => call.task))}`);
+      `one restored role screen plus nine fresh screens must fill the first automatic roster, got ${JSON.stringify(calls.map(call => call.task))}`);
       releases.get(calls[0])();
-      await new Promise(resolve => setImmediate(resolve));
-      assert(calls.length === 10,
-        `a solved restored role screen must not be replaced before the first work set settles, got ${calls.length}`);
+      for (let attempt = 0; attempt < 100 && calls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(calls.length === 11 && calls[10].task === 'job-role-screen-batch'
+        && Math.max(...calls.map(call => call.activeAtStart)) === HANDOFF_CONCURRENCY,
+      `a completed automatic slot must immediately refill without exceeding ten workers, got ${JSON.stringify(calls.map(call => ({ task: call.task, active: call.activeAtStart })) )}`);
       calls.slice(1).forEach(call => releases.get(call)());
       for (let attempt = 0; attempt < 100 && calls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(calls.length === 11 && calls[10].task === 'job-role-screen-batch',
-        `the next fresh role screen must wait for the whole mixed wave, got ${JSON.stringify(calls.map(call => call.task))}`);
-      releases.get(calls[10])();
       const result = await run;
       assert(result.acceptedJobs.length === jobs.length && result.droppedJobs.length === 0,
         'mixed restored/fresh role screens preserve every fail-open listing result');
@@ -1698,18 +2341,196 @@ export default [
         && rawProgressHints.every(hints => hints.itemsTotal === 28 && hints.progressScopeId === rawProgressHints[0].progressScopeId)
         && JSON.stringify(rawProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(['company-research-raw-1', 'company-research-raw-2', 'company-research-raw-3'])
         && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([12, 12, 4])
-        && JSON.stringify(assessmentProgressHints.map(hints => hints.itemsDone)) === JSON.stringify([0, 0])
-        && assessmentProgressHints.every(hints => hints.itemsTotal === 28 && hints.progressScopeId === assessmentProgressHints[0].progressScopeId)
-        && JSON.stringify(assessmentProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(['company-research-assessment-1', 'company-research-assessment-2'])
-        && JSON.stringify(assessmentProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([27, 1])
-        && assessmentProgressHints[0].progressScopeId !== rawProgressHints[0].progressScopeId
+        && JSON.stringify(assessmentProgressHints.map(hints => hints.itemCount)) === JSON.stringify([27, 1])
+        && assessmentProgressHints.every(hints => !Object.hasOwn(hints, 'itemsDone')
+          && !Object.hasOwn(hints, 'itemsTotal')
+          && !Object.hasOwn(hints, 'progressScopeId')
+          && !Object.hasOwn(hints, 'progressUnitId'))
         && JSON.stringify(assessmentIds) === JSON.stringify(rawIds),
       `raw partitions must stay at twelve while the dependent verdicts pack in stable order through 27, got ${JSON.stringify({ rawBatches, assessmentBatches })}`);
       return { raw: rawBatches.map(ids => ids.length), assessment: assessmentBatches.map(ids => ids.length) };
     },
   },
   {
-    name: 'job preferences: company research keeps ten independent handoffs available',
+    name: 'job preferences: ready company assessments refill the shared raw roster before a slow raw tail settles',
+    run: async () => {
+      const jobs = Array.from({ length: 132 }, (_, index) => ({ title: 'Engineer', company: `Pipelined Company ${index}` }));
+      const plan = {
+        version: 1, summary: '',
+        direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
+        softPreferences: [], strictRequirements: [{ id: 'benefit', criterion: 'Published training budget', category: 'perk' }],
+        warnings: [], titles: [],
+      };
+      const rawCalls = [];
+      const assessmentCalls = [];
+      const pending = [];
+      let gateOpen = false;
+      let active = 0;
+      let peak = 0;
+      const delay = (kind, payload, value) => {
+        if (gateOpen) return Promise.resolve(value);
+        active += 1;
+        peak = Math.max(peak, active);
+        const call = { kind, payload, released: false, release: null };
+        const wait = new Promise(resolve => {
+          call.release = () => {
+            if (call.released) return;
+            call.released = true;
+            active -= 1;
+            resolve(value);
+          };
+        });
+        pending.push(call);
+        return wait;
+      };
+      const result = evaluateJobPreferences({
+        jobs,
+        jobPreferences: 'Published training budget',
+        preferencePlan: plan,
+        callRaw: (prompt, options) => {
+          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
+          const value = ids.map(id => `BEGIN RESEARCH ${id}\nPublished training budget. https://example.test/${id}\nEND RESEARCH ${id}`).join('\n');
+          const wait = delay('raw', ids, value);
+          rawCalls.push(pending[pending.length - 1]);
+          assert(options.task === 'job-preference-research-batch', `expected only packed raw calls, got ${options.task}`);
+          return wait;
+        },
+        callText: (prompt, options) => {
+          if (options.task === 'job-preference-evaluation') {
+            return { assessments: Array.from({ length: options.hints.itemCount }, (_, index) => ({
+              index, matches: [{ preferenceId: 'benefit', outcome: 'unverified', evidence: 'Not listed.' }],
+            })) };
+          }
+          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
+          const value = { assessments: ids.map(id => ({
+            researchId: id, preferenceId: 'benefit', outcome: 'confirmed', evidence: 'Benefits page.',
+            evidenceQuote: 'Published training budget.', sourceUrls: [`https://example.test/${id}`], sourceDate: '',
+          })) };
+          const wait = delay('assessment', ids, value);
+          assessmentCalls.push(pending[pending.length - 1]);
+          return wait;
+        },
+      });
+      for (let attempt = 0; attempt < 100 && rawCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(rawCalls.length === 10 && peak === 10,
+        `the initial company-research roster must fill ten slots, got ${JSON.stringify({ rawCalls: rawCalls.length, peak })}`);
+      rawCalls.slice(0, 3).forEach(call => call.release());
+      for (let attempt = 0; attempt < 100 && assessmentCalls.length < 1; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(assessmentCalls.length >= 1
+        && rawCalls[9]?.released === false
+        && active <= 10
+        && peak <= 10,
+      `three completed raw partitions must unlock an assessment while the slow raw tail still occupies the shared cap, got ${JSON.stringify({ raw: rawCalls.length, assessments: assessmentCalls.length, active, peak, slowTailReleased: rawCalls[9]?.released })}`);
+      gateOpen = true;
+      pending.forEach(call => call.release());
+      const completed = await result;
+      assert(completed.acceptedJobs.length === jobs.length && active === 0,
+        `the pipelined research roster must drain every result without leaking a worker, got ${JSON.stringify({ jobs: completed.acceptedJobs.length, active })}`);
+      return { initialRaw: 10, overlappingAssessments: assessmentCalls.length, peak };
+    },
+  },
+  {
+    name: 'handoff scheduler: automatic workers cap, refill immediately, and preserve source-order output',
+    run: async () => {
+      const started = [];
+      const workerSignals = [];
+      const controller = new AbortController();
+      let active = 0;
+      let peak = 0;
+      const scheduler = mapAutomaticHandoffs(['a', 'b', 'c', 'd'], 2, (item, index, { signal }) => new Promise(resolve => {
+        active += 1;
+        peak = Math.max(peak, active);
+        workerSignals.push(signal);
+        started.push({ item, index, resolve: value => { active -= 1; resolve(value); } });
+      }), { abortController: controller });
+      for (let attempt = 0; attempt < 100 && started.length < 2; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      started[1].resolve('B');
+      for (let attempt = 0; attempt < 100 && started.length < 3; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      started[2].resolve('C');
+      for (let attempt = 0; attempt < 100 && started.length < 4; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      started[3].resolve('D');
+      let settled = false;
+      void scheduler.then(() => { settled = true; });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(!settled && peak === 2 && active === 1
+        && JSON.stringify(started.map(call => call.index)) === JSON.stringify([0, 1, 2, 3]),
+      `a slow sibling must not block refill or let automatic workers exceed their cap, got ${JSON.stringify({ active, peak, started: started.map(call => call.index) })}`);
+      started[0].resolve('A');
+      const output = await scheduler;
+      assert(JSON.stringify(output) === JSON.stringify(['A', 'B', 'C', 'D']) && active === 0
+        && workerSignals.every(signal => signal === controller.signal),
+        `automatic results must retain source order after out-of-order completion, got ${JSON.stringify(output)}`);
+      return { peak, output };
+    },
+  },
+  {
+    name: 'handoff scheduler: automatic workers stop refilling after a rejected handoff',
+    run: async () => {
+      const started = [];
+      let active = 0;
+      let peak = 0;
+      const scheduler = mapAutomaticHandoffs([0, 1, 2], 2, index => new Promise((resolve, reject) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        started.push({ index, resolve: value => { active -= 1; resolve(value); }, reject: error => { active -= 1; reject(error); } });
+      }));
+      const outcome = scheduler.then(() => null, error => error);
+      for (let attempt = 0; attempt < 100 && started.length < 2; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      const failure = new Error('first research handoff failed');
+      started[0].reject(failure);
+      started[1].resolve('second result');
+      const rejected = await outcome;
+      for (let attempt = 0; attempt < 20; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      assert(rejected === failure && peak === 2 && active === 0
+        && JSON.stringify(started.map(call => call.index)) === JSON.stringify([0, 1]),
+      `a rejected rolling handoff must stop successor issuance after the failure, got ${JSON.stringify({ started: started.map(call => call.index), active, peak })}`);
+      return { started: started.length, peak };
+    },
+  },
+  {
+    name: 'handoff scheduler: lazy workers abort, drain active work, and preserve the first error',
+    run: async () => {
+      const controller = new AbortController();
+      const claims = [0, 1, 2];
+      const started = [];
+      let rejectFirst;
+      let releaseSecond;
+      let secondSignal = null;
+      const failure = new Error('first automatic handoff failed');
+      const scheduler = runAutomaticHandoffWorkers({
+        workerCount: 2,
+        abortController: controller,
+        claim: () => claims.shift() ?? null,
+        work: (claimed, { signal }) => new Promise((resolve, reject) => {
+          started.push(claimed);
+          if (claimed === 0) rejectFirst = reject;
+          else {
+            secondSignal = signal;
+            releaseSecond = resolve;
+          }
+        }),
+      });
+      let settled = false;
+      const outcome = scheduler.then(
+        () => null,
+        error => { settled = true; return error; },
+      );
+      for (let attempt = 0; attempt < 100 && started.length < 2; attempt += 1) await new Promise(resolve => setImmediate(resolve));
+      rejectFirst(failure);
+      await new Promise(resolve => setImmediate(resolve));
+      assert(controller.signal.aborted && secondSignal?.aborted && !settled
+        && JSON.stringify(started) === JSON.stringify([0, 1])
+        && JSON.stringify(claims) === JSON.stringify([2]),
+      `a lazy failure must abort shared work, avoid successor claims, and wait for active work, got ${JSON.stringify({ aborted: controller.signal.aborted, secondAborted: secondSignal?.aborted, settled, started, claims })}`);
+      releaseSecond();
+      const rejected = await outcome;
+      assert(rejected === failure && settled,
+        'the lazy worker roster must reject with its first failure only after active siblings drain');
+      return { drained: true, preservedFirstError: true };
+    },
+  },
+  {
+    name: 'job preferences: company research refills a ten-handoff roster as each prompt settles',
     run: async () => {
       const jobs = Array.from({ length: 121 }, (_, index) => ({
         title: 'Engineer',
@@ -1737,11 +2558,11 @@ export default [
         jobs,
         jobPreferences: 'Required parallelism benefit',
         preferencePlan: plan,
-        callRaw: async prompt => new Promise((resolve) => {
+        callRaw: async (prompt, options) => new Promise((resolve) => {
           const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
           activeRawCalls += 1;
           peakRawCalls = Math.max(peakRawCalls, activeRawCalls);
-          rawCalls.push({ ids, resolve, released: false });
+          rawCalls.push({ ids, options, resolve, released: false });
         }),
         callText: async (prompt, options) => {
           if (options.task === 'job-preference-evaluation') {
@@ -1766,31 +2587,30 @@ export default [
         await new Promise(resolve => setImmediate(resolve));
       }
       assert(rawCalls.length === 10 && activeRawCalls === 10 && peakRawCalls === 10,
-        `the first research wave must fill all ten manual handoff slots, got ${JSON.stringify({ issued: rawCalls.length, activeRawCalls, peakRawCalls })}`);
+        `the initial research roster must fill all ten manual handoff slots, got ${JSON.stringify({ issued: rawCalls.length, activeRawCalls, peakRawCalls })}`);
 
-      releaseRawCall(rawCalls[0]);
+      // Keep batch 1 deliberately slow.  Settling batch 2 must immediately
+      // materialize batch 11, proving this is a work-conserving roster rather
+      // than a fixed ten-prompt wave.
+      releaseRawCall(rawCalls[1]);
       for (let attempt = 0; attempt < 100 && rawCalls.length < 11; attempt += 1) {
         await new Promise(resolve => setImmediate(resolve));
       }
-      assert(rawCalls.length === 10 && activeRawCalls === 9 && peakRawCalls === 10,
-        `a completed prompt must not churn a replacement into the current fixed wave, got ${JSON.stringify({ issued: rawCalls.length, activeRawCalls, peakRawCalls })}`);
+      assert(rawCalls.length === 11 && activeRawCalls === 10 && peakRawCalls === 10
+        && rawCalls[0].released === false && rawCalls[10].options?.hints?.batch === 11,
+      `a settled research prompt must immediately refill its slot while a slow sibling remains active, got ${JSON.stringify({ issued: rawCalls.length, activeRawCalls, peakRawCalls, batches: rawCalls.map(call => call.options?.hints?.batch) })}`);
 
       rawCalls.forEach(releaseRawCall);
-      for (let attempt = 0; attempt < 100 && rawCalls.length < 11; attempt += 1) {
-        await new Promise(resolve => setImmediate(resolve));
-      }
-      assert(rawCalls.length === 11 && activeRawCalls === 1 && peakRawCalls === 10,
-        `the next prompt must begin only after the whole ten-request wave settles, got ${JSON.stringify({ issued: rawCalls.length, activeRawCalls, peakRawCalls })}`);
-      releaseRawCall(rawCalls[10]);
       const result = await run;
       assert(result.acceptedJobs.length === jobs.length
+        && JSON.stringify(result.acceptedJobs.map(job => job.company)) === JSON.stringify(jobs.map(job => job.company))
         && JSON.stringify(rawCalls.map(call => call.ids.length)) === JSON.stringify([...Array(10).fill(12), 1]),
-      `all eleven deterministic research batches must finish in fixed ten-wide waves, got ${JSON.stringify(rawCalls.map(call => call.ids.length))}`);
+      `all eleven deterministic research batches must preserve stable output order while refilling the bounded roster, got ${JSON.stringify(rawCalls.map(call => call.ids.length))}`);
       return { initialPending: 10, peakPending: peakRawCalls, totalBatches: rawCalls.length };
     },
   },
   {
-    name: 'job preferences: restored legacy research fills the first fixed ten-request wave with fresh batches',
+    name: 'job preferences: restored legacy research refills the ten-request roster with fresh batches',
     run: async () => {
       const legacyCompanies = ['Restored Legacy Four', 'Restored Legacy Five', 'Restored Legacy Six'];
       const jobs = [
@@ -1805,10 +2625,13 @@ export default [
       };
       const probePrompts = new Map();
       const rawCalls = [];
+      let activeRawCalls = 0;
+      let peakRawCalls = 0;
       const legacyUrl = company => `https://example.test/${company.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
       const release = (call) => {
         if (!call || call.released) return;
         call.released = true;
+        activeRawCalls -= 1;
         if (call.options.task === 'job-preference-research') {
           call.resolve(`Legacy evidence: Published restart benefit. ${legacyUrl(call.company)}`);
           return;
@@ -1832,6 +2655,8 @@ export default [
         callRaw: async (prompt, options) => new Promise(resolve => {
           const company = legacyCompanies.find(name => prompt.includes(name)) || null;
           const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
+          activeRawCalls += 1;
+          peakRawCalls = Math.max(peakRawCalls, activeRawCalls);
           rawCalls.push({ prompt, options, company, ids, resolve, released: false });
         }),
         callText: async (prompt, options) => {
@@ -1862,21 +2687,20 @@ export default [
       assert(firstWave.length === 10
         && firstWave.filter(call => call.options.task === 'job-preference-research').length === 3
         && firstWave.filter(call => call.options.task === 'job-preference-research-batch').length === 7
+        && activeRawCalls === 10 && peakRawCalls === 10
         && legacyCompanies.every(company => stableLegacyContract(firstWave.find(call => call.company === company)?.prompt) === stableLegacyContract(probePrompts.get(company))),
-      `three exact restored legacy prompts must retain their original contracts while seven fresh batches fill the first wave, got ${JSON.stringify(firstWave.map(call => ({ task: call.options.task, company: call.company, ids: call.ids.length })))} `);
+      `three exact restored legacy prompts must retain their original contracts while seven fresh batches fill the initial roster, got ${JSON.stringify(firstWave.map(call => ({ task: call.options.task, company: call.company, ids: call.ids.length })))} `);
       release(firstWave[0]);
-      for (let attempt = 0; attempt < 50; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(rawCalls.length === 10,
-        `accepting one restored legacy handoff must not replace it before the first fixed wave settles, got ${rawCalls.length}`);
-      firstWave.slice(1).forEach(release);
       for (let attempt = 0; attempt < 100 && rawCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(rawCalls.length === 11 && rawCalls[10].options.task === 'job-preference-research-batch',
-        `the eighth fresh batch must wait for the three legacy plus seven fresh first wave, got ${JSON.stringify(rawCalls.map(call => call.options.task))}`);
-      release(rawCalls[10]);
+      assert(rawCalls.length === 11 && rawCalls[10].options.task === 'job-preference-research-batch'
+        && activeRawCalls === 10 && peakRawCalls === 10 && firstWave[1].released === false,
+        `settling a restored legacy handoff must immediately refill its slot with the eighth fresh batch while a sibling remains pending, got ${JSON.stringify({ tasks: rawCalls.map(call => call.options.task), activeRawCalls, peakRawCalls })}`);
+      rawCalls.slice(1).forEach(release);
       const result = await run;
-      assert(result.acceptedJobs.length === jobs.length,
-        `restored and fresh research must retain all jobs after the mixed fixed waves, got ${result.acceptedJobs.length}`);
-      return { restored: 3, firstWaveFresh: 7, nextWave: 1 };
+      assert(result.acceptedJobs.length === jobs.length
+        && JSON.stringify(result.acceptedJobs.map(job => job.company)) === JSON.stringify(jobs.map(job => job.company)),
+        `restored and fresh research must retain all jobs after the mixed rolling roster, got ${result.acceptedJobs.length}`);
+      return { restored: 3, initialFresh: 7, replacementFresh: 1, peakRawCalls };
     },
   },
   {
@@ -1893,7 +2717,6 @@ export default [
         softPreferences: [], strictRequirements: [{ id: 'accepted-prefix', criterion: 'Published accepted-prefix benefit', category: 'perk' }],
         warnings: [], titles: [],
       };
-      const statusPrompts = new Map();
       const pendingRawCalls = [];
       const release = call => {
         if (call.released) return;
@@ -1906,12 +2729,6 @@ export default [
         preferencePlan: plan,
         legacyResearchStepProbe: async input => acceptedLegacyCompanies.includes(input.request.company),
         legacyResearchAssessmentStepProbe: async () => false,
-        researchStepStatusProbe: async ({ prompt, task, hints }) => {
-          const key = `${task}:${hints?.batch || 0}`;
-          statusPrompts.set(key, prompt);
-          if (task === 'job-preference-research') return 'accepted';
-          return hints?.batch <= 3 ? 'accepted' : (hints?.batch <= 6 ? 'pending' : null);
-        },
         callRaw: async (prompt, options) => {
           if (options.task === 'job-preference-research') {
             const company = acceptedLegacyCompanies.find(name => prompt.includes(name));
@@ -1933,11 +2750,8 @@ export default [
       });
       for (let attempt = 0; attempt < 100 && pendingRawCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
       const visibleBatches = pendingRawCalls.map(call => call.options.hints.batch);
-      const stableContract = prompt => String(prompt || '').replace(/untrusted-[a-z-]+-[a-f0-9]{8}/g, 'untrusted-nonce');
-      assert(JSON.stringify(visibleBatches) === JSON.stringify([4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
-        && [4, 5, 6].every(batch => stableContract(pendingRawCalls.find(call => call.options.hints.batch === batch)?.prompt)
-          === stableContract(statusPrompts.get(`job-preference-research-batch:${batch}`))),
-      `six accepted legacy steps and accepted v2 batches 1–3 must leave exact pending 4–6 plus fresh 7–13 as the visible wave, got ${JSON.stringify(visibleBatches)}`);
+      assert(JSON.stringify(visibleBatches) === JSON.stringify([4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
+      `six auto-replayed legacy steps and v2 batches 1–3 must leave pending 4–13 as the visible wave, got ${JSON.stringify(visibleBatches)}`);
       pendingRawCalls.forEach(release);
       const result = await run;
       assert(result.candidatePool.length === jobs.length,
@@ -2461,31 +3275,28 @@ export default [
     },
   },
   {
-    name: 'ROLE LOCKING: a re-scan with data.resolvedRoles already populated reuses the lock and never calls resolveSearchRoles; the search title list is derived from the (locked) plan',
+    name: 'ROLE LOCKING: a re-scan reuses roles only while its Search Brief fingerprint still matches, then regenerates roles after an edit',
     run: async () => {
       const search = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      const lockStart = search.indexOf('let jobPreferencesInterpretation = laneTurnData.searchBriefPlan ?? null;');
+      const lockStart = search.indexOf('let jobPreferencesInterpretation = null;');
       const lockEnd = search.indexOf('const activePreferredLocation = locationToLegacyText', lockStart);
       assert(lockStart >= 0 && lockEnd > lockStart, 'the ROLE LOCKING resolution block must exist between the freeze and location resolution');
       const lockBlock = search.slice(lockStart, lockEnd);
-      // REUSE: laneTurnData.resolvedRoles is no longer the lock-existence
-      // check on its own (FIX2 — see hasResolvedRoleLock's WHY comment: a
-      // legitimate zero-title resolution must still count as locked, which
-      // `resolvedRoles.length > 0` cannot express). hasLockedRoles is now
-      // keyed on hasResolvedRoleLock(laneTurnData) (resolvedRolesMeta
-      // presence) — a populated lock still means the `if` below never
-      // executes, so this run still spends zero interpretation calls.
-      const hasLockedAt = lockBlock.indexOf('const hasLockedRoles = hasResolvedRoleLock(laneTurnData);');
-      const guardAt = lockBlock.indexOf('if (!hasLockedRoles && activeJobPreferences && window.electronAPI?.resolveSearchRoles) {');
+      // Reuse remains free for an unchanged brief, but a brief edit must
+      // invalidate its old roles without unlocking locations/limits/sources.
+      const hasLockedAt = lockBlock.indexOf('const hasLockedRoles = roleLockMatchesBrief(laneTurnData);');
+      const guardAt = lockBlock.indexOf('if (!hasLockedRoles && window.electronAPI?.resolveSearchRoles) {');
       const callAt = lockBlock.indexOf('window.electronAPI.resolveSearchRoles({');
       assert(hasLockedAt >= 0 && guardAt > hasLockedAt && callAt > guardAt,
-        'resolveSearchRoles must be called only inside a block explicitly guarded on an empty/absent lock (hasResolvedRoleLock)');
+        'resolveSearchRoles must be called when the role plan is absent or its persisted brief fingerprint no longer matches');
       // The lock and its titles are written together, atomically, from the
       // SAME resolved plan — so reusing searchBriefPlan.titles on a later run
       // is guaranteed to equal what was persisted into resolvedRoles when the
       // lock was first established (the two fields can never diverge).
-      assert(lockBlock.includes('resolvedRoles: lockedTitles,') && lockBlock.includes('searchBriefPlan: jobPreferencesInterpretation,'),
-        'the freshly-established lock must persist resolvedRoles and searchBriefPlan from the same resolved plan in one atomic patch');
+      assert(lockBlock.includes('resolvedRoles: lockedTitles,')
+        && lockBlock.includes('searchBriefPlan: jobPreferencesInterpretation,')
+        && lockBlock.includes('briefFingerprint: activeJobPreferences,'),
+        'the freshly-established role plan must persist its titles, plan, and exact brief fingerprint atomically');
       // PER-RUN title list: SINGLE MODE collapsed the old query/gate split
       // (deriveQueryTitles + deriveGatePinnedTitles, the latter titleSource-
       // aware) into one deriveSearchTitles, since there is no more
@@ -2542,7 +3353,7 @@ export default [
     },
   },
   {
-    name: 'SETTINGS LOCKING FREEZE: every user-configurable setting (brief, location, remote residences, depth, platforms) is read-only/disabled once resolvedRoles is populated, in both JobSearchNode.jsx (empty state) and JobSearchDoneState.jsx (done state)',
+    name: 'SETTINGS LOCKING FREEZE: completed searches keep their search controls fixed but leave the Search Brief editable for saved-job re-evaluation',
     run: async () => {
       const [search, done] = await Promise.all([
         fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8'),
@@ -2565,19 +3376,18 @@ export default [
         && search.includes('setCollectionLimits={setCollectionLimits}\n                    disabled={settingsFrozen}')
         && search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}'),
       'JobSearchNode.jsx must disable location, collection-limits, and platform-selection controls once settingsFrozen, not only the Search Brief');
-      // Done state: resolvedRoles AND resolvedRolesMeta arrive as PROPS (this
-      // component does not read node data directly) and gate every setting in
-      // this render too. FIX2 (mirrored from JobSearchNode.jsx's own
-      // hasResolvedRoleLock): settingsFrozen is keyed on resolvedRolesMeta
-      // presence, not `resolvedRoles.length > 0` — a legitimate zero-title
-      // resolution must still freeze settings here too.
+      // Done state keeps location, limits, and sources fixed, but deliberately
+      // leaves the brief editable: saved-job re-evaluation regenerates roles
+      // and fit results without scraping again.
+      const doneBriefStart = done.indexOf('<textarea');
+      const doneBriefEnd = done.indexOf('/>', doneBriefStart);
       assert(done.includes('resolvedRoles = [],')
         && done.includes('resolvedRolesMeta = null,')
         && done.includes('const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === \'object\');')
-        && done.includes('disabled={settingsFrozen}'),
-      'JobSearchDoneState.jsx must accept resolvedRoles/resolvedRolesMeta as props and disable its own settings once resolvedRolesMeta is populated');
-      // The done state is the one most likely to tempt a pre-re-run tweak, so
-      // every non-brief setting must carry the same freeze there too.
+        && doneBriefStart >= 0 && doneBriefEnd > doneBriefStart
+        && !done.slice(doneBriefStart, doneBriefEnd).includes('disabled='),
+      'JobSearchDoneState.jsx must accept resolvedRoles/resolvedRolesMeta while leaving its completed-state Search Brief editable');
+      // The non-brief settings remain frozen for re-scan consistency.
       assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}')
         && done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}')
         && done.includes('searchLocation={searchLocation}\n            disabled={settingsFrozen}'),
@@ -2589,7 +3399,7 @@ export default [
       assert(search.includes('resolvedRoles={resolvedRoles}')
         && search.includes('resolvedRolesMeta={data.resolvedRolesMeta || null}'),
       'JobSearchNode.jsx must pass its own resolvedRoles and data.resolvedRolesMeta through to JobSearchDoneState');
-      return { emptyStateFrozen: true, doneStateFrozen: true, propWired: true };
+      return { emptyStateFrozen: true, doneBriefEditable: true, propWired: true };
     },
   },
   {
@@ -2608,15 +3418,15 @@ export default [
         && search.includes('maxLength={4000}')
         && search.includes('const cleanupRetirementPending = hasPendingManualAiRetirement(data);')
         && search.includes('const baseControlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
-        && search.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;')
-        && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;')
+        && search.includes('const controlsLocked = baseControlsLocked || manualAiRecoveryAdmissionLocked;')
+        && search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || manualAiRecoveryAdmissionLocked;')
         && search.includes('disabled={controlsLocked}')
         // Location controls carry the PERMANENT settingsFrozen freeze in
         // addition to the transient controlsLocked busy-state (see
         // the SETTINGS LOCKING FREEZE test above for the full inventory).
         && search.includes('disabled={controlsLocked || settingsFrozen}\n                />')
         && search.includes('locked={errorControlsLocked}'),
-      'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, finishing cancellation cleanup, or awaiting a stale manual-AI recovery decision without hiding the cleanup retry action');
+      'the merged empty-state Search Brief control must be named, explain what AI derives from it, describe its help, and disable every editable setting while locked, queued, finishing cancellation cleanup, or awaiting a saved manual-AI recovery decision without hiding the cleanup retry action');
       assert(locations.includes('disabled = false')
         && locations.includes('disabled={disabled}'),
       'structured location inputs must honor the parent locked state rather than remaining editable');
@@ -2627,19 +3437,19 @@ export default [
         && done.includes('aria-describedby={preferencesHelpId}')
         && done.includes('maxLength={4000}')
         && done.includes('const [setupOpen, setSetupOpen] = useState(() => !settingsFrozen);')
-        && done.includes("Search setup{settingsFrozen ? ' · locked' : ''}")
+        && done.includes("Search setup{settingsFrozen ? ' · brief editable' : ''}")
         && done.includes('open={setupOpen}')
         && done.includes('Describe roles, priorities, and deal-breakers.'),
-      'completed result labels must pluralize every job count and retain a labeled, 4,000-character Search Brief inside an initially closed locked setup disclosure with concise locked/unlocked guidance');
+      'completed result labels must pluralize every job count and retain a labeled, 4,000-character editable Search Brief inside an initially closed setup disclosure');
 
       // A zero-title role resolution is still a real frozen plan. Both draft
       // and completed views must therefore use an explicit fallback rather
       // than printing the dangling label `Locked roles:` with no value.
       assert(search.includes("resolvedRoles.length > 0\n                        ? `Locked roles: ${resolvedRoles.join(', ')}`\n                        : 'No specific roles were saved, so searches are not narrowed to a role list.'")
-        && done.includes("resolvedRoles.length > 0\n                  ? `Locked roles: ${resolvedRoles.join(', ')}`\n                  : 'No specific roles were saved, so searches are not narrowed to a role list.'")
+        && done.includes("resolvedRoles.length > 0\n                  ? `Current roles: ${resolvedRoles.join(', ')}`\n                  : 'No specific roles are saved, so searches are not narrowed to a role list.'")
         && !search.includes('Locked roles: {resolvedRoles.join')
         && !done.includes('Locked roles: {resolvedRoles.join'),
-      'a locked zero-role plan must show its explicit fallback in draft and completed Search setup, never a dangling Locked roles label');
+      'a zero-role plan must show its explicit fallback in draft and completed Search setup, never a dangling roles label');
 
       const normalProcessingStart = processing.indexOf('<div className="group flex flex-col items-center justify-center');
       const normalProcessing = processing.slice(normalProcessingStart);
@@ -2659,9 +3469,14 @@ export default [
         && normalProcessing.slice(primaryLiveEnd).includes('{scoringStatus && <p')
         && normalProcessing.slice(primaryLiveEnd).includes('{resumeSummary && (')
         && !normalProcessing.slice(primaryLiveEnd).includes('role="status"')
-        && processing.includes('aria-label="Stop job search and keep saved progress for Resume when available"')
-        && processing.includes('onStop,')
-        && processing.includes('onClick={onStop}')
+        && processing.includes('aria-label="Pause and save job search progress for Resume"')
+        && processing.includes('data-action="pause-and-save"')
+        && processing.includes("activity === 'description-enrichment'")
+        && processing.includes('Enriching ${activeSourceName} descriptions…')
+        && processing.includes('Pause &amp; save')
+        && !processing.includes('opacity-0 group-hover:opacity-100')
+        && processing.includes('onPauseAndSave,')
+        && processing.includes('onClick={onPauseAndSave}')
         && !processing.includes('Cancel and reset job search')
         && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
       'processing controls must be keyboard-operable and communicate the compact phase/source through one atomic live region without making detail, counts, scoring, or résumé text live');
@@ -2722,12 +3537,13 @@ export default [
       assert(search.includes('searchLocation={searchLocation}\n                    disabled={settingsFrozen}\n                  />\n                )}'),
       '[setting 6/6 — Job platforms] JobSearchNode.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
 
-      // JobSearchDoneState.jsx (the re-run screen) — locked/busy is handled
-      // by hiding this whole settings block (`{!locked && (...)}`); within
-      // it, settingsFrozen alone gates every control, since a queued/busy
-      // hub never reaches this render at all.
-      assert(done.includes('// a locked brief reads as intentional rather than a stray bug.\n              disabled={settingsFrozen}'),
-      '[setting 1/6 — Search Brief] JobSearchDoneState.jsx textarea must disable on settingsFrozen');
+      // JobSearchDoneState.jsx (the re-run screen) keeps the saved brief
+      // editable; only the remaining search controls freeze.
+      const doneBriefStart = done.indexOf('<textarea');
+      const doneBriefEnd = done.indexOf('/>', doneBriefStart);
+      assert(doneBriefStart >= 0 && doneBriefEnd > doneBriefStart
+        && !done.slice(doneBriefStart, doneBriefEnd).includes('disabled='),
+      '[setting 1/6 — Search Brief] JobSearchDoneState.jsx textarea stays editable for saved-job re-evaluation');
       assert(done.includes('remoteResidences={remoteResidences}\n            setRemoteResidence={setRemoteResidence}\n            compact\n            disabled={settingsFrozen}'),
       '[settings 2+3/6 — Search location + Remote salary residences, one <JobSearchLocationFields> instance] JobSearchDoneState.jsx must disable it on settingsFrozen');
       assert(done.includes('setCollectionLimits={setCollectionLimits}\n            disabled={settingsFrozen}'),
@@ -2739,7 +3555,7 @@ export default [
         && done.slice(donePlatformControlStart, donePlatformControlEnd).includes('disabled={settingsFrozen}'),
       '[setting 6/6 — Job platforms] JobSearchDoneState.jsx <JobPlatformSelectionControl> must disable on settingsFrozen');
 
-      return { perControlAsserted: 8 };
+      return { perControlAsserted: 8, doneBriefEditable: true };
     },
   },
   {
@@ -2762,10 +3578,10 @@ export default [
       // JobSearchNode.jsx: the three lock/freeze definitions, verbatim. None
       // of the three right-hand sides mentions either of the other two names.
       assert(search.includes('const baseControlsLocked = !!data.locked || !!data.queuedModuleRun || cleanupRetirementPending;')
-        && search.includes('const controlsLocked = baseControlsLocked || staleManualAiRecoveryAdmissionLocked;'),
-      'controlsLocked must compose only the ordinary transient lock with the deliberate stale-manual-recovery admission lock — never settingsFrozen or resolvedRoles');
-      assert(search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || staleManualAiRecoveryAdmissionLocked;'),
-      'errorControlsLocked must add only the deliberate stale-manual-recovery admission lock — never settingsFrozen, resolvedRoles, or cleanupRetirementPending');
+        && search.includes('const controlsLocked = baseControlsLocked || manualAiRecoveryAdmissionLocked;'),
+      'controlsLocked must compose only the ordinary transient lock with the deliberate manual-AI-recovery admission lock — never settingsFrozen or resolvedRoles');
+      assert(search.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || manualAiRecoveryAdmissionLocked;'),
+      'errorControlsLocked must add only the deliberate manual-AI-recovery admission lock — never settingsFrozen, resolvedRoles, or cleanupRetirementPending');
       // FIX2: settingsFrozen is keyed on hasResolvedRoleLock(data) — i.e.
       // resolvedRolesMeta presence — not `resolvedRoles.length > 0` (which
       // cannot distinguish "never locked" from "locked with zero titles").
@@ -5035,6 +5851,502 @@ export default [
       assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 9,'.length) === '{ version: 9,',
         'the v9 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
       return { schemaVersion: CURRENT_SCHEMA_VERSION, v8Registered: true, v9Registered: true };
+    },
+  },
+  {
+    name: 'terminal completion reclaims only superseded same-hub description-recovery checkpoints',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-superseded-description-checkpoint-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const hubId = 'checkpoint-gc-hub';
+      const foreignHubId = 'checkpoint-gc-foreign-hub';
+      // Keep the terminal ordering wholly artificial. In particular, do not
+      // derive it from Date.now(): a slow fixture setup can otherwise leave
+      // a supposedly stale file with an mtime after terminal completion.
+      const terminalStartedAt = Date.UTC(2040, 0, 1, 0, 0, 10);
+      const terminalCompletedAt = Date.UTC(2040, 0, 1, 0, 0, 20);
+      const staleCheckpointAt = terminalStartedAt - 20_000;
+      const staleMtimeAt = terminalStartedAt - 10_000;
+      const checkpointPath = (runId) => getJobDescriptionRecoveryCheckpointPath(
+        canvas,
+        runId,
+        path.join(dir, 'unsaved-analysis'),
+      );
+      const setCheckpointMtime = (filePath, timestamp) => {
+        const date = new Date(timestamp);
+        fs.utimesSync(filePath, date, date);
+      };
+      const snapshot = (runId, createdAt, nodeId = hubId) => ({
+        version: 2,
+        canvasFilePath: canvas,
+        sourceHubId: nodeId,
+        nodeId,
+        runId,
+        createdAt: new Date(createdAt).toISOString(),
+        gatheredJobCount: 1,
+        jobs: [{ title: `checkpoint ${runId}` }],
+        descriptionRecoveryJobs: [{ title: `deferred ${runId}` }],
+      });
+      try {
+        const staleRun = 'checkpoint-gc-stale';
+        const terminalRun = 'checkpoint-gc-terminal';
+        const newerRun = 'checkpoint-gc-newer';
+        const foreignRun = 'checkpoint-gc-foreign';
+        const malformedRun = 'checkpoint-gc-malformed';
+        const legacyRun = 'checkpoint-gc-legacy-large';
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(staleRun, staleCheckpointAt));
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(terminalRun, staleCheckpointAt));
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(newerRun, terminalStartedAt + 1));
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(foreignRun, staleCheckpointAt, foreignHubId));
+        setCheckpointMtime(checkpointPath(staleRun), staleMtimeAt);
+        setCheckpointMtime(checkpointPath(terminalRun), staleMtimeAt);
+        setCheckpointMtime(checkpointPath(foreignRun), staleMtimeAt);
+        const malformedPath = getJobDescriptionRecoveryCheckpointPath(canvas, malformedRun, path.join(dir, 'unsaved-analysis'));
+        fs.writeFileSync(malformedPath, '{not json', 'utf8');
+        const legacyPath = checkpointPath(legacyRun);
+        fs.writeFileSync(legacyPath, JSON.stringify({
+          sourceHubId: hubId,
+          nodeId: hubId,
+          runId: legacyRun,
+          createdAt: new Date(staleCheckpointAt).toISOString(),
+          payload: 'x'.repeat(600 * 1024),
+        }), 'utf8');
+        setCheckpointMtime(legacyPath, staleMtimeAt);
+
+        // The concurrent successor can settle before or after the sweep. Its
+        // post-terminal creation time must preserve it in either ordering.
+        const racedRun = 'checkpoint-gc-raced-newer';
+        const [cleanup, raced] = await Promise.all([
+          __pruneSupersededDescriptionRecoveryCheckpointsForTests(canvas, hubId, terminalRun, {
+            terminalStartedAt,
+            terminalCompletedAt,
+          }),
+          __createDescriptionRecoveryCheckpointForTests(snapshot(racedRun, terminalStartedAt + 2)),
+        ]);
+        assert(raced.saved === true
+          && cleanup.removed === 2
+          && !fs.existsSync(checkpointPath(staleRun))
+          && !fs.existsSync(legacyPath)
+          && fs.existsSync(checkpointPath(terminalRun))
+          && fs.existsSync(checkpointPath(newerRun))
+          && fs.existsSync(checkpointPath(foreignRun))
+          && fs.existsSync(malformedPath)
+          && fs.existsSync(checkpointPath(racedRun)),
+        'terminal-success GC removes only old, ownership-verified same-hub checkpoints; it preserves the current run, newer/racing successors, foreign ownership, and malformed files');
+
+        const substitutedRun = 'checkpoint-gc-substituted';
+        const substitutedPath = checkpointPath(substitutedRun);
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(substitutedRun, staleCheckpointAt));
+        setCheckpointMtime(substitutedPath, staleMtimeAt);
+        const foreignReplacement = snapshot('checkpoint-gc-foreign-replacement', staleCheckpointAt, foreignHubId);
+        const foreignReplacementPath = path.join(dir, 'foreign-checkpoint-replacement.json');
+        fs.writeFileSync(foreignReplacementPath, JSON.stringify(foreignReplacement), 'utf8');
+        setCheckpointMtime(foreignReplacementPath, staleMtimeAt);
+        const foreignInode = fs.lstatSync(foreignReplacementPath).ino;
+        const originalRename = fs.promises.rename;
+        fs.promises.rename = async (from, to) => {
+          if (from === substitutedPath) {
+            await fs.promises.unlink(from);
+            await originalRename.call(fs.promises, foreignReplacementPath, from);
+          }
+          return originalRename.call(fs.promises, from, to);
+        };
+        try {
+          const substitutionCleanup = await __pruneSupersededDescriptionRecoveryCheckpointsForTests(
+            canvas, hubId, terminalRun, { terminalStartedAt, terminalCompletedAt },
+          );
+          const restored = JSON.parse(fs.readFileSync(substitutedPath, 'utf8'));
+          assert(substitutionCleanup.removed === 0
+            && restored.sourceHubId === foreignHubId
+            && restored.runId === foreignReplacement.runId
+            && fs.lstatSync(substitutedPath).ino === foreignInode,
+          'a distinct-inode regular-file substitution between eligibility and rename is restored under its original name and is never retired or unlinked');
+        } finally {
+          fs.promises.rename = originalRename;
+        }
+
+        const missingOrdering = await __pruneSupersededDescriptionRecoveryCheckpointsForTests(
+          canvas, hubId, terminalRun, { terminalStartedAt: null, terminalCompletedAt },
+        );
+        assert(missingOrdering.skipped === 'missing-terminal-ordering'
+          && fs.existsSync(checkpointPath(newerRun)),
+        'timestamp ambiguity fails closed rather than inferring that a recovery checkpoint is obsolete');
+        return { removed: cleanup.removed, preservedRace: racedRun };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'complete-job-run performs checkpoint GC only after its exact terminal transaction commits',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-complete-job-run-checkpoint-gc-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const failedCanvas = path.join(dir, 'failed.json');
+      const hubId = 'completion-gc-hub';
+      const foreignHubId = 'completion-gc-foreign-hub';
+      const runId = 'completion-gc-current-run';
+      const startedAt = Date.now();
+      const snapshot = (canvasFilePath, checkpointRunId, createdAt, nodeId = hubId) => ({
+        version: 2,
+        canvasFilePath,
+        sourceHubId: nodeId,
+        nodeId,
+        runId: checkpointRunId,
+        createdAt: new Date(createdAt).toISOString(),
+        gatheredJobCount: 1,
+        jobs: [{ title: `checkpoint ${checkpointRunId}` }],
+        descriptionRecoveryJobs: [{ title: `deferred ${checkpointRunId}` }],
+      });
+      const sender = {
+        id: 904,
+        isDestroyed: () => false,
+        once: () => {},
+        on: () => {},
+        removeListener: () => {},
+      };
+      const originalTrashItem = electronPkg.shell.trashItem;
+      try {
+        const staleRun = 'completion-gc-stale-run';
+        const successorRun = 'completion-gc-successor-run';
+        const foreignRun = 'completion-gc-foreign-run';
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, staleRun, startedAt - 30_000));
+        const manifest = await startRun(canvas, {
+          runId,
+          startedAt,
+          nodeId: hubId,
+          queries: ['exact transaction test'],
+          canonicalLocation: 'Toronto, ON',
+          sourceIds: ['google'],
+        });
+        assert(manifest?.runId === runId, 'fixture creates the exact owned run manifest that completion must consume');
+        const continuation = await beginJobContinuation(canvas, {
+          nodeId: hubId,
+          parentRunId: runId,
+          profileFingerprint: 'c'.repeat(64),
+          kind: 'source-recovery',
+          operation: 'resolve-job-source',
+          sourceId: 'linkedin',
+          searchWindow: null,
+          canonicalLocation: 'Toronto, ON',
+          generationFingerprint: 'completion-fixture',
+          recoveryMode: 'automatic',
+          now: startedAt + 1,
+        });
+        assert(continuation.ok === true, 'fixture creates a same-run continuation that terminal completion must retire');
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, runId, startedAt + 1));
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, successorRun, startedAt + 2));
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(canvas, foreignRun, startedAt - 30_000, foreignHubId));
+        const currentPath = getJobDescriptionRecoveryCheckpointPath(canvas, runId, path.join(dir, 'unsaved-analysis'));
+        const stalePath = getJobDescriptionRecoveryCheckpointPath(canvas, staleRun, path.join(dir, 'unsaved-analysis'));
+        const successorPath = getJobDescriptionRecoveryCheckpointPath(canvas, successorRun, path.join(dir, 'unsaved-analysis'));
+        const foreignPath = getJobDescriptionRecoveryCheckpointPath(canvas, foreignRun, path.join(dir, 'unsaved-analysis'));
+        fs.utimesSync(stalePath, new Date(startedAt - 30_000), new Date(startedAt - 30_000));
+        electronPkg.shell.trashItem = async (filePath) => fs.promises.unlink(filePath);
+        registerJobsHandlers();
+        const complete = ipcMain.__getInvokeHandler('complete-job-run');
+        const completed = await complete({ sender }, {
+          canvasFilePath: canvas,
+          nodeId: hubId,
+          runId,
+          terminalStatus: 'completed',
+          terminalOutcome: 'populated',
+          scoreReadyCount: 1,
+        });
+        const receipt = await readLastRunReceipt(canvas, hubId);
+        const runState = await readRunState(canvas, Date.now(), { nodeId: hubId });
+        assert(completed.success === true && completed.ok === true
+          && completed.checkpointCleanup?.removed === true
+          && completed.continuationCleanup?.removed === 1
+          && completed.supersededCheckpointCleanup?.removed === 1
+          && receipt?.runId === runId && receipt.startedAt === startedAt
+          && runState === null
+          && (await listJobContinuations(canvas, hubId)).length === 0
+          && !fs.existsSync(currentPath) && !fs.existsSync(stalePath)
+          && fs.existsSync(successorPath) && fs.existsSync(foreignPath),
+        `registered complete-job-run consumes its exact manifest into a receipt, clears its own sidecars/current checkpoint, then reclaims only the older same-hub checkpoint: ${JSON.stringify({ completed, receipt, runState, paths: { current: fs.existsSync(currentPath), stale: fs.existsSync(stalePath), successor: fs.existsSync(successorPath), foreign: fs.existsSync(foreignPath) } })}`);
+
+        const failedStaleRun = 'completion-gc-failed-stale-run';
+        await __createDescriptionRecoveryCheckpointForTests(snapshot(failedCanvas, failedStaleRun, startedAt - 30_000));
+        const failedPath = getJobDescriptionRecoveryCheckpointPath(failedCanvas, failedStaleRun, path.join(dir, 'unsaved-analysis'));
+        fs.utimesSync(failedPath, new Date(startedAt - 30_000), new Date(startedAt - 30_000));
+        const failed = await complete({ sender }, {
+          canvasFilePath: failedCanvas,
+          nodeId: hubId,
+          runId: 'completion-gc-missing-manifest-run',
+          terminalStatus: 'completed',
+          terminalOutcome: 'populated',
+          scoreReadyCount: 1,
+        });
+        assert(failed.success === true && failed.ok === false && failed.tokenMismatch === true
+          && fs.existsSync(failedPath),
+        'a missing/token-mismatched terminal transaction does not invoke checkpoint GC or remove the only recoverable stale checkpoint');
+        return { terminalGcRemoved: completed.supersededCheckpointCleanup.removed, failedGcSkipped: true };
+      } finally {
+        electronPkg.shell.trashItem = originalTrashItem;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job recovery policy auto-retries safe headless failures but never startup-launches human gates',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-recovery-policy-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const nodeId = 'recovery-policy-hub';
+      const runId = 'recovery-policy-run';
+      const oldRunAt = Date.now() - (48 * 60 * 60 * 1000);
+      try {
+        await startRun(canvas, {
+          runId,
+          startedAt: oldRunAt,
+          nodeId,
+          queries: ['engineer'],
+          profileFingerprint: 'a'.repeat(64),
+          canonicalLocation: 'Toronto, ON',
+          sourceIds: ['google', 'remoteok', 'linkedin'],
+        });
+        assert(jobSourceRecoveryDisposition('google', [{
+          code: 'captcha-presented', severity: 'block',
+        }]) === 'manual'
+          && jobSourceRecoveryDisposition('indeed', [{
+            code: 'needs-login', severity: 'block', resumeState: { mode: 'native-login' },
+          }]) === 'manual'
+          && jobSourceRecoveryDisposition('remoteok', [{
+            code: 'scrape-timeout', severity: 'block',
+          }]) === 'automatic'
+          && jobSourceRecoveryDisposition('linkedin', [{
+            code: 'linkedin-rate-limited', severity: 'throttle',
+          }]) === 'automatic',
+        'interactive browser/login warnings are manual while known API/headless transient failures remain automatic');
+
+        await markSourceStatus(canvas, 'remoteok', 'blocked', oldRunAt + 500, {
+          expectedRunId: runId,
+          nodeId,
+        });
+        let state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(isJobRunAutomaticRecoveryEligible(state.manifest) === true,
+        'a legacy blocked source with no disposition remains restart-retryable until explicit human evidence marks it manual');
+        await markSourceStatus(canvas, 'remoteok', 'blocked', oldRunAt + 750, {
+          expectedRunId: runId,
+          nodeId,
+          recoveryDisposition: 'automatic',
+        });
+
+        await markSourceStatus(canvas, 'google', 'blocked', oldRunAt + 1_000, {
+          expectedRunId: runId,
+          nodeId,
+          recoveryDisposition: 'manual',
+        });
+        state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(state.resumable === false && isJobRunAutomaticRecoveryEligible(state.manifest) === false,
+        'a human-gated source suppresses automatic recovery even when the old 24-hour freshness bit is only diagnostic');
+
+        await activateRunForResume(canvas, { expectedRunId: runId, nodeId, now: Date.now() });
+        state = await readRunState(canvas, Date.now(), { nodeId });
+        assert(isJobRunAutomaticRecoveryEligible(state.manifest) === true
+          && state.manifest.sources.google.recoveryDisposition === 'automatic',
+        'an explicit exact Resume re-arms the run, while a repeated human gate can mark itself manual again');
+        return { oldRunSurfaced: true, humanGateManual: true, headlessTransientAutomatic: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job continuation sidecar is exact, crash-durable, sender-leased, and manual-pause aware',
+    run: async () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-continuation-'));
+      const canvas = path.join(dir, 'canvas.json');
+      const identity = {
+        nodeId: 'continuation-hub',
+        parentRunId: 'continuation-run',
+        profileFingerprint: 'b'.repeat(64),
+        kind: 'late-source-refresh',
+        operation: 'search-jobs-single-source',
+        sourceId: 'usajobs',
+        searchWindow: {
+          startTimestamp: Date.UTC(2026, 8, 1),
+          anchorTimestamp: Date.UTC(2026, 8, 1),
+          completionTimestamp: null,
+          capped: false,
+          capReason: null,
+          providerLookbackDays: 21,
+        },
+        canonicalLocation: 'Toronto, ON',
+        generationFingerprint: 'done:7:1:42',
+      };
+      const senderA = { once: () => {} };
+      const senderB = { once: () => {} };
+      try {
+        const begun = await beginJobContinuation(canvas, {
+          ...identity,
+          recoveryMode: 'automatic',
+          now: Date.now(),
+        });
+        const listed = await listJobContinuations(canvas, identity.nodeId);
+        assert(begun.ok === true && listed.length === 1
+          && listed[0].intentId === begun.intent.intentId
+          && !JSON.stringify(listed[0]).includes('Toronto'),
+        'the acknowledged sidecar persists one redacted exact intent before network work starts');
+
+        const leaseA = await claimJobContinuation(canvas, {
+          ...identity,
+          intentId: begun.intent.intentId,
+        }, { sender: senderA });
+        const duplicate = await claimJobContinuation(canvas, {
+          ...identity,
+          intentId: begun.intent.intentId,
+        }, { sender: senderB });
+        assert(leaseA.ok === true && typeof leaseA.leaseToken === 'string'
+          && duplicate.ok === false && duplicate.busy === true,
+        'only one window can own a continuation execution lease at a time');
+        assert(releaseJobContinuationExecution(begun.intent.intentId, 'wrong', senderA) === false
+          && releaseJobContinuationExecution(begun.intent.intentId, leaseA.leaseToken, senderA) === true,
+        'a continuation lease is sender/token scoped and releases without leaving a durable crash lock');
+
+        const mismatch = await claimJobContinuation(canvas, {
+          ...identity,
+          canonicalLocation: 'Ottawa, ON',
+          intentId: begun.intent.intentId,
+        }, { sender: senderA });
+        assert(mismatch.ok === false && mismatch.tokenMismatch === true,
+        'location/window/profile/generation mismatch cannot claim an old continuation');
+
+        const paused = await pauseJobContinuations(canvas, {
+          nodeId: identity.nodeId,
+          parentRunId: identity.parentRunId,
+          now: Date.now(),
+        });
+        const automaticClaim = await claimJobContinuation(canvas, {
+          ...identity,
+          intentId: begun.intent.intentId,
+        }, { sender: senderA });
+        assert(paused.ok === true && paused.paused === 1
+          && automaticClaim.ok === false && automaticClaim.manual === true,
+        'explicit Stop makes the exact continuation manual before cancellation');
+        const removed = await completeJobContinuation(canvas, {
+          nodeId: identity.nodeId,
+          parentRunId: identity.parentRunId,
+          intentId: begun.intent.intentId,
+        });
+        assert(removed.ok === true && removed.removed === true
+          && (await listJobContinuations(canvas, identity.nodeId)).length === 0,
+        'success/input supersession removes only the exact continuation');
+        return { duplicateWindowBlocked: true, exactInputGuarded: true, manualPauseDurable: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: interrupted source results never become terminal',
+    run: () => {
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const terminalStart = jobs.indexOf('const markGatheredSourceTerminal = async');
+      const terminalSlice = jobs.slice(terminalStart, jobs.indexOf('const runBrowserSourcesInOrder', terminalStart));
+      assert(terminalSlice.includes("if (combinedSignal.aborted || rows.some(row => row?.cancelled === true || row?.stopReason === 'aborted')) return;")
+        && terminalSlice.indexOf("row?.stopReason === 'aborted'") < terminalSlice.indexOf('await markSourceStatus(')
+        && terminalSlice.includes('only a clean, non-interrupted zero is terminal'),
+      'cancelled/aborted source results must stay pending before any durable done/blocked status write, while clean zero results remain terminal');
+    },
+  },
+  {
+    name: 'job run staging: saved-source checkpoints fail closed while unsaved canvases stay sidecar-free',
+    run: () => {
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const stageOnPage = jobs.slice(jobs.indexOf('const stageOnPage = async'), jobs.indexOf('const runBrowserSourcesInOrder'));
+      const stageHttp = jobs.slice(jobs.indexOf('const stageHttpSource = async'), jobs.indexOf('jobsTelemetry.pipeline = {', jobs.indexOf('const stageHttpSource = async')));
+      assert(stageOnPage.includes('const saved = await recordSourcePage(canvasFilePath')
+        && stageOnPage.includes('if (canvasFilePath && saved !== true) throw new Error(`Could not durably checkpoint ${sourceId} query page ${page}.`);')
+        && stageHttp.includes('const saved = await recordSourcePage(canvasFilePath')
+        && stageHttp.includes('if (canvasFilePath && saved !== true) throw new Error(`Could not durably checkpoint ${sourceId}.`);')
+        && stageHttp.indexOf('saved !== true') < stageHttp.indexOf('await markGatheredSourceTerminal(sourceId'),
+      'saved canvas page/HTTP staging must reject a failed write before any terminal source status; unsaved canvases intentionally bypass the sidecar assertion');
+    },
+  },
+  {
+    name: 'job run staging: fatal gather branch aborts and drains its sibling, including clean HTTP zeros',
+    run: () => {
+      const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+      const gatherStart = jobs.indexOf('let gatherBranches = null;');
+      const gatherCatch = jobs.indexOf('} catch (error) {', gatherStart);
+      const gatherSlice = jobs.slice(gatherStart, jobs.indexOf('jobsTelemetry.pipeline = {', gatherCatch));
+      const httpStart = jobs.indexOf('// Flush this source to crash-recovery staging');
+      const httpSlice = jobs.slice(httpStart, jobs.indexOf('return { sourceId, jobs, warning', httpStart));
+      const terminalStart = jobs.indexOf('const markGatheredSourceTerminal = async');
+      const terminalSlice = jobs.slice(terminalStart, jobs.indexOf('const runBrowserSourcesInOrder', terminalStart));
+      assert(gatherSlice.includes('gatherBranches = [')
+        && gatherSlice.includes('await Promise.all(gatherBranches)')
+        && gatherSlice.includes('pipelineAbort.abort(error)')
+        && gatherSlice.includes('await Promise.allSettled(gatherBranches)')
+        && httpSlice.includes('if (stageSource) {')
+        && !httpSlice.includes('jobs.length > 0')
+        && httpSlice.includes("const retryablePartial = warning?.code === 'query-error'")
+        && httpSlice.includes("entry?.fanoutStopped === true")
+        && httpSlice.includes('stageSource({ sourceId, jobs, warning, retryablePartial })')
+        && terminalSlice.includes('r?.retryablePartial === true')
+        && terminalSlice.includes("blocked ? 'blocked' : 'done'"),
+      'a fatal gather branch must abort/drain concurrent provider work; clean HTTP zeroes terminalize, while explicit retryable partial HTTP coverage stays automatically blocked');
+    },
+  },
+  {
+    name: 'Job Search forwards its manual-AI run identity to fresh and resumed search IPC work',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+      const freshStart = source.indexOf('const searchResult = await window.electronAPI.searchJobs({\n        queries: allQueries,');
+      const resumeStart = source.indexOf('const searchResult = await window.electronAPI.searchJobs({\n        queries,', freshStart + 1);
+      const freshEnd = source.indexOf('      if (cancelled()) return searchRunOutcome', freshStart);
+      const resumeEnd = source.indexOf('      if (cancelled()) return;', resumeStart);
+      const freshPayload = source.slice(freshStart, freshEnd);
+      const resumePayload = source.slice(resumeStart, resumeEnd);
+
+      assert(freshStart >= 0 && freshEnd > freshStart
+        && freshPayload.includes('nodeId: currentId,\n        manualAiRunId: effectiveManualAiRunId,')
+        && resumeStart >= 0 && resumeEnd > resumeStart
+        && resumePayload.includes('nodeId: currentId,\n        manualAiRunId,'),
+      'fresh Job Search IPC work must carry its generated effective manual-AI run id, while resumed work carries its exact recovery run id, so role-screen handoffs can offer durable Pause & save');
+    },
+  },
+  {
+    name: 'primary Job Search exact resume is process-leased and continuation lifecycle cancel remains recoverable',
+    run: () => {
+      const dir = fs.mkdtempSync(path.join('/tmp', 'ic-job-run-execution-'));
+      const canvas = path.join(dir, 'canvas.json');
+      try {
+        const first = claimExactJobRunExecution(canvas, 'lease-hub', 'lease-run');
+        const duplicate = claimExactJobRunExecution(canvas, 'lease-hub', 'lease-run');
+        assert(first.ok === true && duplicate.ok === false && duplicate.busy === true,
+        'two windows cannot execute the same exact primary resume concurrently');
+        first.release();
+        const afterRelease = claimExactJobRunExecution(canvas, 'lease-hub', 'lease-run');
+        assert(afterRelease.ok === true,
+        'the process lease releases in finally and cannot become a durable false lock after restart/error');
+        afterRelease.release();
+
+        const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
+        const card = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
+        const jobs = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
+        assert(search.includes('pauseJobRunAndCancel({')
+          && search.includes('runId: jobRunIdRef.current || null')
+          && !search.includes('runId: jobRunIdRef.current || resetData.jobRunId')
+          && jobs.indexOf('pauseRunForManualResume(canvasFilePath') < jobs.indexOf('abortNodeTasksAndWait('),
+        'Stop discovers a fresh current manifest when needed and persists manual disposition before abort');
+        assert(card.includes("solveOutcome === 'resolved'")
+          && card.includes('jobContinuationAppliedReceipt(')
+          && card.includes("solveOutcome === 'fenced'")
+          && card.includes("solveOutcome = 'interrupted'")
+          && card.includes("cancelNodeTask?.(data.hubId, 'job-source-card-removed')"),
+        'ordinary unmount/WebContents cancellation preserves the exact automatic/manual continuation, while a resolved result is receipt-staged until canvas persistence proves it may retire');
+        assert(search.includes('listJobContinuations({')
+          && search.includes('triggerUSAJobsBackgroundSearch({ continuation: intent })')
+          && card.includes('Auto-resuming unattended source recovery')
+          && card.includes("String(progress?.warning?.resumeState?.mode || '').toLowerCase() === 'retry-descriptions'"),
+        'mount recovery discovers exact unattended continuations while interactive login/challenge modes remain outside the automatic retry-description route');
+        return { exactRunLease: true, lifecycleCancelRetained: true, startupDiscovery: true };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     },
   },
 ];

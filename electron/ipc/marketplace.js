@@ -7,8 +7,15 @@
  *           was retired — see fetchReverbListings), AptDeco (furniture)
  */
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import electronPkg from 'electron';
 import { callLLMVision, callLLMText, hasExactDurableTextHandoff } from './llm.js';
-import { MANUAL_HANDOFF_CONCURRENCY, mapWithConcurrency } from './jobPreferences.js';
+import {
+  HANDOFF_CONCURRENCY,
+  mapAutomaticHandoffs,
+  mapManualHandoffWaves,
+} from '../../src/utils/handoffScheduler.js';
 import { getCurrentIpcRequestContext, handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
@@ -27,8 +34,39 @@ import { COMP_SOURCE_LOGIN_PLATFORM, getRequiredCompLoginPlatformIds } from '../
 import { retryWarningRequiringAction } from '../../src/utils/compsMerge.js';
 import { deriveBundlePricingResult, roundToCents } from '../../src/utils/bundlePricing.js';
 import { CONDITION_VALUES, formatConditionGuideForPrompt, formatConditionForPricingPrompt, stripConditionFromGeneratedTitle } from '../../src/utils/productConditions.js';
+import {
+  isAutomaticMarketplaceResolveIntent,
+  marketplacePhotoInputKey,
+  marketplacePhotoInputMatches,
+  marketplaceResolveInput,
+  marketplaceResolveInputKey,
+  marketplaceResearchInput,
+  marketplaceResearchInputKey,
+  marketplaceStatusInput,
+  marketplaceStatusInputKey,
+  marketplaceSynthesisInputKey,
+  mergeMarketplaceSourceCheckpoint,
+  mergeMarketplaceStatusPrepared,
+  newMarketplaceRecovery,
+  newMarketplaceStatusRecovery,
+  recordMarketplaceStatusResult,
+} from '../../src/utils/marketplaceRunRecovery.js';
+import {
+  acknowledgeMarketplaceRecovery,
+  acquireMarketplaceRecoveryClaim,
+  abandonMarketplaceRecovery,
+  abandonMarketplaceRecoveryBatch,
+  beginMarketplaceRecovery,
+  checkpointMarketplaceRecovery,
+  peekMarketplaceRecovery,
+} from './marketplaceRecoveryStore.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, PRICE_SYNTHESIS_BATCH_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
+
+const { app } = electronPkg;
+const MAX_MARKETPLACE_PHOTO_BYTES = 50 * 1024 * 1024;
+const MAX_MARKETPLACE_PHOTO_TOTAL_BYTES = 200 * 1024 * 1024;
+const MARKETPLACE_PHOTO_STAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 import { wrapUntrustedText } from './promptSafety.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
@@ -70,6 +108,16 @@ const marketplaceTelemetry = {
   fit:       null, // { ts, platforms, good, unfit }
 };
 
+// Marketplace phases have a durable write-ahead recovery record. An unsaved
+// canvas has no restart owner, so reject before claims, browser work, or model
+// work; the renderer keeps its photos/inputs and can retry immediately after
+// Save rather than losing an in-flight scrape on restart.
+function requireSavedMarketplaceRecoveryCanvas(canvasFilePath) {
+  if (typeof canvasFilePath !== 'string' || !canvasFilePath.trim()) {
+    throw new Error('Save this canvas first before starting Marketplace research. Your current inputs will remain in place.');
+  }
+}
+
 // Results can cross in transit: the next queued run may emit progress before
 // the previous invoke response reaches the renderer. Wall-clock timestamps can
 // tie within one millisecond, so stamp a per-process monotonic sequence too.
@@ -100,6 +148,7 @@ function canonicalBatchPricingId(item) {
     sold: Array.isArray(item?.comps?.sold) ? item.comps.sold : [],
     active: Array.isArray(item?.comps?.active) ? item.comps.active : [],
     pricingNotes: normalizePricingNotes(item?.pricingNotes),
+    productSpec: item?.productSpec && typeof item.productSpec === 'object' ? item.productSpec : {},
   })).digest('hex').slice(0, 20);
   return `price-${digest}`;
 }
@@ -152,6 +201,329 @@ function prepareBatchPricingItem(item, ordinal = 0) {
     junkExample: [...soldJunk, ...activeJunk][0]?.title ? String([...soldJunk, ...activeJunk][0].title).slice(0, 60) : null,
     itemId: canonicalBatchPricingId({ ...item, ordinal, query, condition, itemKey, comps: { sold, active }, pricingNotes: userPricingNotes }),
   };
+}
+
+function throwIfMarketplaceLifecycleAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('Marketplace task was interrupted before its result could be checkpointed.');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function isMarketplaceManualAiCancellation(error, signal) {
+  const reason = signal?.reason;
+  return error?.cancelCause === 'manual-ai-cancelled'
+    || reason?.cancelCause === 'manual-ai-cancelled'
+    || (error?.name === 'AbortError' && /manual ai job cancelled/i.test(String(error?.message || '')));
+}
+
+async function tombstoneMarketplaceManualAiCancellation({
+  error, signal, claim, canvasFilePath, nodeId, kind, runId, inputKey,
+}) {
+  if (!isMarketplaceManualAiCancellation(error, signal)) return false;
+  const stopped = await abandonMarketplaceRecovery({
+    canvasFilePath,
+    nodeId,
+    kind,
+    runId,
+    inputKey,
+    reason: 'manual-ai-cancelled',
+  }, { ownerToken: claim?.ownerToken });
+  if (!stopped?.abandoned) {
+    throw new Error(`Manual AI cancellation could not be durably recorded (${stopped?.reason || 'unknown'}).`);
+  }
+  if (kind === 'sellhub') {
+    await removeMarketplacePhotoStage(canvasFilePath, nodeId, runId).catch(() => false);
+  }
+  return true;
+}
+
+function withMarketplaceClaimAbort(args) {
+  const context = getCurrentIpcRequestContext();
+  const controller = context?.abortController;
+  return {
+    ...args,
+    sender: context?.sender || null,
+    abort: controller && typeof controller.abort === 'function'
+      ? (reason) => controller.abort(reason)
+      : null,
+  };
+}
+
+function exactJson(value) {
+  return JSON.stringify(value);
+}
+
+async function readBoundedMarketplacePhoto(imagePath) {
+    const canonicalPath = await fs.promises.realpath(imagePath);
+    const stat = await fs.promises.lstat(canonicalPath);
+    if (!stat.isFile()) throw new Error(`Marketplace photo is not a regular file: ${imagePath}`);
+    if (stat.size > MAX_MARKETPLACE_PHOTO_BYTES) throw new Error(`Image file too large for marketplace analysis: ${imagePath}`);
+    const bytes = await fs.promises.readFile(canonicalPath);
+    if (bytes.length !== stat.size || bytes.length > MAX_MARKETPLACE_PHOTO_BYTES) {
+      throw new Error(`Marketplace photo changed while it was being staged: ${imagePath}`);
+    }
+    return { canonicalPath, bytes, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+}
+
+function marketplacePhotoStageRoot() {
+  return path.resolve(app.getPath('userData'), 'marketplace-photo-recovery');
+}
+
+function marketplacePhotoStageDir(canvasFilePath, nodeId, runId) {
+  const root = marketplacePhotoStageRoot();
+  const digest = crypto.createHash('sha256')
+    .update(`${path.resolve(canvasFilePath)}\u0000${nodeId}\u0000${runId}`)
+    .digest('hex');
+  const target = path.resolve(root, digest);
+  if (path.dirname(target) !== root) throw new Error('Unsafe marketplace photo stage path.');
+  return target;
+}
+
+async function fsyncMarketplaceDirectory(directoryPath) {
+  const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
+  if (!handle) return;
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function removeMarketplacePhotoStage(canvasFilePath, nodeId, runId) {
+  if (!canvasFilePath || !nodeId || !runId) return false;
+  const stageDir = marketplacePhotoStageDir(canvasFilePath, nodeId, runId);
+  const stat = await fs.promises.lstat(stageDir).catch(() => null);
+  if (!stat) return false;
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    logger.warn('[Marketplace] Refusing to remove unsafe photo-stage entry:', stageDir);
+    return false;
+  }
+  await fs.promises.rm(stageDir, { recursive: true, force: true });
+  // Directory removal is not crash durable until the parent metadata reaches
+  // disk. Without this barrier an explicitly stopped/completed run could
+  // resurrect private staged bytes after a power loss.
+  await fsyncMarketplaceDirectory(path.dirname(stageDir));
+  return true;
+}
+
+async function writeExclusiveFile(filePath, bytes) {
+  const handle = await fs.promises.open(filePath, 'wx', 0o600);
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function stageMarketplacePhotos(imagePaths, canvasFilePath, nodeId, runId, { replaceOwnedPartial = false } = {}) {
+  const snapshots = [];
+  let totalBytes = 0;
+  for (const imagePath of imagePaths) {
+    const snapshot = await readBoundedMarketplacePhoto(imagePath);
+    totalBytes += snapshot.size;
+    if (totalBytes > MAX_MARKETPLACE_PHOTO_TOTAL_BYTES) throw new Error('Marketplace photos are too large to stage safely.');
+    snapshots.push(snapshot);
+  }
+  const root = marketplacePhotoStageRoot();
+  await fs.promises.mkdir(root, { recursive: true, mode: 0o700 });
+  const rootStat = await fs.promises.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Marketplace photo recovery root is unsafe.');
+  const stageDir = marketplacePhotoStageDir(canvasFilePath, nodeId, runId);
+  const existing = await fs.promises.lstat(stageDir).catch(() => null);
+  if (existing) {
+    if (!replaceOwnedPartial || !existing.isDirectory() || existing.isSymbolicLink()) {
+      throw new Error('A marketplace photo stage already exists for this run; restart recovery must verify ownership before replacing it.');
+    }
+    const manifestPath = path.join(stageDir, 'owner.json');
+    const manifestStat = await fs.promises.lstat(manifestPath).catch(() => null);
+    const manifest = manifestStat?.isFile() && !manifestStat.isSymbolicLink() && manifestStat.size <= 16_384
+      ? JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'))
+      : null;
+    if (
+      manifest?.version !== 1
+      || path.resolve(manifest.canvasFilePath || '') !== path.resolve(canvasFilePath)
+      || manifest.nodeId !== nodeId
+      || manifest.runId !== runId
+    ) throw new Error('Refusing to replace a marketplace photo stage with mismatched ownership.');
+    await removeMarketplacePhotoStage(canvasFilePath, nodeId, runId);
+  }
+  await fs.promises.mkdir(stageDir, { recursive: false, mode: 0o700 });
+  await fsyncMarketplaceDirectory(root);
+  let createdStageDir = true;
+  try {
+    await writeExclusiveFile(path.join(stageDir, 'owner.json'), JSON.stringify({
+      version: 1,
+      canvasFilePath: path.resolve(canvasFilePath),
+      nodeId,
+      runId,
+      createdAt: Date.now(),
+    }));
+    const identities = [];
+    for (let index = 0; index < snapshots.length; index++) {
+      const snapshot = snapshots[index];
+      const extension = path.extname(snapshot.canonicalPath).replace(/[^.a-z0-9]/gi, '').slice(0, 12) || '.img';
+      const stagedPath = path.join(stageDir, `${String(index).padStart(3, '0')}-${snapshot.sha256.slice(0, 20)}${extension}`);
+      const tempPath = path.join(stageDir, `.${crypto.randomBytes(12).toString('hex')}.tmp`);
+      await writeExclusiveFile(tempPath, snapshot.bytes);
+      try {
+        await fs.promises.link(tempPath, stagedPath);
+      } finally {
+        await fs.promises.unlink(tempPath).catch(() => {});
+      }
+      identities.push({
+        originalCanonicalPath: snapshot.canonicalPath,
+        stagedPath,
+        size: snapshot.size,
+        sha256: snapshot.sha256,
+      });
+    }
+    await fsyncMarketplaceDirectory(stageDir);
+    createdStageDir = false;
+    return identities;
+  } finally {
+    if (createdStageDir) await removeMarketplacePhotoStage(canvasFilePath, nodeId, runId).catch(() => {});
+  }
+}
+
+async function verifyStagedMarketplacePhotos(identities) {
+  let totalBytes = 0;
+  for (const identity of identities) {
+    const snapshot = await readBoundedMarketplacePhoto(identity?.stagedPath);
+    totalBytes += snapshot.size;
+    if (totalBytes > MAX_MARKETPLACE_PHOTO_TOTAL_BYTES
+      || snapshot.canonicalPath !== identity.stagedPath
+      || snapshot.size !== identity.size
+      || snapshot.sha256 !== identity.sha256) {
+      throw new Error('A staged marketplace photo no longer matches its durable content identity.');
+    }
+  }
+  return identities.map(identity => identity.stagedPath);
+}
+
+async function pruneOrphanedMarketplacePhotoStages() {
+  const root = marketplacePhotoStageRoot();
+  const rootStat = await fs.promises.lstat(root).catch(() => null);
+  if (!rootStat) return;
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    logger.warn('[Marketplace] Refusing photo-stage pruning because the recovery root is unsafe.');
+    return;
+  }
+  const entries = (await fs.promises.readdir(root, { withFileTypes: true })).slice(0, 512);
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
+    const stageDir = path.resolve(root, entry.name);
+    if (path.dirname(stageDir) !== root) continue;
+    try {
+      const stageStat = await fs.promises.lstat(stageDir);
+      const manifestPath = path.join(stageDir, 'owner.json');
+      const manifestStat = await fs.promises.lstat(manifestPath);
+      if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 16_384) continue;
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      if (
+        manifest?.version !== 1
+        || marketplacePhotoStageDir(manifest.canvasFilePath, manifest.nodeId, manifest.runId) !== stageDir
+      ) continue;
+      const persisted = await peekMarketplaceRecovery({
+        canvasFilePath: manifest.canvasFilePath,
+        nodeId: manifest.nodeId,
+        kind: 'sellhub',
+      });
+      const activePaths = persisted?.found && persisted.runId === manifest.runId
+        ? (persisted.recovery?.input?.imageIdentities || []).map(identity => path.dirname(identity?.stagedPath || ''))
+        : [];
+      const activeStaging = persisted?.found
+        && persisted.runId === manifest.runId
+        && persisted.recovery?.phase === 'analysis'
+        && (persisted.recovery?.input?.staging === true
+          || (activePaths.length > 0 && activePaths.every(directory => directory === stageDir)));
+      const durablyRetired = ['abandoned', 'completed'].includes(persisted?.status)
+        || (persisted?.found && (
+          persisted.runId !== manifest.runId
+          || persisted.recovery?.phase !== 'analysis'
+        ));
+      if (!activeStaging && (
+        durablyRetired
+        || now - Number(manifest.createdAt || stageStat.mtimeMs || 0) >= MARKETPLACE_PHOTO_STAGE_MAX_AGE_MS
+      )) {
+        await removeMarketplacePhotoStage(manifest.canvasFilePath, manifest.nodeId, manifest.runId);
+      }
+    } catch (error) {
+      logger.warn('[Marketplace] Could not inspect a photo-stage directory:', error?.message || String(error));
+    }
+  }
+}
+
+/** Bind a caller's prompt rows to the exact durable post-scrape snapshot. */
+export function validateMarketplaceBatchExecution(recovery, items) {
+  const pending = (Array.isArray(recovery?.pendingItems) ? recovery.pendingItems : [])
+    .filter(item => ((item?.comps?.sold?.length || 0) + (item?.comps?.active?.length || 0)) > 0);
+  const supplied = Array.isArray(items) ? items : [];
+  if (pending.length !== supplied.length) throw new Error('Pricing batch items do not match the durable comp snapshot.');
+  for (let index = 0; index < pending.length; index++) {
+    const expected = pending[index];
+    const actual = supplied[index] || {};
+    const expectedCore = {
+      itemKey: expected.key || 'primary',
+      itemLabel: expected.label || expected.query || 'Item',
+      query: expected.query || '',
+      condition: expected.condition || 'Used - Good',
+      pricingNotes: expected.pricingNotes || '',
+      productSpec: expected.productSpec || {},
+      comps: expected.comps || { sold: [], active: [] },
+    };
+    const actualCore = {
+      itemKey: actual.itemKey || 'primary',
+      itemLabel: actual.itemLabel || actual.query || 'Item',
+      query: actual.query || '',
+      condition: actual.condition || 'Used - Good',
+      pricingNotes: actual.pricingNotes || '',
+      productSpec: actual.productSpec || {},
+      comps: actual.comps || { sold: [], active: [] },
+    };
+    if (exactJson(actualCore) !== exactJson(expectedCore)) {
+      throw new Error(`Pricing item ${index + 1} does not match the durable comp snapshot.`);
+    }
+  }
+  return supplied;
+}
+
+/** Bind bundle reasoning to the exact pending items + durable batch output. */
+export function validateMarketplaceBundleExecution(recovery, items) {
+  const pending = Array.isArray(recovery?.pendingItems) ? recovery.pendingItems : [];
+  const supplied = Array.isArray(items) ? items : [];
+  if (pending.length !== supplied.length) throw new Error('Bundle items do not match the durable pricing snapshot.');
+  const batchByKey = new Map((recovery?.batchResult?.items || []).map(row => [row?.itemKey, row?.pricing || null]));
+  for (let index = 0; index < pending.length; index++) {
+    const expected = pending[index];
+    const actual = supplied[index] || {};
+    const pricing = batchByKey.get(expected.key) || null;
+    const expectedCore = {
+      itemKey: expected.key,
+      label: expected.label || expected.query,
+      condition: expected.condition,
+      recommended_price: pricing?.recommended_price ?? null,
+      quick_sell_price: pricing?.quick_sell_price ?? null,
+      max_profit_price: pricing?.max_profit_price ?? null,
+      match_quality: pricing?.match_quality ?? null,
+      reasoning: pricing?.justification ?? null,
+      notes: expected.pricingNotes || '',
+    };
+    const actualCore = {
+      itemKey: actual.itemKey,
+      label: actual.label,
+      condition: actual.condition,
+      recommended_price: actual.recommended_price ?? null,
+      quick_sell_price: actual.quick_sell_price ?? null,
+      max_profit_price: actual.max_profit_price ?? null,
+      match_quality: actual.match_quality ?? null,
+      reasoning: actual.reasoning ?? null,
+      notes: actual.notes || '',
+    };
+    if (exactJson(actualCore) !== exactJson(expectedCore)) {
+      throw new Error(`Bundle item ${index + 1} does not match the durable pricing result.`);
+    }
+  }
+  return supplied;
 }
 
 /** Stable greedy packing against `1024 + 900*items + 200*comps <= 15360`. */
@@ -463,7 +835,7 @@ function priceStats(items) {
 //
 // Each task has a `category: 'sold' | 'active'` field so the aggregate loop can
 // classify results without a separately-maintained hardcoded ID list.
-function buildCompTasks(query) {
+function buildCompTasks(query, sourcePlan = null) {
   // Swappa's /search is a MODEL picker (indexes by model, not configuration), so
   // an over-specific query like "Apple iPhone XS 64GB" can miss the model entirely
   // and fall through to featured/trending products. Strip storage/capacity tokens
@@ -474,7 +846,7 @@ function buildCompTasks(query) {
   const swappaQuery = String(query || '').replace(/\b\d+\s?(?:gb|tb)\b/gi, ' ').replace(/\s+/g, ' ').trim() || query;
   // Marketplace test mode (MARKETPLACE_TEST_ENABLED + MARKETPLACE_TEST_SOURCE)
   // narrows the run to a single targeted comp source; production returns all.
-  return [
+  const tasks = [
     // Tier 1 — Sold comps (gold standard)
     {
       id: 'ebay-sold', category: 'sold',
@@ -530,6 +902,9 @@ function buildCompTasks(query) {
     // server-rendered but its client-side JS blanks them under automation, so the
     // stealth browser always read 0; a plain fetch with a browser UA gets them.
   ].filter(task => isCompSourceEnabledInScope(task.id));
+  if (!Array.isArray(sourcePlan)) return tasks;
+  const byId = new Map(tasks.map(task => [task.id, task]));
+  return sourcePlan.map(sourceId => byId.get(sourceId)).filter(Boolean);
 }
 
 /** Build a lookup map from task ID → category, derived once per price research call. */
@@ -751,7 +1126,55 @@ function enabledApiCompSourceIds() {
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses an internal REST API.
  */
-async function fetchApiMarketplaceSources(query, signal = null, emit = null, category = undefined) {
+function restoredMarketplaceSourceRecord(value, sourceId, kind, category) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.sourceId !== sourceId || value.kind !== kind || value.category !== category) return null;
+  if (!Array.isArray(value.items) || value.items.length > 2_000) return null;
+  // A canvas is user-editable input. Refuse an oversized replay blob instead of
+  // trusting it as a cheap way around the live scraper's own output bounds.
+  try {
+    if (JSON.stringify(value).length > 10 * 1024 * 1024) return null;
+  } catch {
+    return null;
+  }
+  return value;
+}
+
+function checkpointBrowserResult(result, task, sessionCache) {
+  const items = Array.isArray(result?.data) ? result.data : [];
+  return {
+    kind: 'browser',
+    sourceId: task.id,
+    category: task.category || 'sold',
+    success: result?.success === true,
+    items,
+    warning: result?.warning || (!result?.success ? classifyCompScrapeFailure(result?.error, task.id, sessionCache) : null),
+    error: result?.error || null,
+    url: task.url || null,
+    yieldStats: result?.yieldStats || null,
+  };
+}
+
+function checkpointApiResult(result) {
+  return {
+    kind: 'api',
+    sourceId: result.sourceId,
+    category: result.category,
+    success: !result.error,
+    items: Array.isArray(result.items) ? result.items : [],
+    warning: result.warning || null,
+    error: result.error || null,
+    effectiveQuery: result.effectiveQuery || '',
+    url: result.url || null,
+  };
+}
+
+export function isMarketplaceSourceLifecycleAbort(signal, error) {
+  if (signal?.aborted || error?.name === 'AbortError') return true;
+  return /^(Aborted|Window closed|Browser pool is shutting down)$/i.test(String(error?.message || error || ''));
+}
+
+async function fetchApiMarketplaceSources(query, signal = null, emit = null, category = undefined, resumeSources = {}, onSourceSettled = null, sourcePlan = null) {
   // PriceCharting is a product-catalog search (not a listing index): seller-style
   // titles miss the exact product and fall back to ~100 fuzzy results, so the
   // query is normalized to the canonical product name (see priceChartingQuery).
@@ -766,13 +1189,35 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
   // retired) and AptDeco (furniture) are ACTIVE asking prices — the caller
   // routes results by this field instead of assuming all API sources are sold.
   // AptDeco skips itself for non-furniture (isAptDecoApplicable).
-  const apiTasks = [
+  let apiTasks = [
     { sourceId: 'reverb', category: 'active', effectiveQuery: query, fn: (s) => fetchReverbListings(query, s) },
     { sourceId: 'pricecharting', category: 'sold', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
     { sourceId: 'aptdeco-active', category: 'active', effectiveQuery: query, fn: (s) => fetchAptDecoComps(query, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));
+  if (Array.isArray(sourcePlan)) {
+    const byId = new Map(apiTasks.map(task => [task.sourceId, task]));
+    apiTasks = sourcePlan.map(sourceId => byId.get(sourceId)).filter(Boolean);
+  }
 
   return Promise.all(apiTasks.map(async ({ sourceId, category: sourceCategory, effectiveQuery, fn }) => {
+    const restored = restoredMarketplaceSourceRecord(resumeSources?.[sourceId], sourceId, 'api', sourceCategory);
+    if (restored) {
+      emit?.(sourceId, {
+        status: restored.error ? 'error' : 'done',
+        count: restored.items.length,
+        warning: restored.warning || null,
+        url: restored.url || null,
+      });
+      return {
+        sourceId,
+        items: restored.items,
+        warning: restored.warning || null,
+        error: restored.error || null,
+        effectiveQuery: restored.effectiveQuery || effectiveQuery,
+        url: restored.url || null,
+        category: sourceCategory,
+      };
+    }
     try {
       if (signal?.aborted) throw new Error('Aborted');
       // Each API fetcher now returns { items, warning } so blocks/throttles
@@ -781,11 +1226,18 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       const url = Array.isArray(result) ? null : (result?.url || null);
+      const settled = { sourceId, items, warning, effectiveQuery, url, category: sourceCategory };
+      if (onSourceSettled) await onSourceSettled(sourceId, checkpointApiResult(settled));
       emit?.(sourceId, { status: 'done', count: items.length, warning });
-      return { sourceId, items, warning, effectiveQuery, url, category: sourceCategory };
+      return settled;
     } catch (error) {
+      if (isMarketplaceSourceLifecycleAbort(signal, error)) {
+        throw error;
+      }
+      const settled = { sourceId, items: [], error: error?.message || String(error), effectiveQuery, category: sourceCategory };
+      if (onSourceSettled) await onSourceSettled(sourceId, checkpointApiResult(settled));
       emit?.(sourceId, { status: 'error', count: 0 });
-      return { sourceId, items: [], error: error?.message || String(error), effectiveQuery, category: sourceCategory };
+      return settled;
     }
   }));
 }
@@ -799,29 +1251,58 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
  * preflight is the CALLER's job — it's per-platform, not per-query, so a
  * multi-item run only does it once.
  */
-async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category }) {
-  const tasks = buildCompTasks(query);
-  for (const t of tasks) emit(t.id, { status: 'searching', count: 0 });
-
+async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category, resumeSources = {}, onSourceSettled = null, sourcePlan = null }) {
+  const tasks = buildCompTasks(query, sourcePlan);
   const sourceUrlById = Object.fromEntries(tasks.map(t => [t.id, t.url]));
-  const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
-    const items = Array.isArray(res.data) ? res.data : [];
-    // Login-aware: a 0-result login wall is relabeled 'login-required' rather
-    // than 'stale-selectors' so the card guides the user to log in.
-    const warning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
-    emit(res.id, {
-      status: res.success ? 'done' : 'error',
-      count: items.length,
-      warning,
-      url: sourceUrlById[res.id] || null,
+  const restoredBrowserResults = [];
+  const pendingBrowserTasks = [];
+  for (const task of tasks) {
+    const restored = restoredMarketplaceSourceRecord(resumeSources?.[task.id], task.id, 'browser', task.category || 'sold');
+    if (!restored) {
+      pendingBrowserTasks.push(task);
+      emit(task.id, { status: 'searching', count: 0 });
+      continue;
+    }
+    restoredBrowserResults.push({
+      id: task.id,
+      success: restored.success === true,
+      data: restored.items,
+      warning: restored.warning || null,
+      error: restored.error || null,
+      yieldStats: restored.yieldStats || null,
     });
-  }, signal);
+    emit(task.id, {
+      status: restored.success ? 'done' : 'error',
+      count: restored.items.length,
+      warning: restored.warning || null,
+      url: restored.url || task.url || null,
+    });
+  }
+  const freshBrowserResultsPromise = pendingBrowserTasks.length > 0
+    ? scrapeMultiple(pendingBrowserTasks, null, signal, async (res, task) => {
+      if (isMarketplaceSourceLifecycleAbort(signal, res.success ? null : res.error)) return;
+      if (onSourceSettled) await onSourceSettled(res.id, checkpointBrowserResult(res, task, sessionCache));
+      const items = Array.isArray(res.data) ? res.data : [];
+      const warning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
+      emit(res.id, {
+        status: res.success ? 'done' : 'error',
+        count: items.length,
+        warning,
+        url: sourceUrlById[res.id] || null,
+      });
+    })
+    : Promise.resolve([]);
 
-  const apiSourceIds = enabledApiCompSourceIds();
-  for (const sourceId of apiSourceIds) emit(sourceId, { status: 'searching', count: 0 });
-  const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit, category);
+  const apiSourceIds = Array.isArray(sourcePlan)
+    ? sourcePlan.filter(sourceId => enabledApiCompSourceIds().includes(sourceId))
+    : enabledApiCompSourceIds();
+  for (const sourceId of apiSourceIds) {
+    if (!resumeSources?.[sourceId]) emit(sourceId, { status: 'searching', count: 0 });
+  }
+  const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit, category, resumeSources, onSourceSettled, sourcePlan);
 
-  const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
+  const [freshBrowserResults, apiResults] = await Promise.all([freshBrowserResultsPromise, apiResultsPromise]);
+  const scrapeResults = [...restoredBrowserResults, ...freshBrowserResults];
 
   const taskCategoryMap = buildTaskCategoryMap(tasks);
   const comps = { sold: [], active: [] };
@@ -880,9 +1361,137 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
  * Register all Marketplace IPC handlers.
  */
 export function registerMarketplaceHandlers() {
+  void pruneOrphanedMarketplacePhotoStages().catch(error => {
+    logger.warn('[Marketplace] Photo-stage startup pruning failed:', error?.message || String(error));
+  });
+  // Renderer recovery controls. These are deliberately acknowledged main-
+  // process transactions, not best-effort React state. Every record is scoped
+  // to the canonical saved canvas + exact node owner in the store.
+  handleSafe('peek-marketplace-recovery', async (_event, args = {}) =>
+    peekMarketplaceRecovery(args));
+  handleSafe('checkpoint-marketplace-recovery', async (_event, args = {}) =>
+    checkpointMarketplaceRecovery(args));
+  handleSafe('abandon-marketplace-recovery', async (_event, args = {}) => {
+    const result = await abandonMarketplaceRecovery(args);
+    if (result?.abandoned && args.kind === 'sellhub') {
+      await removeMarketplacePhotoStage(args.canvasFilePath, args.nodeId, args.runId).catch(error => {
+        logger.warn('[Marketplace] Could not clean abandoned photo staging:', error?.message || String(error));
+      });
+    }
+    return result;
+  });
+  handleSafe('abandon-marketplace-recovery-batch', async (_event, args = {}) => {
+    const result = await abandonMarketplaceRecoveryBatch(args);
+    if (result?.fenced) {
+      await Promise.all((Array.isArray(args.owners) ? args.owners : [])
+        .filter(owner => owner?.kind === 'sellhub' && owner?.runId)
+        .map(owner => removeMarketplacePhotoStage(args.canvasFilePath, owner.nodeId, owner.runId).catch(() => false)));
+    }
+    return result;
+  });
+  handleSafe('acknowledge-marketplace-recovery', async (_event, args = {}) => {
+    const result = await acknowledgeMarketplaceRecovery(args);
+    if (result?.completed && args.kind === 'sellhub') {
+      await removeMarketplacePhotoStage(args.canvasFilePath, args.nodeId, args.runId).catch(() => false);
+    }
+    return result;
+  });
+
   // ── Analyze Product Photos ────────────────────────────────────────────────
-  handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
-    logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
+  handleSafe('analyze-photos', async (event, { imagePaths, nodeId, canvasFilePath, manualAiRunId, recovery, autoResume = false }, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(canvasFilePath);
+    const validPaths = (Array.isArray(imagePaths) ? imagePaths : [])
+      .filter(value => typeof value === 'string' && value.trim())
+      .map(value => value.trim());
+    if (recovery && manualAiRunId && recovery.runId !== manualAiRunId) {
+      throw new Error('Photo analysis run does not match its durable recovery snapshot.');
+    }
+    const analysisRunId = recovery?.runId || manualAiRunId || crypto.randomUUID();
+    const provisionalInputKey = recovery?.inputKey
+      || `photo-staging:${marketplacePhotoInputKey(validPaths)}`;
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath, nodeId, kind: 'sellhub', runId: analysisRunId, inputKey: provisionalInputKey,
+      autoResume,
+      operation: 'analysis',
+    }));
+    if (!claim.claimed) throw new Error('This exact marketplace analysis is already running in another window.');
+    try {
+    let durableRecovery = recovery;
+    let imageIdentities = Array.isArray(recovery?.input?.imageIdentities)
+      ? recovery.input.imageIdentities
+      : null;
+    let barrier;
+    if (imageIdentities) {
+      const exactInputKey = marketplacePhotoInputKey(validPaths, imageIdentities);
+      if (!marketplacePhotoInputMatches(recovery, validPaths) || recovery.inputKey !== exactInputKey) {
+        throw new Error('A marketplace photo changed since this analysis was checkpointed. Review the photos and start a new analysis.');
+      }
+      barrier = await beginMarketplaceRecovery({
+        canvasFilePath, nodeId, kind: 'sellhub', recovery: durableRecovery,
+      });
+    } else {
+      if (recovery && recovery?.input?.staging !== true) {
+        const persisted = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+        if (persisted?.found && persisted.runId === recovery.runId) {
+          throw new Error('The saved photo analysis predates content-bound recovery. Review the photos and start a new analysis.');
+        }
+      }
+      const provisionalRecovery = recovery?.input?.staging === true
+        ? recovery
+        : newMarketplaceRecovery({
+          runId: analysisRunId,
+          phase: 'analysis',
+          input: { imagePaths: validPaths, staging: true },
+          inputKey: provisionalInputKey,
+        });
+      barrier = await beginMarketplaceRecovery({
+        canvasFilePath, nodeId, kind: 'sellhub', recovery: provisionalRecovery,
+      });
+      if (canvasFilePath && !barrier.saved) {
+        throw new Error(`Could not durably reserve photo staging (${barrier.reason || 'unknown recovery error'}).`);
+      }
+      const stagingRecovery = barrier.recovery || provisionalRecovery;
+      imageIdentities = await stageMarketplacePhotos(
+        validPaths,
+        canvasFilePath,
+        nodeId,
+        analysisRunId,
+        { replaceOwnedPartial: true },
+      );
+      const exactInputKey = marketplacePhotoInputKey(validPaths, imageIdentities);
+      const contentBoundRecovery = newMarketplaceRecovery({
+        runId: analysisRunId,
+        phase: 'analysis',
+        input: { imagePaths: validPaths, imageIdentities },
+        inputKey: exactInputKey,
+      });
+      throwIfMarketplaceLifecycleAborted(signal);
+      const bound = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: stagingRecovery.inputKey,
+        recovery: contentBoundRecovery,
+        signal,
+      });
+      if (canvasFilePath && !bound.saved) {
+        await removeMarketplacePhotoStage(canvasFilePath, nodeId, analysisRunId).catch(() => {});
+        throw new Error(`Could not bind staged photo content (${bound.reason || 'unknown recovery error'}).`);
+      }
+      durableRecovery = contentBoundRecovery;
+      barrier = { saved: true, recovery: contentBoundRecovery };
+    }
+    if (canvasFilePath && !barrier.saved) {
+      throw new Error(`Could not durably start photo analysis (${barrier.reason || 'unknown recovery error'}).`);
+    }
+    if (barrier.recovery?.runId === durableRecovery.runId) durableRecovery = barrier.recovery;
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('marketplace-analysis-checkpoint', {
+        nodeId,
+        recovery: barrier.recovery || durableRecovery,
+      });
+    }
+    logger.info(`[Marketplace][${nodeId}] Analyzing`, validPaths.length, 'photos');
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
     marketplaceTelemetry.scrape = null;
@@ -892,8 +1501,12 @@ export function registerMarketplaceHandlers() {
     marketplaceTelemetry.bundle = null;
     marketplaceTelemetry.fit = null;
 
+    // The handoff receives only immutable staged files. Re-verify their bytes
+    // immediately before creating the prompt so the exact hashed attachment,
+    // not a mutable original path, is what the AI chat will receive.
+    const stagedImagePaths = await verifyStagedMarketplacePhotos(imageIdentities);
     const aiMeta = {}; // populated with the model that actually served this call
-    const result = await callLLMVision(imagePaths, `
+    const result = await callLLMVision(stagedImagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
 Return a JSON object:
@@ -914,7 +1527,13 @@ Be specific about what you can clearly see. If you can't identify brand or model
 CONDITION GUIDE — choose the condition tier whose definition best matches what the photos show. When between two tiers, pick the LOWER (more conservative) one unless the photos clearly support the higher:
 ${formatConditionGuideForPrompt()}
 
-If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGLE most prominent / highest-value product and describe ONLY that one across every field (brand, model, generated_title, search_query). Do NOT fold the other products into the title or query — the seller lists them separately as additional items afterward.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA, meta: aiMeta });
+If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGLE most prominent / highest-value product and describe ONLY that one across every field (brand, model, generated_title, search_query). Do NOT fold the other products into the title or query — the seller lists them separately as additional items afterward.`, {
+      signal,
+      task: 'vision-product-analysis',
+      responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA,
+      meta: aiMeta,
+      attachmentSourcePaths: validPaths,
+    });
 
     const rawTitle = String(result?.generated_title || '');
     const normalizedRawTitle = rawTitle.replace(/\s+/g, ' ').trim();
@@ -939,7 +1558,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     marketplaceTelemetry.analyze = {
       ts: Date.now(),
       nodeId,
-      photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
+      photos: validPaths.length,
       title: product?.generated_title || '(unknown)',
       rawTitle: titleCleaned ? rawTitle : null,
       titleCleaned,
@@ -947,7 +1566,39 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       model: aiMeta.model || null,
       fallback: aiMeta.fallback || null,
     };
-    return { product };
+    const completedRecovery = {
+      ...durableRecovery,
+      phase: 'analysis-result',
+      result: { product },
+      updatedAt: Date.now(),
+    };
+    throwIfMarketplaceLifecycleAborted(signal);
+    const checkpoint = await checkpointMarketplaceRecovery({
+      canvasFilePath,
+      nodeId,
+      kind: 'sellhub',
+      expectedInputKey: durableRecovery.inputKey,
+      recovery: completedRecovery,
+      signal,
+    });
+    if (canvasFilePath && !checkpoint.saved) {
+      throw new Error(`Photo analysis finished but its durable result checkpoint failed (${checkpoint.reason || 'unknown'}).`);
+    }
+    if (stagedImagePaths.length > 0) {
+      await removeMarketplacePhotoStage(canvasFilePath, nodeId, durableRecovery.runId).catch((error) => {
+        logger.warn('[Marketplace] Could not prune completed photo staging:', error?.message || String(error));
+      });
+    }
+    return { product, recovery: completedRecovery, processEpoch: checkpoint.processEpoch };
+    } catch (error) {
+      await tombstoneMarketplaceManualAiCancellation({
+        error, signal, claim, canvasFilePath, nodeId, kind: 'sellhub',
+        runId: analysisRunId, inputKey: provisionalInputKey,
+      });
+      throw error;
+    } finally {
+      claim.release();
+    }
   });
 
   // ── Scrape Comps (no AI synthesis) ────────────────────────────────────────
@@ -956,7 +1607,87 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
   // failures before the model spends tokens on partial data. The renderer
   // calls `synthesize-price` afterward with the comps it decides to use.
   handleSafe('scrape-price-comps', async (event, args = {}, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(args.canvasFilePath);
     const { nodeId } = args;
+    // Establish the exact input + durable write-ahead record BEFORE even the
+    // login verifier/queue can touch a remote site. Renderer state is only a
+    // mirror; this acknowledged sidecar is the restart authority.
+    const items = (Array.isArray(args.items) && args.items.length > 0)
+      ? args.items
+      : [{ query: args.query, condition: args.condition }];
+    const sourcePlan = args.recovery?.input?.sourcePlan;
+    const sourcePlanIds = Array.isArray(sourcePlan?.sourceIds) ? sourcePlan.sourceIds : [];
+    if (sourcePlan?.version !== 1 || sourcePlan?.contract !== 'marketplace-comp-source-v1' || sourcePlanIds.length === 0) {
+      throw new Error('This saved price check predates exact source-plan recovery. Start a fresh price check to continue safely.');
+    }
+    const availableSourceIds = new Set([
+      ...buildCompTasks(items[0]?.query).map(task => task.id),
+      ...enabledApiCompSourceIds(),
+    ]);
+    const unavailableSourceIds = sourcePlanIds.filter(sourceId => !availableSourceIds.has(sourceId));
+    if (unavailableSourceIds.length > 0) {
+      throw new Error(`The saved price-check source plan is unavailable in this build (${unavailableSourceIds.join(', ')}). Start a fresh price check to migrate it.`);
+    }
+    const exactInput = marketplaceResearchInput(items, args.category, sourcePlan);
+    const exactInputKey = marketplaceResearchInputKey(items, args.category, sourcePlan);
+    const durableRunId = args.recovery?.runId || args.manualAiRunId || crypto.randomUUID();
+    let durableRecovery = args.recovery?.runId === durableRunId
+      && args.recovery?.phase === 'scrape'
+      && args.recovery?.inputKey === exactInputKey
+      && JSON.stringify(args.recovery?.input) === JSON.stringify(exactInput)
+      ? args.recovery
+      : newMarketplaceRecovery({
+        runId: durableRunId,
+        phase: 'scrape',
+        input: exactInput,
+        inputKey: exactInputKey,
+      });
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath: args.canvasFilePath,
+      nodeId,
+      kind: 'sellhub',
+      runId: durableRecovery.runId,
+      inputKey: durableRecovery.inputKey,
+      autoResume: args.autoResume === true,
+      operation: 'scrape',
+    }));
+    if (!claim.claimed) throw new Error('This exact marketplace scrape is already running in another window.');
+    try {
+    const barrier = await beginMarketplaceRecovery({
+      canvasFilePath: args.canvasFilePath,
+      nodeId,
+      kind: 'sellhub',
+      recovery: durableRecovery,
+    });
+    if (args.canvasFilePath && !barrier.saved) {
+      throw new Error(`Could not durably start marketplace research (${barrier.reason || 'unknown recovery error'}).`);
+    }
+    if (barrier.recovery?.runId === durableRecovery.runId) durableRecovery = barrier.recovery;
+    if (args.autoResume === true && durableRecovery.manualPause?.kind === 'login-required') {
+      return {
+        items: [],
+        comps: { sold: [], active: [] },
+        scrapeWarnings: [],
+        preflightBlocked: true,
+        missingLogins: durableRecovery.manualPause.missingLogins || [],
+        recovery: durableRecovery,
+      };
+    }
+    if (durableRecovery.manualPause?.kind === 'login-required') {
+      const resumedRecovery = { ...durableRecovery, manualPause: null, updatedAt: Date.now() };
+      const resumed = await checkpointMarketplaceRecovery({
+        canvasFilePath: args.canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: durableRecovery.inputKey,
+        recovery: resumedRecovery,
+        signal,
+      });
+      if (args.canvasFilePath && !resumed.saved) {
+        throw new Error(`Could not resume the login-paused price check (${resumed.reason || 'unknown'}).`);
+      }
+      durableRecovery = resumedRecovery;
+    }
     // Serialize against every other sell-side browser op — other nodes' price
     // checks AND captcha-resolve windows — via marketplaceBrowserLock. Without
     // it, a concurrent captcha-resolve calls closeStealthBrowser() mid-scrape
@@ -986,9 +1717,47 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     // independent products (kayak + paddle). Each item runs its own complete
     // pass through the pricing sources. Fall back to a single legacy `query`
     // so older callers / saved flows keep working.
-    const items = (Array.isArray(args.items) && args.items.length > 0)
-      ? args.items
-      : [{ query: args.query, condition: args.condition }];
+    let checkpointTail = Promise.resolve();
+    const sendSourceCheckpoint = (itemIndex, sourceId, record) => {
+      if (!durableRecovery?.runId) return Promise.resolve();
+      checkpointTail = checkpointTail.then(async () => {
+        throwIfMarketplaceLifecycleAborted(signal);
+        const next = mergeMarketplaceSourceCheckpoint(durableRecovery, {
+          runId: durableRecovery.runId,
+          inputKey: exactInputKey,
+          itemIndex,
+          sourceId,
+          record,
+        });
+        if (next === durableRecovery) throw new Error(`Rejected invalid recovery checkpoint for ${sourceId}.`);
+        const saved = await checkpointMarketplaceRecovery({
+          canvasFilePath: args.canvasFilePath,
+          nodeId,
+          kind: 'sellhub',
+          expectedInputKey: durableRecovery.inputKey,
+          recovery: next,
+          signal,
+        });
+        if (args.canvasFilePath && !saved.saved) {
+          throw new Error(`Could not persist ${sourceId} recovery checkpoint (${saved.reason || 'unknown'}).`);
+        }
+        durableRecovery = next;
+        if (event.sender.isDestroyed()) return;
+      try {
+        event.sender.send('marketplace-scrape-checkpoint', {
+          nodeId,
+          runId: durableRecovery.runId,
+          inputKey: exactInputKey,
+          itemIndex,
+          sourceId,
+          record,
+        });
+      } catch (error) {
+        logger.warn(`[Marketplace][${nodeId}] Could not emit ${sourceId} recovery checkpoint:`, error?.message || String(error));
+      }
+      });
+      return checkpointTail;
+    };
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
     // A full scrape starts a new pricing run. Clear every downstream stage now
@@ -1003,7 +1772,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
 
     // The comp-source LIST is query-independent, so build once from item 0 for
     // the login preflight (the per-source cards are spawned by the renderer).
-    const allTasks = buildCompTasks(items[0].query);
+    const allTasks = buildCompTasks(items[0].query, sourcePlanIds);
 
     // Pre-check login-required sources: skip scraping and emit login-required
     // immediately so the source card shows "Log in" guidance instead of running
@@ -1048,7 +1817,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       // Nothing else on this path stamps them, so without a terminal here their
       // cards stay at "waiting" for the rest of the session. Telemetry below
       // still counts only the tasks that were actually preflighted.
-      for (const apiSourceId of enabledApiCompSourceIds()) {
+      for (const apiSourceId of sourcePlanIds.filter(sourceId => enabledApiCompSourceIds().includes(sourceId))) {
         sendBlocked(apiSourceId, blockedWarning);
       }
       logger.info(`[Marketplace][${nodeId}] Price check blocked by login preflight — missing: ${missingLogins.join(', ')}`);
@@ -1056,7 +1825,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         ts: Date.now(),
         nodeId,
         sold: 0, active: 0,
-        sources: allTasks.length + enabledApiCompSourceIds().length,
+        sources: sourcePlanIds.length,
         warnings: allTasks.length,
         blocked: 0, errored: 0, timedOut: 0,
         loginRequired: Object.values(sourceWarnings).filter(w => w.code === 'login-required').length,
@@ -1065,7 +1834,30 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         sourceWarnings,
       };
       marketplaceTelemetry.resolves = {};
-      return { items: [], comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins };
+      const pausedRecovery = {
+        ...durableRecovery,
+        manualPause: {
+          kind: 'login-required',
+          missingLogins,
+          status: 'manual-required',
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const paused = await checkpointMarketplaceRecovery({
+        canvasFilePath: args.canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: durableRecovery.inputKey,
+        recovery: pausedRecovery,
+        signal,
+      });
+      if (args.canvasFilePath && !paused.saved) {
+        throw new Error(`Could not persist the login-required pause (${paused.reason || 'unknown'}).`);
+      }
+      durableRecovery = pausedRecovery;
+      return { items: [], comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins, recovery: pausedRecovery };
     }
 
     // Every source that reaches here is in scope. Run each item's full scrape
@@ -1097,7 +1889,15 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     for (let k = 0; k < items.length; k++) {
       if (signal.aborted) throw new Error('Window closed');
       const emit = progressFactory(k);
-      const res = await scrapeCompsForQuery(items[k].query, { emit, signal, sessionCache, category: productCategory });
+      const res = await scrapeCompsForQuery(items[k].query, {
+        emit,
+        signal,
+        sessionCache,
+        category: productCategory,
+        resumeSources: durableRecovery?.completedSources?.[k] || {},
+        onSourceSettled: (sourceId, record) => sendSourceCheckpoint(k, sourceId, record),
+        sourcePlan: sourcePlanIds,
+      });
       perItem.push({
         query: items[k].query,
         label: items[k].label || null,
@@ -1178,6 +1978,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       })),
     };
 
+    await checkpointTail;
     if (signal.aborted) throw new Error('Window closed');
 
     // `comps` = the PRIMARY item (back-compat for any single-comps reader);
@@ -1189,6 +1990,9 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       // while still queued, the in-callback queuedBehind:0 never fired — emit it
       // here so the renderer's queueWait can't strand > 0.
       if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, queuedBehind: 0 });
+    }
+    } finally {
+      claim.release();
     }
   });
 
@@ -1430,6 +2234,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
         itemKey: String(itemKey || 'primary'),
         query: String(query || '').trim(),
         condition: String(condition || 'Used - Good'),
+        productSpec: productSpec && typeof productSpec === 'object' ? productSpec : {},
         comps: { sold: soldComps, active: activeComps },
         pricingNotes: userPricingNotes,
       }),
@@ -1535,9 +2340,62 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
   // New bundle flows use this versioned path, including a fresh singleton.
   // Keep `synthesize-price` above intact for old renderer builds and durable
   // handoffs whose one-item prompt/schema must continue to replay exactly.
-  handleSafe('synthesize-prices-batch', async (event, { items, nodeId } = {}, signal) => {
+  handleSafe('synthesize-prices-batch', async (event, {
+    items, nodeId, canvasFilePath, manualAiRunId, recovery, autoResume = false,
+  } = {}, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(canvasFilePath);
+    const synthesisKey = marketplaceSynthesisInputKey(recovery?.pendingItems, recovery?.skippedWarnings);
+    if (recovery && (
+      recovery?.phase !== 'synthesis'
+      || recovery?.runId !== manualAiRunId
+      || recovery?.inputKey !== synthesisKey
+    )) throw new Error('Pricing synthesis recovery identity does not match its saved comp snapshot.');
+    if (canvasFilePath && !recovery) throw new Error('Saved-canvas pricing requires a durable recovery snapshot.');
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath, nodeId, kind: 'sellhub', runId: recovery?.runId || manualAiRunId, inputKey: recovery?.inputKey || '',
+      waitForRelease: true,
+      autoResume,
+      operation: 'synthesis-batch',
+    }));
+    if (!claim.claimed) throw new Error('This exact marketplace pricing run is already active in another window.');
+    try {
+    let effectiveRecovery = recovery;
+    if (recovery) {
+      const barrier = await beginMarketplaceRecovery({
+        canvasFilePath, nodeId, kind: 'sellhub', recovery,
+      });
+      if (canvasFilePath && !barrier.saved) {
+        throw new Error(`Could not durably start price synthesis (${barrier.reason || 'unknown recovery error'}).`);
+      }
+      if (barrier.recovery?.runId === recovery.runId) effectiveRecovery = barrier.recovery;
+      if (effectiveRecovery.batchResult?.items) return effectiveRecovery.batchResult;
+    }
+    let executionItems = effectiveRecovery?.batchExecution?.items;
+    if (!effectiveRecovery) {
+      executionItems = Array.isArray(items) ? items : [];
+    } else if (!Array.isArray(executionItems)) {
+      executionItems = validateMarketplaceBatchExecution(effectiveRecovery, items);
+      const executionRecovery = {
+        ...effectiveRecovery,
+        batchExecution: { items: executionItems },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const executionCheckpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery?.inputKey,
+        recovery: executionRecovery,
+        signal,
+      });
+      if (canvasFilePath && !executionCheckpoint.saved) {
+        throw new Error(`Could not persist exact price-batch input (${executionCheckpoint.reason || 'unknown'}).`);
+      }
+      effectiveRecovery = executionRecovery;
+    }
     const startedAt = Date.now();
-    const prepared = (Array.isArray(items) ? items : []).map((item, index) => prepareBatchPricingItem(item, index));
+    const prepared = executionItems.map((item, index) => prepareBatchPricingItem(item, index));
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
     const cannedById = new Map();
@@ -1562,11 +2420,12 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
       }
     }
     const batches = packBatchPriceSynthesisItems(aiItems);
-    // Price-synthesis batches are dispatched concurrently, so progress is
-    // tracked as accepted batch units rather than prompt-open order.
+    // Price-synthesis is automatic work: retain a bounded roster and refill a
+    // freed slot immediately. Progress remains tied to accepted batch units,
+    // not prompt-open order.
     const priceSynthesisProgressScopeId = crypto.randomUUID();
     const batchMetadata = batches.map((entries, index) => ({ entries, batch: index + 1 }));
-    // If any independent manual handoff fails, withdraw every sibling prompt
+    // If any independent automatic handoff fails, withdraw every sibling prompt
     // immediately. Leaving them open would invite a later paste into a run that
     // has already failed and is no longer able to apply a complete bundle.
     const batchAbort = new AbortController();
@@ -1575,9 +2434,9 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
       : batchAbort.signal;
     let resolved;
     try {
-      resolved = await mapWithConcurrency(
+      resolved = await mapAutomaticHandoffs(
         batchMetadata,
-        MANUAL_HANDOFF_CONCURRENCY,
+        HANDOFF_CONCURRENCY,
         async ({ entries, batch }) => {
           const meta = {};
           const totalCompCount = entries.reduce((total, item) => total + item.soldComps.length + item.activeComps.length, 0);
@@ -1626,12 +2485,37 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
     }
     const pricingById = new Map(cannedById);
     for (const rows of resolved) for (const [itemId, row] of rows) pricingById.set(itemId, row.pricing);
-    return {
+    const batchResult = {
       items: prepared.map(item => ({
         itemKey: item.itemKey,
         pricing: pricingById.get(item.itemId) || null,
       })),
     };
+    if (effectiveRecovery) {
+      throwIfMarketplaceLifecycleAborted(signal);
+      const checkpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: { ...effectiveRecovery, batchResult, updatedAt: Date.now() },
+        signal,
+      });
+      if (canvasFilePath && !checkpoint.saved) {
+        throw new Error(`Could not persist completed price batch (${checkpoint.reason || 'unknown'}).`);
+      }
+    }
+    return batchResult;
+    } catch (error) {
+      await tombstoneMarketplaceManualAiCancellation({
+        error, signal, claim, canvasFilePath, nodeId, kind: 'sellhub',
+        runId: recovery?.runId || manualAiRunId,
+        inputKey: recovery?.inputKey || '',
+      });
+      throw error;
+    } finally {
+      claim.release();
+    }
   });
 
   // ── Combine independently-priced items into ONE bundle asking price ────────
@@ -1642,10 +2526,85 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
   // sums those factors and derives every dollar price + explanation from them,
   // so the rationale and price cannot drift. Text-only (no photos): the items
   // were already identified/priced; this step reasons over those results.
-  handleSafe('synthesize-bundle-price', async (event, { items, sumOfPrices, nodeId } = {}, signal) => {
+  handleSafe('synthesize-bundle-price', async (event, {
+    items, sumOfPrices, nodeId, canvasFilePath, manualAiRunId, recovery, autoResume = false,
+  } = {}, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(canvasFilePath);
+    const synthesisKey = marketplaceSynthesisInputKey(recovery?.pendingItems, recovery?.skippedWarnings);
+    if (recovery && (
+      recovery?.phase !== 'synthesis'
+      || recovery?.runId !== manualAiRunId
+      || recovery?.inputKey !== synthesisKey
+    )) throw new Error('Bundle synthesis recovery identity does not match its saved comp snapshot.');
+    if (canvasFilePath && !recovery) throw new Error('Saved-canvas bundle pricing requires a durable recovery snapshot.');
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath, nodeId, kind: 'sellhub', runId: recovery?.runId || manualAiRunId, inputKey: recovery?.inputKey || '',
+      waitForRelease: true,
+      autoResume,
+      operation: 'synthesis-bundle',
+    }));
+    if (!claim.claimed) throw new Error('This exact marketplace bundle run is already active in another window.');
+    try {
+    let effectiveRecovery = recovery;
+    if (recovery) {
+      const barrier = await beginMarketplaceRecovery({
+        canvasFilePath, nodeId, kind: 'sellhub', recovery,
+      });
+      if (canvasFilePath && !barrier.saved) {
+        throw new Error(`Could not durably start bundle synthesis (${barrier.reason || 'unknown recovery error'}).`);
+      }
+      if (barrier.recovery?.runId === recovery.runId) effectiveRecovery = barrier.recovery;
+      if (effectiveRecovery.bundleResultCheckpointed) {
+        return { bundlePricing: effectiveRecovery.bundleResult || null };
+      }
+    }
+    let executionItems = effectiveRecovery?.bundleExecution?.items;
+    if (!effectiveRecovery) {
+      executionItems = Array.isArray(items) ? items : [];
+    } else if (!Array.isArray(executionItems)) {
+      executionItems = validateMarketplaceBundleExecution(effectiveRecovery, items);
+      const executionRecovery = {
+        ...effectiveRecovery,
+        bundleExecution: { items: executionItems },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const executionCheckpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: executionRecovery,
+        signal,
+      });
+      if (canvasFilePath && !executionCheckpoint.saved) {
+        throw new Error(`Could not persist exact bundle input (${executionCheckpoint.reason || 'unknown'}).`);
+      }
+      effectiveRecovery = executionRecovery;
+    }
+    const persistBundleResult = async (result) => {
+      if (!effectiveRecovery) return;
+      throwIfMarketplaceLifecycleAborted(signal);
+      const checkpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: {
+          ...effectiveRecovery,
+          bundleResultCheckpointed: true,
+          bundleResult: result || null,
+          updatedAt: Date.now(),
+        },
+        signal,
+      });
+      if (canvasFilePath && !checkpoint.saved) {
+        throw new Error(`Could not persist completed bundle synthesis (${checkpoint.reason || 'unknown'}).`);
+      }
+    };
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
-    const list = Array.isArray(items) ? items : [];
+    const list = executionItems;
     // Bundling is only meaningful with 2+ items, and we can only reason about
     // synergy for the ones that actually got a price. Fewer than 2 priced → let
     // the caller fall back to the arithmetic sum.
@@ -1658,6 +2617,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
       && roundToCents(it.recommended_price) > 0
     ));
     if (priced.length < 2) {
+      await persistBundleResult(null);
       return { bundlePricing: null };
     }
     const sum = roundToCents(priced.reduce((n, it) => n + roundToCents(it.recommended_price), 0));
@@ -1669,6 +2629,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
     }
     if (sum <= 0) {
       logger.warn(`[Marketplace][${nodeId}] Skipping bundle factor synthesis because priced items sum to non-positive value $${sum}`);
+      await persistBundleResult(null);
       return { bundlePricing: null };
     }
     logger.info(`[Marketplace][${nodeId}] Synthesizing bundle price for ${priced.length} item(s) (sum $${sum})`);
@@ -1765,7 +2726,18 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     } else {
       logger.warn(`[Marketplace][${nodeId}] Invalid bundle factor response; using separate-item sum $${sum}`);
     }
+    await persistBundleResult(result);
     return { bundlePricing: result };
+    } catch (error) {
+      await tombstoneMarketplaceManualAiCancellation({
+        error, signal, claim, canvasFilePath, nodeId, kind: 'sellhub',
+        runId: recovery?.runId || manualAiRunId,
+        inputKey: recovery?.inputKey || '',
+      });
+      throw error;
+    } finally {
+      claim.release();
+    }
   });
 
   // ── Rescrape a single comp source ─────────────────────────────────────────
@@ -1773,7 +2745,84 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
   // instead of throwing away the prior scrape's ~70 successful comps and
   // re-paying for a full multi-source run. The renderer merges the returned
   // items into pendingComps and drops the source from scrapeWarnings.
-  handleSafe('rescrape-source', async (event, { sourceId, query, items, nodeId, noChallengeConfirmed = false }, signal) => {
+  handleSafe('rescrape-source', async (event, {
+    sourceId, query, items, nodeId, noChallengeConfirmed = false,
+    canvasFilePath, manualAiRunId, recovery, autoResume = false,
+  }, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(canvasFilePath);
+    if (canvasFilePath && (!recovery || !['scrape', 'comps-ready'].includes(recovery.phase) || recovery.runId !== manualAiRunId)) {
+      throw new Error('Source rescrape requires its exact paused Marketplace recovery snapshot.');
+    }
+    const resolveInput = marketplaceResolveInput({
+      sourceId: String(sourceId || ''),
+      query: typeof query === 'string' ? query : '',
+      items: Array.isArray(items) ? items.map(item => ({ key: item?.key ?? null, query: String(item?.query || '') })) : null,
+      noChallengeConfirmed: noChallengeConfirmed === true,
+    });
+    if (!resolveInput) throw new Error('Source rescrape input is invalid or exceeds the durable recovery bounds.');
+    const resolveInputKey = marketplaceResolveInputKey(resolveInput);
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath,
+      nodeId,
+      kind: 'sellhub',
+      runId: recovery?.runId || manualAiRunId,
+      inputKey: recovery?.inputKey || '',
+      autoResume,
+      operation: `rescrape:${sourceId || 'unknown'}`,
+    }));
+    if (!claim.claimed) {
+      // A hidden coordinator may finish the one permitted automatic attempt
+      // before this node mounts. Replaying its exact durable result performs no
+      // provider work and lets the mounted node merge it without defeating the
+      // per-process network-attempt fence.
+      if (claim.reason === 'automatic-attempted' && canvasFilePath) {
+        const replay = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+        const priorIntent = replay?.found
+          && replay.runId === recovery.runId
+          && replay.inputKey === recovery.inputKey
+          ? replay.recovery?.resolveIntent
+          : null;
+        if (priorIntent?.inputKey === resolveInputKey && priorIntent.status === 'result' && priorIntent.result) {
+          return priorIntent.result;
+        }
+      }
+      throw new Error('This exact source rescrape is already active or was already auto-attempted.');
+    }
+    try {
+    let effectiveRecovery = recovery;
+    if (canvasFilePath) {
+      const peek = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+      if (!peek.found || peek.runId !== recovery.runId || peek.inputKey !== recovery.inputKey) {
+        throw new Error('Source rescrape lost exact recovery ownership.');
+      }
+      effectiveRecovery = peek.recovery;
+      const priorIntent = effectiveRecovery.resolveIntent;
+      if (priorIntent?.inputKey === resolveInputKey && priorIntent.status === 'result' && priorIntent.result) {
+        return priorIntent.result;
+      }
+      if (autoResume && !isAutomaticMarketplaceResolveIntent(effectiveRecovery)) {
+        throw new Error('Automatic source rescrape no longer matches the durable source plan and pending-item snapshot.');
+      }
+      if (priorIntent?.inputKey && priorIntent.inputKey !== resolveInputKey) {
+        throw new Error('Another source rescrape intent already owns this paused Marketplace run.');
+      }
+      const intentRecovery = {
+        ...effectiveRecovery,
+        resolveIntent: { inputKey: resolveInputKey, input: resolveInput, status: 'running', updatedAt: Date.now() },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const intentSaved = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: intentRecovery,
+        signal,
+      });
+      if (!intentSaved.saved) throw new Error(`Could not persist source-rescrape intent (${intentSaved.reason || 'unknown'}).`);
+      effectiveRecovery = intentRecovery;
+    }
     // Serialize on the shared browser like the full scrape — a rescrape runs
     // headless scrapes on the one stealth browser, so it must not overlap
     // another node's captcha-resolve closing that browser. See marketplaceBrowserLock.
@@ -1781,7 +2830,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
       event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
     }
-    return withMarketplaceBrowserLock(async () => {
+    const resolvedResult = await withMarketplaceBrowserLock(async () => {
     if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     // Multi-item bundle: re-scrape this source once per item's query so a Solve
     // recovers comps for EVERY item, not just the primary. Returns per-item
@@ -1869,6 +2918,32 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     };
     return normalizedResult;
     }, signal, `marketplace source rescrape:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
+    if (canvasFilePath && effectiveRecovery) {
+      throwIfMarketplaceLifecycleAborted(signal);
+      const completedRecovery = {
+        ...effectiveRecovery,
+        resolveIntent: {
+          ...effectiveRecovery.resolveIntent,
+          status: 'result',
+          result: resolvedResult,
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      const resultSaved = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: completedRecovery,
+        signal,
+      });
+      if (!resultSaved.saved) throw new Error(`Could not persist source-rescrape result (${resultSaved.reason || 'unknown'}).`);
+    }
+    return resolvedResult;
+    } finally {
+      claim.release();
+    }
   });
 
   // ── Resolve captcha / anti-bot challenge that blocked a comp scrape ───────
@@ -1877,7 +2952,57 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
   // when cleared. Resulting cookies persist for the userDataDir's session
   // TTL, so the renderer's follow-up "Refresh Prices" call lands on a
   // clean page instead of bouncing back into the same wall.
-  handleSafe('resolve-captcha', async (event, { url, sourceId, nodeId } = {}, signal) => {
+  handleSafe('resolve-captcha', async (event, {
+    url, sourceId, nodeId, canvasFilePath, manualAiRunId, recovery,
+  } = {}, signal) => {
+    if (canvasFilePath && (!recovery || recovery.phase !== 'comps-ready' || recovery.runId !== manualAiRunId)) {
+      throw new Error('CAPTCHA resolve requires its exact paused Marketplace recovery snapshot.');
+    }
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath,
+      nodeId,
+      kind: 'sellhub',
+      runId: recovery?.runId || manualAiRunId,
+      inputKey: recovery?.inputKey || '',
+      operation: `captcha:${sourceId || 'unknown'}`,
+      waitForRelease: true,
+    }));
+    if (!claim.claimed) throw new Error('This exact Marketplace recovery already has an active action.');
+    try {
+    let effectiveRecovery = recovery;
+    if (canvasFilePath) {
+      const peek = await peekMarketplaceRecovery({ canvasFilePath, nodeId, kind: 'sellhub' });
+      if (!peek.found || peek.runId !== recovery.runId || peek.inputKey !== recovery.inputKey) {
+        throw new Error('CAPTCHA resolve lost exact recovery ownership.');
+      }
+      effectiveRecovery = peek.recovery;
+      if (effectiveRecovery.phase !== 'comps-ready'
+        || !(effectiveRecovery.scrapeWarnings || []).some(warning => warning?.sourceId === sourceId)) {
+        throw new Error('This source is no longer paused for CAPTCHA resolution.');
+      }
+      const manualRecovery = {
+        ...effectiveRecovery,
+        manualPause: {
+          kind: 'captcha',
+          sourceId,
+          url,
+          status: 'manual-required',
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const pauseSaved = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: manualRecovery,
+        signal,
+      });
+      if (!pauseSaved.saved) throw new Error(`Could not persist CAPTCHA pause (${pauseSaved.reason || 'unknown'}).`);
+      effectiveRecovery = manualRecovery;
+    }
     // Hold the sell-side browser lock for the WHOLE resolve: this op CLOSES the
     // shared stealth browser to hand its profile to a visible Chrome, so it must
     // not run while a price-check scrape still has pages in flight (that is the
@@ -1887,7 +3012,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
       event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
     }
-    return withMarketplaceBrowserLock(async () => {
+    const resolvedResult = await withMarketplaceBrowserLock(async () => {
     if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     logger.info(`[Marketplace][${nodeId}] User opening captcha-resolve window for ${sourceId}: ${url}`);
     // Look up the source's extractor + category (browser-pool sources only —
@@ -1969,6 +3094,32 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     };
     return { ...result, category, warning: inlineWarning };
     }, signal, `marketplace captcha resolve:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
+    if (canvasFilePath && effectiveRecovery) {
+      throwIfMarketplaceLifecycleAborted(signal);
+      const resolvedRecovery = {
+        ...effectiveRecovery,
+        manualPause: {
+          ...effectiveRecovery.manualPause,
+          status: 'resolved',
+          result: resolvedResult,
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      const resultSaved = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'sellhub',
+        expectedInputKey: effectiveRecovery.inputKey,
+        recovery: resolvedRecovery,
+        signal,
+      });
+      if (!resultSaved.saved) throw new Error(`Could not persist CAPTCHA result (${resultSaved.reason || 'unknown'}).`);
+    }
+    return resolvedResult;
+    } finally {
+      claim.release();
+    }
   });
 
   // ── Assess platform fit (which marketplaces suit this specific item) ──────
@@ -2060,9 +3211,71 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
   // Without this split the run would interleave scrape A → human pastes →
   // scrape B → human pastes → … across up to 8 platforms, forcing the user to
   // babysit an entire browser-automation run one paste at a time.
-  handleSafe('check-marketplace-status', async (event, { platformIds, nodeId, runId } = {}, signal) => {
+  handleSafe('check-marketplace-status', async (event, {
+    platformIds, nodeId, runId, canvasFilePath, recovery, autoResume = false,
+  } = {}, signal) => {
+    requireSavedMarketplaceRecoveryCanvas(canvasFilePath);
     const ids = [...new Set(Array.isArray(platformIds) ? platformIds.filter(Boolean) : [])];
     if (ids.length === 0) return { results: {} };
+    const recoveryIds = Array.isArray(recovery?.input?.platformIds) ? recovery.input.platformIds : ids;
+    const currentWatchUrls = Object.fromEntries(recoveryIds.map(platformId => [
+      platformId, getMarketplaceWatchUrls(platformId),
+    ]));
+    const exactStatusInput = marketplaceStatusInput(recoveryIds, currentWatchUrls);
+    const exactStatusKey = marketplaceStatusInputKey(recoveryIds, currentWatchUrls);
+    const matchesRecovery = recovery?.runId === runId
+      && recovery?.inputKey === exactStatusKey
+      && JSON.stringify(recovery?.input) === JSON.stringify(exactStatusInput);
+    // An explicit user click may legitimately start a fresh scan after the
+    // monitor URLs change. Startup recovery may not: its authority is the
+    // exact persisted input, so a settings TOCTOU must remain paused instead
+    // of silently broadening work to the new configuration.
+    if (autoResume && !matchesRecovery) {
+      throw new Error('Marketplace status auto-resume input no longer matches its durable checkpoint.');
+    }
+    let durableRecovery = matchesRecovery
+      ? recovery
+      : newMarketplaceStatusRecovery({ runId: runId || crypto.randomUUID(), platformIds: ids, watchUrlsByPlatform: currentWatchUrls });
+    if (!ids.every(platformId => durableRecovery.remainingPlatformIds.includes(platformId))) {
+      throw new Error('Marketplace status resume requested a platform outside the durable remaining set.');
+    }
+    const claim = await acquireMarketplaceRecoveryClaim(withMarketplaceClaimAbort({
+      canvasFilePath, nodeId, kind: 'marketplace-status', runId: durableRecovery.runId, inputKey: durableRecovery.inputKey,
+      autoResume,
+      operation: 'status',
+    }));
+    if (!claim.claimed) throw new Error('This exact marketplace status scan is already running in another window.');
+    try {
+    const barrier = await beginMarketplaceRecovery({
+      canvasFilePath, nodeId, kind: 'marketplace-status', recovery: durableRecovery,
+    });
+    if (canvasFilePath && !barrier.saved) {
+      throw new Error(`Could not durably start marketplace status scan (${barrier.reason || 'unknown recovery error'}).`);
+    }
+    if (barrier.recovery?.runId === durableRecovery.runId) durableRecovery = barrier.recovery;
+    if (autoResume && durableRecovery.manualPause) {
+      return {
+        results: {},
+        recovery: durableRecovery,
+        pausedNativeIds: durableRecovery.manualPause.platformIds || [],
+        manualPause: durableRecovery.manualPause,
+      };
+    }
+    if (durableRecovery.manualPause) {
+      const resumedRecovery = { ...durableRecovery, manualPause: null, updatedAt: Date.now() };
+      const resumed = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'marketplace-status',
+        expectedInputKey: durableRecovery.inputKey,
+        recovery: resumedRecovery,
+        signal,
+      });
+      if (canvasFilePath && !resumed.saved) {
+        throw new Error(`Could not resume the manual-paused Marketplace Status run (${resumed.reason || 'unknown'}).`);
+      }
+      durableRecovery = resumedRecovery;
+    }
 
     // Share the listing-status FIFO mutex: hub scans read the same auth-walled
     // seller dashboards and must not double the single-IP burst against any
@@ -2078,7 +3291,17 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     // needs to append into the same `results` map and emit through the same
     // progress channel that pass 1 used.
     const results = {};
-    const recordResult = (platformId, result) => {
+    let terminalProcessEpoch = null;
+    const manualPauseForResult = (platformId, result) => {
+      if (result?.status === 'needs-login' || result?.sources?.some(source => source?.loggedOut)) {
+        return { kind: 'login-required', platformId };
+      }
+      if (result?.sources?.some(source => source?.challenged || source?.antiBot)) {
+        return { kind: 'captcha-required', platformId };
+      }
+      return null;
+    };
+    const recordResult = async (platformId, result) => {
       const completedResult = {
         ...result,
         lastChecked: new Date().toISOString(),
@@ -2087,14 +3310,47 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           sequence: ++marketplaceStatusResultSequence,
         },
       };
+      const retryable = completedResult.status !== 'ok';
+      let nextRecovery = recordMarketplaceStatusResult(durableRecovery, platformId, completedResult, { retryable });
+      const manualPause = manualPauseForResult(platformId, completedResult);
+      if (manualPause) {
+        nextRecovery = {
+          ...nextRecovery,
+          manualPause: {
+            kind: manualPause.kind,
+            status: 'manual-required',
+            platformIds: [...new Set([...(nextRecovery.manualPause?.platformIds || []), platformId])],
+            updatedAt: Date.now(),
+          },
+          updatedAt: Date.now(),
+        };
+      }
+      if (nextRecovery.remainingPlatformIds.length === 0) {
+        nextRecovery = { ...nextRecovery, phase: 'status-result', updatedAt: Date.now() };
+      }
+      throwIfMarketplaceLifecycleAborted(signal);
+      const checkpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'marketplace-status',
+        expectedInputKey: durableRecovery.inputKey,
+        recovery: nextRecovery,
+        signal,
+      });
+      if (canvasFilePath && !checkpoint.saved) {
+        throw new Error(`Could not persist ${platformId} status result (${checkpoint.reason || 'unknown'}).`);
+      }
+      terminalProcessEpoch = checkpoint.processEpoch || terminalProcessEpoch;
+      durableRecovery = nextRecovery;
       results[platformId] = completedResult;
       if (!event.sender.isDestroyed()) {
         try {
           event.sender.send('marketplace-status-progress', {
             nodeId,
-            runId: runId || null,
+            runId: durableRecovery.runId,
             platformId,
             result: completedResult,
+            processEpoch: checkpoint.processEpoch || null,
             completed: Object.keys(results).length,
             total: ids.length,
           });
@@ -2111,6 +3367,41 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     // is released (pass 2), instead of awaiting each platform's handoff
     // in-line with its scrape.
     const pendingScans = [];
+    const durablePrepared = (prepared) => ({
+      platformId: prepared.platformId,
+      llmInputs: (Array.isArray(prepared.llmInputs) ? prepared.llmInputs : []).map(input => ({
+        ...input,
+        spec: { url: input?.spec?.url || '', urlLabel: input?.spec?.urlLabel || 'hub' },
+      })),
+      sources: Array.isArray(prepared.sources) ? prepared.sources : [],
+      readState: prepared.readState || { read: 0, unread: 0 },
+    });
+    const checkpointPrepared = async (platformId, prepared) => {
+      const serializable = durablePrepared(prepared);
+      const next = mergeMarketplaceStatusPrepared(durableRecovery, {
+        runId: durableRecovery.runId, platformId, prepared: serializable,
+      });
+      if (next === durableRecovery) throw new Error(`Rejected invalid prepared checkpoint for ${platformId}.`);
+      throwIfMarketplaceLifecycleAborted(signal);
+      const saved = await checkpointMarketplaceRecovery({
+        canvasFilePath,
+        nodeId,
+        kind: 'marketplace-status',
+        expectedInputKey: durableRecovery.inputKey,
+        recovery: next,
+        signal,
+      });
+      if (canvasFilePath && !saved.saved) {
+        throw new Error(`Could not persist ${platformId} prepared pages (${saved.reason || 'unknown'}).`);
+      }
+      durableRecovery = next;
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('marketplace-status-checkpoint', {
+          nodeId, runId: durableRecovery.runId, platformId, prepared: serializable,
+        });
+      }
+      return serializable;
+    };
 
     // PASS 1 — the browser/fetch work only — is the ONLY part serialized by
     // statusCheckLock. The lock exists purely to cap request-burst concurrency
@@ -2130,12 +3421,22 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
       // profile (one Chrome per userDataDir); grouping them last means the
       // stealth browser is torn down ONCE at the end instead of thrashing
       // close→relaunch between every interleaved headless platform.
+      const runnableIds = autoResume
+        ? ids.filter(id => !shouldUseNativeRead(id) || durableRecovery.preparedByPlatform?.[id])
+        : ids;
       const orderedIds = [
-        ...ids.filter((id) => !shouldUseNativeRead(id)),
-        ...ids.filter((id) => shouldUseNativeRead(id)),
+        ...runnableIds.filter((id) => !shouldUseNativeRead(id)),
+        ...runnableIds.filter((id) => shouldUseNativeRead(id)),
       ];
       for (const platformId of orderedIds) {
         if (signal?.aborted) break;
+
+        const restoredPrepared = durableRecovery.preparedByPlatform?.[platformId];
+        if (restoredPrepared?.platformId === platformId && Array.isArray(restoredPrepared.llmInputs)) {
+          logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: resuming from durable prepared hub pages`);
+          pendingScans.push({ platformId, prepared: restoredPrepared });
+          continue;
+        }
 
         // Native-read platforms (Swappa/Mercari) are CDP-walled: the headless
         // verify can't reach their pages either (403 / 35s reload-loop wedge), so
@@ -2170,7 +3471,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           }
           if (gateReason !== undefined) {
             const name = monitorConfig?.name || platformId;
-            recordResult(platformId, {
+            await recordResult(platformId, {
               status: 'needs-login',
               message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check All again.`,
               summary: '', attention: [], sources: [],
@@ -2181,11 +3482,27 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
 
         const watchUrls = getMarketplaceWatchUrls(platformId);
         if (watchUrls.length === 0) {
-          recordResult(platformId, {
+          await recordResult(platformId, {
             status: 'unknown',
             message: 'No watch URL configured — add one in Settings → Marketplace Monitors.',
             summary: '', attention: [], sources: [],
           });
+          const paused = {
+            ...durableRecovery,
+            manualPause: {
+              kind: 'watch-url-required',
+              status: 'manual-required',
+              platformIds: [...new Set([...(durableRecovery.manualPause?.platformIds || []), platformId])],
+              updatedAt: Date.now(),
+            },
+            updatedAt: Date.now(),
+          };
+          const savedPause = await checkpointMarketplaceRecovery({
+            canvasFilePath, nodeId, kind: 'marketplace-status',
+            expectedInputKey: durableRecovery.inputKey, recovery: paused, signal,
+          });
+          if (canvasFilePath && !savedPause.saved) throw new Error(`Could not persist ${platformId} manual watch-URL pause.`);
+          durableRecovery = paused;
           continue;
         }
 
@@ -2228,16 +3545,17 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
             // finalize immediately instead of queuing a no-op pass-2 entry.
             const scan = await scanPreparedHubPages({ ...prepared, signal });
             logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
-            recordResult(platformId, scan);
+            await recordResult(platformId, scan);
           } else {
             logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: scraped ${prepared.llmInputs.length} hub page(s), queuing AI handoff`);
-            pendingScans.push({ platformId, prepared });
+            const savedPrepared = await checkpointPrepared(platformId, prepared);
+            pendingScans.push({ platformId, prepared: savedPrepared });
           }
         } catch (error) {
           if (signal?.aborted) break;
           const message = error?.message || String(error);
           logger.error(`[MarketplaceStatus][${nodeId}] ${platformId} failed:`, message);
-          recordResult(platformId, {
+          await recordResult(platformId, {
             status: 'error',
             message: `Could not complete the ${platformId} hub scan: ${message}`,
             summary: '',
@@ -2251,10 +3569,15 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
 
     // Pass 2: every platform has now been scraped (or failed/gated out during
     // pass 1). Pack the independent prepared hubs into deterministic, bounded
-    // manual handoffs. Up to ten batches are dispatched as one stable wave;
+    // manual handoffs. Up to the shared handoff capacity is dispatched as one
+    // stable wave;
     // the next wave is not revealed until that whole set settles. Singleton
     // batches retain the established one-platform prompt and result contract.
-    if (pendingScans.length > 0 && !signal?.aborted) {
+    // Startup recovery is allowed to restore only the bounded fetch/prepared
+    // phase. The next phase intentionally opens a manual copy/paste handoff,
+    // so an unmounted nested Status node must leave its durable prepared pages
+    // for an explicit user action instead of surfacing that handoff on launch.
+    if (pendingScans.length > 0 && !signal?.aborted && !autoResume) {
       const scanBatches = packPreparedHubScans(pendingScans);
       const allEntries = scanBatches.flat();
       // A packed descriptor is the atomic accepted unit whether it uses the
@@ -2269,9 +3592,9 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         sectionsByParent.set(entry.parentScanId, parts);
       };
       const batchesWithProgress = scanBatches.map((entries, index) => ({ entries, batch: index + 1 }));
-      await mapWithConcurrency(
+      await mapManualHandoffWaves(
         batchesWithProgress,
-        MANUAL_HANDOFF_CONCURRENCY,
+        HANDOFF_CONCURRENCY,
         async ({ entries, batch }) => {
         try {
           // Keep the established task/prompt exactly for a normal one-platform
@@ -2338,9 +3661,49 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         const scan = mergePreparedHubScanSections(sectionsByParent.get(parentScanId));
         if (!scan) continue;
         logger.info(`[MarketplaceStatus][${nodeId}] ${entry.platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
-        recordResult(entry.platformId, scan);
+        await recordResult(entry.platformId, scan);
       }
     }
-    return { results };
+    const pausedNativeIds = autoResume
+      ? ids.filter(id => shouldUseNativeRead(id) && !durableRecovery.preparedByPlatform?.[id])
+      : [];
+    if (pausedNativeIds.length > 0) {
+      const pausedRecovery = {
+        ...durableRecovery,
+        manualPause: {
+          kind: 'native-read-required',
+          status: 'manual-required',
+          platformIds: pausedNativeIds,
+          updatedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      };
+      throwIfMarketplaceLifecycleAborted(signal);
+      const pausedCheckpoint = await checkpointMarketplaceRecovery({
+        canvasFilePath, nodeId, kind: 'marketplace-status',
+        expectedInputKey: durableRecovery.inputKey, recovery: pausedRecovery, signal,
+      });
+      if (canvasFilePath && !pausedCheckpoint.saved) {
+        throw new Error(`Could not persist native-browser manual pause (${pausedCheckpoint.reason || 'unknown'}).`);
+      }
+      durableRecovery = pausedRecovery;
+    }
+    return {
+      results,
+      recovery: durableRecovery,
+      processEpoch: terminalProcessEpoch,
+      pausedNativeIds,
+      manualPause: durableRecovery.manualPause || null,
+    };
+    } catch (error) {
+      await tombstoneMarketplaceManualAiCancellation({
+        error, signal, claim, canvasFilePath, nodeId, kind: 'marketplace-status',
+        runId: durableRecovery?.runId || runId,
+        inputKey: durableRecovery?.inputKey || recovery?.inputKey || '',
+      });
+      throw error;
+    } finally {
+      claim.release();
+    }
   });
 }

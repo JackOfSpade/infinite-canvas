@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim } from '../test-dependencies.js';
 import { subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MIN_SHARED_SOURCE_TERMS, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
-import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC } from '../../electron/ipc/jobApplication.js';
+import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION } from '../../electron/ipc/jobApplication.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -236,6 +236,69 @@ export default [
         return { status: statusBeforeHandoff.status, completed: reopened.completed, stage: recoveredManifest.paste.stage };
       } finally {
         _resetPasteCorrectionsForTests();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Paste handoff: completed retry feedback projects only for its current result before save advances',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: TRUSTED_QUEUE_CAREER_DATA,
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Reliable delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const resultPath = path.join(queued.folder, 'result.json');
+        const resultRaw = '{"completed":"retry-projection"}\n';
+        await fs.promises.writeFile(resultPath, resultRaw, 'utf8');
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        const completedManifest = {
+          ...manifest,
+          status: 'completed',
+          paste: { ...manifest.paste, stage: 'completed', handoffCode: null, findings: [] },
+        };
+        await fs.promises.writeFile(manifestPath, JSON.stringify(completedManifest), 'utf8');
+        const feedback = {
+          version: 1, jobId: queued.id, status: 'render-retry-required', measured: false,
+          resultSha256: sha256(resultRaw), retryReproducesFailure: true,
+          pdfMismatchKind: 'text', pdfMismatchRevision: APPLICATION_PDF_RECONCILE_REVISION,
+          pdfMismatchDimensions: [{ kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION }],
+          message: 'This current comparison needs an application update.',
+        };
+        await fs.promises.writeFile(feedbackPath, JSON.stringify(feedback), 'utf8');
+        const current = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchRevision: APPLICATION_PDF_RECONCILE_REVISION - 1,
+          pdfMismatchDimensions: [{ kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION - 1 }],
+        }), 'utf8');
+        const stale = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        await fs.promises.writeFile(feedbackPath, JSON.stringify(feedback), 'utf8');
+        await fs.promises.writeFile(manifestPath, JSON.stringify({
+          ...completedManifest, status: 'imported', importedResultSha256: sha256(resultRaw), importedAt: new Date().toISOString(),
+        }), 'utf8');
+        const imported = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        await fs.promises.writeFile(manifestPath, JSON.stringify(completedManifest), 'utf8');
+        await fs.promises.writeFile(resultPath, '{"completed":"newer-result"}\n', 'utf8');
+        const changedResult = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        assert(current.localJob?.status === 'render-retry-required'
+          && current.localJob?.retryReproducesFailure === true
+          && /application update/i.test(current.localJob?.message || '')
+          && stale.localJob?.status === 'render-retry-required'
+          && stale.localJob?.retryReproducesFailure === false
+          && /comparison was updated/i.test(stale.localJob?.message || '')
+          && imported.localJob?.status === 'imported'
+          && imported.localJob?.retryReproducesFailure === false
+          && changedResult.localJob?.status === 'completed'
+          && changedResult.localJob?.retryReproducesFailure === false,
+        `completed handoff retry feedback must be revision- and hash-bound, and never override an active import, got ${JSON.stringify({ current, stale, imported, changedResult })}`);
+        return { current: current.localJob.status, staleRetryable: !stale.localJob.retryReproducesFailure, imported: imported.localJob.status };
+      } finally {
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
@@ -2337,8 +2400,24 @@ export default [
     run: async () => {
       const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const fallbackSource = await fs.promises.readFile(path.resolve('src/hooks/useLocalAiFallbackManager.js'), 'utf8');
-      assert(/LOCAL_AI_CARD_POLL_IDLE_STATUSES\.includes\(localApplication\.status\)\) return undefined;/.test(cardSource),
-        "the card's poll gate consumes the shared idle-status constant — one source of truth with the fallback manager, so the two drivers' idle sets cannot silently diverge");
+      const localSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+      assert(cardSource.includes('LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes(localApplication.status) && !needsRenderRetryProbe')
+        && cardSource.includes('localRenderRetryProbeRef.current.add(jobId)')
+        && cardSource.includes('if (!result?.success || !result.localJob) throw new Error')
+        && cardSource.includes('if (interval !== null) {')
+        && cardSource.includes('window.clearInterval(interval);')
+        && cardSource.includes('interval = window.setInterval(check, 2500);')
+        && !cardSource.includes('if (needsRenderRetryProbe) return () => { cancelled = true; };'),
+      'a persisted render retry retries transient probe failures until one durable status response, then returns to the shared idle policy');
+      const completedHandoff = localSource.slice(localSource.indexOf('export async function getLocalApplicationHandoff'), localSource.indexOf('// The entries requiredPasteReviewDeltaEntries'));
+      assert(completedHandoff.indexOf("readOwnedFile(root, path.join(dir, 'result.json'))")
+          < completedHandoff.lastIndexOf('manifestImportedResultSha256(manifest)')
+        && completedHandoff.includes("readOwnedFile(root, path.join(dir, 'result.json'))")
+        && completedHandoff.includes('.then(contentHash)')
+        && completedHandoff.includes("['completed', 'render-retry-required'].includes(manifest.status)")
+        && completedHandoff.includes('renderRetryFeedbackProjection(feedback, { jobId, resultSha256 })')
+        && !completedHandoff.includes('localApplicationStatus(jobId, canvasFilePath)'),
+      'completed handoff discovery projects current or stale hash-bound retry feedback without invoking the mutating status path while its lock is held');
       assert(!LOCAL_AI_CARD_POLL_IDLE_STATUSES.includes('invalid'),
         'invalid results remain eligible for status polling after Local AI corrects result.json');
       assert(cardSource.includes("status: 'status-error'")
@@ -2843,6 +2922,8 @@ export default [
           if (path.resolve(String(target)) === path.resolve(imported.resumePdfPath)) {
             const error = new Error('Could not produce a resume PDF consistent with Application.html: PDF text does not match its HTML panel. A freshly rendered PDF was rejected for the same reason, so retrying this save reproduces it.');
             error.code = APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC;
+            error.pdfMismatchKind = 'text';
+            error.pdfMismatchRevision = APPLICATION_PDF_RECONCILE_REVISION;
             throw error;
           }
           return originalOpen.call(this, target, ...args);
@@ -2870,11 +2951,102 @@ export default [
           && feedback.measured === false
           && feedback.resultSha256 === result.sha256
           && feedback.retryReproducesFailure === true
+          && feedback.pdfMismatchKind === 'text'
+          && feedback.pdfMismatchRevision === APPLICATION_PDF_RECONCILE_REVISION
+          && Array.isArray(feedback.pdfMismatchDimensions)
+          && feedback.pdfMismatchDimensions.length === 1
+          && feedback.pdfMismatchDimensions[0]?.kind === 'text'
           && !/Retry the app-side layout\/save step/.test(feedback.message)
           && /reproduces the same failure/i.test(feedback.message)
           && /Do not retry this save/i.test(feedback.instruction)
           && /do not rewrite result\.json/i.test(feedback.instruction),
         `a save failure whose error carries the deterministic PDF-mismatch code must be answered with stop-not-retry feedback instead of the ordinary retry wording, got ${JSON.stringify({ failedSave, feedback })}`);
+
+        // The current comparator must guard even a delayed direct IPC retry,
+        // while a feedback record from before a comparator repair must become
+        // an explicitly retryable recovery path with fresh wording.
+        const currentStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const guardedImport = await importLocalApplicationJob({
+          jobId: queued.id,
+          canvasFilePath: project.canvasFilePath,
+          senderId: 9131,
+          expectedResultSha256: result.sha256,
+        });
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchRevision: APPLICATION_PDF_RECONCILE_REVISION - 1,
+          pdfMismatchDimensions: [{ kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION - 1 }],
+        }), 'utf8');
+        const legacyStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchKind: 'variant',
+          pdfMismatchRevision: APPLICATION_PDF_VARIANT_REVISION,
+          pdfMismatchDimensions: [{ kind: 'variant', revision: APPLICATION_PDF_VARIANT_REVISION }],
+        }), 'utf8');
+        const variantStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          retryReproducesFailure: false,
+          pdfMismatchKind: null,
+          pdfMismatchRevision: null,
+          pdfMismatchDimensions: [],
+          message: 'The renderer could not load its fonts yet. Retry layout check when it is available.',
+        }), 'utf8');
+        const transientStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchDimensions: [
+            { kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION - 1 },
+            { kind: 'variant', revision: APPLICATION_PDF_VARIANT_REVISION },
+          ],
+        }), 'utf8');
+        const bothFailedPartlyCurrent = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchDimensions: [
+            { kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION - 1 },
+            { kind: 'variant', revision: APPLICATION_PDF_VARIANT_REVISION - 1 },
+          ],
+        }), 'utf8');
+        const bothFailedObsolete = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          resultSha256: 'f'.repeat(64),
+        }), 'utf8');
+        const staleFeedbackStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        // A retry may advance to an active import while its old exact-hash
+        // render feedback still exists; active progress must win that race.
+        await fs.promises.writeFile(feedbackPath, JSON.stringify(feedback), 'utf8');
+        const retryManifestPath = path.join(queued.folder, 'manifest.json');
+        const retryManifest = JSON.parse(await fs.promises.readFile(retryManifestPath, 'utf8'));
+        await fs.promises.writeFile(retryManifestPath, JSON.stringify({
+          ...retryManifest,
+          status: 'imported',
+          importedAt: new Date().toISOString(),
+          importedResultSha256: result.sha256,
+        }), 'utf8');
+        const advancedImportStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(currentStatus.status === 'render-retry-required'
+          && currentStatus.retryReproducesFailure === true
+          && /waiting on a fix to the app/i.test(currentStatus.message)
+          && guardedImport.status === 'render-retry-required'
+          && guardedImport.retryReproducesFailure === true
+          && legacyStatus.status === 'render-retry-required'
+          && legacyStatus.retryReproducesFailure === false
+          && /comparison was updated/i.test(legacyStatus.message)
+          && /Retry layout check/i.test(legacyStatus.message)
+          && !/waiting on a fix to the app/i.test(legacyStatus.message)
+          && variantStatus.retryReproducesFailure === true
+          && transientStatus.retryReproducesFailure === false
+          && /renderer could not load its fonts yet/i.test(transientStatus.message)
+          && bothFailedPartlyCurrent.retryReproducesFailure === true
+          && bothFailedObsolete.retryReproducesFailure === false
+          && staleFeedbackStatus.status === 'completed'
+          && staleFeedbackStatus.retryReproducesFailure === false
+          && advancedImportStatus.status === 'importing'
+          && advancedImportStatus.retryReproducesFailure === false,
+        `any current dimension in a deterministic PDF mismatch must block retry, while legacy, fully obsolete, stale-result, transient, and advanced-save feedback stay retryable with appropriate wording, got ${JSON.stringify({ currentStatus, guardedImport, legacyStatus, variantStatus, transientStatus, bothFailedPartlyCurrent, bothFailedObsolete, staleFeedbackStatus, advancedImportStatus })}`);
 
         // 2026-09-23 bug report: this exact failure landed on manifest.json
         // (feedback.json above proves that much) but never reached the live
@@ -2895,7 +3067,7 @@ export default [
           && historyTypes[0] === 'result-imported'
           && historyTypes.at(-1) === 'bundle-save-retry-required',
         `a save failure must advance the live handoff trace a bug report reads, without revising the already-completed generation's own status, got ${JSON.stringify({ attemptId: telemetryAfterFailure?.attemptId, status: telemetryAfterFailure?.status, historyTypes })}`);
-        return { retryReproducesFailure: feedback.retryReproducesFailure, errorCode: failedSave.errorCode };
+        return { retryReproducesFailure: feedback.retryReproducesFailure, errorCode: failedSave.errorCode, legacyRetryable: legacyStatus.retryReproducesFailure === false, variantBlocked: variantStatus.retryReproducesFailure === true };
       } finally {
         fs.promises.open = originalOpen;
         __setLocalAiRenderPdfForTests(null);
@@ -3486,6 +3658,7 @@ export default [
       let successCallbacks = 0;
       let failureCallbacks = 0;
       let blockedRemovals = 0;
+      let afterCleanupCallbacks = 0;
       try {
         await fs.promises.mkdir(workDir, { recursive: true });
         await Promise.all([
@@ -3505,12 +3678,14 @@ export default [
             fs.renameSync(workDir, retiredDir);
             return { workDir: retiredDir };
           },
+          onAfterSuccessfulCleanup: async () => { afterCleanupCallbacks += 1; },
           onSaveFailure: async () => { failureCallbacks += 1; },
         });
         registerJobApplicationHandlers();
         const saveApplication = ipcMain.__getInvokeHandler('save-application');
         fs.promises.rm = async (target, options) => {
-          if (path.resolve(String(target)) === path.resolve(retiredDir)) {
+          if (path.dirname(path.resolve(String(target))) === project.root
+            && path.basename(path.resolve(String(target))).includes('.cleanup-')) {
             blockedRemovals += 1;
             const error = new Error('simulated relocated cleanup failure');
             error.code = 'EBUSY';
@@ -3540,16 +3715,408 @@ export default [
           && saved.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
           && successCallbacks === 1
           && failureCallbacks === 0
+          && afterCleanupCallbacks === 0
           && blockedRemovals === 1
           && fs.existsSync(destinationHtml)
           && fs.existsSync(workDir)
           && !fs.existsSync(retiredDir)
           && released === true
           && pruneOperationRan,
-        `a failed relocated cleanup must restore its exact source path, surface the failure, and release the capability, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, blockedRemovals, released, pruneOperationRan })}`);
+        `a failed relocated cleanup must restore its exact source path, surface the failure, release the capability, and never emit a terminal cleanup callback, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, afterCleanupCallbacks, blockedRemovals, released, pruneOperationRan })}`);
         return { cleanupErrorCode: saved.errorCode, restored: true, capabilityReleased: true };
       } finally {
         fs.promises.rm = originalRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application cleanup: an unrelocated remove failure never reports a completed save',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'cleanup-unrelocated-failure-workspace');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9116;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      const originalRm = fs.promises.rm;
+      let successCallbacks = 0;
+      let failureCallbacks = 0;
+      let afterCleanupCallbacks = 0;
+      let blockedRemovals = 0;
+      let competingRegistrationErrorCode = null;
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+          cleanupOnSaveFailure: false, artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => { successCallbacks += 1; },
+          onAfterSuccessfulCleanup: async () => { afterCleanupCallbacks += 1; },
+          onSaveFailure: async () => { failureCallbacks += 1; },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        fs.promises.rm = async (target, options) => {
+          if (path.dirname(path.resolve(String(target))) === project.root
+            && path.basename(path.resolve(String(target))).includes('.cleanup-')) {
+            blockedRemovals += 1;
+            // Put the exact old inode back at its ordinary pathname for one
+            // synchronous turn. The in-flight cleanup claim must still reject
+            // a fresh registration; the pre-fix early Map release let this
+            // registration replace the capability before rm ran.
+            fs.renameSync(target, workDir);
+            try {
+              registerPendingApplicationWorkspace({
+                workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+                cleanupOnSaveFailure: false, artifactData: { resumeHtml, jobListing },
+              });
+            } catch (error) {
+              competingRegistrationErrorCode = error?.code || null;
+            }
+            fs.renameSync(workDir, target);
+            const error = new Error('simulated unrelocated cleanup failure');
+            error.code = 'EBUSY';
+            throw error;
+          }
+          return originalRm(target, options);
+        };
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        fs.promises.rm = originalRm;
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        let pruneOperationRan = false;
+        const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
+          pruneOperationRan = true;
+        });
+        assert(saved?.success === false
+          && saved.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
+          && successCallbacks === 1
+          && failureCallbacks === 0
+          && afterCleanupCallbacks === 0
+          && blockedRemovals === 1
+          && competingRegistrationErrorCode === 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT'
+          && fs.existsSync(destinationHtml)
+          && fs.existsSync(workDir)
+          && fs.readFileSync(resumeHtmlPath, 'utf8') === resumeHtml
+          && released === true
+          && pruneOperationRan,
+        `an unrelocated cleanup failure must surface after the durable destination, retain its exact source, reject a competing registration, and never announce a completed handoff, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, afterCleanupCallbacks, blockedRemovals, competingRegistrationErrorCode, released, pruneOperationRan })}`);
+        return { cleanupErrorCode: saved.errorCode, sourceRetained: true, capabilityReleased: true };
+      } finally {
+        fs.promises.rm = originalRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application cleanup: a replacement at the retired path is never removed or marked complete',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'cleanup-replacement-workspace');
+      const retiredDir = path.join(project.root, 'cleanup-replacement-workspace.retired');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9117;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      const originalRenameSync = fs.renameSync;
+      const originalRm = fs.promises.rm;
+      let successCallbacks = 0;
+      let failureCallbacks = 0;
+      let afterCleanupCallbacks = 0;
+      let retirementRenameCalls = 0;
+      let replacementRemovalAttempts = 0;
+      let foreignRetirementPath = null;
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+          cleanupOnSaveFailure: false, artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => { successCallbacks += 1; },
+          onBeforeSuccessfulCleanup: () => {
+            fs.renameSync(workDir, retiredDir);
+            return { workDir: retiredDir };
+          },
+          onAfterSuccessfulCleanup: async () => { afterCleanupCallbacks += 1; },
+          onSaveFailure: async () => { failureCallbacks += 1; },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        fs.renameSync = (from, to) => {
+          retirementRenameCalls += 1;
+          // The Local-AI guard made the first move. After the app has proved
+          // the first private retirement but before its final retirement, put
+          // the trusted inode back at the writer-visible path and replace the
+          // first tombstone. The final retirement must detect the foreign
+          // inode before recursive removal, and recovery must not overwrite
+          // either surviving path.
+          if (retirementRenameCalls === 3) {
+            originalRenameSync(from, workDir);
+            fs.mkdirSync(from);
+            foreignRetirementPath = path.resolve(String(to));
+          }
+          return originalRenameSync(from, to);
+        };
+        fs.promises.rm = async (target, options) => {
+          if (path.dirname(path.resolve(String(target))) === project.root
+            && path.basename(path.resolve(String(target))).includes('.cleanup-')) replacementRemovalAttempts += 1;
+          return originalRm(target, options);
+        };
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        fs.renameSync = originalRenameSync;
+        fs.promises.rm = originalRm;
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        let pruneOperationRan = false;
+        const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
+          pruneOperationRan = true;
+        });
+        assert(saved?.success === false
+          && saved.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
+          && successCallbacks === 1
+          && failureCallbacks === 0
+          && afterCleanupCallbacks === 0
+          && retirementRenameCalls === 3
+          && replacementRemovalAttempts === 0
+          && fs.existsSync(destinationHtml)
+          && fs.existsSync(workDir)
+          && fs.readFileSync(resumeHtmlPath, 'utf8') === resumeHtml
+          && foreignRetirementPath != null
+          && fs.existsSync(foreignRetirementPath)
+          && released === true
+          && pruneOperationRan,
+        `a replacement at a retired cleanup path must be left intact while the trusted source stays recoverable and completion remains unannounced, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, afterCleanupCallbacks, retirementRenameCalls, replacementRemovalAttempts, released, pruneOperationRan })}`);
+        return { cleanupErrorCode: saved.errorCode, replacementPreserved: true, sourceRetained: true };
+      } finally {
+        fs.renameSync = originalRenameSync;
+        fs.promises.rm = originalRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application cleanup: a retired Local AI workspace that vanishes before final retirement never completes',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'cleanup-moved-retired-workspace');
+      const retiredDir = path.join(project.root, 'cleanup-moved-retired-workspace.retired');
+      const holdingDir = path.join(project.root, 'cleanup-moved-retired-workspace.holding');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9118;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      const originalRenameSync = fs.renameSync;
+      const originalRm = fs.promises.rm;
+      let successCallbacks = 0;
+      let failureCallbacks = 0;
+      let afterCleanupCallbacks = 0;
+      let retirementRenameCalls = 0;
+      let cleanupRemovalAttempts = 0;
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+          cleanupOnSaveFailure: false, artifactData: { resumeHtml, jobListing },
+          onSuccessfulSave: async () => { successCallbacks += 1; },
+          onBeforeSuccessfulCleanup: () => {
+            fs.renameSync(workDir, retiredDir);
+            return { workDir: retiredDir };
+          },
+          onAfterSuccessfulCleanup: async () => { afterCleanupCallbacks += 1; },
+          onSaveFailure: async () => { failureCallbacks += 1; },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        fs.renameSync = (from, to) => {
+          retirementRenameCalls += 1;
+          // After the Local-AI guard's own move, remove its private retirement
+          // just before the app can make its final verified retirement. There
+          // is no ENOENT success path: the held inode is preserved at holding.
+          if (retirementRenameCalls === 2) originalRenameSync(from, holdingDir);
+          return originalRenameSync(from, to);
+        };
+        fs.promises.rm = async (target, options) => {
+          if (path.dirname(path.resolve(String(target))) === project.root
+            && path.basename(path.resolve(String(target))).includes('.cleanup-')) cleanupRemovalAttempts += 1;
+          return originalRm(target, options);
+        };
+        const saved = await saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        fs.renameSync = originalRenameSync;
+        fs.promises.rm = originalRm;
+        const destinationHtml = path.join(project.root, 'Applied Jobs', 'Acme', 'Toronto', 'Developer', 'Application.html');
+        let pruneOperationRan = false;
+        const released = await withUnregisteredApplicationWorkspacePruneClaim(workDir, async () => {
+          pruneOperationRan = true;
+        });
+        assert(saved?.success === false
+          && saved.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_FAILED'
+          && successCallbacks === 1
+          && failureCallbacks === 0
+          && afterCleanupCallbacks === 0
+          && retirementRenameCalls === 2
+          && cleanupRemovalAttempts === 0
+          && fs.existsSync(destinationHtml)
+          && fs.existsSync(holdingDir)
+          && fs.readFileSync(path.join(holdingDir, 'Application.html'), 'utf8') === resumeHtml
+          && released === true
+          && pruneOperationRan,
+        `a Local AI retirement that vanishes before final verification must fail closed, preserve the held inode, and not announce completion, got ${JSON.stringify({ saved, successCallbacks, failureCallbacks, afterCleanupCallbacks, retirementRenameCalls, cleanupRemovalAttempts, released, pruneOperationRan })}`);
+        return { cleanupErrorCode: saved.errorCode, heldWorkspacePreserved: true };
+      } finally {
+        fs.renameSync = originalRenameSync;
+        fs.promises.rm = originalRm;
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application cleanup: a duplicate discard reports cleanup-in-flight instead of false completion',
+    run: async () => {
+      const project = await createCanvasProject();
+      const workDir = path.join(project.root, 'cleanup-duplicate-discard-workspace');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9119;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      let releaseCleanup;
+      let enteredCleanup;
+      const cleanupEntered = new Promise(resolve => { enteredCleanup = resolve; });
+      try {
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+          artifactData: { resumeHtml, jobListing },
+          onBeforeDiscard: async () => {
+            enteredCleanup();
+            await new Promise(resolve => { releaseCleanup = resolve; });
+          },
+        });
+        registerJobApplicationHandlers();
+        const discardApplication = ipcMain.__getInvokeHandler('discard-application');
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const firstDiscard = discardApplication({ sender }, { workDir });
+        await cleanupEntered;
+        const duplicateDiscard = await discardApplication({ sender }, { workDir });
+        const concurrentSave = await saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        releaseCleanup();
+        const firstResult = await firstDiscard;
+        assert(duplicateDiscard?.success === false
+          && duplicateDiscard.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT'
+          && concurrentSave?.success === false
+          && concurrentSave.errorCode === 'APPLICATION_WORKSPACE_CLEANUP_IN_FLIGHT'
+          && firstResult?.success === true
+          && firstResult.discarded === true
+          && !fs.existsSync(workDir),
+        `a second discard or save during awaited cleanup must reject rather than consume the retiring workspace, got ${JSON.stringify({ duplicateDiscard, concurrentSave, firstResult })}`);
+        return { duplicateCode: duplicateDiscard.errorCode, saveCode: concurrentSave.errorCode, firstDiscarded: firstResult.discarded };
+      } finally {
+        releaseCleanup?.();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application status: a terminal receipt cannot close a bridge lane while its private cleanup is in flight',
+    run: async () => {
+      const project = await createCanvasProject();
+      const jobId = crypto.randomUUID();
+      const workDir = path.join(project.root, '.local-ai', 'jobs', jobId);
+      const retiredDir = path.join(project.root, '.local-ai', 'jobs', `${jobId}.retired`);
+      const receiptDir = path.join(project.root, '.local-ai', 'handoff-receipts');
+      const resumeHtmlPath = path.join(workDir, 'Application.html');
+      const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+      const resumeHtml = '<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>Resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>Cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>';
+      const jobListing = '# Listing\n';
+      const senderId = 9120;
+      const sender = { id: senderId, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      let enteredSave;
+      let releaseSave;
+      const saveEntered = new Promise(resolve => { enteredSave = resolve; });
+      try {
+        await fs.promises.mkdir(receiptDir, { recursive: true });
+        await fs.promises.mkdir(workDir, { recursive: true });
+        await Promise.all([
+          fs.promises.writeFile(resumeHtmlPath, resumeHtml, 'utf8'),
+          fs.promises.writeFile(jobListingPath, jobListing, 'utf8'),
+          fs.promises.writeFile(path.join(receiptDir, `${jobId}.json`), JSON.stringify({
+            version: 2,
+            jobId,
+            canvasFilePath: project.canvasFilePath,
+            status: 'imported',
+            resultSha256: 'a'.repeat(64),
+            importedAt: new Date().toISOString(),
+            outputDir: path.join(project.root, 'Applied Jobs', 'Acme'),
+            message: 'A durable bundle receipt exists.',
+          }), 'utf8'),
+        ]);
+        registerPendingApplicationWorkspace({
+          workDir, senderId, company: 'Acme', resumeHtmlPath, jobListingPath,
+          cleanupOnSaveFailure: false, artifactData: { resumeHtml, jobListing },
+          onBeforeSave: async () => {
+            // This mirrors the save cleanup's private retirement: the ordinary
+            // job pathname is absent, but the capability is still active.
+            fs.renameSync(workDir, retiredDir);
+            enteredSave();
+            await new Promise(resolve => { releaseSave = resolve; });
+          },
+        });
+        registerJobApplicationHandlers();
+        const saveApplication = ipcMain.__getInvokeHandler('save-application');
+        const saving = saveApplication({ sender }, {
+          resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, workDir, jobTitle: 'Developer', location: 'Toronto',
+          canvasFilePath: project.canvasFilePath, suppressReveal: true,
+        });
+        await saveEntered;
+        const duringCleanup = await localApplicationStatus(jobId, project.canvasFilePath);
+        const saveClaimActive = isPendingApplicationWorkspaceSaveInFlight(workDir);
+        releaseSave();
+        await saving;
+        assert(duringCleanup.status === 'importing'
+          && duringCleanup.folder === workDir
+          && /waiting for private handoff cleanup/.test(duringCleanup.message)
+          && saveClaimActive,
+        `a receipt published before cleanup must remain host-owned until the save capability releases, got ${JSON.stringify(duringCleanup)}`);
+        return { statusDuringCleanup: duringCleanup.status, bridgeLaneRetained: true };
+      } finally {
+        releaseSave?.();
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
@@ -4371,6 +4938,22 @@ export default [
         && /onSuccessfulSave\s*:\s*(?:async\s*)?\(\{\s*dir:\s*savedOutputDir\s*\}\s*=\s*\{\}\)\s*=>[\s\S]{0,1200}(?:await\s+)?writeLocalAiTerminalReceipt\(/.test(localSource.slice(registrationAt))
         && /onSaveFailure\s*:\s*async\s*\(\{\s*phase,\s*error\s*\}\)\s*=>[\s\S]{0,800}recordLocalAiSaveFailure\(/.test(localSource.slice(registrationAt)),
       'a Local AI import registers failure-retention plus hash-bound success and failure callbacks, and the success callback receives the saved output directory');
+      const successCallback = localSource.slice(
+        localSource.indexOf('onSuccessfulSave: async', registrationAt),
+        localSource.indexOf('onBeforeSuccessfulCleanup:', registrationAt),
+      );
+      const afterCleanupCallback = localSource.slice(
+        localSource.indexOf('onAfterSuccessfulCleanup:', registrationAt),
+        localSource.indexOf('onSaveFailure:', registrationAt),
+      );
+      assert(successCallback.indexOf('await writeLocalAiTerminalReceipt(') >= 0
+        && successCallback.indexOf('await assertLocalAiResultHashCurrent(root, dir, resultSha256);', successCallback.indexOf('await writeLocalAiTerminalReceipt('))
+          > successCallback.indexOf('await writeLocalAiTerminalReceipt(')
+        && afterCleanupCallback.includes("cause: 'bundle_saved'")
+        && applicationSource.includes('const cleaned = await discardPendingApplicationArtifacts(resolvedWorkDir, pending, \'successful save\');')
+        && applicationSource.includes('if (cleaned && pending.onAfterSuccessfulCleanup)')
+        && applicationSource.includes('Post-cleanup save observer failed'),
+      'a successful save closes its bridge lane only after receipt publication, final hash fencing, and successful cleanup; observer failure is non-fatal');
       assert(receiptCalls.length === 1 && receiptCalls[0] > registrationAt,
         'the terminal receipt is not emitted during measured import before save-application owns the workspace');
       assert(auditBuildAt >= 0 && artifactStageAt > auditBuildAt && registrationAt > artifactStageAt
@@ -7602,8 +8185,9 @@ Personal Projects`;
       const resumeHtmlFor = variant => `<!doctype html><html data-print="ink-only"><body><section data-ic-document-panel="resume"><main class="page"><p>${variant} resume</p></main></section><section data-ic-document-panel="cover"><main class="page"><p>${variant} cover</p></main></section><script id="ic-application-bundle-data" type="application/json">{}</script></body></html>`;
       const jobListingFor = listingLabel => `# ${listingLabel} listing\n\nScraped listing text unique to ${listingLabel}.\n`;
       const sender = id => ({ id, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} });
+      let postCleanupCalls = 0;
 
-      const saveJob = async ({ variant, listingLabel, senderId, workDirName }) => {
+      const saveJob = async ({ variant, listingLabel, senderId, workDirName, onAfterSuccessfulCleanup = null }) => {
         const workDir = path.join(project.root, workDirName);
         const resumeHtmlPath = path.join(workDir, 'Application.html');
         const jobListingPath = path.join(workDir, 'Original Job Listing.md');
@@ -7616,7 +8200,7 @@ Personal Projects`;
         ]);
         registerPendingApplicationWorkspace({
           workDir, senderId, company, resumeHtmlPath, jobListingPath,
-          artifactData: { resumeHtml, jobListing },
+          artifactData: { resumeHtml, jobListing }, onAfterSuccessfulCleanup,
         });
         const saveApplication = ipcMain.__getInvokeHandler('save-application');
         const saved = await saveApplication({ sender: sender(senderId) }, {
@@ -7631,8 +8215,11 @@ Personal Projects`;
         registerJobApplicationHandlers();
 
         // Job A's first save lands on the sanitized base path.
-        const jobA = await saveJob({ variant: 'Job A v1', listingLabel: 'Job A', senderId: 9601, workDirName: 'job-a-workspace' });
-        assert(jobA.saved?.success === true && jobA.saved.saved === true && jobA.saved.dir === baseDir,
+        const jobA = await saveJob({
+          variant: 'Job A v1', listingLabel: 'Job A', senderId: 9601, workDirName: 'job-a-workspace',
+          onAfterSuccessfulCleanup: async () => { postCleanupCalls += 1; throw new Error('observer failure must not undo save'); },
+        });
+        assert(jobA.saved?.success === true && jobA.saved.saved === true && jobA.saved.dir === baseDir && postCleanupCalls === 1,
           `job A's first save must land on the sanitized base path, got ${JSON.stringify(jobA.saved)}`);
 
         // Job A regenerated (identical job listing, a fresh workspace exactly
@@ -7700,30 +8287,34 @@ Personal Projects`;
         assert(foreign.discarded && !foreign.removedJob && fs.existsSync(queued.folder) && events.length === 0,
           'a discard request from another canvas leaves the folder and must not tell the bridge to free the job\'s lane');
 
-        const lines = getRecentLogs().length;
+        // The process-wide diagnostic ring can already be full when this
+        // late-running group starts.  Slice-by-length would then miss a new
+        // entry because appending evicts the oldest entry and preserves the
+        // length; track the existing entry identities instead.
+        const logsBeforeDiscard = new Set(getRecentLogs());
         const result = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
         assert(result.discarded && result.removedJob && !fs.existsSync(queued.folder), 'the owning canvas discards the bundle');
         assert(Object.keys(result).sort().join(',') === 'discarded,removedJob,removedReceipt', `the public result keeps its shape, got ${Object.keys(result)}`);
         assert(events.length === 1 && events[0].jobId === queued.id && events[0].cause === 'bundle_discarded'
           && events[0].canvasFilePath === project.canvasFilePath, `exactly one event with a closed cause, got ${JSON.stringify(events)}`);
-        const discardLine = getRecentLogs().slice(lines).map(entry => entry.message).find(message => message.startsWith('[LocalAI] discarded job='));
+        const discardLine = getRecentLogs().filter(entry => !logsBeforeDiscard.has(entry)).map(entry => entry.message).find(message => message.startsWith('[LocalAI] discarded job='));
         assert(discardLine === `[LocalAI] discarded job=${queued.id.slice(0, 8)} removedJob=true removedReceipt=false stamp=written`,
           `a successful discard leaves one closed log line, got ${discardLine}`);
         assert(!discardLine.includes(project.root), 'and never a path');
 
         // The dock probes the folder it was just told to forget.
-        const before = getRecentLogs().length;
+        const logsBeforeProbe = new Set(getRecentLogs());
         const probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
         assert(probe?.success === true && probe.gone === true && probe.handoff === null, `a read of a job the app recorded as discarded is a quiet "gone", got ${JSON.stringify(probe)}`);
-        const probeLogs = getRecentLogs().slice(before);
+        const probeLogs = getRecentLogs().filter(entry => !logsBeforeProbe.has(entry));
         assert(!probeLogs.some(entry => entry.level === 'error'), 'it must not log an ERROR that reads like a failed discard');
         assert(probeLogs.some(entry => entry.message === `[LocalAI] read of gone job job=${queued.id.slice(0, 8)} phase=discarded`), 'it leaves one closed observation instead');
 
         // A job the app has no record of stays loud.
         const neverSeen = '323e4567-e89b-42d3-a456-426614174009';
-        const beforeLoud = getRecentLogs().length;
+        const logsBeforeLoudProbe = new Set(getRecentLogs());
         const unknown = await readHandoff({ sender }, { jobId: neverSeen, canvasFilePath: project.canvasFilePath });
-        assert(unknown?.success === false && getRecentLogs().slice(beforeLoud).some(entry => entry.level === 'error'), 'an unrecorded missing job is still an error');
+        assert(unknown?.success === false && getRecentLogs().filter(entry => !logsBeforeLoudProbe.has(entry)).some(entry => entry.level === 'error'), 'an unrecorded missing job is still an error');
         const repeat = await discardLocalApplicationJob(queued.id, project.canvasFilePath);
         assert(repeat.discarded && !repeat.removedJob && events.length === 2, 'a repeat discard of an already-gone folder still tells the bridge (its lane may have outlived the folder)');
       } finally {

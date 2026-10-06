@@ -7,6 +7,7 @@ import {
   TRANSIENT_PROCESSING_HUB_STATES,
 } from './persistenceTransientState.js';
 import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
+import { isRestorableMarketplaceRecovery } from './marketplaceRunRecovery.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -803,6 +804,7 @@ export function sanitizeNodesForSave(nodes) {
     // (that step runs before one exists), so this check alone distinguishes
     // them without needing to inspect hubState directly.
     const hasPersistedSellDraft = isSellHub && !!n.data?.product;
+    const hasRestorableSellRun = isSellHub && isRestorableMarketplaceRecovery(n.data?.marketplaceRunResume);
 
     // Hub-specific transient data fields. These are diagnostic / pending-flow
     // state generated within a single session — once the app restarts the
@@ -837,7 +839,9 @@ export function sanitizeNodesForSave(nodes) {
         _preserveTreeLayoutOnRestore: _preserveTreeLayoutOnRestore,
         ...cleanData
       } = result.data || {};
-      if (hasTransientHubState) cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';
+      if (hasTransientHubState && !hasRestorableSellRun) {
+        cleanData.hubState = hasPersistedJobResults ? 'done' : hasPersistedSellDraft ? 'draft' : 'empty';
+      }
       if (hasJobSearchTransient) {
         for (const k of JOBSEARCH_TRANSIENT_KEYS) delete cleanData[k];
       }

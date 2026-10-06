@@ -713,10 +713,14 @@ export default [
       const wrongType = await exchange(valid, { path: '/mcp', headers: { 'content-type': 'text/plain' }, body: '{}' });
       assert(wrongType.status === 415 && JSON.parse(wrongType.body).error.code === -32000, 'MCP content-type failures must use the JSON-RPC error envelope');
       const now = () => 0;
-      const limited = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', now, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }) });
+      const rateDiagnostics = [];
+      const limited = createRequestHandler({ hostname: 'bridge.example.com', sourcePolicy: 'off', now, authenticate: async () => ({ linkId: 'grant' }), mcp: async () => ({ status: 200, body: {} }), diagnostics: { recordMcpRateLimit: event => rateDiagnostics.push(event) } });
       let last;
       for (let index = 0; index < 61; index++) last = await exchange(limited, { path: '/mcp', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
-      assert(last.status === 429 && JSON.parse(last.body).error.code === -32000 && last.headers['retry-after'], 'per-grant throttling must be JSON-RPC with Retry-After');
+      assert(last.status === 429 && JSON.parse(last.body).error.code === -32000 && last.headers['retry-after']
+        && rateDiagnostics.length === 1 && Number.isInteger(rateDiagnostics[0]?.retryAfterSeconds)
+        && rateDiagnostics[0].retryAfterSeconds >= 1 && !JSON.stringify(rateDiagnostics).includes('grant'),
+      'per-grant throttling must be JSON-RPC with Retry-After and expose only a bounded retry delay to diagnostics');
       const held = createRequestHandler({ hostname: 'bridge.example.com', authenticate: async () => { throw new Error('none'); }, mcp: async () => ({ status: 200, body: {} }) });
       const responses = [];
       for (let index = 0; index < 16; index++) {

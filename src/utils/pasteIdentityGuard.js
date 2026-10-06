@@ -2,7 +2,7 @@
  * Guards against a pasted AI response landing in the wrong AI handoff dock
  * prompt (src/components/NonApiAiDialog.jsx).
  *
- * The dock juggles up to MANUAL_HANDOFF_CONCURRENCY scoring prompts and
+ * The dock juggles up to the shared handoff-concurrency limit of scoring prompts and
  * APPLICATION_HANDOFF_LIMIT application bundles side by side, each with its
  * own textarea. A person can paste into the wrong one — a chat-tab mix-up, a
  * stale clipboard, or simply re-pasting the same answer while retrying a

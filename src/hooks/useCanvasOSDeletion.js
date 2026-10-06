@@ -4,6 +4,7 @@ import {
   applyManualAiRetirementReceiptsToNodes,
   cancelNodeTasksRecursively,
   collectDeletedManualAiWorkflowNodes,
+  collectMarketplaceRecoveryOwners,
   discardDeletedJobAnalysisSnapshots,
   discardDeletedJobRuns,
   retireDeletedManualAiRuns,
@@ -261,6 +262,26 @@ export function useCanvasOSDeletion({
       // unregister a manual run which has not published its renderer marker.
       await Promise.all(childCancellations);
       await retireDeletedManualAiRuns(cleanupDeletedNodes);
+
+      // Commit Marketplace tombstones only after every unrelated Job/manual-AI
+      // cleanup has succeeded. If that earlier cleanup rejects, deletion is
+      // cancelled and the still-retained Marketplace node keeps its resumable
+      // marker. This is the last awaited/fallible boundary before deletion is
+      // committed; exact node+run fencing rejects any later handler write.
+      const marketplaceOwners = collectMarketplaceRecoveryOwners(cleanupDeletedNodes);
+      if (marketplaceOwners.length > 0 && canvasFilePath) {
+        if (!window.electronAPI?.abandonMarketplaceRecoveryBatch) {
+          throw new Error('Atomic Marketplace deletion cleanup is unavailable.');
+        }
+        const fenced = await window.electronAPI.abandonMarketplaceRecoveryBatch({
+          canvasFilePath,
+          owners: marketplaceOwners,
+          reason: 'node-deleted',
+        });
+        if (!fenced?.success || !fenced?.fenced) {
+          throw new Error(`Could not atomically retire Marketplace recovery for the deleted node tree (${fenced?.reason || fenced?.error || 'unknown'}).`);
+        }
+      }
     } catch (error) {
       EventLogger.error('[JobSearch] Deleted node cleanup failed; deletion cancelled:', error);
       addToast?.({
@@ -332,7 +353,7 @@ export function useCanvasOSDeletion({
     });
     committedTransactionsRef.current.set(transactionKey, pendingCommits);
     return { nodes: committedNodes, edges: committedEdges };
-  }, [addToast, enumerateAllNodes, getEdges, getNodes, jobSearchCoordinator, moduleRunQueue, requestConfirm, setNodes]);
+  }, [addToast, canvasFilePath, enumerateAllNodes, getEdges, getNodes, jobSearchCoordinator, moduleRunQueue, requestConfirm, setNodes]);
 
   const onNodesDelete = useCallback((committedNodes) => {
     const transactionKey = deletionTransactionKey(committedNodes);

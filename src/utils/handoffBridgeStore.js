@@ -80,7 +80,7 @@ function isAuthoritativeStatus(raw) {
       raw.counts.acceptedByStage,
     ];
     if (nestedRecords.some(value => !isRecord(value))) return false;
-    const arrays = [raw.alarms, raw.link.sources, raw.chat.previous, raw.queue.jobs, raw.push.selectedHubs, raw.push.discovered];
+    const arrays = [raw.alarms, raw.link.sources, raw.chat.previous, raw.queue.jobs, raw.push.selectedHubs, raw.push.discovered, raw.push.claimed];
     if (arrays.some(value => !Array.isArray(value))) return false;
     if (typeof raw.availability.ok !== 'boolean' || typeof raw.enabled !== 'boolean'
       || typeof raw.autoStart !== 'boolean' || typeof raw.autoRelease !== 'boolean'
