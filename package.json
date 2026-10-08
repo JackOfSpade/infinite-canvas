@@ -97,5 +97,8 @@
     "tailwindcss": "^4.3.3",
     "vite": "8.3.1",
     "vite-plugin-electron": "^0.29.1"
+  },
+  "overrides": {
+    "global-agent": "4.1.3"
   }
 }
