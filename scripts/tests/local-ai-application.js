@@ -352,7 +352,8 @@ export default [
         const contextOf = handoff => JSON.parse(handoff.prompt.slice(handoff.prompt.lastIndexOf('\n\nAuthoritative context:\n') + '\n\nAuthoritative context:\n'.length));
         const reply = (handoff, fields) => JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields });
         const makeRecords = indexes => {
-          const evidence = indexes.map(index => ({ id: `p1-e-${index}`, sourceId: 'job-listing', quote: `${needs[index - 1]}.`, requirement: needs[index - 1], priority: 'high' }));
+          const suppliedSourceIds = ['jobListing', 'listing', undefined, 'career-data'];
+          const evidence = indexes.map(index => ({ id: `p1-e-${index}`, sourceId: suppliedSourceIds[(index - 1) % suppliedSourceIds.length], quote: `${needs[index - 1]}.`, requirement: needs[index - 1], priority: 'high' }));
           const requirements = indexes.map(index => ({ id: `p1-r-${index}`, text: needs[index - 1], priority: 'high', evidenceIds: [`p1-e-${index}`] }));
           return { evidence, requirements };
         };
@@ -364,6 +365,14 @@ export default [
         'requirements chat identity is main-only/non-enumerable and cannot leak into a manual paste payload');
         assert(context.requirementsProgress.sourceCoverage.units.some(unit => unit.text.includes(commaSentence)),
           'a comma-separated requirement sentence remains one semantic source unit rather than fragmenting independent audit evidence');
+        assert(handoff.prompt.includes('Evidence sourceId is host-owned in this stage: omit it;')
+          && handoff.prompt.includes('evidence:[{id,quote,requirement,priority}]')
+          && !handoff.prompt.includes('evidence:[{id,sourceId,quote,requirement,priority}]'),
+        'the initial requirements prompt makes listing provenance host-owned instead of requiring a model sourceId choice');
+        const requirementsSource = await fs.promises.readFile(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+        assert((requirementsSource.match(/materializeRequirementsListingEvidenceSourceIds\(evidence\);/g) || []).length === 2
+          && (requirementsSource.match(/Evidence sourceId is host-owned in this stage: omit it;/g) || []).length === 2,
+        'current and historical legacy requirements both use the shared host materializer and tell responders to omit sourceId');
         const twelfthUnitIndex = context.requirementsProgress.sourceCoverage.units.findIndex(unit => unit.text.includes('Dense requirement 12.'));
         assert(twelfthUnitIndex >= 0, 'fixture must expose individually addressable source units for dense listing clauses');
         const firstFields = { storeDigest: context.authorityStore.digest, complete: false, identity: context.trustedIdentity, ...firstTwelve,
@@ -374,9 +383,25 @@ export default [
           'a response cannot advance through a source span while silently omitting one clause receipt');
         assert(rejected.handoff.freshContextKey === requirementsKey,
           'requirements authoring corrections remain in the same fresh chat context');
+        const invalidQuote = structuredClone(firstFields); invalidQuote.evidence[0].quote = 'Not in the immutable listing.';
+        rejected = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: rejected.handoff.handoffCode, response: reply(rejected.handoff, invalidQuote) });
+        assert(!rejected.accepted && rejected.validationErrors.some(error => /is not an exact slice of this listing page/i.test(error))
+          && rejected.handoff.prompt.includes('Evidence sourceId is host-owned here: omit it;'),
+        'a non-source listing quote remains rejected and its correction scaffold says provenance is host-owned');
+        const blankQuote = structuredClone(firstFields); blankQuote.evidence[0].quote = '   ';
+        rejected = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: rejected.handoff.handoffCode, response: reply(rejected.handoff, blankQuote) });
+        assert(!rejected.accepted && rejected.validationErrors.some(error => /must be nonblank/i.test(error)),
+          'blank listing quotes receive their own rejection rather than a provenance error');
+        const tooLongQuote = structuredClone(firstFields); tooLongQuote.evidence[0].quote = 'x'.repeat(MAX_SOURCE_GROUNDING_QUOTE_CHARS + 1);
+        rejected = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: rejected.handoff.handoffCode, response: reply(rejected.handoff, tooLongQuote) });
+        assert(!rejected.accepted && rejected.validationErrors.some(error => /exceeds the .*source-binding limit/i.test(error)),
+          'overlong listing quotes receive their own bounded-length rejection');
         handoff = rejected.handoff;
         const first = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: handoff.handoffCode, response: reply(handoff, firstFields) });
         assert(first.accepted && first.handoff.stage === 'requirements', `twelve clauses on one frozen page must continue rather than force a cap (${JSON.stringify(first.validationErrors || [])})`);
+        const persistedRequirements = await (await openAuthorityLedgerStore(path.join(queued.folder, 'context'), { namespace: 'application-authority' })).getReceiptPage('requirements', 0);
+        assert(persistedRequirements.records.filter(record => record.kind === 'listing-evidence').every(record => record.item.sourceId === 'job-listing'),
+          'accepted requirements evidence is persisted with canonical job-listing provenance regardless of the response label');
         assert(first.handoff.freshContextKey === requirementsKey,
           'requirements authoring pages retain their original chat identity');
         handoff = first.handoff; context = contextOf(handoff); const last = makeRecords([13]);
