@@ -11,7 +11,7 @@ const PDF_TEXT_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’.-]*|[^\s]/gu;
 const MAX_RECONCILE_TOKENS = 4_000;
 // Bump when trusted HTML ↔ PDF comparison semantics change so a previously
 // deterministic retry verdict is not reused against a repaired comparator.
-export const APPLICATION_PDF_RECONCILE_REVISION = 2;
+export const APPLICATION_PDF_RECONCILE_REVISION = 3;
 // pdfjs-dist chooses its Node implementation (including the adjacent worker)
 // only when Node loads its native ESM file. A static import lets Vite inline its
 // browser build into Electron's CJS main bundle, where worker setup falls back
@@ -676,6 +676,92 @@ function nextResumeSectionIndex(lines, start, headings, skillsHeading) {
   return lines.length;
 }
 
+function standalonePdfFolio(value) {
+  const match = /^(\d+)\s*\/\s*(\d+)$/u.exec(normalizeReconcileText(value));
+  if (!match) return null;
+  const page = Number(match[1]);
+  const count = Number(match[2]);
+  return Number.isSafeInteger(page) && Number.isSafeInteger(count) && page > 0 && count > 0
+    ? { page, count }
+    : null;
+}
+
+function finitePdfCoordinate(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function folioRightEdge(block) {
+  const x = finitePdfCoordinate(block?.x);
+  const width = finitePdfCoordinate(block?.width);
+  return x == null ? null : x + Math.max(0, width || 0);
+}
+
+// A bare `1 / 2` is a perfectly valid résumé datum. Treat it as print chrome
+// only when the complete document proves the Chromium-folio pattern: every
+// page after the deliberately folio-free first page has its own `page / total`
+// line, those lines share a lower-right footer geometry, and they sit below
+// the real page content. This intentionally works from unmodified extraction
+// text, before the resume canonicalizer removes visual bullet markers;
+// `• 1 / 2` is content, not a folio. If any evidence is absent, keep the line
+// and let reconciliation fail safely rather than discard candidate-authored
+// text.
+function contextualPdfFolioIndexes(blocks) {
+  const records = (Array.isArray(blocks) ? blocks : []).map((block, index) => ({
+    block,
+    index,
+    page: Number(block?.page),
+    folio: standalonePdfFolio(block?.text),
+  })).filter(record => Number.isSafeInteger(record.page) && record.page > 0);
+  const pageCount = records.reduce((highest, record) => Math.max(highest, record.page), 0);
+  // The resume stylesheet intentionally suppresses the first-page footer.
+  // One later-page line is enough only in a two-page document, where its
+  // matching page/total value and lower-right geometry still distinguish it
+  // from ordinary body content.
+  if (pageCount < 2 || new Set(records.map(record => record.page)).size !== pageCount) return new Set();
+
+  const candidates = records.filter(record => record.folio
+    && record.folio.page === record.page
+    && record.page > 1
+    && record.folio.count === pageCount);
+  if (candidates.length !== pageCount - 1) return new Set();
+  const candidatesByPage = new Map(candidates.map(record => [record.page, record]));
+  if (candidatesByPage.size !== pageCount - 1) return new Set();
+
+  const footerRightEdges = candidates.map(record => folioRightEdge(record.block));
+  const footerYs = candidates.map(record => finitePdfCoordinate(record.block?.y));
+  if (footerRightEdges.some(value => value == null) || footerYs.some(value => value == null)) return new Set();
+  const minFooterRight = Math.min(...footerRightEdges);
+  const maxFooterRight = Math.max(...footerRightEdges);
+  const minFooterY = Math.min(...footerYs);
+  const maxFooterY = Math.max(...footerYs);
+  // Browser footers share a baseline and a right edge. The tolerance permits
+  // normal font/rounding differences without allowing body-column ratios.
+  if (maxFooterRight - minFooterRight > 18 || maxFooterY - minFooterY > 12) return new Set();
+
+  for (let page = 2; page <= pageCount; page += 1) {
+    const candidate = candidatesByPage.get(page);
+    const x = finitePdfCoordinate(candidate.block?.x);
+    const y = finitePdfCoordinate(candidate.block?.y);
+    const content = records.filter(record => record.page === page && record.index !== candidate.index);
+    const contentXs = content.map(record => finitePdfCoordinate(record.block?.x)).filter(value => value != null);
+    const contentYs = content.map(record => finitePdfCoordinate(record.block?.y)).filter(value => value != null);
+    if (!content.length) continue; // The blank-page gate will reject this page after its folio is ignored.
+    if (!contentXs.length || !contentYs.length || x == null || y == null) return new Set();
+    const leftEdge = Math.min(...contentXs);
+    const lowestContentY = Math.min(...contentYs);
+    // Do not infer a page width. Relative-to-content evidence is enough:
+    // Chromium chrome is well beyond the left reading column and below it.
+    if (x - leftEdge < 72 || lowestContentY - y < 18) return new Set();
+  }
+  return new Set(candidates.map(record => record.index));
+}
+
+function resumeContentBlocks(blocks) {
+  const source = Array.isArray(blocks) ? blocks : [];
+  const folios = contextualPdfFolioIndexes(source);
+  return source.filter((_block, index) => !folios.has(index));
+}
+
 /**
  * Translate known print-only résumé representations back to the document's
  * semantic reading order.  It deliberately relies on the current DOM for
@@ -684,11 +770,12 @@ function nextResumeSectionIndex(lines, start, headings, skillsHeading) {
  */
 function canonicalizeResumePdfLines(lines, main) {
   const knownHeadings = [...main.querySelectorAll('.section-head h2')].map(element => normalizeReconcileText(element.textContent));
-  const normalized = (Array.isArray(lines) ? lines : []).map(line => ({
-    ...line,
-    // `•` is a visual list marker, never a text node in the generated HTML.
-    text: collapsedTrackedHeading(normalizeReconcileText(line.text).replace(/^•\s*/, ''), knownHeadings),
-  }));
+  const normalized = resumeContentBlocks(lines)
+    .map(line => ({
+      ...line,
+      // `•` is a visual list marker, never a text node in the generated HTML.
+      text: collapsedTrackedHeading(normalizeReconcileText(line.text).replace(/^•\s*/, ''), knownHeadings),
+    }));
   const skillsHeading = knownHeadings.find(heading => foldedText(heading) === 'skills');
   const skillsIndex = normalized.findIndex(line => skillsHeading && foldedText(line.text) === foldedText(skillsHeading));
   const rows = skillRows(main);
@@ -921,6 +1008,41 @@ function reconcileResumeTextBlocks(main, lines) {
   return { changed: true, mappedTokens: current.length, anchors: anchors.length };
 }
 
+// Text reconciliation already reconstructs the PDF's actual visual reading
+// order. Reuse that evidence for the one pagination defect CSS alone cannot
+// prove: a section label printed at the foot of one page while the first real
+// line it introduces begins on the next. This is deliberately conservative:
+// it reports only exact, trusted heading labels and their immediate following
+// extracted line, never guesses at paragraph ownership from y-distance.
+function inspectPdfPagination(main, kind, blocks) {
+  const textBlocks = kind === 'resume' ? resumeContentBlocks(blocks) : (Array.isArray(blocks) ? blocks : []);
+  const textPages = [...new Set(textBlocks
+    // A PDF text extractor can preserve a drawn whitespace run. That is not
+    // document content: without this check a visually blank page could evade
+    // the terminal blank-page gate simply by carrying an empty text object.
+    .filter(block => normalizeReconcileText(block?.text))
+    .map(block => Number(block?.page))
+    .filter(page => Number.isSafeInteger(page) && page > 0))].sort((left, right) => left - right);
+  if (kind !== 'resume') return { textPages, orphanHeadingCount: 0 };
+  const lines = canonicalizeResumePdfLines(blocks, main);
+  const headings = [...main.querySelectorAll('.section-head h2, .subsection-head h3')]
+    .map(element => foldedText(normalizeReconcileText(element.textContent)))
+    .filter(Boolean);
+  let cursor = 0;
+  let orphanHeadingCount = 0;
+  for (const heading of headings) {
+    let index = -1;
+    for (let candidate = cursor; candidate < lines.length; candidate += 1) {
+      if (foldedText(lines[candidate]?.text) === heading) { index = candidate; break; }
+    }
+    if (index < 0) continue; // Text reconciliation itself will reject a missing heading.
+    cursor = index + 1;
+    const following = lines.slice(cursor).find(line => normalizeReconcileText(line?.text));
+    if (following && Number(lines[index]?.page) < Number(following.page)) orphanHeadingCount += 1;
+  }
+  return { textPages, orphanHeadingCount };
+}
+
 /**
  * Pure reconciliation over already-extracted PDF lines.  It preserves all
  * application HTML outside the selected panel and returns the original HTML on
@@ -951,12 +1073,13 @@ export function reconcileApplicationHtmlFromPdfBlocks({ applicationHtml, html, d
     const result = kind === 'cover'
       ? reconcileCoverTextBlocks(main, blocks)
       : reconcileResumeTextBlocks(main, blocks);
-    if (result.conflict) return conflictResult(source, result.conflict);
-    if (!result.changed) return { success: true, status: 'unchanged', html: source, exactTextMatch: true, reason: 'PDF text already matches the selected panel.', ...result };
+    const pagination = inspectPdfPagination(main, kind, blocks);
+    if (result.conflict) return { ...conflictResult(source, result.conflict), pagination };
+    if (!result.changed) return { success: true, status: 'unchanged', html: source, exactTextMatch: true, reason: 'PDF text already matches the selected panel.', pagination, ...result };
     let sanitized = sanitizeDocumentMainHtml(main.outerHTML, { documentKind: kind, allowHostState: true, allowTrustedDerivations: true });
     if (kind === 'resume') sanitized = restoreTrustedReceiptDerivations(sanitized, trustedMainHtml);
     const updatedHtml = `${source.slice(0, startOffset)}${sanitized}${source.slice(endOffset)}`;
-    return { success: true, status: 'updated', html: updatedHtml, changed: true, exactTextMatch: false, reason: 'Reconciled the selected panel from the external PDF.', ...result };
+    return { success: true, status: 'updated', html: updatedHtml, changed: true, exactTextMatch: false, reason: 'Reconciled the selected panel from the external PDF.', pagination, ...result };
   } finally {
     dom.window.close();
   }

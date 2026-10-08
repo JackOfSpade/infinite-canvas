@@ -8575,18 +8575,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const ach = a.achievements || {};
     const achSourceLabel = {
       reused: 'reused from hub cache', mined: 'freshly mined this generation',
+      // Snapshot-authority jobs deliberately do not carry the legacy mined
+      // ledger. Name that complete approved authority instead of falsely
+      // calling it a mutable careerData-only fallback.
+      'pinned-authority': 'not used — pinned approved career authority',
       unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
     }[ach.source] || ach.source || 'unknown';
-    // `ach.source` reads 'unknown' exactly when the generation route recorded
-    // no ledger decision at all (every Local AI handoff today: the paste
-    // protocol carries no achievement-ledger telemetry back to the app) — and
-    // `ach.kept` is undefined in that same case. `ach.kept ?? 0` turned that
-    // absence into an asserted zero, so the line claimed a measured count in
-    // the same breath it admitted the ledger state was unknown. The count is
-    // only printable when a source for it was actually recorded.
-    const achKeptClause = ach.source != null && Number.isFinite(ach.kept)
-      ? `kept ${ach.kept} item(s)`
-      : 'kept count unavailable';
+    // `ach.source` reads 'unknown' only when a generation route recorded no
+    // ledger or authority decision at all. Legacy Local AI handoffs can have
+    // that shape; current snapshot-authority handoffs explicitly project the
+    // pinned-authority state above. `ach.kept ?? 0` turned any such absence
+    // into an asserted zero, so the line claimed a measured count in the same
+    // breath it admitted the ledger state was unknown. The count is only
+    // printable when a source for it was actually recorded.
+    const achKeptClause = ach.source === 'pinned-authority'
+      ? 'kept count not applicable'
+      : ach.source != null && Number.isFinite(ach.kept)
+        ? `kept ${ach.kept} item(s)`
+        : 'kept count unavailable';
     lines.push(`- Achievement ledger: ${achSourceLabel} · ${achKeptClause}${ach.suppressedWeakened ? ` · ${ach.suppressedWeakened} refute-weakened item(s) withheld from application prompts` : ''}${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
     // These are sub-bullets OF the ledger line above, so they have to be pushed
     // here — emitted after the résumé-render block below they would nest under

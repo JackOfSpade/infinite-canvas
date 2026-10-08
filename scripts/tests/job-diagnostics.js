@@ -2,6 +2,7 @@ import { ALL_COMP_SOURCE_IDS, buildJobCompletionAssessment, filterJobsByAge, get
 import { clearRestoredJobTreeLayout } from '../test-dependencies.js';
 import { __canWriteJobResolveTelemetryForTests, __recordJobSourceResolvePassForTests } from '../test-dependencies.js';
 import { buildNativeChallengeHistoryEvidence } from '../test-dependencies.js';
+import { __localAiAchievementTelemetryForTests } from '../../electron/ipc/localAiApplication.js';
 import { redactNodeForIssueReport } from '../test-dependencies.js';
 import { collapseConsecutiveIdentical, postPipelineRecoveryAttemptCount } from '../test-dependencies.js';
 import { __createDescriptionRecoveryCheckpointForTests, __loadDescriptionRecoveryCheckpointForTests, __loadJobAnalysisSnapshotForTests, __saveJobAnalysisSnapshotForTests, ipcMain, registerBugReportHandlers } from '../test-dependencies.js';
@@ -36,7 +37,7 @@ import { sanitizeLastRunReceipt } from '../test-dependencies.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../test-dependencies.js';
 import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
-import { fixedPageTypeAreaHeight, formatTypeAreaUtilization, pageTextMeasurementExpression, resumeTypeAreaUtilization } from '../test-dependencies.js';
+import { fixedPageTypeAreaHeight, formatTypeAreaUtilization, pageTextMeasurementExpression, renderedPageLayoutIssues, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
@@ -5686,7 +5687,7 @@ export default [
       return { bounded: true };
     },
   },
-{
+  {
     // Every Local AI telemetry record leaves `achievements` unset (the paste
     // protocol reports no ledger reuse/mine decision back to the app), so
     // `ach.source` always falls to 'unknown' and `ach.kept` is always
@@ -5715,7 +5716,45 @@ export default [
       return { ledgerUnknown: true };
     },
   },
-{
+  {
+    // The original application report called an immutable snapshot-authority
+    // generation a "careerData-only fallback" simply because this route does
+    // not reuse the legacy mined ledger. That label hid the source of truth
+    // actually used by the bundle and made the missing legacy count sound like
+    // a failed measurement rather than a non-applicable one.
+    name: 'Pinned career authority is not falsely reported as a careerData-only achievement-ledger fallback',
+    run: () => {
+      assert(__localAiAchievementTelemetryForTests(null, { hasPinnedCareerAuthority: true }).source === 'pinned-authority'
+        && __localAiAchievementTelemetryForTests(null).source === 'unavailable'
+        && __localAiAchievementTelemetryForTests({ ledger: [] }, { hasPinnedCareerAuthority: true }).source === 'reused',
+      'the bounded telemetry producer must distinguish the pinned authority from a missing legacy ledger while preserving an actually reused ledger');
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-pinned-authority-ledger-test', nodeId: 'application-pinned-authority-ledger-card',
+          jobTitle: 'Platform Engineer', company: 'Example Co', status: 'completed',
+          achievements: { source: 'pinned-authority' },
+        });
+        const report = generateMarkdown({
+          description: 'Check the achievement ledger line for a snapshot-authority application.',
+          nodes: [{ id: 'application-pinned-authority-ledger-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(report.includes('Achievement ledger: not used — pinned approved career authority · kept count not applicable'),
+          'a snapshot-authority generation must name its approved authority and state that the legacy-ledger count is not applicable');
+        assert(!report.includes('careerData-only fallback') && !report.includes('kept 0 item(s)'),
+          'a snapshot-authority generation must not look like a mutable fallback or an unmeasured zero-item ledger');
+
+        const localSource = fs.readFileSync(path.resolve('electron/ipc/localAiApplication.js'), 'utf8');
+        assert(/localAiAchievementTelemetry\(input\?\.achievements,\s*\{\s*hasPinnedCareerAuthority:\s*Boolean\(input\?\.careerAuthority\),\s*\}\)/u.test(localSource),
+          'every terminal Local AI telemetry path must derive the report provenance from the actual pinned authority, rather than a hard-coded job or career-data shape');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { pinnedAuthorityLabel: true };
+    },
+  },
+  {
     // 2026-09-23 bug report: "Application Generation … Outcome: completed"
     // sat three lines above "Application Export … Outcome: ⚠️ failed" for the
     // SAME generation, reading as a direct contradiction. `status` is in fact
@@ -12982,10 +13021,10 @@ export default [
       const pageMeasurement = pageTextMeasurementExpression();
       const emptyMeasurement = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${pageMeasurement};`)(
         {
-          querySelector: () => ({}),
+          querySelector: () => ({ getBoundingClientRect: () => ({ left: 0, right: 816 }), scrollWidth: 816, clientWidth: 816 }),
           createTreeWalker: () => ({ nextNode: () => null }),
         },
-        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px' }),
+        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px', paddingLeft: '54px', paddingRight: '54px' }),
         { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
       );
       assert(emptyMeasurement === null
@@ -13006,7 +13045,7 @@ export default [
       let walked = 0;
       const lineMeasurement = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${pageMeasurement};`)(
         {
-          querySelector: () => ({}),
+          querySelector: () => ({ getBoundingClientRect: () => ({ left: 0, right: 816 }), scrollWidth: 816, clientWidth: 816 }),
           createTreeWalker: () => ({ nextNode: () => (walked < measuredNodes.length ? measuredNodes[walked++] : null) }),
           createRange: () => {
             let selected = null;
@@ -13016,13 +13055,22 @@ export default [
             };
           },
         },
-        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px' }),
+        () => ({ minHeight: '1056px', paddingTop: '69.12px', paddingBottom: '69.12px', paddingLeft: '54px', paddingRight: '54px' }),
         { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
       );
       assert(Math.abs(lineMeasurement.contentHeightPx - 89.8) < 0.001
         && Math.abs(lineMeasurement.typeAreaHeightPx - 917.76) < 0.001
         && Math.abs(lineMeasurement.lineHeightPx - 19.8) < 0.001,
       'the page-text probe reports a median line height alongside the measured text span');
+      const layoutIssues = renderedPageLayoutIssues({
+        horizontalOverflowCount: 1,
+        maxHorizontalOverflowPx: 7.26,
+        hasHorizontalScrollOverflow: true,
+      });
+      assert(layoutIssues.length === 1 && layoutIssues[0].id === 'horizontal-overflow'
+        && layoutIssues[0].count === 1 && layoutIssues[0].maxOverflowPx === 7.3
+        && renderedPageLayoutIssues({ horizontalOverflowCount: 0, hasHorizontalScrollOverflow: false }).length === 0,
+      'only measured horizontal overflow becomes a hard, tolerance-normalized layout issue');
       assert(emptyMeasurement === null,
         'a page with no measurable text reports no layout at all rather than a zero line height');
 

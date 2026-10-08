@@ -9,6 +9,7 @@ import {
   buildResumeDocument,
   embedApplicationSyncConfig,
   fs,
+  inspectApplicationExport,
   inspectGeneratedApplicationPdf,
   JSDOM,
   path,
@@ -23,10 +24,23 @@ import {
 } from '../../electron/ipc/applicationPdfReconcile.js';
 
 async function textPdf(lines) {
+  return textPdfPages([lines]);
+}
+
+async function textPdfPages(pages) {
   const pdf = await PDFLib.PDFDocument.create();
-  const page = pdf.addPage([612, 792]);
   const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
-  for (const { text, y, x = 56 } of lines) page.drawText(text, { x, y, size: 11, font });
+  for (const entry of pages) {
+    const lines = Array.isArray(entry) ? entry : entry.lines;
+    const page = pdf.addPage(Array.isArray(entry) ? [612, 792] : entry.size);
+    if (!Array.isArray(entry) && entry.media) {
+      page.setMediaBox(entry.media.x, entry.media.y, entry.media.width, entry.media.height);
+    }
+    if (!Array.isArray(entry) && entry.crop) {
+      page.setCropBox(entry.crop.x, entry.crop.y, entry.crop.width, entry.crop.height);
+    }
+    for (const { text, y, x = 56 } of lines) page.drawText(text, { x, y, size: 11, font });
+  }
   return pdf.save();
 }
 
@@ -326,6 +340,236 @@ export default [
       assert(suspendedInspection.valid && suspendedInspection.textMatches && suspendedInspection.variantMatches,
         `save-time PDF inspection must preserve a visually wrapped suspended hyphen, got ${JSON.stringify(suspendedInspection)}`);
       return { valid: inspection.valid, compoundMatches: inspection.textMatches, suspendedMatches: suspendedInspection.textMatches };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: terminal inspection rejects an unexpected blank extra page',
+    run: async () => {
+      const source = resumeBulletWorkspace('Built reliable full-scale systems.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([
+        wrappedResumeBulletLines('Built reliable full-', 'scale systems.'),
+        [],
+      ]);
+      const inspection = await inspectGeneratedApplicationPdf({
+        html: source, pdf, documentKind: 'resume', expectedPageCount: 1,
+      });
+      assert(!inspection.valid && !inspection.paginationMatches && inspection.pageCount === 2
+        && inspection.expectedPageCount === 1 && /expected 1/i.test(inspection.reason),
+      `an extra blank page must be rejected even when page-one text matches, got ${JSON.stringify(inspection)}`);
+      return { pageCount: inspection.pageCount, expected: inspection.expectedPageCount };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: whitespace-only pages remain blank',
+    run: async () => {
+      const source = resumeBulletWorkspace('Built reliable full-scale systems.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([
+        wrappedResumeBulletLines('Built reliable full-', 'scale systems.'),
+        [{ text: '   ', y: 700 }],
+      ]);
+      const inspection = await inspectGeneratedApplicationPdf({
+        html: source, pdf, documentKind: 'resume', expectedPageCount: 2,
+      });
+      assert(!inspection.valid && !inspection.paginationMatches
+        && JSON.stringify(inspection.blankPages) === JSON.stringify([2])
+        && /no extractable document text on page\(s\) 2/i.test(inspection.reason),
+      `whitespace text objects must not make a blank PDF page acceptable, got ${JSON.stringify(inspection)}`);
+      return { blankPages: inspection.blankPages };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: terminal inspection rejects an orphaned resume heading',
+    run: async () => {
+      const source = resumeBulletsWorkspace(['Built reliable systems.', 'Kept the release process stable.'])
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([
+        [
+          { text: 'Maya Chen', y: 700 },
+          { text: 'Experience', y: 80 },
+        ],
+        [
+          { text: '• Built reliable systems.', y: 700 },
+          { text: '• Kept the release process stable.', y: 670 },
+          { text: '2 / 2', y: 25, x: 520 },
+        ],
+      ]);
+      const inspection = await inspectGeneratedApplicationPdf({
+        html: source, pdf, documentKind: 'resume', expectedPageCount: 2,
+      });
+      assert(!inspection.valid && inspection.textMatches && !inspection.paginationMatches
+        && inspection.orphanHeadingCount === 1 && /orphaned/i.test(inspection.reason),
+      `a heading at a page foot must not pass merely because its text extracts, got ${JSON.stringify(inspection)}`);
+      return { orphanHeadingCount: inspection.orphanHeadingCount };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: later-page folios preserve a valid multi-page resume',
+    run: async () => {
+      const source = resumeBulletsWorkspace(['Built reliable systems.', 'Kept the release process stable.'])
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([
+        [
+          { text: 'Maya Chen', y: 700 },
+          { text: 'Experience', y: 670 },
+          { text: '• Built reliable systems.', y: 640 },
+        ],
+        [
+          { text: '• Kept the release process stable.', y: 700 },
+          { text: '2 / 2', y: 25, x: 520 },
+        ],
+      ]);
+      const inspection = await inspectGeneratedApplicationPdf({
+        html: source, pdf, documentKind: 'resume', expectedPageCount: 2,
+      });
+      assert(inspection.valid && inspection.textMatches && inspection.paginationMatches
+        && inspection.orphanHeadingCount === 0,
+      `standalone page folios must not become extra résumé text, got ${JSON.stringify(inspection)}`);
+      return { pageCount: inspection.pageCount, textMatches: inspection.textMatches };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: body ratios are not mistaken for repeated page folios',
+    run: () => {
+      const source = '<!doctype html><html><body><section data-ic-document-panel="resume"><main class="page">'
+        + '<h1 class="name">Maya Chen</h1><section class="section"><div class="section-head"><h2>Experience</h2></div>'
+        + '<p>1 / 2</p><p>Continued evidence.</p><p>2 / 2</p></section>'
+        + '</main></section></body></html>';
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'resume',
+        blocks: [
+          { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+          { page: 1, x: 56, y: 670, text: 'Experience' },
+          { page: 1, x: 56, y: 640, text: '1 / 2' },
+          { page: 2, x: 56, y: 700, text: 'Continued evidence.' },
+          { page: 2, x: 56, y: 670, text: '2 / 2' },
+        ],
+      });
+      assert(result.success && result.changed === false && result.pagination?.textPages?.join(',') === '1,2',
+        `body ratios must remain reconciliation text instead of becoming fake chrome, got ${JSON.stringify(result)}`);
+      return { textPages: result.pagination.textPages };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: terminal inspection rejects inconsistent page media or crop geometry',
+    run: async () => {
+      const source = resumeBulletsWorkspace(['Built reliable systems.', 'Kept the release process stable.'])
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([
+        [
+          { text: 'Maya Chen', y: 700 },
+          { text: 'Experience', y: 670 },
+        ],
+        { size: [600, 800], lines: [
+          { text: '• Built reliable systems.', y: 700 },
+          { text: '• Kept the release process stable.', y: 670 },
+        ] },
+      ]);
+      const inspection = await inspectGeneratedApplicationPdf({
+        html: source, pdf, documentKind: 'resume', expectedPageCount: 2,
+      });
+      assert(!inspection.valid && inspection.textMatches && !inspection.paginationMatches
+        && /size does not match|crop bounds/i.test(inspection.reason),
+      `a malformed second page must not pass based on page one, got ${JSON.stringify(inspection)}`);
+      return { pageCount: inspection.pageCount, rejected: inspection.reason };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: terminal inspection rejects uniformly inset CropBoxes',
+    run: async () => {
+      const source = resumeBulletWorkspace('Built reliable full-scale systems.')
+        .replace('<html>', '<html data-print="ink-only">');
+      const pdf = await textPdfPages([{
+        size: [612, 792], crop: { x: 12, y: 12, width: 588, height: 768 },
+        lines: wrappedResumeBulletLines('Built reliable full-', 'scale systems.'),
+      }]);
+      const inspection = await inspectGeneratedApplicationPdf({ html: source, pdf, documentKind: 'resume', expectedPageCount: 1 });
+      assert(!inspection.valid && inspection.textMatches && !inspection.paginationMatches
+        && /crop bounds do not match/i.test(inspection.reason),
+      `matching inset CropBoxes on every page are clipping, not consistent geometry, got ${JSON.stringify(inspection)}`);
+      return { rejected: inspection.reason };
+    },
+  },
+  {
+    name: 'Application PDF reconcile: atomic export readback rejects uniformly inset CropBoxes',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp('/tmp/application-pdf-crop-');
+      const pdfPath = path.join(directory, 'Resume.pdf');
+      try {
+        const pdf = await textPdfPages([{
+          size: [612, 792], crop: { x: 12, y: 12, width: 588, height: 768 },
+          lines: wrappedResumeBulletLines('Built reliable full-', 'scale systems.'),
+        }]);
+        await fs.promises.writeFile(pdfPath, pdf);
+        const error = await inspectApplicationExport([{
+          path: pdfPath, kind: 'pdf', expectedData: pdf, expectedPageCount: 1,
+          expectedPaper: { x: 0, y: 0, width: 612, height: 792 },
+        }]).then(() => null, failure => failure);
+        assert(/Application export readback failed.*Resume\.pdf/i.test(String(error?.message || error)),
+          `atomic readback must reject a uniformly inset CropBox, got ${String(error)}`);
+        return { rejected: true };
+      } finally {
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: translated Letter and A4 boxes pass preflight and atomic readback',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp('/tmp/application-pdf-translated-');
+      try {
+        const papers = [
+          { name: 'Letter', attrs: 'data-print="ink-only"', width: 612, height: 792 },
+          { name: 'A4', attrs: 'data-page="a4" data-print="ink-only"', width: 595.28, height: 841.89 },
+        ];
+        const results = [];
+        for (const paper of papers) {
+          const source = resumeBulletWorkspace('Built reliable full-scale systems.')
+            .replace('<html>', `<html ${paper.attrs}>`);
+          const translated = { x: 18, y: -24, width: paper.width, height: paper.height };
+          const pdf = await textPdfPages([{
+            size: [paper.width, paper.height], media: translated, crop: translated,
+            lines: wrappedResumeBulletLines('Built reliable full-', 'scale systems.'),
+          }]);
+          const preflight = await inspectGeneratedApplicationPdf({ html: source, pdf, documentKind: 'resume', expectedPageCount: 1 });
+          const pdfPath = path.join(directory, `${paper.name}.pdf`);
+          await fs.promises.writeFile(pdfPath, pdf);
+          const readback = await inspectApplicationExport([{
+            path: pdfPath, kind: 'pdf', expectedData: pdf, expectedPageCount: 1,
+            expectedPaper: { x: 0, y: 0, width: paper.width, height: paper.height },
+          }]);
+          assert(preflight.valid && readback[0]?.integrityVerified === true
+            && readback[0]?.pdfPageGeometryValid === true,
+          `translated ${paper.name} boxes must retain their legal origin while passing dimension checks, got ${JSON.stringify({ preflight, readback })}`);
+          results.push({ paper: paper.name, preflight: preflight.valid, readback: readback[0].pdfPageGeometryValid });
+        }
+        return results;
+      } finally {
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Application PDF reconcile: later-page three-page folios cannot mask an orphaned heading',
+    run: () => {
+      const source = resumeBulletsWorkspace(['Built reliable systems.', 'Kept the release process stable.']);
+      const result = reconcileApplicationHtmlFromPdfBlocks({
+        html: source,
+        documentKind: 'resume',
+        blocks: [
+          { page: 1, x: 56, y: 700, text: 'Maya Chen' },
+          { page: 2, x: 56, y: 80, text: 'Experience' },
+          { page: 2, x: 520, y: 25, text: '2 / 3' },
+          { page: 3, x: 56, y: 700, text: '• Built reliable systems.' },
+          { page: 3, x: 56, y: 670, text: '• Kept the release process stable.' },
+          { page: 3, x: 520, y: 25, text: '3 / 3' },
+        ],
+      });
+      assert(result.pagination?.orphanHeadingCount === 1,
+        `a repeated page folio must not be treated as heading content, got ${JSON.stringify(result.pagination)}`);
+      return { orphanHeadingCount: result.pagination.orphanHeadingCount };
     },
   },
   {

@@ -141,9 +141,12 @@ export function pageTextMeasurementExpression() {
     "    var page = document.querySelector('[data-ic-document-panel]:not([hidden]) main.page') || document.querySelector('main.page');",
     '    if (!page) return null;',
     '    var pageStyle = getComputedStyle(page);',
+    '    var pageRect = page.getBoundingClientRect();',
     "    var minPageHeight = parseFloat(pageStyle.minHeight || '0');",
     "    var paddingTop = parseFloat(pageStyle.paddingTop || '0');",
     "    var paddingBottom = parseFloat(pageStyle.paddingBottom || '0');",
+    "    var paddingLeft = parseFloat(pageStyle.paddingLeft || '0');",
+    "    var paddingRight = parseFloat(pageStyle.paddingRight || '0');",
     '    var typeAreaHeight = minPageHeight - paddingTop - paddingBottom;',
     '    if (!Number.isFinite(typeAreaHeight) || typeAreaHeight <= 0) return null;',
     '    var top = Infinity;',
@@ -155,6 +158,14 @@ export function pageTextMeasurementExpression() {
     '    });',
     '    var node;',
     '    var lineHeights = [];',
+    '    var horizontalOverflowCount = 0;',
+    '    var maxHorizontalOverflowPx = 0;',
+    // Fractional glyph bounds routinely extend a fraction of a pixel beyond
+    // their line box. Two CSS pixels is deliberately larger than that rounding
+    // noise while still catching a clipped .nowrap run or unbroken URL.
+    '    var horizontalTolerancePx = 2;',
+    '    var contentLeft = pageRect.left + paddingLeft;',
+    '    var contentRight = pageRect.right - paddingRight;',
     '    while ((node = walker.nextNode())) {',
     '      var range = document.createRange();',
     '      range.selectNodeContents(node);',
@@ -163,6 +174,11 @@ export function pageTextMeasurementExpression() {
     '        top = Math.min(top, rect.top);',
     '        bottom = Math.max(bottom, rect.bottom);',
     '        lineHeights.push(rect.height);',
+    '        var overflow = Math.max(contentLeft - rect.left, rect.right - contentRight, 0);',
+    '        if (overflow > horizontalTolerancePx) {',
+    '          horizontalOverflowCount += 1;',
+    '          maxHorizontalOverflowPx = Math.max(maxHorizontalOverflowPx, overflow);',
+    '        }',
     '      });',
     '    }',
     '    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return null;',
@@ -176,12 +192,37 @@ export function pageTextMeasurementExpression() {
     '    var middle = Math.floor(sorted.length / 2);',
     '    var lineHeightPx = sorted.length === 0 ? null',
     '      : (sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2);',
-    '    return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight, lineHeightPx: lineHeightPx };',
+    '    return { contentHeightPx: bottom - top, typeAreaHeightPx: typeAreaHeight, lineHeightPx: lineHeightPx,',
+    '      horizontalOverflowCount: horizontalOverflowCount, maxHorizontalOverflowPx: maxHorizontalOverflowPx,',
+    // `scrollWidth` catches an overflowing descendant whose text range happens
+    // to be empty (for example a future generated inline widget). It is a
+    // secondary signal only; the range test above is the candidate-copy gate.
+    '      hasHorizontalScrollOverflow: page.scrollWidth > page.clientWidth + horizontalTolerancePx };',
     '  } catch (_) {',
     '    return null;',
     '  }',
     '})()',
   ].join('\n');
+}
+
+/**
+ * Stable, content-free summary of layout defects measured in the print
+ * renderer. Keep this separate from the browser expression so fit decisions
+ * and tests do not have to parse a renderer-specific object shape.
+ */
+export function renderedPageLayoutIssues(layout) {
+  const issues = [];
+  const horizontalOverflowCount = Number(layout?.horizontalOverflowCount);
+  const maxHorizontalOverflowPx = Number(layout?.maxHorizontalOverflowPx);
+  if ((Number.isFinite(horizontalOverflowCount) && horizontalOverflowCount > 0)
+    || layout?.hasHorizontalScrollOverflow === true) {
+    issues.push({
+      id: 'horizontal-overflow',
+      count: Number.isFinite(horizontalOverflowCount) ? Math.round(horizontalOverflowCount) : 0,
+      maxOverflowPx: Number.isFinite(maxHorizontalOverflowPx) ? Math.round(maxHorizontalOverflowPx * 10) / 10 : null,
+    });
+  }
+  return issues;
 }
 
 function throwIfAborted(signal) {

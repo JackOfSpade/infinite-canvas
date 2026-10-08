@@ -94,7 +94,7 @@ function applicationArtifactSha256(data) {
  * panel and carries the paper treatment declared on the root element. Hashes
  * alone prove identity, not that two independently produced artifacts match.
  */
-export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }) {
+export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind, expectedPageCount = null }) {
   const expectedDualMode = isDualMode(extractVariantAttrs(html));
   const actualDualMode = await pdfHasDualModeBackground(pdf);
   const reconciliation = await reconcileApplicationHtmlFromPdf({
@@ -104,16 +104,96 @@ export async function inspectGeneratedApplicationPdf({ html, pdf, documentKind }
   });
   const textMatches = reconciliation?.success === true && reconciliation?.changed === false;
   const variantMatches = expectedDualMode === actualDualMode;
+  const geometry = await inspectApplicationPdfGeometry(pdf, { html, expectedPageCount });
+  const pagination = reconciliation?.pagination || {};
+  const textPages = new Set(Array.isArray(pagination.textPages) ? pagination.textPages : []);
+  const blankPages = Array.from({ length: geometry.pageCount }, (_unused, index) => index + 1)
+    .filter(page => !textPages.has(page));
+  const orphanHeadingCount = Number(pagination.orphanHeadingCount) || 0;
+  const paginationMatches = geometry.valid && blankPages.length === 0 && orphanHeadingCount === 0;
   return {
-    valid: textMatches && variantMatches,
+    valid: textMatches && variantMatches && paginationMatches,
     textMatches,
     variantMatches,
+    paginationMatches,
+    pageCount: geometry.pageCount,
+    expectedPageCount: geometry.expectedPageCount,
+    blankPages,
+    orphanHeadingCount,
     expectedVariant: expectedDualMode ? 'dual-pdf' : 'ink-only',
     actualVariant: actualDualMode ? 'dual-pdf' : 'ink-only',
     reason: !textMatches
       ? String(reconciliation?.error || reconciliation?.reason || 'PDF text does not match its HTML panel.')
-      : (!variantMatches ? 'PDF paper treatment does not match the HTML root variant.' : ''),
+      : (!variantMatches ? 'PDF paper treatment does not match the HTML root variant.'
+        : (!geometry.valid ? geometry.reason
+          : (blankPages.length ? `PDF has no extractable document text on page(s) ${blankPages.join(', ')}.`
+            : (orphanHeadingCount ? `PDF has ${orphanHeadingCount} heading(s) orphaned at a page boundary.` : '')))),
   };
+}
+
+const PDF_PAGE_TOLERANCE_POINTS = 0.75;
+
+function closePdfDimension(left, right) {
+  return Number.isFinite(left) && Number.isFinite(right)
+    && Math.abs(left - right) <= PDF_PAGE_TOLERANCE_POINTS;
+}
+
+function pdfPageBox(page, name) {
+  const box = name === 'media' ? page.getMediaBox() : page.getCropBox();
+  return { x: box.x, y: box.y, width: box.width, height: box.height };
+}
+
+function samePdfPageBox(left, right) {
+  return closePdfDimension(left.x, right.x)
+    && closePdfDimension(left.y, right.y)
+    && closePdfDimension(left.width, right.width)
+    && closePdfDimension(left.height, right.height);
+}
+
+// PDF page boxes may legally be translated. Paper selection governs the
+// physical dimensions, while CropBox-to-MediaBox comparison below governs the
+// complete visible coordinate system (including origin).
+function samePdfPageDimensions(left, right) {
+  return closePdfDimension(left.width, right.width)
+    && closePdfDimension(left.height, right.height);
+}
+
+function expectedPdfPaperBox(html) {
+  const attrs = extractVariantAttrs(html);
+  // CSS Paged Media defines these physical sizes; tolerate Chromium's normal
+  // sub-point rounding while rejecting a Letter/A4 swap or rotated output.
+  return attrs.includes('data-page="a4"')
+    ? { x: 0, y: 0, width: 595.28, height: 841.89 }
+    : { x: 0, y: 0, width: 612, height: 792 };
+}
+
+/** Verify all saved PDF pages keep the requested paper and a common crop/media box. */
+async function inspectApplicationPdfGeometry(pdf, { html, expectedPageCount = null } = {}) {
+  const document = await PDFDocument.load(pdf, { ignoreEncryption: true });
+  const pageCount = document.getPageCount();
+  const expected = Number.isSafeInteger(expectedPageCount) && expectedPageCount > 0
+    ? expectedPageCount
+    : null;
+  if (pageCount < 1) return { valid: false, pageCount, expectedPageCount: expected, reason: 'PDF has no pages.' };
+  if (expected != null && pageCount !== expected) {
+    return { valid: false, pageCount, expectedPageCount: expected, reason: `PDF has ${pageCount} pages; expected ${expected}.` };
+  }
+  const paper = expectedPdfPaperBox(html);
+  for (let index = 0; index < pageCount; index += 1) {
+    const page = document.getPage(index);
+    const media = pdfPageBox(page, 'media');
+    const crop = pdfPageBox(page, 'crop');
+    if (!samePdfPageDimensions(media, paper)) {
+      return { valid: false, pageCount, expectedPageCount: expected, reason: `PDF page ${index + 1} size does not match the requested paper.` };
+    }
+    // A uniform inset CropBox is still a clipped document. Compare every
+    // page's effective visible bounds to its own MediaBox, rather than merely
+    // comparing all CropBoxes to page one.
+    if (!samePdfPageBox(crop, media)) {
+      return { valid: false, pageCount, expectedPageCount: expected, reason: `PDF page ${index + 1} crop bounds do not match its media bounds.` };
+    }
+  }
+  return { valid: true, pageCount, expectedPageCount: expected, reason: '' };
 }
 
 // A generated-PDF mismatch that a fresh render from the same HTML reproduces
@@ -124,15 +204,20 @@ export const APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC = 'APPLICATION_PDF_MISMAT
 // Keep its revision separate so a text-comparator repair cannot accidentally
 // make a still-deterministic variant mismatch retryable.
 export const APPLICATION_PDF_VARIANT_REVISION = 1;
+// Page count, visible-page geometry, blank-page, and orphan-heading checks
+// form one deterministic acceptance dimension. Keep it versioned separately
+// from text and visual-variant reconciliation so persisted retry guidance
+// becomes recoverable only when this gate itself changes.
+export const APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION = 2;
 // A deterministic comparison failure is only non-retryable while the exact
 // reconciliation logic that proved it remains in the running app.  Local AI
 // jobs deliberately survive upgrades, so expose this revision to their
 // feedback writer rather than stranding a result behind a defect we fixed.
 export { APPLICATION_PDF_RECONCILE_REVISION };
 
-async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
+async function ensureGeneratedApplicationPdf({ html, pdf, documentKind, expectedPageCount = null }) {
   if (pdf == null) return null;
-  const inspection = await inspectGeneratedApplicationPdf({ html, pdf, documentKind });
+  const inspection = await inspectGeneratedApplicationPdf({ html, pdf, documentKind, expectedPageCount });
   if (inspection.valid) return pdf;
   logger.warn(`[JobApplication] Regenerating mismatched ${documentKind} PDF before export: ${inspection.reason}`);
   const rendered = await renderPdf(html, { document: documentKind });
@@ -148,7 +233,7 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
   }
   let repaired = rendered.bytes;
   if (isDualMode(extractVariantAttrs(html))) repaired = await applyDualPdf(repaired);
-  const repairedInspection = await inspectGeneratedApplicationPdf({ html, pdf: repaired, documentKind });
+  const repairedInspection = await inspectGeneratedApplicationPdf({ html, pdf: repaired, documentKind, expectedPageCount });
   if (!repairedInspection.valid) {
     // A PDF rendered fresh from this exact HTML, rejected for the exact same
     // reason as the one it replaced, did not fail because of its bytes — so
@@ -174,6 +259,7 @@ async function ensureGeneratedApplicationPdf({ html, pdf, documentKind }) {
       error.pdfMismatchDimensions = [
         ...(!repairedInspection.textMatches ? [{ kind: 'text', revision: APPLICATION_PDF_RECONCILE_REVISION }] : []),
         ...(!repairedInspection.variantMatches ? [{ kind: 'variant', revision: APPLICATION_PDF_VARIANT_REVISION }] : []),
+        ...(!repairedInspection.paginationMatches ? [{ kind: 'pagination-geometry', revision: APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION }] : []),
       ];
       // Singular fields remain for consumers of pre-dimensions envelopes.
       [error.pdfMismatchKind, error.pdfMismatchRevision] = [
@@ -237,6 +323,7 @@ export function __pruneEmptyExportDirectoriesForTests(outputRoot, exportDir) {
 export function registerPendingApplicationWorkspace({
   workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
+  resumePdfPageCount = null, coverLetterPdfPageCount = null,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
   generationLogPath = null,
   attemptId = null, cleanupOnDiscard = true, applicationRoot = null,
@@ -254,6 +341,10 @@ export function registerPendingApplicationWorkspace({
   const optional = [resumePdfPath, coverLetterPdfPath, generationAuditPath, generationLogPath]
     .map(value => value ? path.resolve(String(value)) : null);
   const paths = [...required, ...optional.filter(Boolean)];
+  const validPageCount = value => value == null || (Number.isSafeInteger(value) && value > 0);
+  if (!validPageCount(resumePdfPageCount) || !validPageCount(coverLetterPdfPageCount)) {
+    throw new Error('Application PDF page counts must be positive safe integers when supplied.');
+  }
   if (paths.some(value => !isWithinDirectory(resolvedWorkDir, value))) {
     throw new Error('Application artifact escaped its registered workspace.');
   }
@@ -320,6 +411,8 @@ export function registerPendingApplicationWorkspace({
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
+    resumePdfPageCount: optional[0] ? resumePdfPageCount : null,
+    coverLetterPdfPageCount: optional[1] ? coverLetterPdfPageCount : null,
     generationAuditPath: optional[2],
     generationLogPath: optional[3],
     generationAuditJobId: optional[2] ? expectedGenerationAuditJobId : null,
@@ -2010,9 +2103,24 @@ export async function inspectApplicationExport(files) {
             const pdf = await PDFDocument.load(data);
             row.pageCount = pdf.getPageCount();
             if (row.pageCount > 0) {
-              const { width, height } = pdf.getPage(0).getSize();
+              const firstPage = pdf.getPage(0);
+              const { width, height } = firstPage.getSize();
+              const expectedPaper = file.expectedPaper || null;
               row.firstPagePoints = `${Math.round(width)}x${Math.round(height)}`;
-              row.pdfParsed = true;
+              row.pdfPageCountValid = !Number.isSafeInteger(file.expectedPageCount)
+                || row.pageCount === file.expectedPageCount;
+              row.pdfPageGeometryValid = true;
+              for (let index = 0; index < row.pageCount; index += 1) {
+                const page = pdf.getPage(index);
+                const media = pdfPageBox(page, 'media');
+                const crop = pdfPageBox(page, 'crop');
+                if (!samePdfPageBox(crop, media)
+                  || (expectedPaper && !samePdfPageDimensions(media, expectedPaper))) {
+                  row.pdfPageGeometryValid = false;
+                  break;
+                }
+              }
+              row.pdfParsed = row.pdfPageGeometryValid && row.pdfPageCountValid;
             }
           }
         } else if (kind === 'html') {
@@ -2058,7 +2166,7 @@ export async function inspectApplicationExport(files) {
   const invalid = manifest.filter(row => row.expected
     ? (!row.exists || !row.readable || row.bytes <= 0
       || !row.sourceExpected || row.matchesSource !== true
-      || row.pdfHeaderValid === false || row.pdfParsed === false
+      || row.pdfHeaderValid === false || row.pdfParsed === false || row.pdfPageCountValid === false || row.pdfPageGeometryValid === false
       || row.htmlStructureValid === false || row.markdownNonEmpty === false
       || row.generationAuditParsed === false || row.generationAuditVersionValid === false
       || row.generationAuditSchemaValid === false || row.generationAuditJobIdValid === false
@@ -2490,8 +2598,8 @@ export function registerJobApplicationHandlers() {
       });
     }
     const [resumePdfData, coverLetterPdfData] = await Promise.all([
-      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume' }),
-      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover' }),
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume', expectedPageCount: pending.resumePdfPageCount }),
+      ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover', expectedPageCount: pending.coverLetterPdfPageCount }),
     ]);
     hasPdf = resumePdfData != null;
     hasCoverLetterPdf = coverLetterPdfData != null;
@@ -2546,8 +2654,8 @@ export function registerJobApplicationHandlers() {
         verify: async () => {
           const readback = await inspectApplicationExport([
             { path: applicationFile, expected: true, expectedData: generatedHtml, kind: 'html' },
-            { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf' },
-            { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf' },
+            { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf', expectedPageCount: pending.resumePdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
+            { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf', expectedPageCount: pending.coverLetterPdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
             { path: jobListingFile, expected: hasListing, expectedData: jobListingData, kind: 'markdown' },
             {
               path: generationAuditFile,

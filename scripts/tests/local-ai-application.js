@@ -4,7 +4,7 @@ import electronPkg from 'electron';
 import { getRecentLogs } from '../../electron/logger.js';
 import { acceptApplicationBlindReviewCursorResponse, applicationBlindReviewScopeCount, applicationBlindReviewWorkAt, assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, createApplicationBlindReviewPlan, createApplicationBlindReviewSourceAccessor, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, createAuthorityLedgerStore, createStoreAuthorityWorkflowRoot, createStoreMatchReceipt, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus, projectEvidenceCoverageGaps, projectedCareerProjectEvidenceBlocks, queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, storeRequirementCatalogPairDescriptor, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertCurrentAuthorityDispositionProofCandidatesForTests, __authorityPasteContextEvidencePlanForTests, __blindReviewDocumentProjectionForTests, __currentAuthorityDispositionProofMaterialForTests, __currentAuthorityDraftSelectionForTests, __currentAuthorityRolelessResumeRuleForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __validateStoredBlindReviewCoverageForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, BLIND_REVIEW_DOCUMENT_PROJECTION_MAX_BYTES_FOR_TESTS, DISPOSITION_PROOF_CANDIDATE_BYTES, MAX_DISPOSITION_PROOF_CANDIDATES_PER_DOCUMENT, MAX_DISPOSITION_PROOF_CANDIDATES_PER_REQUIREMENT, MAX_DISPOSITION_PROOF_MATERIAL_BYTES, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
-import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
+import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
 import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, getPasteHandoffDiagnosticsSnapshot, recordPasteHandoffDiagnostic } from '../../electron/ipc/pasteHandoffDiagnostics.js';
@@ -2060,6 +2060,75 @@ export default [
     },
   },
   {
+    name: 'Paste handoff recovery: validated layout-only feedback reopens review while malformed issue rows remain nonblocking',
+    run: async () => {
+      const project = await createCanvasProject();
+      try {
+        const queued = await queueLocalApplicationJob({
+          transport: 'paste', canvasFilePath: project.canvasFilePath,
+          careerData: 'Ada Lovelace\nada@example.test\nEngineer\nBuilt supported systems with concrete delivery outcomes.',
+          job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' },
+          resumeProfile: { workHistory: [{ id: 'role-1', title: 'Engineer', employer: 'Acme', startDate: '', endDate: '' }] },
+        });
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const feedbackPath = path.join(queued.folder, 'fit-feedback.json');
+        const resultPath = path.join(queued.folder, 'result.json');
+        const resultRaw = '{"completed":"layout-recovery"}\n';
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        const completedManifest = {
+          ...manifest,
+          status: 'completed',
+          paste: { ...manifest.paste, stage: 'completed', handoffCode: null, findings: [] },
+        };
+        await fs.promises.writeFile(resultPath, resultRaw, 'utf8');
+        await fs.promises.writeFile(manifestPath, JSON.stringify(completedManifest), 'utf8');
+        const baseFeedback = {
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 1,
+          resultSha256: sha256(resultRaw), targetPageCount: 1,
+          resume: { pageCount: 1, targetPageCount: 1, layoutIssues: [] },
+          coverLetter: { pageCount: 1, targetPageCount: 1, layoutIssues: [] },
+        };
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...baseFeedback,
+          resume: {
+            ...baseFeedback.resume,
+            layoutIssues: [
+              { id: 'horizontal-overflow', count: 'broken', maxOverflowPx: 3 },
+              { id: 'future-layout-issue', count: 1, maxOverflowPx: 3 },
+            ],
+          },
+        }), 'utf8');
+        const malformed = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const stillCompleted = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        assert(malformed.completed === true && malformed.handoff == null
+          && stillCompleted.status === 'completed' && stillCompleted.paste?.stage === 'completed',
+        'malformed or unknown layout issue rows never reopen a completed paste package');
+
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...baseFeedback,
+          resume: {
+            ...baseFeedback.resume,
+            layoutIssues: [{ id: 'horizontal-overflow', count: 0, maxOverflowPx: null }],
+          },
+        }), 'utf8');
+        _resetPasteCorrectionsForTests();
+        const reopened = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath });
+        const recoveredManifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        assert(reopened.completed !== true && reopened.localJob?.status === 'queued'
+          && recoveredManifest.status === 'queued' && recoveredManifest.paste?.stage === 'review'
+          && JSON.stringify(recoveredManifest.paste?.requiredChangeDocuments) === JSON.stringify(['resume'])
+          && JSON.stringify(recoveredManifest.paste?.requiredChangeTargets) === JSON.stringify(['resume:rendered'])
+          && recoveredManifest.paste?.findings?.some(finding => /^host-resume-layout-/u.test(finding.id)
+            && /printable width/i.test(finding.issue)),
+        `a validated layout-only measurement must recover the paste review with a concrete rendered-document target, got ${JSON.stringify({ reopened, manifest: recoveredManifest })}`);
+        return { malformedStayedCompleted: malformed.completed, reopened: recoveredManifest.paste.stage };
+      } finally {
+        _resetPasteCorrectionsForTests();
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'Paste handoff: completed retry feedback projects only for its current result before save advances',
     run: async () => {
       const project = await createCanvasProject();
@@ -2462,6 +2531,8 @@ export default [
         && localSource.includes('layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null')
         && localSource.includes('contentUtilization: resumeTypeAreaUtilization(layout)')
         && localSource.includes('Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria')
+        && localSource.includes('reported horizontal-overflow layout issues')
+        && !localSource.includes('Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements')
         && localSource.includes('do not rewrite it merely because the résumé overflowed or to occupy more page space')
         && localSource.includes('missingArtifacts.length === 0'),
       'Local AI measures both final documents, treats utilization and cover-letter body shape as diagnostics rather than acceptance gates, records every handoff event without a queue/history cap, keeps unresolved page-limit work revision-required, and never saves when layout verification is unavailable');
@@ -4102,6 +4173,10 @@ export default [
         resumeFit: {
           targetPageCount: 1, pageCount: 1, compactApplied: true, fontsLoaded: true, contentUtilization: 0.925641,
           layout: { contentHeightPx: 925.641, typeAreaHeightPx: 1000 },
+          layoutIssues: [
+            { id: 'horizontal-overflow', count: 1, maxOverflowPx: 4.2 },
+            { id: 'future-layout-issue', count: 1, maxOverflowPx: 4.2 },
+          ],
           attempts: [{
             attempt: 1, density: 'default', pageCount: 2, fontsLoaded: true, contentUtilization: 1.08,
             layout: { contentHeightPx: 1080, typeAreaHeightPx: 1000 },
@@ -4112,12 +4187,16 @@ export default [
         },
         coverLetterFit: {
           targetPageCount: 1, pageCount: 1, fontsLoaded: true, contentUtilization: 0.4,
+          layoutIssues: [{ id: 'horizontal-overflow', count: 0, maxOverflowPx: null }],
           bodyWordCount: 220, bodyParagraphCount: 3,
         },
       });
       assert(handoffEvent.resume?.compactApplied === true
         && handoffEvent.resume?.fontsLoaded === true
         && handoffEvent.resume?.contentUtilization === 0.925641
+        && handoffEvent.resume?.layoutIssues?.length === 1
+        && handoffEvent.resume?.layoutIssues?.[0]?.id === 'horizontal-overflow'
+        && handoffEvent.coverLetter?.layoutIssues?.[0]?.id === 'horizontal-overflow'
         && handoffEvent.resume?.attempts?.[0]?.contentUtilization === 1.08
         && handoffEvent.resume?.attempts?.[0]?.layout?.utilization === 1.08
         && handoffEvent.resume?.attempts?.[1]?.contentUtilization === 0.925641
@@ -4126,7 +4205,7 @@ export default [
         && handoffEvent.coverLetter?.bodyWordCount === 220
         && handoffEvent.coverLetter?.bodyParagraphCount === 3
         && !Object.hasOwn(handoffEvent.coverLetter || {}, 'pathologicalUnderfill'),
-      'handoff events retain verification, aggregate cover-letter shape, and utilization fields consumed by the audit for both documents and every résumé attempt');
+      'handoff events retain validated hard-layout issues, verification, aggregate cover-letter shape, and utilization fields consumed by the audit for both documents and every résumé attempt');
       const artifactText = buildLocalGenerationAuditArtifact({
         jobId: LOCAL_AI_TEST_JOB_ID,
         input: {
@@ -4152,6 +4231,7 @@ export default [
         resumeFit: {
           targetPageCount: 1, pageCount: 1, compactApplied: true, fontsLoaded: true,
           contentUtilization: 0.94, layout: { contentHeightPx: 940 },
+          layoutIssues: [{ id: 'horizontal-overflow', count: 1, maxOverflowPx: 3.1 }],
           attempts: [{
             attempt: 1,
             density: 'default',
@@ -4163,6 +4243,7 @@ export default [
         coverLetterFit: {
           targetPageCount: 1, pageCount: 1, fontsLoaded: true,
           contentUtilization: 0.48, layout: { contentHeightPx: 480 },
+          layoutIssues: [{ id: 'horizontal-overflow', count: 0, maxOverflowPx: null }],
         },
         importedManifest: {
           handoffEventCount: 40,
@@ -4228,14 +4309,19 @@ export default [
       assert(artifact.measuredFit.resume.pageCount === 1
         && artifact.measuredFit.resume.attempts.length === 2
         && artifact.measuredFit.coverLetter.pageCount === 1
+        && artifact.measuredFit.resume.layoutIssues?.[0]?.maxOverflowPx === 3.1
+        && artifact.measuredFit.coverLetter.layoutIssues?.[0]?.id === 'horizontal-overflow'
         && artifact.handoff.events[0]?.resume?.compactApplied === true
         && artifact.handoff.events[0]?.resume?.fontsLoaded === true
         && artifact.handoff.events[0]?.resume?.contentUtilization === 0.925641
+        && artifact.handoff.events[0]?.resume?.layoutIssues?.length === 1
+        && artifact.handoff.events[0]?.resume?.layoutIssues?.[0]?.id === 'horizontal-overflow'
         && artifact.handoff.events[0]?.resume?.attempts[0]?.contentUtilization === 1.08
         && artifact.handoff.events[0]?.resume?.attempts[0]?.layout?.utilization === 1.08
         && artifact.handoff.events[0]?.resume?.attempts[1]?.contentUtilization === 0.925641
         && artifact.handoff.events[0]?.resume?.attempts[1]?.layout?.utilization === 0.925641
         && artifact.handoff.events[0]?.coverLetter?.contentUtilization === 0.4
+        && artifact.handoff.events[0]?.coverLetter?.layoutIssues?.[0]?.id === 'horizontal-overflow'
         && artifact.handoff.events[0]?.coverLetter?.bodyWordCount === 220
         && artifact.handoff.events[0]?.coverLetter?.bodyParagraphCount === 3
         && !Object.hasOwn(artifact.handoff.events[0]?.coverLetter || {}, 'pathologicalUnderfill')
@@ -4636,6 +4722,66 @@ export default [
         const legacyUnderfillReady = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(legacyUnderfillReady.status === 'completed' && legacyUnderfillReady.resultSha256 === sha256(resultText),
           'a hash-matching legacy underfill-only record does not hold a valid one-page letter in revision-required status');
+        // A one-page document can still be visibly clipped. The durable
+        // feedback must hold this exact result without re-rendering it, expose
+        // the concrete issue to the import UI, and require a material document
+        // change if a later review changes only its metadata.
+        const layoutOnlyFeedback = {
+          version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 16,
+          resultSha256: sha256(resultText), documentSha256,
+          resume: {
+            targetPageCount: 1, pageCount: 1,
+            layoutIssues: [{ id: 'horizontal-overflow', count: 1, maxOverflowPx: 4.2 }],
+          },
+          coverLetter: { targetPageCount: 1, pageCount: 1, layoutIssues: [] },
+          message: 'résumé has text extending beyond the printable width by up to 4.2px.',
+        };
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify(layoutOnlyFeedback)}\n`, 'utf8');
+        const layoutOnlyStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const layoutOnlyImport = await importLocalApplicationJob({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, senderId: 9216,
+          expectedResultSha256: sha256(resultText),
+        });
+        assert(layoutOnlyStatus.status === 'revision-required'
+          && layoutOnlyImport.status === 'revision-required'
+          && layoutOnlyImport.resumeFit?.targetMet === false
+          && layoutOnlyImport.resumeFit?.layoutIssues?.[0]?.id === 'horizontal-overflow'
+          && layoutOnlyImport.fitIssues?.some(issue => /printable width/i.test(issue)),
+        `a same-hash layout-only failure must remain revision-required and project its validated issue without a new render, got ${JSON.stringify({ status: layoutOnlyStatus, imported: layoutOnlyImport })}`);
+        const layoutOnlyDiminishing = {
+          ...result,
+          qualityReview: {
+            ...groundedQualityReview(sourceGroundingFor()),
+            resume: { decision: 'kept_diminishing_returns', rationale: 'No remaining cut preserves more priority evidence than it removes from the résumé.' },
+            coverLetter: { decision: 'kept_diminishing_returns', rationale: 'No material improvement remains: one controlling argument still uses minimum-sufficient evidence.' },
+          },
+        };
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), `${JSON.stringify(layoutOnlyDiminishing)}\n`, 'utf8');
+        const layoutOnlyUnchanged = await localApplicationStatus(queued.id, project.canvasFilePath);
+        const layoutOnlyInvalidFeedback = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+        assert(layoutOnlyUnchanged.status === 'invalid' && /must materially regenerate the résumé/i.test(layoutOnlyUnchanged.message)
+          && layoutOnlyInvalidFeedback.priorMeasured?.resume?.layoutIssues?.[0]?.id === 'horizontal-overflow',
+        'an unchanged document cannot use diminishing returns to override a measured horizontal-overflow criterion, including across an intervening validation record');
+
+        // Legacy records and future renderers may carry data this version does
+        // not understand. It remains informational rather than blocking an
+        // otherwise valid result; only a fully validated app-owned issue
+        // shape has hard acceptance semantics.
+        await fs.promises.writeFile(path.join(queued.folder, 'result.json'), resultText, 'utf8');
+        await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
+          ...layoutOnlyFeedback,
+          resume: {
+            targetPageCount: 1, pageCount: 1,
+            layoutIssues: [
+              { id: 'horizontal-overflow', count: 'not-a-count', maxOverflowPx: 4.2 },
+              { id: 'future-layout-issue', count: 1, maxOverflowPx: 4.2 },
+            ],
+          },
+          coverLetter: { targetPageCount: 1, pageCount: 1, layoutIssues: [] },
+        })}\n`, 'utf8');
+        const malformedLayoutReady = await localApplicationStatus(queued.id, project.canvasFilePath);
+        assert(malformedLayoutReady.status === 'completed' && malformedLayoutReady.resultSha256 === sha256(resultText),
+          'malformed or unknown persisted layout issue data is nonblocking for a valid legacy result');
         await fs.promises.writeFile(path.join(queued.folder, 'fit-feedback.json'), `${JSON.stringify({
           version: 1, jobId: queued.id, status: 'revision-required', revisionRound: 17,
           resultSha256: sha256(resultText), documentSha256,
@@ -4702,8 +4848,37 @@ export default [
         await fs.promises.writeFile(path.join(queued.folder, 'result.json'), `${JSON.stringify(changedResult, null, 2)}\n`, 'utf8');
         const revised = await localApplicationStatus(queued.id, project.canvasFilePath);
         assert(revised.status === 'completed', 'a materially changed résumé and unchanged diminishing-returns cover letter clear stale feedback and return to import-ready state');
-        return { legacyUnderfill: legacyUnderfillReady.status, malformedCoverTarget: malformedCoverTarget.status, held: revisionRequired.status, legacyResumed: legacyExhausted.status, revised: revised.status };
+        // A new render has no prior feedback to project, so this is the path
+        // that proves a live measured overflow reaches both the persisted
+        // feedback and the immediate UI response through the same validated
+        // shape. The test renderer returns the raw browser-probe fields;
+        // production code must never expose those raw fields as a different
+        // issue contract.
+        const fixturePdf = await PDFLib.PDFDocument.create();
+        fixturePdf.addPage([612, 792]);
+        const fixturePdfBytes = Buffer.from(await fixturePdf.save());
+        __setLocalAiRenderPdfForTests(async () => ({
+          bytes: Buffer.from(fixturePdfBytes), pageCount: 1, fontsLoaded: true, missingFontFaces: [],
+          layout: {
+            contentHeightPx: 640, typeAreaHeightPx: 800,
+            horizontalOverflowCount: 1, maxHorizontalOverflowPx: 4.2,
+            hasHorizontalScrollOverflow: true,
+          },
+        }));
+        const freshLayoutRevision = await importLocalApplicationJob({
+          jobId: queued.id, canvasFilePath: project.canvasFilePath, senderId: 9217,
+          expectedResultSha256: sha256(`${JSON.stringify(changedResult, null, 2)}\n`),
+        });
+        const freshLayoutFeedback = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'fit-feedback.json'), 'utf8'));
+        assert(freshLayoutRevision.status === 'revision-required'
+          && freshLayoutRevision.resumeFit?.layoutIssues?.[0]?.id === 'horizontal-overflow'
+          && freshLayoutRevision.coverLetterFit?.layoutIssues?.[0]?.id === 'horizontal-overflow'
+          && freshLayoutFeedback.resume?.layoutIssues?.[0]?.id === 'horizontal-overflow'
+          && freshLayoutFeedback.coverLetter?.layoutIssues?.[0]?.id === 'horizontal-overflow',
+        `a fresh measured layout failure must use the validated issue projection in feedback and both immediate UI document fits, got ${JSON.stringify({ response: freshLayoutRevision, feedback: freshLayoutFeedback })}`);
+        return { legacyUnderfill: legacyUnderfillReady.status, layoutHeld: layoutOnlyStatus.status, malformedLayout: malformedLayoutReady.status, malformedCoverTarget: malformedCoverTarget.status, held: revisionRequired.status, legacyResumed: legacyExhausted.status, revised: revised.status, freshLayoutRevision: freshLayoutRevision.status };
       } finally {
+        __setLocalAiRenderPdfForTests(null);
         await fs.promises.rm(project.root, { recursive: true, force: true });
       }
     },
@@ -5141,6 +5316,20 @@ export default [
         const variantStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
         await fs.promises.writeFile(feedbackPath, JSON.stringify({
           ...feedback,
+          pdfMismatchKind: 'pagination-geometry',
+          pdfMismatchRevision: APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION,
+          pdfMismatchDimensions: [{ kind: 'pagination-geometry', revision: APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION }],
+        }), 'utf8');
+        const paginationGeometryStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
+          pdfMismatchKind: 'pagination-geometry',
+          pdfMismatchRevision: APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION - 1,
+          pdfMismatchDimensions: [{ kind: 'pagination-geometry', revision: APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION - 1 }],
+        }), 'utf8');
+        const stalePaginationGeometryStatus = await localApplicationStatus(queued.id, project.canvasFilePath);
+        await fs.promises.writeFile(feedbackPath, JSON.stringify({
+          ...feedback,
           retryReproducesFailure: false,
           pdfMismatchKind: null,
           pdfMismatchRevision: null,
@@ -5192,6 +5381,8 @@ export default [
           && /Retry layout check/i.test(legacyStatus.message)
           && !/waiting on a fix to the app/i.test(legacyStatus.message)
           && variantStatus.retryReproducesFailure === true
+          && paginationGeometryStatus.retryReproducesFailure === true
+          && stalePaginationGeometryStatus.retryReproducesFailure === false
           && transientStatus.retryReproducesFailure === false
           && /renderer could not load its fonts yet/i.test(transientStatus.message)
           && bothFailedPartlyCurrent.retryReproducesFailure === true
@@ -5200,7 +5391,7 @@ export default [
           && staleFeedbackStatus.retryReproducesFailure === false
           && advancedImportStatus.status === 'importing'
           && advancedImportStatus.retryReproducesFailure === false,
-        `any current dimension in a deterministic PDF mismatch must block retry, while legacy, fully obsolete, stale-result, transient, and advanced-save feedback stay retryable with appropriate wording, got ${JSON.stringify({ currentStatus, guardedImport, legacyStatus, variantStatus, transientStatus, bothFailedPartlyCurrent, bothFailedObsolete, staleFeedbackStatus, advancedImportStatus })}`);
+        `any current dimension in a deterministic PDF mismatch must block retry, while legacy, fully obsolete, stale-result, transient, and advanced-save feedback stay retryable with appropriate wording, got ${JSON.stringify({ currentStatus, guardedImport, legacyStatus, variantStatus, paginationGeometryStatus, stalePaginationGeometryStatus, transientStatus, bothFailedPartlyCurrent, bothFailedObsolete, staleFeedbackStatus, advancedImportStatus })}`);
 
         // 2026-09-23 bug report: this exact failure landed on manifest.json
         // (feedback.json above proves that much) but never reached the live

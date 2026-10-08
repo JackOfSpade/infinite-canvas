@@ -15,9 +15,9 @@ import { handleSafe } from './ipcUtils.js';
 import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath } from './canvasRecoveryPaths.js';
 import { EMPTY_JOB_LISTING_BODY_NOTE, formatOriginalJobListingMarkdown, normaliseJobPostingVariants, ORIGINAL_JOB_LISTING_BODY_HEADING } from './applicationBundle.js';
 import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml } from './resumeHtml.js';
-import { renderPdf as productionRenderPdf, applyDualPdf } from './resumeRender.js';
+import { renderPdf as productionRenderPdf, applyDualPdf, renderedPageLayoutIssues } from './resumeRender.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
-import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, RESUME_BULLET_CHARACTER_BUDGET, RESUME_BULLET_OPENING_VARIETY_RULE, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
+import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, RESUME_BULLET_CHARACTER_BUDGET, RESUME_BULLET_OPENING_VARIETY_RULE, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
 import { applicationConvergenceInstruction, expectedApplicationQualityDecision, isApplicationQualityDecision } from './applicationConvergence.js';
 import { ADJACENT_SENTENCE_SHAPE_RULE, ARGUMENT_CLAIM_SPAN_RULE, ARGUMENT_MAPPING_REQUIRED_RULE, ARGUMENT_PROOF_SPAN_RULE, ARGUMENT_RELEVANCE_ANAPHORA_RULE, ARGUMENT_RELEVANCE_MECHANISM_RULE, ARGUMENT_RELEVANCE_SPAN_RULE, ARGUMENT_SPAN_ALIGNMENT_RULE, authorCoverLetterEnvelope, checkEvidenceGrounding, checkMappingNarrativeStructure, checkParagraphArgumentLinks, checkRoleThesis, COVER_LETTER_EQUIVALENCE_CARRIERS, COVER_LETTER_LOGISTICS_PROMISE_CLASSES, COVER_LETTER_SALIENT_ECHO_PHRASES, DANGLING_DEMONSTRATIVE_RULE, DURATION_CLAIM_SHAPE_RULE, evaluateCoverLetterChecks, findUnsupportedDurationClaim, formatCoverLetterDate, MAX_ARGUMENT_MAPPING_FIELD_CHARS, MAX_LETTER_FIGURES, MAX_LETTER_OFF_POSTING_TOOLS, MAX_PARAGRAPH_OFF_POSTING_TOOLS, MAX_SENTENCE_WORDS, MIN_ANCHOR_RELEVANCE_CORPUS_WORDS, MIN_ROLE_THESIS_WORDS, MIN_SHARED_SHAPE_PARAGRAPHS, paragraphArgumentSpanGaps, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE, SENTENCE_SHAPE_FRAME_WORDS, REDUNDANCY_SHINGLE_WORDS, SHARED_SENTENCE_SHAPE_CEILING_RULE } from './coverLetterChecks.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot, isWithinDirectory } from '../utils/pathSafety.js';
@@ -4640,9 +4640,15 @@ function pastePrompt({ input, state }) {
   const legacyEducationHeaderOverride = stage === 'evidence-plan' && !Array.isArray(input.hostCareerEvidenceCatalog)
     ? ' Education supersession: identity.credential is optional. A completed degree may instead be represented later in resume.education with its accepted career-data evidence; do not force a degree into the header or select one by source order. Existing header credentials remain accepted when already present.'
     : '';
-  const genericStageContract = stage === 'evidence-plan'
+  // The source-grounding validator reads this exact rule for both first drafts
+  // and review replacements. Keep it outside the legacy/current-authority
+  // variants so neither prompt family can silently omit it.
+  const sourceFigureStageRule = ['resume', 'cover-letter', 'review'].includes(stage)
+    ? ` ${SOURCE_FIGURE_GROUNDING_RULE}.`
+    : '';
+  const genericStageContract = (stage === 'evidence-plan'
     ? (Array.isArray(input.hostCareerEvidenceCatalog) ? currentSnapshotEvidencePlanContract : `${contracts['legacy-evidence-plan']}${roleSelectionContract}${legacyEducationHeaderOverride}`)
-    : `${contracts[stage]}${resumeSchemaExtension}`;
+    : `${contracts[stage]}${resumeSchemaExtension}`) + sourceFigureStageRule;
   // Legacy writers receive the raw frozen source fields their original
   // contracts name. Current-authority writers do not: alter only those source
   // scope claims, retaining the shared output and quality constraints.
@@ -5289,7 +5295,8 @@ function pasteGroundingBriefRule(parts, items) {
     + (forms
       ? ` Any qualifier the new wording adds beyond those quotes must be stated by one of them in that quote’s own `
         + `words, and each family is read by word form, so these are the forms${stated.size ? ', beyond the families the items above already spell out' : ''}: ${forms}.`
-      : '');
+      : '')
+    + ` ${SOURCE_FIGURE_GROUNDING_RULE}.`;
 }
 
 // Ordered by what omitting each one cost when a literal repair was measured
@@ -8140,7 +8147,7 @@ async function retireLegacyUnderfillOnlyPasteReview({ root, dir, manifest, input
   // A malformed legacy state must never let an actual overflow slip through.
   // The fixed one-page cover target in this predicate also rejects a corrupt
   // legacy record that claimed a two-page cover-letter target.
-  if (feedback?.jobId === input.jobId && measuredFeedbackHasUnmetPageTarget(
+  if (feedback?.jobId === input.jobId && measuredFeedbackHasUnmetHardCriterion(
     feedback,
     targetPageCountForJob(input.job?.title),
   )) return manifest;
@@ -8171,21 +8178,28 @@ async function recoverPasteMeasuredFitHandoff({ root, dir, manifest, input, stat
   }
   const resultRaw = await readOwnedFile(root, path.join(dir, 'result.json'), { maxBytes: MAX_RESULT_BYTES }).catch(error => error?.code === 'ENOENT' ? '' : Promise.reject(error));
   if (!resultRaw || feedback.resultSha256 !== contentHash(resultRaw)) return { manifest, state, recovered: false };
-  const targetPageCount = Number.isFinite(feedback.targetPageCount) && feedback.targetPageCount > 0
-    ? feedback.targetPageCount : targetPageCountForJob(input.job?.title);
+  const targetPageCount = positiveMeasuredPageTarget(
+    feedback.targetPageCount,
+    targetPageCountForJob(input.job?.title),
+  );
   const resumeLayout = feedback.resume?.layout || null;
   const resumePageCount = Number.isFinite(feedback.resume?.pageCount) ? feedback.resume.pageCount : null;
   const coverLetterPageCount = Number.isFinite(feedback.coverLetter?.pageCount) ? feedback.coverLetter.pageCount : null;
-  const resumeNeedsChange = resumePageCount == null || resumePageCount > targetPageCount;
-  const coverNeedsChange = coverLetterPageCount == null || coverLetterPageCount > 1;
-  // A measured advisory is only written for a failed target, but do not reopen
-  // a malformed record whose measurements would require no document change.
+  const resumeLayoutIssues = safeMeasuredLayoutIssues(feedback.resume?.layoutIssues);
+  const coverLayoutIssues = safeMeasuredLayoutIssues(feedback.coverLetter?.layoutIssues);
+  const resumeNeedsChange = measuredDocumentHasUnmetHardCriterion({ pageCount: resumePageCount, layoutIssues: resumeLayoutIssues }, targetPageCount);
+  const coverNeedsChange = measuredDocumentHasUnmetHardCriterion({ pageCount: coverLetterPageCount, layoutIssues: coverLayoutIssues }, 1);
+  // A measured advisory is only written for a failed hard criterion, but do
+  // not reopen a malformed record whose measurements would require no
+  // document change.
   if (!resumeNeedsChange && !coverNeedsChange) return { manifest, state, recovered: false };
   const revisionRound = Number.isFinite(feedback.revisionRound) && feedback.revisionRound > 0 ? feedback.revisionRound : 1;
   const revision = Math.max(Number(state.revision) || 0, revisionRound);
   const findings = [
     ...(resumePageCount != null && resumePageCount > targetPageCount ? [{ id: `host-resume-fit-${revisionRound}`, document: 'resume', targetId: 'document', issue: `Measured ${resumePageCount} pages; target is ${targetPageCount}.`, fix: 'Edit the résumé to satisfy the measured page target while retaining supported evidence.' }] : []),
     ...(coverLetterPageCount != null && coverLetterPageCount > 1 ? [{ id: `host-cover-fit-${revisionRound}`, document: 'coverLetter', targetId: 'document', issue: `Measured ${coverLetterPageCount} pages; target is 1.`, fix: 'Edit the cover letter to fit one measured page while preserving its argument.' }] : []),
+    ...measuredLayoutIssueMessages(resumeLayoutIssues, 'résumé').map((issue, index) => ({ id: `host-resume-layout-${revisionRound}-${index + 1}`, document: 'resume', targetId: 'document', issue, fix: 'Edit the résumé so every text run remains within the printable width.' })),
+    ...measuredLayoutIssueMessages(coverLayoutIssues, 'cover letter').map((issue, index) => ({ id: `host-cover-layout-${revisionRound}-${index + 1}`, document: 'coverLetter', targetId: 'document', issue, fix: 'Edit the cover letter so every text run remains within the printable width.' })),
   ];
   const priorEvent = await readLastPasteGenerationLogEvent(dir, path.join(dir, PASTE_APPLICATION_LOG_FILE));
   const expectedSequence = (Number(state.logCount) || 0) + 1;
@@ -8196,8 +8210,8 @@ async function recoverPasteMeasuredFitHandoff({ root, dir, manifest, input, stat
     await appendPasteGenerationLog(dir, {
       type: 'host-fit-revision-requested', jobId: input.jobId, sequence: expectedSequence,
       revision, stage: 'review', fit: {
-        resume: { pageCount: resumePageCount, targetPageCount, utilization: resumeTypeAreaUtilization(resumeLayout) },
-        coverLetter: { pageCount: coverLetterPageCount, targetPageCount: 1, utilization: resumeTypeAreaUtilization(feedback.coverLetter?.layout || null) },
+        resume: { pageCount: resumePageCount, targetPageCount, utilization: resumeTypeAreaUtilization(resumeLayout), layoutIssueCount: resumeLayoutIssues.length },
+        coverLetter: { pageCount: coverLetterPageCount, targetPageCount: 1, utilization: resumeTypeAreaUtilization(feedback.coverLetter?.layout || null), layoutIssueCount: coverLayoutIssues.length },
       }, findings: findings.length,
     });
     logCount = expectedSequence;
@@ -10717,10 +10731,15 @@ function localAiApplicationNodeId(value) {
 }
 
 // Local-AI deliberately does not mine achievements, but it can reuse the
-// ledger the originating hub already supplied. The report needs that fact and
-// its bounded counts, not ledger prose, claims, evidence, or identifiers.
-function localAiAchievementTelemetry(achievements) {
-  const source = achievements && Array.isArray(achievements.ledger) ? 'reused' : 'unavailable';
+// ledger the originating hub already supplied. A snapshot-authority job has a
+// different, complete approved career source instead of that legacy ledger;
+// reporting it as a careerData fallback would misstate the authority actually
+// used. The report needs that provenance and bounded counts, never ledger
+// prose, claims, evidence, or identifiers.
+function localAiAchievementTelemetry(achievements, { hasPinnedCareerAuthority = false } = {}) {
+  const source = achievements && Array.isArray(achievements.ledger)
+    ? 'reused'
+    : hasPinnedCareerAuthority ? 'pinned-authority' : 'unavailable';
   if (source !== 'reused') return { source };
   const ledger = achievements.ledger;
   const stats = achievements.stats && typeof achievements.stats === 'object' ? achievements.stats : null;
@@ -10739,6 +10758,12 @@ function localAiAchievementTelemetry(achievements) {
     kept: Math.min(ledger.length, 10_000),
     ...(safeStats ? { stats: safeStats } : {}),
   };
+}
+
+// Narrow test seam for the provenance projection only. It never exposes a
+// ledger entry, claim, or authority record.
+export function __localAiAchievementTelemetryForTests(achievements, options) {
+  return localAiAchievementTelemetry(achievements, options);
 }
 
 // A successful save removes the private job directory, which formerly took
@@ -12483,6 +12508,169 @@ export const SOURCE_TERM_OVERLAP_RULE = 'a term is a run of letters or digits, c
   + 'however often it repeats, a one-character term counting only when it is a digit, and these '
   + `${SOURCE_GROUNDING_STOPWORDS.size} words never count: ${[...SOURCE_GROUNDING_STOPWORDS].sort().join(', ')}`;
 
+// Token overlap establishes that a unit is about the cited work, but it cannot
+// establish that a newly added result is true.  In particular, "Built the
+// reporting service" and "Built the reporting service, reducing cost by 40%"
+// easily share the overlap floor even when the source never states the
+// reduction.  Keep this mechanical and conservative: it protects only
+// marked quantitative results, for which exact source support is decidable.
+// Bare numerals and written dates are excluded because they are often
+// host-trusted role metadata or technical identifiers, not a result a bullet
+// needs to re-prove from its selected quote.
+export const SOURCE_FIGURE_GROUNDING_RULE = 'every percentage or percentage-point amount, currency amount, or compact multiplier such as 2x in a bullet or candidate-work paragraph must occur in one of that unit\'s cited career-data quotes with the same value and kind, and with the same currency denomination where applicable; equivalent thousands, decimal-zero, and k/m/bn magnitude formatting is treated as the same value, while standalone numbers, spaced dimensions such as 3 x 3, technical version numbers, and four-digit calendar years are not treated as figures by this rule';
+
+function sourceGroundingFigures(value) {
+  const text = normalizeSourceGroundingText(value);
+  const figures = [];
+  // US-style grouping is the format this renderer/prompt uses. A comma may
+  // be discarded only when it is a three-digit thousands separator; a period
+  // remains part of the value so 2.5x can never collapse into 25x.
+  // `x` is deliberately compact: 2x is a multiplier, while 3 x 3 is a
+  // technical dimension and has no reliable performance meaning.
+  // A letter/digit immediately before the number is a technical identifier,
+  // not a performance figure: v2x must not become a claimed multiplier.
+  const figureRe = /(?<![\p{L}\p{N}_.])(?:(?<prefixSign>[+-])\s*)?(?:(?<currencyPrefix>[A-Za-z]{1,3})?(?<symbol>[$€£¥₹]))?\s*(?<number>[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+))(?:(?:\s*(?<suffix>%|percent\b|per\s*cent\b|percentage[-\s]?points?\b|pp\b|times\b|bn\b|thousand\b|million\b|billion\b|[kKmMbB](?![\p{L}\p{N}])))|x\b)?/giu;
+  let match;
+  while ((match = figureRe.exec(text)) !== null) {
+    const raw = match[0];
+    const number = match.groups?.number;
+    if (!number) continue;
+    const magnitude = /(?:\s*(bn|thousand|million|billion|[kKmMbB]))$/iu.exec(raw)?.[1]?.toLowerCase() || '';
+    const numeric = canonicalSourceFigureValue(`${match.groups?.prefixSign || ''}${number}`, magnitude);
+    const before = text.slice(Math.max(0, match.index - 32), match.index);
+    const after = text.slice(match.index + raw.length, match.index + raw.length + 32);
+    const denomination = sourceFigureCurrencyDenomination(
+      match.groups?.symbol || '', before, after, match.groups?.currencyPrefix || '',
+    );
+    const kind = denomination
+      ? 'currency'
+      : /(?:percentage[-\s]?points?\b|pp\b)/iu.test(raw)
+        ? 'percentage-points'
+      : /(?:%|percent\b|per\s*cent\b)/iu.test(raw)
+        ? 'percentage'
+        : /(?:\d\s*(?:x\b|times\b))/iu.test(raw)
+          ? 'multiplier'
+          : 'number';
+    // Bare numerals are too ambiguous for a factual gate: technical versions,
+    // artifact names, stages, and prose labels routinely use them. Percent,
+    // currency, and multiplier claims have explicit semantic markers, so they
+    // can be checked without turning neutral technical copy into a false
+    // source-grounding defect.
+    if (kind === 'number') continue;
+    // Unlike a compact 3x, "3 times" can open either a performance claim or
+    // a dimension. When another number follows immediately, it is the latter
+    // construction (3 times 3), so stand down rather than guessing at scope.
+    if (kind === 'multiplier' && /\btimes\b/iu.test(raw)
+      && /^\s*[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)/u.test(after)) continue;
+    figures.push({ numeric, kind, denomination, raw: raw.trim() });
+  }
+  return figures;
+}
+
+const SOURCE_FIGURE_CURRENCY_FALLBACK_CODES = Object.freeze([
+  'USD', 'CAD', 'AUD', 'NZD', 'SGD', 'HKD', 'EUR', 'GBP', 'JPY', 'CNY', 'RMB', 'INR',
+]);
+// Do not turn the current user's currencies into a narrow vocabulary. Modern
+// Electron exposes the standard ISO currency inventory through Intl; the
+// small fallback preserves the prior well-tested denominations on an older
+// runtime that lacks supportedValuesOf altogether.
+const SOURCE_FIGURE_CURRENCY_CODES = Object.freeze([...new Set([
+  ...SOURCE_FIGURE_CURRENCY_FALLBACK_CODES,
+  ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('currency') : []),
+])]
+  .map(code => String(code).toUpperCase())
+  .filter(code => /^[A-Z]{3}$/u.test(code)));
+// `$` and `£` do not identify a country on their own, so align each with its
+// ordinary unqualified word rather than silently treating it as USD or GBP.
+// `¥` is used for both yen and yuan. Keeping it distinct is deliberately
+// conservative: a source must use an ISO/country marker or the same symbol
+// rather than letting one national currency ground the other.
+const SOURCE_FIGURE_CURRENCY_SYMBOLS = Object.freeze({ '$': 'dollar', '€': 'EUR', '£': 'pound', '¥': '¥', '₹': 'INR' });
+const SOURCE_FIGURE_CURRENCY_CODE_RE = new RegExp(`\\b(${SOURCE_FIGURE_CURRENCY_CODES.join('|')})\\b`, 'iu');
+const SOURCE_FIGURE_WORD_CURRENCIES = Object.freeze([
+  { before: /(?:^|\s)(?:u\.?s\.?|united states)\s+dollars?\s*$/iu, after: /^\s*(?:u\.?s\.?|united states)\s+dollars?\b/iu, denomination: 'USD' },
+  { before: /(?:^|\s)canadian\s+dollars?\s*$/iu, after: /^\s*canadian\s+dollars?\b/iu, denomination: 'CAD' },
+  { before: /(?:^|\s)australian\s+dollars?\s*$/iu, after: /^\s*australian\s+dollars?\b/iu, denomination: 'AUD' },
+  { before: /(?:^|\s)(?:new zealand|nz)\s+dollars?\s*$/iu, after: /^\s*(?:new zealand|nz)\s+dollars?\b/iu, denomination: 'NZD' },
+  { before: /(?:^|\s)singapore(?:an)?\s+dollars?\s*$/iu, after: /^\s*singapore(?:an)?\s+dollars?\b/iu, denomination: 'SGD' },
+  { before: /(?:^|\s)(?:hong kong|hk)\s+dollars?\s*$/iu, after: /^\s*(?:hong kong|hk)\s+dollars?\b/iu, denomination: 'HKD' },
+  { before: /(?:^|\s)(?:british|uk)\s+pounds?\s*$/iu, after: /^\s*(?:british|uk)\s+pounds?\b/iu, denomination: 'GBP' },
+  { before: /(?:^|\s)indian\s+rupees?\s*$/iu, after: /^\s*indian\s+rupees?\b/iu, denomination: 'INR' },
+  { before: /(?:^|\s)japanese\s+yen\s*$/iu, after: /^\s*japanese\s+yen\b/iu, denomination: 'JPY' },
+  { before: /(?:^|\s)chinese\s+yuan\s*$/iu, after: /^\s*chinese\s+yuan\b/iu, denomination: 'CNY' },
+  { before: /(?:^|\s)euros?\s*$/iu, after: /^\s*euros?\b/iu, denomination: 'EUR' },
+  { before: /(?:^|\s)yen\s*$/iu, after: /^\s*yen\b/iu, denomination: 'JPY' },
+  { before: /(?:^|\s)yuan\s*$/iu, after: /^\s*yuan\b/iu, denomination: 'CNY' },
+  { before: /(?:^|\s)dollars?\s*$/iu, after: /^\s*dollars?\b/iu, denomination: 'dollar' },
+  { before: /(?:^|\s)pounds?\s*$/iu, after: /^\s*pounds?\b/iu, denomination: 'pound' },
+  { before: /(?:^|\s)rupees?\s*$/iu, after: /^\s*rupees?\b/iu, denomination: 'rupee' },
+]);
+
+function sourceFigureCurrencyDenomination(symbol, before, after, symbolPrefix = '') {
+  // Qualified dollar symbols (US$1M, C$1M, HK$1M) are common in career
+  // material. Treat the recognised prefix as part of the denomination instead
+  // of silently reducing the whole expression to an unguarded bare number.
+  // An unfamiliar prefix remains a marked dollar amount, but does not get to
+  // impersonate one of the national ISO denominations below.
+  const qualifiedSymbol = `${String(symbolPrefix || '').toUpperCase()}${symbol}`;
+  const qualifiedDollarDenominations = {
+    'US$': 'USD', 'CA$': 'CAD', 'C$': 'CAD', 'AU$': 'AUD', 'A$': 'AUD',
+    'NZ$': 'NZD', 'SG$': 'SGD', 'S$': 'SGD', 'HK$': 'HKD',
+  };
+  if (qualifiedDollarDenominations[qualifiedSymbol]) return qualifiedDollarDenominations[qualifiedSymbol];
+  // A code has to sit directly beside the number. Looking farther into a
+  // sentence could attribute an unrelated currency word to a later figure.
+  const nearbyCode = /(?:^|\s)([A-Za-z]{3})\s*$/u.exec(before)?.[1]
+    || /^\s*([A-Za-z]{3})(?:\b|\s)/u.exec(after)?.[1]
+    || '';
+  const code = nearbyCode.toUpperCase();
+  if (SOURCE_FIGURE_CURRENCY_CODES.includes(code) && SOURCE_FIGURE_CURRENCY_CODE_RE.test(code)) return code;
+  // Currency words are conventional on either side of a value: both
+  // “1 Canadian dollar” and “Canadian dollars 1” are amounts. Require the
+  // words to touch the number except for whitespace so an earlier sentence
+  // mention cannot label an unrelated later bare number as money.
+  for (const currency of SOURCE_FIGURE_WORD_CURRENCIES) {
+    if (currency.after.test(after) || currency.before.test(before)) return currency.denomination;
+  }
+  return SOURCE_FIGURE_CURRENCY_SYMBOLS[symbol] || '';
+}
+
+function canonicalSourceFigureValue(numberText, magnitude = '') {
+  const signed = String(numberText || '');
+  // An explicit plus has the same value as the ordinary positive form. A
+  // minus is material: -25% must never ground 25%.
+  const sign = signed.startsWith('-') ? '-' : '';
+  const raw = signed.replace(/^[+-]/u, '').replace(/,/gu, '');
+  const [integerPart = '', fractionalPart = ''] = raw.split('.');
+  let digits = `${integerPart}${fractionalPart}`.replace(/^0+/u, '');
+  if (!digits) return `${sign}0e0`;
+  let exponent = -fractionalPart.length + ({
+    k: 3, thousand: 3, m: 6, million: 6, b: 9, bn: 9, billion: 9,
+  }[magnitude] || 0);
+  // Canonical scientific form avoids floating-point rounding and makes
+  // formatting-only variants equal: 1,200.00, 1200, and 1.2k all become 12e2.
+  while (digits.length > 1 && digits.endsWith('0')) {
+    digits = digits.slice(0, -1);
+    exponent += 1;
+  }
+  return `${sign}${digits}e${exponent}`;
+}
+
+function assertSupportedSourceFigures(finalText, sourceQuotes, unit) {
+  // Quotes are independent evidence spans. Joining them lets a number at the
+  // end of one quote borrow a marker at the start of the next ("25" + "%"),
+  // manufacturing support neither source actually stated.
+  const source = (Array.isArray(sourceQuotes) ? sourceQuotes : [])
+    .flatMap(quote => sourceGroundingFigures(quote));
+  const unsupported = sourceGroundingFigures(finalText)
+    .filter(figure => !source.some(candidate => candidate.numeric === figure.numeric
+      && candidate.kind === figure.kind && candidate.denomination === figure.denomination));
+  if (!unsupported.length) return;
+  const visible = unsupported.slice(0, 4).map(figure => `“${figure.raw}” (${figure.kind})`);
+  const remainder = unsupported.length - visible.length;
+  throw new Error(`${unit} uses unsupported figure${unsupported.length === 1 ? '' : 's'} ${visible.join(', ')}; every percentage, percentage-point amount, currency amount, or multiplier must occur in this unit's bound career-data quotes with the same value and kind, and with the same currency denomination where applicable.${remainder ? ` ${remainder} further unsupported figure(s) are not listed here.` : ''}`);
+}
+
 // These are deliberately high-precision rather than a general semantic
 // similarity model. They cover modifiers that materially broaden a career
 // claim and therefore need literal support in that unit's bound quotes.
@@ -12635,6 +12823,27 @@ function isCandidateCareerSentence(sentence, identityTokens) {
   return identityTokens.some(token => tokens.has(token));
 }
 
+// A cover letter can validly use an implicit-subject construction ("Reduced
+// manual work by 25% through reporting systems.") after an earlier sentence
+// established the candidate. Such a sentence has neither a pronoun nor a
+// literal employer/title token, so the broader source-overlap gate accepts it
+// but isCandidateCareerSentence intentionally leaves its non-quantitative
+// qualifiers alone. A marked result is different: it is mechanically
+// checkable and high-risk. Ground it whenever this is a career-action sentence
+// that is substantively about the cited career evidence. That still leaves
+// listing-only statements alone: they either have no career action or do not
+// share the required career-data terms.
+function isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes) {
+  if (isCandidateCareerSentence(sentence, identityTokens)) return true;
+  const hasCareerAction = CAREER_ASSERTION_ACTION_RE.test(sentence) || CAREER_ASSERTION_REGULAR_PAST_RE.test(sentence);
+  if (!hasCareerAction) return false;
+  const sentenceTokens = meaningfulSourceTokens(sentence);
+  const quoteTokens = new Set(meaningfulSourceTokens((Array.isArray(sourceQuotes) ? sourceQuotes : []).join(' ')));
+  const shared = sentenceTokens.filter(token => quoteTokens.has(token));
+  const minimumShared = sentenceTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
+  return sentenceTokens.length > 0 && shared.length >= minimumShared;
+}
+
 // A sentence carrying two unsupported qualifiers used to cost two rounds: the
 // loop threw on the first rule that matched, so dropping the qualifier it named
 // revealed the next one. Measured on a cover-letter paragraph that stated both
@@ -12734,12 +12943,23 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   const durationFailure = unsupportedDurationClaimError(`${unit.charAt(0).toLocaleUpperCase()}${unit.slice(1)}`, finalText, sourceQuotes);
   if (durationFailure) throw new Error(durationFailure);
   if (label === 'resumeBullets') {
+    assertSupportedSourceFigures(finalText, sourceQuotes, unit);
     assertSupportedSourceQualifiers(finalText, sourceQuotes, unit);
     return;
   }
   const ungrounded = [];
   for (const [sentenceIndex, sentence] of groundingSentences(finalText).entries()) {
-    if (!isCandidateCareerSentence(sentence, identityTokens)) continue;
+    const candidateCareerSentence = isCandidateCareerSentence(sentence, identityTokens);
+    // The paragraph can also contain a role or employer fact taken from the
+    // job listing. That figure is not a candidate claim and its career-data
+    // quote need not repeat it. An implicit-subject career action can omit
+    // those identity words while still being grounded in the selected career
+    // evidence, so it receives the same exact figure proof as a résumé
+    // bullet. Listing-only figures continue to stand down.
+    if (isCandidateCareerFigureSentence(sentence, identityTokens, sourceQuotes)) {
+      assertSupportedSourceFigures(sentence, sourceQuotes, `${unit}, sentence ${sentenceIndex + 1}`);
+    }
+    if (!candidateCareerSentence) continue;
     const sentenceTokens = meaningfulSourceTokens(sentence);
     const sentenceShared = sentenceTokens.filter(token => quoteTokens.has(token));
     const sentenceMinimum = sentenceTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
@@ -13950,6 +14170,10 @@ function projectGenerationAuditFit(value, { resume = false } = {}) {
   return {
     targetPageCount: finiteMetric(source.targetPageCount),
     pageCount: finiteMetric(source.pageCount),
+    // Preserve only the current, app-measured hard-layout vocabulary. A
+    // history/audit record can cross an app upgrade, so unknown or malformed
+    // rows remain informational rather than becoming unbounded metadata.
+    layoutIssues: safeMeasuredLayoutIssues(source.layoutIssues),
     ...(resume ? {
       compactApplied: source.compactApplied === true,
     } : {}),
@@ -14250,24 +14474,77 @@ function safeMeasuredLayout(layout) {
   };
 }
 
+// A fit-feedback file is durable across app upgrades and can also be left
+// behind by an interrupted write.  Treat only the one app-measured layout
+// issue shape we currently know how to repair as a hard criterion. Unknown or
+// malformed rows are diagnostics from another version/corrupt state, not a
+// reason to strand an otherwise valid legacy result in revision-required.
+// `count: 0, maxOverflowPx: null` is valid: it represents the renderer's
+// secondary scroll-width signal, which has no individual text-range count.
+function safeMeasuredLayoutIssues(value) {
+  if (!Array.isArray(value)) return [];
+  const issues = [];
+  for (const issue of value) {
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)
+      || issue.id !== 'horizontal-overflow'
+      || !Number.isSafeInteger(issue.count) || issue.count < 0 || issue.count > 1_000_000
+      || !Object.prototype.hasOwnProperty.call(issue, 'maxOverflowPx')
+      || (issue.maxOverflowPx !== null && (!Number.isFinite(issue.maxOverflowPx)
+        || issue.maxOverflowPx < 0 || issue.maxOverflowPx > 1_000_000))) continue;
+    // One measured horizontal-overflow record is sufficient to fail the
+    // document. Collapse duplicate persisted copies so a corrupt array cannot
+    // inflate feedback, findings, or the repair prompt.
+    if (issues.some(existing => existing.id === issue.id)) continue;
+    issues.push({
+      id: issue.id,
+      count: issue.count,
+      maxOverflowPx: issue.maxOverflowPx,
+    });
+  }
+  return issues;
+}
+
+function measuredLayoutIssueMessages(value, documentLabel) {
+  return safeMeasuredLayoutIssues(value).map((issue) => {
+    const amount = Number.isFinite(issue.maxOverflowPx) ? ` by up to ${issue.maxOverflowPx}px` : '';
+    return `${documentLabel} has text extending beyond the printable width${amount}`;
+  });
+}
+
+function positiveMeasuredPageTarget(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function measuredDocumentHasUnmetHardCriterion(document, pageTarget) {
+  const pageCount = finiteMetric(document?.pageCount);
+  return pageCount == null || pageCount > pageTarget || safeMeasuredLayoutIssues(document?.layoutIssues).length > 0;
+}
+
+// A legacy feedback file can be incomplete but still correctly hold the job
+// for a fresh measurement. It cannot, however, prove that an unchanged
+// sibling document must be rewritten. Use this narrower form only when
+// enforcing a material document change against a prior hash.
+function measuredDocumentHasKnownUnmetHardCriterion(document, pageTarget) {
+  const pageCount = finiteMetric(document?.pageCount);
+  return (pageCount != null && pageCount > pageTarget)
+    || safeMeasuredLayoutIssues(document?.layoutIssues).length > 0;
+}
+
 // An invalid result has no measurements of its own. Preserve the last app
 // measurement inside an explicit snapshot so a validation rejection cannot
 // erase the hard-layout invariant for the next submitted bytes.
-function measuredFeedbackHasUnmetPageTarget(feedback, fallbackResumeTarget = 1) {
+function measuredFeedbackHasUnmetHardCriterion(feedback, fallbackResumeTarget = 1) {
   if (!['revision-required', 'revision-exhausted'].includes(feedback?.status)) return false;
-  const positivePageTarget = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
-  const resumeTarget = positivePageTarget(
+  const resumeTarget = positiveMeasuredPageTarget(
     feedback?.resume?.targetPageCount,
-    positivePageTarget(feedback?.targetPageCount, fallbackResumeTarget),
+    positiveMeasuredPageTarget(feedback?.targetPageCount, fallbackResumeTarget),
   );
   // Cover letters have one invariant target. Unlike a résumé target, this is
   // not job-configurable, so a malformed persisted value such as 2 must not
   // turn a two-page letter into an accepted legacy measurement.
   const coverLetterTarget = 1;
-  const resumePageCount = finiteMetric(feedback?.resume?.pageCount);
-  const coverLetterPageCount = finiteMetric(feedback?.coverLetter?.pageCount);
-  return resumePageCount == null || coverLetterPageCount == null
-    || resumePageCount > resumeTarget || coverLetterPageCount > coverLetterTarget;
+  return measuredDocumentHasUnmetHardCriterion(feedback?.resume, resumeTarget)
+    || measuredDocumentHasUnmetHardCriterion(feedback?.coverLetter, coverLetterTarget);
 }
 
 function measuredFeedbackSnapshot(feedback) {
@@ -14276,9 +14553,9 @@ function measuredFeedbackSnapshot(feedback) {
     : feedback?.priorMeasured;
   if (!source || !['revision-required', 'revision-exhausted'].includes(source.status)) return null;
   // Historical records may name a former low-utilization advisory. It was
-  // never a page-limit failure, so it must not make an otherwise valid package
-  // look like it still requires a material rewrite.
-  if (!measuredFeedbackHasUnmetPageTarget(source)) return null;
+  // never a hard layout failure, so it must not make an otherwise valid
+  // package look like it still requires a material rewrite.
+  if (!measuredFeedbackHasUnmetHardCriterion(source)) return null;
   const documentSha256 = safeMeasuredDocumentHashes(source.documentSha256);
   if (!documentSha256) return null;
   return {
@@ -14290,11 +14567,13 @@ function measuredFeedbackSnapshot(feedback) {
       pageCount: finiteMetric(source?.resume?.pageCount),
       targetPageCount: finiteMetric(source?.resume?.targetPageCount),
       layout: safeMeasuredLayout(source?.resume?.layout),
+      layoutIssues: safeMeasuredLayoutIssues(source?.resume?.layoutIssues),
     },
     coverLetter: {
       pageCount: finiteMetric(source?.coverLetter?.pageCount),
       targetPageCount: finiteMetric(source?.coverLetter?.targetPageCount),
       layout: safeMeasuredLayout(source?.coverLetter?.layout),
+      layoutIssues: safeMeasuredLayoutIssues(source?.coverLetter?.layoutIssues),
     },
   };
 }
@@ -14344,13 +14623,16 @@ function assertLocalAiQualityReviewConsistency(raw, priorFeedback) {
     }
   }
   if (measuredPrior) {
-    const resumePageCount = Number(measuredPrior?.resume?.pageCount);
-    const resumeTarget = Number(measuredPrior?.resume?.targetPageCount ?? measuredPrior?.targetPageCount);
-    const resumeStillFails = Number.isFinite(resumePageCount) && Number.isFinite(resumeTarget)
-      && resumePageCount > resumeTarget;
-    const coverPageCount = Number(measuredPrior?.coverLetter?.pageCount);
-    const coverTarget = Number(measuredPrior?.coverLetter?.targetPageCount) || 1;
-    const coverStillFails = Number.isFinite(coverPageCount) && coverPageCount > coverTarget;
+    const resumeTarget = positiveMeasuredPageTarget(
+      measuredPrior?.resume?.targetPageCount,
+      positiveMeasuredPageTarget(measuredPrior?.targetPageCount, 1),
+    );
+    const resumeStillFails = measuredDocumentHasKnownUnmetHardCriterion(measuredPrior?.resume, resumeTarget);
+    // Cover letters have one invariant target even when an old feedback file
+    // claims otherwise. This shares the exact issue validator with the
+    // matching-feedback gate, so an unchanged horizontal-overflow document
+    // cannot slip through by changing only its qualityReview fields.
+    const coverStillFails = measuredDocumentHasKnownUnmetHardCriterion(measuredPrior?.coverLetter, 1);
     const unchangedFailures = [
       ...(resumeStillFails && priorHashes?.resume === hashes.resume ? [{ key: 'resume', label: 'résumé' }] : []),
       ...(coverStillFails && priorHashes?.coverLetter === hashes.coverLetter ? [{ key: 'coverLetter', label: 'cover letter' }] : []),
@@ -14358,9 +14640,9 @@ function assertLocalAiQualityReviewConsistency(raw, priorFeedback) {
     if (unchangedFailures.length) {
       throwValidationFailures([{
         message: `Local AI must materially regenerate the ${unchangedFailures.map(item => item.label).join(' and ')} because its prior app-measured layout criterion is still unsatisfied; diminishing returns cannot override a failed hard criterion.`,
-        // A measured page criterion is satisfied by the rendered document and
-        // nothing else, so this is one of the few defects whose repair really
-        // is "the visible document must change".
+        // A measured page or horizontal-overflow criterion is satisfied by
+        // the rendered document and nothing else, so this is one of the few
+        // defects whose repair really is "the visible document must change".
         repairs: unchangedFailures.map(item => `${item.key}:rendered`),
       }]);
     }
@@ -14550,7 +14832,8 @@ async function renderLocalResumeWithFit({ resumeMainHtml, ledger, docId, targetP
     : baseVariantAttrs;
   return {
     mainHtml, variantAttrs, bytes, pageCount, fontsLoaded, renderError, missingFontFaces,
-    attempts, compactApplied, layout, contentUtilization: resumeTypeAreaUtilization(layout),
+    attempts, compactApplied, layout, layoutIssues: renderedPageLayoutIssues(layout),
+    contentUtilization: resumeTypeAreaUtilization(layout),
   };
 }
 
@@ -14587,6 +14870,7 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
       // ratio helper applies unchanged. Utilization and body shape are durable
       // diagnostics only: a one-page letter is never lengthened to fill space.
       layout,
+      layoutIssues: renderedPageLayoutIssues(layout),
       contentUtilization: resumeTypeAreaUtilization(layout),
       bodyWordCount: bodyShape.wordCount,
       bodyParagraphCount: bodyShape.paragraphCount,
@@ -14595,7 +14879,7 @@ async function renderLocalCoverLetter({ letter, variantAttrs, docId, signal }) {
     if (error?.name === 'AbortError') throw error;
     const renderError = error?.message || String(error);
     logger.warn(`[LocalAI] Cover-letter PDF render failed: ${renderError}`);
-    return { bytes: null, pageCount: null, fontsLoaded: null, missingFontFaces: [], renderError, centered: false, layout: null, contentUtilization: null, bodyWordCount: null, bodyParagraphCount: null };
+    return { bytes: null, pageCount: null, fontsLoaded: null, missingFontFaces: [], renderError, centered: false, layout: null, layoutIssues: [], contentUtilization: null, bodyWordCount: null, bodyParagraphCount: null };
   }
 }
 
@@ -14677,6 +14961,7 @@ export function localAiHandoffEvent({ type, resultRaw, revisionRound = null, res
     resume: resumeFit ? {
       pageCount: Number.isFinite(resumeFit.pageCount) ? resumeFit.pageCount : null,
       targetPageCount: Number.isFinite(resumeFit.targetPageCount) ? resumeFit.targetPageCount : null,
+      layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues),
       compactApplied: resumeFit.compactApplied === true,
       fontsLoaded: resumeFit.fontsLoaded === false ? false : resumeFit.fontsLoaded === true ? true : null,
       contentUtilization: Number.isFinite(resumeFit.contentUtilization) ? resumeFit.contentUtilization : null,
@@ -14706,6 +14991,7 @@ export function localAiHandoffEvent({ type, resultRaw, revisionRound = null, res
     coverLetter: coverLetterFit ? {
       pageCount: Number.isFinite(coverLetterFit.pageCount) ? coverLetterFit.pageCount : null,
       targetPageCount: Number.isFinite(coverLetterFit.targetPageCount) ? coverLetterFit.targetPageCount : null,
+      layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues),
       fontsLoaded: coverLetterFit.fontsLoaded === false ? false : coverLetterFit.fontsLoaded === true ? true : null,
       contentUtilization: Number.isFinite(coverLetterFit.contentUtilization) ? coverLetterFit.contentUtilization : null,
       // These are app-measured aggregate layout facts, not letter prose. Keep
@@ -14901,10 +15187,14 @@ async function recordLocalAiSaveFailureUnlocked({
     : [{ kind: error?.pdfMismatchKind, revision: error?.pdfMismatchRevision }];
   const pdfMismatchDimensions = retryReproducesFailure
     ? rawDimensions
-      .filter(dimension => ['text', 'variant'].includes(dimension?.kind))
+      .filter(dimension => ['text', 'variant', 'pagination-geometry'].includes(dimension?.kind))
       .map(dimension => ({
         kind: dimension.kind,
-        revision: dimension.kind === 'text' ? APPLICATION_PDF_RECONCILE_REVISION : APPLICATION_PDF_VARIANT_REVISION,
+        revision: dimension.kind === 'text'
+          ? APPLICATION_PDF_RECONCILE_REVISION
+          : dimension.kind === 'variant'
+            ? APPLICATION_PDF_VARIANT_REVISION
+            : APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION,
       }))
       .filter((dimension, index, all) => all.findIndex(other => other.kind === dimension.kind) === index)
     : [];
@@ -14997,6 +15287,7 @@ function deterministicPdfMismatchStillBlocksRetry(feedback) {
   return dimensions.some(dimension => (
     (dimension?.kind === 'text' && dimension.revision === APPLICATION_PDF_RECONCILE_REVISION)
     || (dimension?.kind === 'variant' && dimension.revision === APPLICATION_PDF_VARIANT_REVISION)
+    || (dimension?.kind === 'pagination-geometry' && dimension.revision === APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION)
   ));
 }
 
@@ -15844,14 +16135,14 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
       // both allow-lists: an 'invalid' record is not a measurement or proof of
       // a completed app-side import.
       const measuredFeedback = matchingFeedback
-        && measuredFeedbackHasUnmetPageTarget(feedback, targetPageCountForJob(input.job?.title));
+        && measuredFeedbackHasUnmetHardCriterion(feedback, targetPageCountForJob(input.job?.title));
       const retryProjection = renderRetryFeedbackProjection(feedback, { jobId, resultSha256 });
       const appRetryFeedback = retryProjection !== null;
       if (!measuredFeedback && !appRetryFeedback) assertLocalAiQualityReviewConsistency(raw, feedback);
       status = 'completed'; message = 'Validated result.json is ready to import.';
       if (measuredFeedback) {
         status = 'revision-required';
-        message = String(feedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
+        message = String(feedback.message || 'The résumé or cover letter has an unmet measured layout criterion. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
       } else if (appRetryFeedback) {
         // A prior import consumed these exact bytes but its app-side render/save
         // pipeline failed. Keep automatic pollers parked until an explicit
@@ -16269,29 +16560,32 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     && ['revision-required', 'revision-exhausted'].includes(priorFeedback?.status);
   // A renderer can retry an IPC request after a slow render, and a local coding agent
   // can leave the card mounted while it is reading the app's feedback. Once a
-  // particular result has already produced a failed hard page measurement,
+  // particular result has already produced a failed hard layout measurement,
   // never render it again: doing so would inflate revision rounds and overwrite
   // the original observation with an identical one. Legacy feedback can carry
   // a low-utilization advisory; it is diagnostic only and must fall through to
-  // normal acceptance when both page limits already pass.
-  if (measuredPriorFeedback && measuredFeedbackHasUnmetPageTarget(
+  // normal acceptance when every hard criterion already passes.
+  if (measuredPriorFeedback && measuredFeedbackHasUnmetHardCriterion(
     priorFeedback,
     targetPageCountForJob(input.job?.title),
   )) {
-    const targetPageCount = Number.isFinite(priorFeedback.targetPageCount) && priorFeedback.targetPageCount > 0
-      ? priorFeedback.targetPageCount
-      : (Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
-        ? input.targetPageCount
-        : targetPageCountForJob(input.job?.title));
+    const targetPageCount = positiveMeasuredPageTarget(
+      priorFeedback.targetPageCount,
+      positiveMeasuredPageTarget(input?.targetPageCount, targetPageCountForJob(input.job?.title)),
+    );
     const resumePageCount = Number.isFinite(priorFeedback?.resume?.pageCount) ? priorFeedback.resume.pageCount : null;
     const coverLetterPageCount = Number.isFinite(priorFeedback?.coverLetter?.pageCount) ? priorFeedback.coverLetter.pageCount : null;
     const resumeLayout = priorFeedback?.resume?.layout || null;
     const coverLetterLayout = priorFeedback?.coverLetter?.layout || null;
-    const targetMet = resumePageCount != null && resumePageCount <= targetPageCount;
-    const coverLetterTargetMet = coverLetterPageCount != null && coverLetterPageCount <= 1;
+    const resumeLayoutIssues = safeMeasuredLayoutIssues(priorFeedback?.resume?.layoutIssues);
+    const coverLayoutIssues = safeMeasuredLayoutIssues(priorFeedback?.coverLetter?.layoutIssues);
+    const targetMet = resumePageCount != null && resumePageCount <= targetPageCount && resumeLayoutIssues.length === 0;
+    const coverLetterTargetMet = coverLetterPageCount != null && coverLetterPageCount <= 1 && coverLayoutIssues.length === 0;
     const fitIssues = [
       ...(resumePageCount != null && resumePageCount > targetPageCount ? [`résumé is ${resumePageCount} pages (target: ${targetPageCount})`] : []),
       ...(coverLetterPageCount != null && coverLetterPageCount > 1 ? [`cover letter is ${coverLetterPageCount} pages (target: 1)`] : []),
+      ...measuredLayoutIssueMessages(resumeLayoutIssues, 'résumé'),
+      ...measuredLayoutIssueMessages(coverLayoutIssues, 'cover letter'),
     ];
     if (targetMet && coverLetterTargetMet) {
       // Do not resurrect a historical underfill-only revision. The current
@@ -16303,8 +16597,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     return {
       id: jobId, status: 'revision-required',
       company: input.job?.company || '', candidateName: result.coverLetter.name,
-      resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
-      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
+      resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, layoutIssues: resumeLayoutIssues, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
+      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, layoutIssues: coverLayoutIssues, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
       localJob: { id: jobId, status: 'revision-required', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath, message: fitMessage },
     };
@@ -16318,7 +16612,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
   const docId = crypto.randomUUID();
   const ledger = Array.isArray(input?.achievements?.ledger) ? input.achievements.ledger : null;
-  const achievementTelemetry = localAiAchievementTelemetry(input?.achievements);
+  const achievementTelemetry = localAiAchievementTelemetry(input?.achievements, {
+    hasPinnedCareerAuthority: Boolean(input?.careerAuthority),
+  });
   const targetPageCount = Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
     ? input.targetPageCount
     : targetPageCountForJob(input.job?.title);
@@ -16423,14 +16719,24 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       },
     };
   }
+  // Rendered layout issues use the same strict durable projection as a later
+  // feedback read. That keeps a future/corrupt issue shape informational
+  // rather than creating a retry loop the repair protocol cannot name.
+  const validatedResumeLayoutIssues = safeMeasuredLayoutIssues(resumeFit.layoutIssues);
+  const validatedCoverLayoutIssues = safeMeasuredLayoutIssues(coverLetterFit.layoutIssues);
+  const resumeLayoutIssues = measuredLayoutIssueMessages(validatedResumeLayoutIssues, 'résumé');
+  const coverLayoutIssues = measuredLayoutIssueMessages(validatedCoverLayoutIssues, 'cover letter');
   const pageTargetMet = resumeFit.pageCount != null && resumeFit.pageCount <= targetPageCount;
-  const targetMet = pageTargetMet;
-  const coverLetterTargetMet = coverLetterFit.pageCount != null && coverLetterFit.pageCount <= 1;
+  const targetMet = pageTargetMet && resumeLayoutIssues.length === 0;
+  const coverLetterTargetMet = coverLetterFit.pageCount != null && coverLetterFit.pageCount <= 1
+    && coverLayoutIssues.length === 0;
   const fitIssues = [
     ...(resumeFit.fontsLoaded !== false && resumeFit.pageCount != null && !pageTargetMet
       ? [`résumé is ${resumeFit.pageCount} pages (target: ${targetPageCount})`] : []),
     ...(coverLetterFit.fontsLoaded !== false && coverLetterFit.pageCount != null && coverLetterFit.pageCount > 1
       ? [`cover letter is ${coverLetterFit.pageCount} pages (target: 1)`] : []),
+    ...resumeLayoutIssues,
+    ...coverLayoutIssues,
   ];
   if (fitIssues.length) {
     const revisionRound = Math.max(0, Number(priorFeedback?.revisionRound) || 0) + 1;
@@ -16450,9 +16756,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       qualityChecklistVersion: expectedChecklistVersion,
       requestedAt: new Date().toISOString(),
       targetPageCount,
-      resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null },
-      coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null },
-      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${expectedChecklistVersion} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. Cut generic, redundant, weakly related, or low-evidence content first. ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} ${COVER_LETTER_RELEVANCE_LINK_RULE} ${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE} ${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} ${COVER_LETTER_PRIOR_WORK_CONTEXT_RULE} ${COVER_LETTER_BOUNDARY_REFERENCE_RULE} For a cover letter that already fits, improve it only when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed or to occupy more page space. Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria. Treat only the page counts, render attempts, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or the cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
+      resume: { pageCount: resumeFit.pageCount, targetPageCount, attempts: resumeFit.attempts, layout: resumeFit.layout ? { ...resumeFit.layout, utilization: resumeFit.contentUtilization } : null, layoutIssues: validatedResumeLayoutIssues },
+      coverLetter: { pageCount: coverLetterFit.pageCount, targetPageCount: 1, layout: coverLetterFit.layout ? { ...coverLetterFit.layout, utilization: coverLetterFit.contentUtilization } : null, layoutIssues: validatedCoverLayoutIssues },
+      instruction: `Before overwriting result.json, compare both documents with the strongest concrete improvement identified by a private quality critique, then rerun every item in the version ${expectedChecklistVersion} quality checklist. Page fit is a hard acceptance criterion, not a quality-completion signal. ${applicationConvergenceInstruction({ revisionAttempt: revisionRound, unchangedSignal: 'keep an already-satisfied document byte-for-byte unchanged and record kept_diminishing_returns with a concrete rationale' })} An unsatisfied document must change materially; a diminishing-returns declaration never overrides a failed hard criterion. For the résumé, preserve direct matches to the job’s highest-priority requirements, concrete outcomes and scale, and credible differentiators. Cut generic, redundant, weakly related, or low-evidence content first. ${COVER_LETTER_COHESION_REVISION_RULE} ${COVER_LETTER_COPY_PRECISION_RULE} ${COVER_LETTER_RELEVANCE_LINK_RULE} ${COVER_LETTER_TRANSFER_RULE} ${COVER_LETTER_OPENING_CONTEXT_RULE} ${COVER_LETTER_CANDIDATE_AGENCY_RULE} ${COVER_LETTER_WARRANT_RULE} ${COVER_LETTER_SENTENCE_FLEXIBILITY_RULE} ${COVER_LETTER_PRIOR_WORK_CONTEXT_RULE} ${COVER_LETTER_BOUNDARY_REFERENCE_RULE} For a cover letter that already fits, improve it only when the comparison finds a material argument or relevance gain; do not rewrite it merely because the résumé overflowed or to occupy more page space. Type-area utilization and body shape are informational diagnostics, not quality or acceptance criteria. Treat the page counts, render attempts, reported horizontal-overflow layout issues, and type-area utilization in this feedback as app measurements. Do not claim that the app confirmed bullet line counts, page fullness, or any unreported cause of overflow; label markup-based conclusions as your own diagnosis. Do not infer candidate contact details, preserve text merely because it appears earlier, or invent facts. Overwrite only result.json when done.`,
       message: fitMessage,
     };
     await atomicJson(path.join(dir, LOCAL_AI_FIT_FEEDBACK_FILE), feedback);
@@ -16471,6 +16777,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       const measuredFindings = [
         ...(!pageTargetMet ? [{ id: `host-resume-fit-${revisionRound}`, document: 'resume', targetId: 'document', issue: `Measured ${resumeFit.pageCount} pages; target is ${targetPageCount}.`, fix: 'Edit the résumé to satisfy the measured page target while retaining supported evidence.' }] : []),
         ...(coverLetterFit.pageCount > 1 ? [{ id: `host-cover-fit-${revisionRound}`, document: 'coverLetter', targetId: 'document', issue: `Measured ${coverLetterFit.pageCount} pages; target is 1.`, fix: 'Edit the cover letter to fit one measured page while preserving its argument.' }] : []),
+        ...resumeLayoutIssues.map((issue, index) => ({ id: `host-resume-layout-${revisionRound}-${index + 1}`, document: 'resume', targetId: 'document', issue, fix: 'Edit the résumé so every text run remains within the printable width.' })),
+        ...coverLayoutIssues.map((issue, index) => ({ id: `host-cover-layout-${revisionRound}-${index + 1}`, document: 'coverLetter', targetId: 'document', issue, fix: 'Edit the cover letter so every text run remains within the printable width.' })),
       ];
       const paste = {
         ...handoffManifest.paste,
@@ -16531,8 +16839,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     });
     return {
       id: jobId, status: 'revision-required', company: input.job?.company || '', candidateName: result.coverLetter.name,
-      resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization },
-      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, contentUtilization: coverLetterFit.contentUtilization },
+      resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: validatedResumeLayoutIssues, contentUtilization: resumeFit.contentUtilization },
+      coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: validatedCoverLayoutIssues, contentUtilization: coverLetterFit.contentUtilization },
       fitIssues, fitMessage,
       revisionRound,
       ...(pasteHandoff ? { handoff: pasteHandoff } : {}),
@@ -16672,6 +16980,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const workDir = registerPendingApplicationWorkspace({
     workDir: dir, senderId, company: input.job?.company, candidateName: result.coverLetter.name,
     resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
+    resumePdfPageCount: resumePdf ? resumeFit.pageCount : null,
+    coverLetterPdfPageCount: coverPdf ? coverLetterFit.pageCount : null,
     generationAuditJobId: jobId,
     generationAuditRequired: expectedAuditVersion != null,
     attemptId: `local-${jobId}`, applicationRoot: outputRoot.resolved,
@@ -16746,7 +17056,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // without this a clean run leaves no import entry in the main-process log a
   // HANDOFF bug report could show.
   logger.info(`[LocalAI] Imported job ${jobId}: résumé ${resumeFit.pageCount}/${targetPageCount} page(s), cover letter ${coverLetterFit.pageCount}/1 — awaiting bundle save`);
-  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
+  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues), contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues), contentUtilization: coverLetterFit.contentUtilization }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
 }
 
 /**

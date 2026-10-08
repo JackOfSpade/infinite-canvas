@@ -1405,6 +1405,314 @@ Dates: May 2019 — August 2019
     },
   },
   {
+    name: 'Source grounding rejects an unsupported percentage result that shares the cited artifact words',
+    run() {
+      const source = 'Built reporting systems that reduced manual work by 25%.';
+      const supportedBullet = 'Built reporting systems that reduced manual work by 25%.';
+      const inventedFigureBullet = 'Built reporting systems that reduced manual work by 40%.';
+      const review = (bullet, quote = source) => ({
+        checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+        criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: `${requirement} measured on the rendered ${id} copy.` })),
+        resume: { decision: 'drafted', rationale: 'The résumé keeps source-supported reporting evidence and its stated result.' },
+        coverLetter: { decision: 'drafted', rationale: 'One controlling argument uses minimum-sufficient evidence for reporting-system delivery.' },
+        sourceGrounding: {
+          resumeBullets: [{ bullet, careerDataQuotes: [quote] }],
+          coverLetterParagraphs: [{ paragraph: source, careerDataQuotes: [source] }],
+        },
+      });
+      const context = (bullet, corpus = source) => ({
+        required: true,
+        careerData: corpus,
+        frozenSourceQuotes: false,
+        resumeEvidence: { roles: [{ title: 'Engineer', company: 'Acme', bullets: [{ text: bullet }] }] },
+        coverLetter: { paragraphs: [source] },
+        coverLetterArgument: { primaryEvidence: { evidence: bullet, evidenceRole: 'Engineer at Acme' } },
+      });
+      sanitizeQualityReview(review(supportedBullet), context(supportedBullet), APPLICATION_QUALITY_CHECKLIST_VERSION);
+      let rejected = null;
+      try {
+        sanitizeQualityReview(review(inventedFigureBullet), context(inventedFigureBullet), APPLICATION_QUALITY_CHECKLIST_VERSION);
+      } catch (error) { rejected = error; }
+      const repair = pasteRejectionChangeDocuments(rejected);
+      assert(rejected?.message.includes('unsupported figure')
+        && JSON.stringify(repair.targets) === JSON.stringify(['resume:authored']),
+      `an unsupported numerical result is rejected as a résumé repair while a sourced result passes (${rejected?.message || 'accepted'})`);
+      return { rejected: true, repair: repair.targets };
+    },
+  },
+  {
+    name: 'Figure grounding preserves decimal precision and ignores listing-only paragraph figures',
+    run() {
+      const decimalSource = 'Built reporting systems that generated $1.2M and operated at 2.5x efficiency.';
+      const candidateSource = 'I built reporting systems that reduced manual work by 25%.';
+      const review = ({ bullet, paragraph, quote, quotes = [quote] }) => ({
+        checklistVersion: APPLICATION_QUALITY_CHECKLIST_VERSION,
+        criteria: APPLICATION_QUALITY_CRITERIA.map(({ id, requirement }) => ({ id, status: 'pass', evidence: `${requirement} measured on the rendered ${id} copy.` })),
+        resume: { decision: 'drafted', rationale: 'The résumé retains source-supported reporting evidence and quantified results.' },
+        coverLetter: { decision: 'drafted', rationale: 'One controlling argument uses minimum-sufficient evidence for reporting-system delivery.' },
+        sourceGrounding: {
+          resumeBullets: [{ bullet, careerDataQuotes: quotes }],
+          coverLetterParagraphs: [{ paragraph, careerDataQuotes: quotes }],
+        },
+      });
+      const context = ({ bullet, paragraph, corpus }) => ({
+        required: true,
+        careerData: corpus,
+        frozenSourceQuotes: false,
+        resumeEvidence: { roles: [{ title: 'Engineer', company: 'Acme', bullets: [{ text: bullet }] }] },
+        coverLetter: { paragraphs: [paragraph] },
+        coverLetterArgument: { primaryEvidence: { evidence: bullet, evidenceRole: 'Engineer at Acme' } },
+      });
+
+      const decimalMutation = 'Built reporting systems that generated $12M and operated at 25x efficiency.';
+      let decimalError = null;
+      try {
+        sanitizeQualityReview(
+          review({ bullet: decimalMutation, paragraph: decimalSource, quote: decimalSource }),
+          context({ bullet: decimalMutation, paragraph: decimalSource, corpus: decimalSource, quote: decimalSource }),
+          APPLICATION_QUALITY_CHECKLIST_VERSION,
+        );
+      } catch (error) { decimalError = error; }
+      assert(decimalError?.message.includes('unsupported figures')
+        && decimalError.message.includes('$12M') && decimalError.message.includes('25x'),
+      `decimal values must not collapse into integer values (${decimalError?.message || 'accepted'})`);
+
+      const formattedSource = 'Built reporting systems that generated $1,200.00, improved conversion by 25.0%, and operated at 2.50x efficiency.';
+      const formattedEquivalent = 'Built reporting systems that generated $1200, improved conversion by 25%, and operated at 2.5x efficiency.';
+      sanitizeQualityReview(
+        review({ bullet: formattedEquivalent, paragraph: formattedEquivalent, quote: formattedSource }),
+        context({ bullet: formattedEquivalent, paragraph: formattedEquivalent, corpus: formattedSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const magnitudeEquivalent = 'Built reporting systems that generated $1,200,000 and operated at 2.5x efficiency.';
+      sanitizeQualityReview(
+        review({ bullet: magnitudeEquivalent, paragraph: magnitudeEquivalent, quote: decimalSource }),
+        context({ bullet: magnitudeEquivalent, paragraph: magnitudeEquivalent, corpus: decimalSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+
+      // A spaced x is an ambiguous technical dimension, not a compact 3x
+      // performance multiplier. The source-grounding rule intentionally
+      // leaves it to ordinary semantic review rather than making up a figure
+      // claim it cannot prove mechanically.
+      const dimensionSource = 'I built a 4 x 4 reporting matrix for internal teams.';
+      const changedDimension = 'I built a 3 x 3 reporting matrix for internal teams.';
+      sanitizeQualityReview(
+        review({ bullet: changedDimension, paragraph: changedDimension, quote: dimensionSource }),
+        context({ bullet: changedDimension, paragraph: changedDimension, corpus: dimensionSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      // The written dimension form is equally ambiguous. It must stand down
+      // when it denotes matrix dimensions, while an actual speed multiplier
+      // remains a source-grounded quantitative claim.
+      const writtenDimensionSource = 'I built a 4 times 4 reporting matrix for internal teams.';
+      const changedWrittenDimension = 'I built a 3 times 3 reporting matrix for internal teams.';
+      sanitizeQualityReview(
+        review({ bullet: changedWrittenDimension, paragraph: changedWrittenDimension, quote: writtenDimensionSource }),
+        context({ bullet: changedWrittenDimension, paragraph: changedWrittenDimension, corpus: writtenDimensionSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+
+      const rejectFigure = ({ source, final, quotes = [source] }) => {
+        try {
+          sanitizeQualityReview(
+            review({ bullet: final, paragraph: final, quote: source, quotes }),
+            context({ bullet: final, paragraph: final, corpus: source }),
+            APPLICATION_QUALITY_CHECKLIST_VERSION,
+          );
+          return null;
+        } catch (error) { return error; }
+      };
+      const splitFigureSource = 'Built reporting systems that improved 25% conversion in weekly reports.';
+      const splitFigureError = rejectFigure({
+        source: splitFigureSource,
+        final: splitFigureSource,
+        quotes: ['Built reporting systems that improved 25', '% conversion in weekly reports.'],
+      });
+      const signedFigureError = rejectFigure({
+        source: 'I built reporting systems that reduced manual work by -25%.',
+        final: 'I built reporting systems that reduced manual work by 25%.',
+      });
+      const leadingDecimalError = rejectFigure({
+        source: 'I built reporting systems that reduced manual work by .5%.',
+        final: 'I built reporting systems that reduced manual work by 5%.',
+      });
+      const denominationError = rejectFigure({
+        source: 'I built reporting systems that generated $1M in revenue.',
+        final: 'I built reporting systems that generated €1M in revenue.',
+      });
+      const dollarError = rejectFigure({
+        source: 'I built reporting systems that generated 1 dollar in revenue.',
+        final: 'I built reporting systems that generated 2 dollars in revenue.',
+      });
+      const millionDollarError = rejectFigure({
+        source: 'I built reporting systems that generated 1.2 million dollars in revenue.',
+        final: 'I built reporting systems that generated 2.2 million dollars in revenue.',
+      });
+      const indianRupeeError = rejectFigure({
+        source: 'I built reporting systems that generated 1 Indian rupee in revenue.',
+        final: 'I built reporting systems that generated 2 Indian rupees in revenue.',
+      });
+      const qualifiedDollarError = rejectFigure({
+        source: 'I built reporting systems that generated 1 Canadian dollar in revenue.',
+        final: 'I built reporting systems that generated USD 1 in revenue.',
+      });
+      const qualifiedSymbolDollarError = rejectFigure({
+        source: 'I built reporting systems that generated US$1M in revenue.',
+        final: 'I built reporting systems that generated US$2M in revenue.',
+      });
+      const prefixWordCurrencyError = rejectFigure({
+        source: 'I built reporting systems that generated Canadian dollars 1M in revenue.',
+        final: 'I built reporting systems that generated Canadian dollars 2M in revenue.',
+      });
+      const brlCurrencyError = rejectFigure({
+        source: 'I built reporting systems that generated BRL 1M in revenue.',
+        final: 'I built reporting systems that generated BRL 2M in revenue.',
+      });
+      const writtenMultiplierError = rejectFigure({
+        source: 'I built reporting systems that rendered reports 3 times faster.',
+        final: 'I built reporting systems that rendered reports 2 times faster.',
+      });
+      assert(splitFigureError?.message.includes('25%')
+        && signedFigureError?.message.includes('25%')
+        && leadingDecimalError?.message.includes('5%')
+        && denominationError?.message.includes('€1M')
+        && dollarError?.message.includes('(currency)')
+        && millionDollarError?.message.includes('(currency)')
+        && indianRupeeError?.message.includes('(currency)')
+        && qualifiedDollarError?.message.includes('(currency)')
+        && qualifiedSymbolDollarError?.message.includes('(currency)')
+        && prefixWordCurrencyError?.message.includes('(currency)')
+        && brlCurrencyError?.message.includes('(currency)')
+        && writtenMultiplierError?.message.includes('2 times'),
+      `quote boundaries, signs, leading decimals, currency denominations, word currencies on either side of a number, and real written multipliers cannot manufacture figure support (${[splitFigureError, signedFigureError, leadingDecimalError, denominationError, dollarError, millionDollarError, indianRupeeError, prefixWordCurrencyError, writtenMultiplierError].map(error => error?.message || 'accepted').join(' | ')})`);
+
+      const inrSource = 'I built reporting systems that generated ₹1M and improved conversion by 25 percentage points.';
+      const inrEquivalent = 'I built reporting systems that generated INR 1,000,000 and improved conversion by 25pp.';
+      sanitizeQualityReview(
+        review({ bullet: inrEquivalent, paragraph: inrEquivalent, quote: inrSource }),
+        context({ bullet: inrEquivalent, paragraph: inrEquivalent, corpus: inrSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const plusSource = 'I built reporting systems that improved conversion by 25%.';
+      const plusEquivalent = 'I built reporting systems that improved conversion by +25%.';
+      sanitizeQualityReview(
+        review({ bullet: plusEquivalent, paragraph: plusEquivalent, quote: plusSource }),
+        context({ bullet: plusEquivalent, paragraph: plusEquivalent, corpus: plusSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const qualifiedDollarSource = 'I built reporting systems that generated USD 1 in revenue.';
+      const qualifiedDollarEquivalent = 'I built reporting systems that generated 1 US dollar in revenue.';
+      sanitizeQualityReview(
+        review({ bullet: qualifiedDollarEquivalent, paragraph: qualifiedDollarEquivalent, quote: qualifiedDollarSource }),
+        context({ bullet: qualifiedDollarEquivalent, paragraph: qualifiedDollarEquivalent, corpus: qualifiedDollarSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const qualifiedSymbolDollarSource = 'I built reporting systems that generated US$1M in revenue.';
+      const qualifiedSymbolDollarEquivalent = 'I built reporting systems that generated USD 1,000,000 in revenue.';
+      sanitizeQualityReview(
+        review({ bullet: qualifiedSymbolDollarEquivalent, paragraph: qualifiedSymbolDollarEquivalent, quote: qualifiedSymbolDollarSource }),
+        context({ bullet: qualifiedSymbolDollarEquivalent, paragraph: qualifiedSymbolDollarEquivalent, corpus: qualifiedSymbolDollarSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const prefixWordCurrencySource = 'I built reporting systems that generated Canadian dollars 1M in revenue.';
+      const prefixWordCurrencyEquivalent = 'I built reporting systems that generated CAD 1,000,000 in revenue.';
+      sanitizeQualityReview(
+        review({ bullet: prefixWordCurrencyEquivalent, paragraph: prefixWordCurrencyEquivalent, quote: prefixWordCurrencySource }),
+        context({ bullet: prefixWordCurrencyEquivalent, paragraph: prefixWordCurrencyEquivalent, corpus: prefixWordCurrencySource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const brlCurrencySource = 'I built reporting systems that generated BRL 1M in revenue.';
+      const brlCurrencyEquivalent = 'I built reporting systems that generated BRL 1,000,000 in revenue.';
+      sanitizeQualityReview(
+        review({ bullet: brlCurrencyEquivalent, paragraph: brlCurrencyEquivalent, quote: brlCurrencySource }),
+        context({ bullet: brlCurrencyEquivalent, paragraph: brlCurrencyEquivalent, corpus: brlCurrencySource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const genericDollarSource = 'I built reporting systems that generated $1 in revenue.';
+      const genericDollarEquivalent = 'I built reporting systems that generated 1 dollar in revenue.';
+      sanitizeQualityReview(
+        review({ bullet: genericDollarEquivalent, paragraph: genericDollarEquivalent, quote: genericDollarSource }),
+        context({ bullet: genericDollarEquivalent, paragraph: genericDollarEquivalent, corpus: genericDollarSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      sanitizeQualityReview(
+        review({ bullet: genericDollarSource, paragraph: genericDollarSource, quote: genericDollarEquivalent }),
+        context({ bullet: genericDollarSource, paragraph: genericDollarSource, corpus: genericDollarEquivalent }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const genericPoundSource = 'I built reporting systems that saved £1.';
+      const genericPoundEquivalent = 'I built reporting systems that saved 1 pound.';
+      sanitizeQualityReview(
+        review({ bullet: genericPoundEquivalent, paragraph: genericPoundEquivalent, quote: genericPoundSource }),
+        context({ bullet: genericPoundEquivalent, paragraph: genericPoundEquivalent, corpus: genericPoundSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      sanitizeQualityReview(
+        review({ bullet: genericPoundSource, paragraph: genericPoundSource, quote: genericPoundEquivalent }),
+        context({ bullet: genericPoundSource, paragraph: genericPoundSource, corpus: genericPoundEquivalent }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const yenSymbolError = rejectFigure({
+        source: 'I built reporting systems that generated ¥1 in revenue.',
+        final: 'I built reporting systems that generated 1 yen in revenue.',
+      });
+      assert(yenSymbolError?.message.includes('(currency)'),
+        `the ambiguous yen/yuan symbol stays distinct from national word denominations (${yenSymbolError?.message || 'accepted'})`);
+      // Calendar years and version-like labels are intentionally not figures;
+      // their source fidelity remains subject to the ordinary term/semantic
+      // review rather than a multiplier parser.
+      const versionSource = 'I built v2x reporting tools during 2024.';
+      const changedVersion = 'I built v3x reporting tools during 2025.';
+      sanitizeQualityReview(
+        review({ bullet: changedVersion, paragraph: changedVersion, quote: versionSource }),
+        context({ bullet: changedVersion, paragraph: changedVersion, corpus: versionSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+
+      const listingOnlyFigure = 'This role has a 40% target. I built reporting systems that reduced manual work by 25%.';
+      sanitizeQualityReview(
+        review({ bullet: candidateSource, paragraph: listingOnlyFigure, quote: candidateSource }),
+        context({ bullet: candidateSource, paragraph: listingOnlyFigure, corpus: candidateSource, quote: candidateSource }),
+        APPLICATION_QUALITY_CHECKLIST_VERSION,
+      );
+      const inventedCandidateFigure = 'This role has a 40% target. I built reporting systems that reduced manual work by 40%.';
+      let candidateError = null;
+      try {
+        sanitizeQualityReview(
+          review({ bullet: candidateSource, paragraph: inventedCandidateFigure, quote: candidateSource }),
+          context({ bullet: candidateSource, paragraph: inventedCandidateFigure, corpus: candidateSource, quote: candidateSource }),
+          APPLICATION_QUALITY_CHECKLIST_VERSION,
+        );
+      } catch (error) { candidateError = error; }
+      const repair = pasteRejectionChangeDocuments(candidateError);
+      assert(candidateError?.message.includes('sentence 2')
+        && JSON.stringify(repair.targets) === JSON.stringify(['coverLetter:authored']),
+      `candidate-work figures in a mixed paragraph remain grounded while listing-only figures stand down (${candidateError?.message || 'accepted'})`);
+
+      // Cover-letter prose often omits its grammatical subject after a prior
+      // sentence establishes the candidate. It is still candidate work when
+      // its action and substantive terms come from the cited career evidence;
+      // absence of a literal employer/title or first-person token must not
+      // let it manufacture a result.
+      const implicitCandidateFigure = 'Reduced manual work by 40% through reporting systems.';
+      let implicitCandidateError = null;
+      try {
+        sanitizeQualityReview(
+          review({ bullet: candidateSource, paragraph: implicitCandidateFigure, quote: candidateSource }),
+          context({ bullet: candidateSource, paragraph: implicitCandidateFigure, corpus: candidateSource }),
+          APPLICATION_QUALITY_CHECKLIST_VERSION,
+        );
+      } catch (error) { implicitCandidateError = error; }
+      const implicitRepair = pasteRejectionChangeDocuments(implicitCandidateError);
+      assert(implicitCandidateError?.message.includes('sentence 1')
+        && implicitCandidateError.message.includes('40%')
+        && JSON.stringify(implicitRepair.targets) === JSON.stringify(['coverLetter:authored']),
+      `an implicit-subject candidate result remains source-grounded without a pronoun or identity token (${implicitCandidateError?.message || 'accepted'})`);
+      return { decimalRejected: true, formattingEquivalent: true, boundaryAndSignGuards: true, wordCurrencyGuards: true, plusEquivalent: true, inrAndPointsEquivalent: true, versionStandsDown: true, dimensionStandsDown: true, listingOnlyAccepted: true, implicitCandidateRejected: true, repair: repair.targets };
+    },
+  },
+  {
     // The source-grounding arm grades values the HOST projected: for a paste
     // job the careerDataQuotes in each binding come out of the frozen evidence
     // plan, and the document chose only which evidence IDs to cite. So the arm

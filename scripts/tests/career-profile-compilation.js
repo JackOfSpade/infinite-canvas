@@ -1161,14 +1161,140 @@ export default [
       // Durable handoff keys derive from the materialized prompt. A prior
       // repair-revision prompt cannot select the current response, so an old
       // accepted no-op is revalidated/reissued rather than silently replayed.
-      const stalePrompt = repairPrompt.replace('Repair protocol revision 2.', 'Repair protocol revision 1.');
+      const stalePrompt = repairPrompt.replace('Repair protocol revision 3.', 'Repair protocol revision 2.');
       const staleAcceptedByPrompt = new Map([[stalePrompt, pageTransport(prior)]]);
       assert(result.snapshot.status === 'approved' && result.profile.skills[0].indexEligible === false
-        && repairPrompt.includes('Repair protocol revision 2.')
+        && repairPrompt.includes('Repair protocol revision 3.')
         && !staleAcceptedByPrompt.has(repairPrompt)
-        && buildCareerProfilePageRepairPrompt(corpus, partitionCareerSourcePages(corpus)[0], pageTransport(prior), [finding]).includes('Repair protocol revision 2.'),
+        && buildCareerProfilePageRepairPrompt(corpus, partitionCareerSourcePages(corpus)[0], pageTransport(prior), [finding]).includes('Repair protocol revision 3.'),
       'the current repair revision must reject a stale canonical no-op before acceptance, recover through the same handoff with a substantive page change, and use a distinct durable prompt identity');
       return { noOpRejectedBeforeAcceptance: true, recovered: true };
+    },
+  },
+  {
+    name: 'career snapshot: repeated semantic audit findings receive one corrective retry then must reduce',
+    run: async () => {
+      const files = sourceFiles();
+      const corpus = buildCareerSourceCorpus(files);
+      const initial = validProfile(corpus);
+      const firstRevision = structuredClone(initial);
+      firstRevision.skills[0].indexEligible = false;
+      // Three distinct observations deliberately persist byte-for-byte while
+      // the repair alternates a cited canonical field. This models an audit
+      // digest that remains unchanged even though profileDigest changes.
+      const findings = Array.from({ length: 3 }, (_value, index) => ({
+        id: `persistent-skills-finding-${index + 1}`, severity: 'warning', category: 'skills',
+        segmentIds: [corpus.segments[3].id], entityIds: ['p0001-skill-python'],
+        detail: `Correct Python skill classification issue ${index + 1} from its cited source evidence.`,
+      }));
+      let auditPass = 0;
+      const repairPrompts = [];
+      let repairCalls = 0;
+      const recovered = await compileAuditedCareerSnapshot({
+        sourceFiles: files,
+        callText: async (prompt, options) => {
+          if (options.task === 'career-profile-compile') return pageTransport(initial);
+          // Each repair round replays the affected audit scope before it
+          // issues a replacement, so retain the finding for two full rounds.
+          if (options.task === 'career-profile-audit-skills') return { findings: auditPass++ < 4 ? findings : [] };
+          if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
+          if (options.task === 'career-profile-repair') {
+            repairPrompts.push(prompt);
+            return pageTransport(repairCalls++ === 0 ? firstRevision : initial);
+          }
+          throw new Error(`Unexpected task ${options.task}`);
+        },
+      });
+      let nonconvergent = null;
+      let failedAuditPass = 0;
+      let failedRepairCalls = 0;
+      try {
+        await compileAuditedCareerSnapshot({
+          sourceFiles: files,
+          callText: async (_prompt, options) => {
+            if (options.task === 'career-profile-compile') return pageTransport(initial);
+            if (options.task === 'career-profile-audit-skills') return { findings };
+            if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
+            if (options.task === 'career-profile-repair') {
+              failedRepairCalls += 1;
+              // Alternate source-targeted, schema-valid changes so the old
+              // {profile,finding} state check alone would keep spinning.
+              return pageTransport(failedAuditPass++ % 2 === 0 ? firstRevision : initial);
+            }
+            throw new Error(`Unexpected task ${options.task}`);
+          },
+        });
+      } catch (error) { nonconvergent = error; }
+      assert(recovered.snapshot.status === 'approved' && repairCalls === 2
+        && !repairPrompts[0].includes('Convergence correction:')
+        && repairPrompts[1].includes('Convergence correction:')
+        && /final corrective opportunity/.test(repairPrompts[1])
+        && nonconvergent?.code === 'CAREER_SNAPSHOT_NONCONVERGENT'
+        && /source-scoped audit finding survived/.test(nonconvergent.message)
+        && failedRepairCalls === 2,
+      `an unchanged semantic audit finding must get one explicit correction pass, then fail rather than churn profiles indefinitely (recovered repairs=${repairCalls}; failed repairs=${failedRepairCalls}; error=${nonconvergent?.message || 'none'})`);
+      return { recoveredRepairCalls: repairCalls, failedRepairCalls, correctionPrompted: true };
+    },
+  },
+  {
+    name: 'career snapshot: a persistent source-cited finding cannot hide behind entity rekeys, siblings, or audit lanes',
+    run: async () => {
+      const files = sourceFiles();
+      const corpus = buildCareerSourceCorpus(files);
+      const initial = validProfile(corpus);
+      const firstRevision = structuredClone(initial);
+      firstRevision.skills[0].indexEligible = false;
+      // Page-local IDs are labels, not source identity. A valid replacement
+      // can rekey the same supported skill while retaining its cited segment.
+      const rekeyedSkillId = 'p0001-skill-python-rekeyed';
+      firstRevision.skills[0].id = rekeyedSkillId;
+      firstRevision.roles[0].skillIds = [rekeyedSkillId];
+      const secondRevision = structuredClone(firstRevision);
+      secondRevision.skills[0].category = 'Programming language';
+      const persistent = {
+        id: 'persistent-cross-lane', severity: 'warning', category: 'skills',
+        segmentIds: [corpus.segments[3].id], entityIds: ['p0001-skill-python'],
+        detail: 'Correct the persistent Python classification from cited source evidence.',
+      };
+      const transient = (index, entityId = 'p0001-skill-python') => ({
+        id: `transient-${index}`, severity: 'warning', category: 'skills',
+        segmentIds: [corpus.segments[3].id], entityIds: [entityId],
+        detail: `A distinct neighbouring observation ${index}.`,
+      });
+      let repairCalls = 0;
+      let failure = null;
+      try {
+        await compileAuditedCareerSnapshot({
+          sourceFiles: files,
+          callText: async (_prompt, options) => {
+            if (options.task === 'career-profile-compile') return pageTransport(initial);
+            // The persistent observation moves from the skills lane to the
+            // completeness lane and changes its page-local entity ID after
+            // the first repair, while another observation changes each round.
+            // Scope/set or entity-label digests would treat all of that as
+            // progress even though this source-cited defect never moved.
+            if (options.task === 'career-profile-audit-skills') {
+              return repairCalls === 0 ? { findings: [persistent, transient('skills-first')] } : { findings: [] };
+            }
+            if (options.task === 'career-profile-audit-completeness') {
+              return repairCalls === 0
+                ? { findings: [] }
+                : { findings: [{ ...persistent, category: 'coverage', entityIds: [rekeyedSkillId] }, transient(`coverage-${repairCalls}`, rekeyedSkillId)] };
+            }
+            if (options.task?.startsWith('career-profile-audit-')) return { findings: [] };
+            if (options.task === 'career-profile-repair') {
+              repairCalls += 1;
+              return pageTransport(repairCalls === 1 ? firstRevision : secondRevision);
+            }
+            throw new Error(`Unexpected task ${options.task}`);
+          },
+        });
+      } catch (error) { failure = error; }
+      assert(failure?.code === 'CAREER_SNAPSHOT_NONCONVERGENT'
+        && /source-scoped audit finding survived/.test(failure.message)
+        && repairCalls === 2,
+      `a recurring cited finding must fail after its one corrective retry even when its entity ID, audit lane, and neighbouring findings change (repairs=${repairCalls}; error=${failure?.message || 'none'})`);
+      return { repairCalls, entityRekeyIndependent: true, laneIndependent: true, siblingIndependent: true };
     },
   },
   {

@@ -7,9 +7,9 @@ an application bundle itself.
 
 ## Disposable one-card live acceptance fixture
 
-For one real paste job without ever writing the production canvas, production
-`.local-ai`, production user-data, existing bundles, or the source snapshot,
-use `one-card-live-acceptance.mjs`. It recursively copies exactly the saved
+For one real paste job without ever writing the production canvas,
+pre-existing `.local-ai` state, existing bundles, or the source snapshot, use
+`one-card-live-acceptance.mjs`. It recursively copies exactly the saved
 Anthropic job-9 or Affirm job-13 into a new one-card canvas below
 `.test-artifacts/blackbox-run/live-one-card`, then deterministically derives
 the only eligible snapshot address from the current `Work Experience.md` bytes,
@@ -20,8 +20,11 @@ directory scan, or historical-pin fallback — and requires one exact direct
 publishes a snapshot. A source, contract, snapshot, or in-read byte drift
 fails closed. The queue then uses that attested immutable ID against the
 run-owned canvas. The queued job's canvas path/root and all bundle candidates
-remain run-owned; its user-data is the real Infinite Canvas user-data so the
-existing bridge, OAuth, tunnel, and plugin setup is available.
+remain run-owned. The harness deliberately uses the real Infinite Canvas
+user-data so the existing bridge, OAuth, tunnel, and plugin setup is available;
+while active, it creates only the run-scoped authority/job/Application Sync
+entries recorded in its manifest, and `restore` removes those exact entries
+only after its drift checks pass.
 
 ```bash
 node --import ./scripts/test-stubs/register.mjs \
